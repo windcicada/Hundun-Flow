@@ -69,8 +69,14 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
   对独立解析两半区间的密度加权源、等权均值、方差衰减作检查；真实磁盘重启后继续计算。
   rank 0 第三次 chemistry 调用失败后所有已接受场/历史/两层通量精确保持，清除故障后
   与不中断路径等价；非有限重启随机场在安装任何状态前被拒绝。
-- 尚须统一非均匀 MeanState 的总焓/组分扩散与随机场共同扩散率，并验证非零空间梯度、
-  湍流随机项和物理/IBM 边界。当前均匀反应验收不能代替这些空间耦合证据。
+- 共同扩散后续增量：MeanState 的总焓/组分扩散与随机场统一到 Gamma=lambda_m/cp+mu_t/Sc_t。
+  明确冻结 unity-Lewis 总焓方程，原温度导热方程保持默认；压力焓线性算子使用同一
+  Gamma*grad(delta h)，非均匀 cp 的独立有限差分与热源历史/能量残差测试通过。
+  输运系数由实际组成、温度重新求本征分子项，不从已加过湍流项的缓存重复累加。
+- 周期域正弦扰动经过实际公共 Restart/Driver，跨 rank 的 Halo、配置对流算子、
+  共同扩散、IEM、两段化学和均值重整后的方差符合独立离散 Fourier 预期，1/2/4 ranks
+  均通过。Clang 扩展 focused 27/27 PASS；GCC/Cantera 产品矩阵 15/15 PASS。
+  尚需湍流随机项、物理/IBM 边界与 TCR 持续历史接线。
 - 接线参考 HUNDUN governance 只读提交 `8ffdf2b` 的
   `docs/numerics/stage5-esf-tcr-equations.md`、`stage5-coast-esf-semantic-audit.md`，
   以及 ESF transport/element consistency 的公开算法实现。保留当前供体 P8 的

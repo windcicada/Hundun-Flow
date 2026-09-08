@@ -1181,10 +1181,11 @@ Status assemble_enthalpy_impl(
     return status;
   }
 
-  // Temperature-space conduction is evaluated exactly.  The Task 15 driver
-  // may later freeze dT/dh into an implicit operator; Task 14 never replaces
-  // this term by a generic h diffusion.
-  const std::array<ConstFieldView, 1U> thermal_reads{state.temperature.trial};
+  // The frozen model selects temperature conduction or the ESF unity-Lewis
+  // total-enthalpy flux. This is an equation choice, not a solver fallback.
+  const std::array<ConstFieldView, 1U> thermal_reads{
+      plan.unity_lewis_total_enthalpy_ ? state.enthalpy.trial
+                                       : state.temperature.trial};
   const KernelInvocation conduction{{thermal_reads.data(),
                                      thermal_reads.size()},
                                     {writes.data(), writes.size()}, box,
@@ -1202,7 +1203,10 @@ Status assemble_enthalpy_impl(
       }
     }
   }
-  status = cartesian_diffusion(*plan.kernels_, material.thermal_conductivity,
+  status = cartesian_diffusion(*plan.kernels_,
+                               plan.unity_lewis_total_enthalpy_
+                                   ? material.enthalpy_diffusivity
+                                   : material.thermal_conductivity,
                                conduction);
   if (!status) {
     return status;
@@ -1414,13 +1418,18 @@ Status assemble_target_coupled_enthalpy_residual(
       *plan.kernels_, plan.convection_, context.mass_flux, convection);
   if (!status) return status;
 
-  const std::array<ConstFieldView, 1U> thermal_reads{state.temperature.trial};
+  const std::array<ConstFieldView, 1U> thermal_reads{
+      plan.unity_lewis_total_enthalpy_ ? state.enthalpy.trial
+                                       : state.temperature.trial};
   const std::array<FieldView, 1U> diffusion_writes{workspace.diffusion};
   const KernelInvocation conduction{
       {thermal_reads.data(), thermal_reads.size()},
       {diffusion_writes.data(), diffusion_writes.size()}, box,
       0U, 0U, 1U, 0U, context.counters};
-  status = cartesian_diffusion(*plan.kernels_, material.thermal_conductivity,
+  status = cartesian_diffusion(*plan.kernels_,
+                               plan.unity_lewis_total_enthalpy_
+                                   ? material.enthalpy_diffusivity
+                                   : material.thermal_conductivity,
                                conduction);
   if (!status) return status;
 

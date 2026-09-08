@@ -84,9 +84,9 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
       hash *= UINT64_C(1099511628211);
     }
   if (esf)
-    for (char byte :
-         std::string_view(";esf-native-transport-iem-two-half-chemistry-be-v1;"
-                          "esf-mean-reconciliation-v1")) {
+    for (char byte : std::string_view(
+             ";esf-native-transport-iem-two-half-chemistry-be-v1;"
+             "esf-mean-reconciliation-v1;esf-shared-gamma-total-h-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -3829,6 +3829,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   if (!status) return status;
   TurbulencePlanSpec turbulence_spec;
   turbulence_spec.kind = model.turbulence;
+  if (candidate->esf.enabled()) {
+    turbulence_spec.turbulent_prandtl = model.reaction.turbulent_schmidt;
+    turbulence_spec.turbulent_schmidt = model.reaction.turbulent_schmidt;
+  }
   if (status)
     status = TurbulencePlan::compile(
         communicator, turbulence_spec, candidate->geometry, candidate->patch,
@@ -3851,6 +3855,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     });
   if (status) {
     EquationPlanSpec equation_spec;
+    equation_spec.unity_lewis_total_enthalpy = candidate->esf.enabled();
     equation_spec.mass_source_identity =
         candidate->esf.enabled() ? candidate->reaction.fingerprint() : 0U;
     equation_spec.density = candidate->fields.rho;
@@ -5631,31 +5636,62 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
-  if (status && product.transport.kernel() ==
-                    TransportKernel::coast_native_air)
+  if (status &&
+      (product.esf.enabled() ||
+       product.transport.kernel() == TransportKernel::coast_native_air))
     status = product.layers.runtime_view(
         FieldLifetime::persistent_workspace, product.fields.heat_capacity,
         heat_capacity);
-  if (status && product.transport.kernel() ==
-                    TransportKernel::coast_native_air)
+  if (status &&
+      (product.esf.enabled() ||
+       product.transport.kernel() == TransportKernel::coast_native_air))
     status = runtime_view_for_write(product.fields.thermal_conductivity,
                                     conductivity);
-  if (status && product.transport.kernel() ==
-                    TransportKernel::coast_native_air)
+  if (status &&
+      (product.esf.enabled() ||
+       product.transport.kernel() == TransportKernel::coast_native_air))
     status = runtime_view_for_write(product.fields.enthalpy_diffusivity,
                                     enthalpy_diffusivity);
-  if (status && product.transport.kernel() ==
-                    TransportKernel::coast_native_air)
+  if (status &&
+      (product.esf.enabled() ||
+       product.transport.kernel() == TransportKernel::coast_native_air))
     status = refresh_coast_native_air_effective_thermal_transport(
         product.transport, as_const(molecular_viscosity),
         as_const(effective_viscosity), as_const(heat_capacity), conductivity,
         enthalpy_diffusivity);
-  if (status && product.transport.kernel() !=
-                    TransportKernel::coast_native_air)
+  if (status &&
+      (!product.esf.enabled() &&
+       product.transport.kernel() != TransportKernel::coast_native_air))
     status = product.layers.runtime_view(
         FieldLifetime::persistent_workspace,
         product.fields.thermal_conductivity, conductivity);
-  if (product.transport.kernel() == TransportKernel::coast_native_air)
+  if (status && product.esf.enabled()) {
+    ConstFieldView temperature;
+    status = product.layers.view(StateRole::accepted_n,
+                                 product.fields.temperature, temperature);
+    if (status)
+      status = product.esf.refresh_transport(
+          product.transport, temperature,
+          Span<const ConstFieldView>{species_accepted.data(),
+                                     species_accepted.size()},
+          as_const(molecular_viscosity), as_const(effective_viscosity),
+          as_const(heat_capacity), conductivity, enthalpy_diffusivity);
+  }
+  if (status && product.esf.enabled() && !restart) {
+    for (StateRole role : roles) {
+      FieldView cache;
+      status = product.layers.view(role, product.fields.esf_transport, cache);
+      if (status)
+        status = product.esf.cache_transport(
+            cache, accepted_density, as_const(molecular_viscosity),
+            as_const(effective_viscosity), as_const(conductivity),
+            as_const(heat_capacity));
+      if (!status)
+        break;
+    }
+  }
+  if (product.esf.enabled() ||
+      product.transport.kernel() == TransportKernel::coast_native_air)
     status = exchange_effective_thermal_ghosts(
         product.coupled_thermal_halo, 60U, product.boundary, conductivity,
         enthalpy_diffusivity, status);
@@ -5888,6 +5924,8 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   material.molecular_viscosity = as_const(molecular_viscosity);
   material.effective_viscosity = as_const(effective_viscosity);
   material.thermal_conductivity = as_const(conductivity);
+  if (product.esf.enabled())
+    material.enthalpy_diffusivity = as_const(enthalpy_diffusivity);
   ThermophysicalRateCertificate rate_certificate;
   if (status)
     status = product.reaction.prepare(equation_state, product.thermodynamics,
@@ -8361,7 +8399,8 @@ Status ProductDriver::Impl::execute_attempt(
 
   const auto refresh_live_effective_thermal_ghosts =
       [&](StageId stage, Status prerequisite) {
-        if (product.transport.kernel() != TransportKernel::coast_native_air)
+        if (!product.esf.enabled() &&
+            product.transport.kernel() != TransportKernel::coast_native_air)
           return prerequisite;
         if (prerequisite)
           prerequisite = runtime_write_view(
@@ -8374,6 +8413,12 @@ Status ProductDriver::Impl::execute_attempt(
               product.transport, as_const(molecular_viscosity),
               as_const(effective_viscosity), as_const(heat_capacity),
               conductivity, enthalpy_diffusivity);
+        if (prerequisite && product.esf.enabled())
+          prerequisite = product.esf.refresh_transport(
+              product.transport, as_const(trial_temperature),
+              Span<const FieldView>{species_trial.data(), species_trial.size()},
+              as_const(molecular_viscosity), as_const(effective_viscosity),
+              as_const(heat_capacity), conductivity, enthalpy_diffusivity);
         prerequisite = exchange_effective_thermal_ghosts(
             product.coupled_thermal_halo, stage, product.boundary, conductivity,
             enthalpy_diffusivity, prerequisite);
@@ -9628,7 +9673,8 @@ Status ProductDriver::Impl::execute_attempt(
       refreshed = product.turbulence.update(
           turbulence_input, effective_viscosity, turbulence_certificate);
     }
-    if (product.transport.kernel() == TransportKernel::coast_native_air)
+    if (product.esf.enabled() ||
+        product.transport.kernel() == TransportKernel::coast_native_air)
       return refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
     return product.reductions.consensus(refreshed);
   };
@@ -10422,6 +10468,8 @@ Status ProductDriver::Impl::execute_attempt(
         energy_enthalpy_binding.density_enthalpy_derivative =
             as_const(enthalpy_compressibility);
         energy_enthalpy_binding.heat_capacity = as_const(heat_capacity);
+        energy_enthalpy_binding.unity_lewis_total_enthalpy =
+            product.esf.enabled();
         energy_enthalpy_binding.thermal_conductivity =
             as_const(conductivity);
         energy_enthalpy_binding.enthalpy_diffusivity =
@@ -11796,7 +11844,20 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(pressure_energy_candidate_heat_capacity),
               pressure_energy_candidate_thermal_conductivity,
               pressure_energy_candidate_enthalpy_diffusivity);
-        if (product.transport.kernel() == TransportKernel::coast_native_air) {
+        if (evaluated && product.esf.enabled())
+          evaluated = product.esf.refresh_transport(
+              product.transport,
+              as_const(pressure_energy_candidate_temperature),
+              Span<const ConstFieldView>{
+                  pressure_energy_candidate_species_const.data(),
+                  pressure_energy_candidate_species_const.size()},
+              as_const(pressure_energy_candidate_molecular_viscosity),
+              as_const(pressure_energy_candidate_effective_viscosity),
+              as_const(pressure_energy_candidate_heat_capacity),
+              pressure_energy_candidate_thermal_conductivity,
+              pressure_energy_candidate_enthalpy_diffusivity);
+        if (product.esf.enabled() ||
+            product.transport.kernel() == TransportKernel::coast_native_air) {
           evaluated = exchange_effective_thermal_ghosts(
               product.candidate_thermal_halo, state_stage, product.boundary,
               pressure_energy_candidate_thermal_conductivity,
@@ -14992,8 +15053,9 @@ Status ProductDriver::Impl::execute_attempt(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
-  if (final_rate_path_active && product.transport.kernel() ==
-                                    TransportKernel::coast_native_air)
+  if (final_rate_path_active &&
+      (product.esf.enabled() ||
+       product.transport.kernel() == TransportKernel::coast_native_air))
     status = refresh_live_effective_thermal_ghosts(60U, status);
   else
     status = product.reductions.consensus(status);

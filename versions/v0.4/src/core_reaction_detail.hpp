@@ -159,13 +159,38 @@ public:
       std::memcpy(&bits, &v, 8);
       integer(bits);
     }
-    if (mode_ == ReactionMode::pasr_algebraic_v1) {
-      string("les-scalar-dissipation-v1;reactant-depletion-l1-v1");
+    if (mode_ == ReactionMode::pasr_algebraic_v1 ||
+        mode_ == ReactionMode::esf_tpdf) {
+      string(mode_ == ReactionMode::pasr_algebraic_v1
+                 ? "les-scalar-dissipation-v1;reactant-depletion-l1-v1"
+                 : "esf-shared-gamma-total-h-v1");
       for (double v : {mixing_c_z_, turbulent_schmidt_}) {
         std::uint64_t bits;
         std::memcpy(&bits, &v, 8);
         integer(bits);
       }
+    }
+    if (mode_ == ReactionMode::esf_tpdf) {
+      const auto &spec = *model.reaction.esf;
+      integer(spec.fields);
+      integer(spec.seed);
+      for (double value : spec.initial_species_offsets) {
+        std::uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        integer(bits);
+      }
+      integer(static_cast<unsigned>(spec.tcr.mode));
+      integer(static_cast<unsigned>(spec.tcr.initialization_sign + 1));
+      for (const auto &name : spec.tcr.reactants)
+        string(name);
+      for (double value : spec.tcr.progress_weights) {
+        std::uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        integer(bits);
+      }
+      std::uint64_t bits;
+      std::memcpy(&bits, &spec.tcr.weak_rate_threshold, sizeof(bits));
+      integer(bits);
     }
     fingerprint_ = h ? h : 1;
     provider_ = bindings.gas_query;

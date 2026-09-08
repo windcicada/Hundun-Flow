@@ -143,7 +143,9 @@ struct Fixture {
 };
 
 bool make_fixture(std::int32_t n, PressureReferenceKind pressure_reference,
-                  Fixture& out, bool stretched = false, PlanFingerprint source_identity = 0U) {
+                  Fixture &out, bool stretched = false,
+                  PlanFingerprint source_identity = 0U,
+                  bool unity_lewis = false) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -229,6 +231,7 @@ bool make_fixture(std::int32_t n, PressureReferenceKind pressure_reference,
   spec.closed_mass_service_stage =
       pressure_reference == PressureReferenceKind::closed_mass ? 1U : 0U;
   spec.mass_source_identity = source_identity;
+  spec.unity_lewis_total_enthalpy = unity_lewis;
   spec.maximum_cells_per_rank = static_cast<std::size_t>(n) * n * n;
   return static_cast<bool>(EquationPlanSet::compile(
       MPI_COMM_SELF, out.schemes, out.geometry, out.patch, out.boundary,
@@ -861,11 +864,11 @@ bool test_bdf2_predictor_and_mutations(bool source_enabled = false) {
   return passed;
 }
 
-bool test_nonadvective_rate_path() {
+bool test_nonadvective_rate_path(bool unity_lewis = false) {
   Fixture fixture;
   constexpr std::int32_t n = 4;
   bool passed = expect(make_fixture(n, PressureReferenceKind::closed_mass,
-                                    fixture),
+                                    fixture, false, 0U, unity_lewis),
                        "nonadvective-rate fixture compiles");
   if (!passed) return false;
   const Int3 cells = fixture.patch.cells;
@@ -905,6 +908,8 @@ bool test_nonadvective_rate_path() {
   OwnedField effective = make_field(kEffectiveViscosity, cells, 1U, 8020U);
   OwnedField conductivity = make_field(61U, cells, 1U, 8021U);
   OwnedField gradient = make_components(kVelocityGradient, 9U, 0U, 8022U);
+  OwnedField gamma = make_field(66U, cells, 1U, 8027U);
+  fill(gamma, 0.007);
   OwnedField enthalpy_rate = make_field(62U, cells, 0U, 8023U);
   OwnedField species_rate = make_field(63U, cells, 0U, 8024U);
   OwnedField diffusion_scratch = make_field(64U, cells, 0U, 8025U);
@@ -951,6 +956,8 @@ bool test_nonadvective_rate_path() {
   material.molecular_viscosity = as_const(molecular.view);
   material.effective_viscosity = as_const(effective.view);
   material.thermal_conductivity = as_const(conductivity.view);
+  if (unity_lewis)
+    material.enthalpy_diffusivity = as_const(gamma.view);
   std::array<FieldView, 1U> species_rates{species_rate.view};
   ThermophysicalRateInput input{state, material, as_const(gradient.view),
                                 {10.0, -10.0, 0.0, 1U}, 1U, {}};
@@ -1040,11 +1047,25 @@ bool test_nonadvective_rate_path() {
   ThermophysicalRateCertificate conduction_certificate;
   status = evaluate_thermophysical_rates(fixture.equations, input, output,
                                          conduction_certificate);
-  passed &= expect(status && conduction_certificate.valid() &&
-                       conduction_certificate.state != certificate.state &&
-                       !close(enthalpy_rate.view.unchecked({1, 1, 1}, 0U),
-                              0.0),
-                   "temperature curvature enters the production rate path");
+  passed &= expect(
+      status && conduction_certificate.valid() &&
+          conduction_certificate.state != certificate.state &&
+          (unity_lewis ==
+           close(enthalpy_rate.view.unchecked({1, 1, 1}, 0U), 0.0)),
+      "diffusion uses the frozen temperature or total-enthalpy coordinate");
+  if (unity_lewis) {
+    enthalpy.view.unchecked({1, 1, 1}, 0) += 100;
+    species.view.unchecked({1, 1, 1}, 0) += 0.1;
+    status = evaluate_thermophysical_rates(fixture.equations, input, output,
+                                           conduction_certificate);
+    passed &= expect(status &&
+                         close(enthalpy_rate.view.unchecked({1, 1, 1}, 0),
+                               -6 * 0.007 * 100 * n * n) &&
+                         close(species_rate.view.unchecked({1, 1, 1}, 0),
+                               -6 * 0.007 * 0.1 * n * n),
+                     "full enthalpy and independent species consume the same "
+                     "frozen diffusivity");
+  }
 
   ThermophysicalRateOutput aliased = output;
   aliased.diffusion_scratch = enthalpy_rate.view;
@@ -1069,7 +1090,8 @@ int main(int argc, char** argv) {
   const bool passed = test_bdf2_predictor_and_mutations() &&
                       test_bdf2_predictor_and_mutations(true);
   const bool mms_passed = test_predictor_mms_orders();
-  const bool rates_passed = test_nonadvective_rate_path();
+  const bool rates_passed =
+      test_nonadvective_rate_path() && test_nonadvective_rate_path(true);
   MPI_Finalize();
   return passed && mms_passed && rates_passed ? 0 : 1;
 }

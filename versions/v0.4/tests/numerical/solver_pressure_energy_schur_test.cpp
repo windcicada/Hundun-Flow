@@ -883,7 +883,7 @@ bool test_enthalpy_diagonal_retains_exact_thermodynamic_time_response() {
   return passed;
 }
 
-bool test_enthalpy_spatial_target_contract_binds() {
+bool test_enthalpy_spatial_target_contract_binds(bool unity_lewis = false) {
   EnthalpySpatialFixture fixture;
   bool passed = expect(make_enthalpy_spatial_fixture(fixture),
                        "frozen-spatial E_h fixture compiles");
@@ -964,6 +964,7 @@ bool test_enthalpy_spatial_target_contract_binds() {
     return false;
 
   PressureEnergyEnthalpyBinding binding;
+  binding.unity_lewis_total_enthalpy = unity_lewis;
   binding.geometry = &fixture.geometry;
   binding.kernels = &fixture.kernels;
   binding.boundary = &fixture.boundary;
@@ -1147,8 +1148,8 @@ bool test_enthalpy_spatial_target_contract_binds() {
     for (std::int32_t y = -1; y < cells.y + 1; ++y) {
       for (std::int32_t x = -1; x < cells.x + 1; ++x) {
         const Int3 cell{x, y, z};
-        const double base =
-            target.view.unchecked(cell, 0U) / cp.view.unchecked(cell, 0U);
+        const double base = target.view.unchecked(cell, 0U) /
+                            (unity_lewis ? 1.0 : cp.view.unchecked(cell, 0U));
         const double direction = delta_temperature.view.unchecked(cell, 0U);
         plus_t.view.unchecked(cell, 0U) = base + epsilon * direction;
         minus_t.view.unchecked(cell, 0U) = base - epsilon * direction;
@@ -1237,8 +1238,10 @@ bool test_enthalpy_spatial_target_contract_binds() {
             const Int3 neighbour = shifted(cell, axis, direction);
             proxy_diagonal += material_transmissibility(
                 as_const(lambda_over_cp.view), axis, face);
-            const double conductance =
-                material_transmissibility(as_const(lambda.view), axis, face);
+            const double conductance = material_transmissibility(
+                unity_lewis ? as_const(lambda_over_cp.view)
+                            : as_const(lambda.view),
+                axis, face);
             plus_negative_diffusion +=
                 conductance * (plus_t.view.unchecked(cell, 0U) -
                                plus_t.view.unchecked(neighbour, 0U));
@@ -1361,12 +1364,13 @@ bool test_enthalpy_spatial_target_contract_binds() {
                    "raw target mutation invalidates the frozen branch before "
                    "output commit");
 
-  const double saved_lambda = lambda.view.unchecked({1, 1, 1}, 0U);
-  lambda.view.unchecked({1, 1, 1}, 0U) =
+  auto selected_coefficient = unity_lewis ? lambda_over_cp.view : lambda.view;
+  const double saved_lambda = selected_coefficient.unchecked({1, 1, 1}, 0U);
+  selected_coefficient.unchecked({1, 1, 1}, 0U) =
       std::numeric_limits<double>::quiet_NaN();
   const Status nonfinite_transport =
       operation.apply(variation.view, hot_output.view);
-  lambda.view.unchecked({1, 1, 1}, 0U) = saved_lambda;
+  selected_coefficient.unchecked({1, 1, 1}, 0U) = saved_lambda;
   passed &= expect(nonfinite_transport.code == StatusCode::numerical_failure &&
                        hot_output.storage == rejected_snapshot,
                    "nonfinite lambda fails atomically in exact temperature "
@@ -4597,6 +4601,7 @@ int main(int argc, char** argv) {
   bool passed = test_exact_schur_and_recovery();
   passed &= test_enthalpy_spatial_binding_rejects_an_empty_contract();
   passed &= test_enthalpy_spatial_target_contract_binds();
+  passed &= test_enthalpy_spatial_target_contract_binds(true);
   passed &= test_enthalpy_spatial_periodic_mpi_and_inactive_interfaces();
   passed &= test_enthalpy_semismooth_limiter_certificate();
   passed &= test_diagonal_operator_activity_and_identity();

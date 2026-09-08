@@ -135,6 +135,40 @@ public:
         }
     return {};
   }
+  template <class ScalarView>
+  Status refresh_transport(const TransportPlan &transport,
+                           ConstFieldView temperature, Span<ScalarView> species,
+                           ConstFieldView molecular, ConstFieldView effective,
+                           ConstFieldView cp, FieldView conductivity,
+                           FieldView gamma) noexcept {
+    if (species.size != independent_.size())
+      return invalid();
+    for (int z = 0; z < cells_.z; ++z)
+      for (int y = 0; y < cells_.y; ++y)
+        for (int x = 0; x < cells_.x; ++x) {
+          const Int3 cell{x, y, z};
+          for (std::size_t s = 0; s < species.size; ++s)
+            independent_[s] = species.data[s].unchecked(cell, 0);
+          MolecularTransportState intrinsic;
+          auto status = transport.evaluate(
+              temperature.unchecked(cell, 0),
+              {independent_.data(), independent_.size()}, intrinsic);
+          if (!status)
+            return status;
+          const double turbulent =
+              effective.unchecked(cell, 0) - molecular.unchecked(cell, 0);
+          const double heat_capacity = cp.unchecked(cell, 0);
+          const double coefficient =
+              intrinsic.conductivity / heat_capacity + turbulent / sc_t_;
+          if (!(heat_capacity > 0) || !std::isfinite(turbulent) ||
+              turbulent < 0 || !std::isfinite(coefficient) ||
+              !(coefficient > 0))
+            return numerical();
+          gamma.unchecked(cell, 0) = coefficient;
+          conductivity.unchecked(cell, 0) = coefficient * heat_capacity;
+        }
+    return {};
+  }
   Status cache_transport(FieldView cache, ConstFieldView rho, ConstFieldView mu,
                          ConstFieldView mu_eff, ConstFieldView lambda,
                          ConstFieldView cp) noexcept {
@@ -146,8 +180,7 @@ public:
                        heat_capacity = cp.unchecked(cell, 0);
           const double turbulent =
               mu_eff.unchecked(cell, 0) - mu.unchecked(cell, 0);
-          const double gamma =
-              lambda.unchecked(cell, 0) / heat_capacity + turbulent / sc_t_;
+          const double gamma = lambda.unchecked(cell, 0) / heat_capacity;
           if (!(density > 0) || !(heat_capacity > 0) || !std::isfinite(gamma) ||
               !(gamma > 0) || !std::isfinite(turbulent) || turbulent < 0)
             return numerical();

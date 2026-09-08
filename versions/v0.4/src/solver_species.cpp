@@ -659,8 +659,7 @@ Status assemble_species_impl(
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial) noexcept {
-  if (plan.kernels_ == nullptr ||
-      context.geometry != plan.geometry_revision_ ||
+  if (plan.kernels_ == nullptr || context.geometry != plan.geometry_revision_ ||
       context.boundary != plan.boundary_revision_ ||
       context.thermo != plan.thermodynamics_fingerprint_ ||
       context.transport != plan.transport_fingerprint_ ||
@@ -672,8 +671,9 @@ Status assemble_species_impl(
       species >= state.independent_species.size ||
       (state.independent_species.size != 0U &&
        state.independent_species.data == nullptr) ||
-      material.scalar_mass_diffusivity.data == nullptr ||
-      species >= material.scalar_mass_diffusivity.size ||
+      (!plan.unity_lewis_total_enthalpy_ &&
+       (material.scalar_mass_diffusivity.data == nullptr ||
+        species >= material.scalar_mass_diffusivity.size)) ||
       plan.specs_[species].role != TransportedScalarRole::species) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
@@ -732,13 +732,16 @@ Status assemble_species_impl(
       plan.convection_, plan.specs_[species],
       plan.contribution_counts_[species] == 0U
           ? Span<const CompiledContribution>{}
-          : Span<const CompiledContribution>{
-                plan.contributions_.data() +
-                    plan.contribution_begins_[species],
-                plan.contribution_counts_[species]},
-      state.independent_species.data[species],
-      state, material.scalar_mass_diffusivity.data[species], contributions,
-      context, system, certificate, allow_partial);
+          : Span<
+                const CompiledContribution>{plan.contributions_.data() +
+                                                plan.contribution_begins_
+                                                    [species],
+                                            plan.contribution_counts_[species]},
+      state.independent_species.data[species], state,
+      plan.unity_lewis_total_enthalpy_
+          ? material.enthalpy_diffusivity
+          : material.scalar_mass_diffusivity.data[species],
+      contributions, context, system, certificate, allow_partial);
 }
 
 Status assemble_scalar_impl(

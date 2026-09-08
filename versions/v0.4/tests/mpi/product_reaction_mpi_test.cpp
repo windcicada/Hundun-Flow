@@ -475,6 +475,110 @@ int main(int argc, char **argv) {
         okay = collective(bool(status) && same);
       }
     }
+    if (okay && esf) {
+      // Restart carries a zero-mean sinusoidal composition disturbance across
+      // patch boundaries. The discrete Fourier eigenvalue is independent of
+      // the production Halo and diffusion kernels.
+      EsfGas spatial_gas;
+      CompiledCasePlan spatial_plan;
+      ProductDriver spatial;
+      status = ProductCompiler::compile(MPI_COMM_WORLD, model, case_root,
+                                        spatial_plan, spatial_gas.bindings());
+      if (status)
+        status = ProductDriver::create(MPI_COMM_WORLD, std::move(spatial_plan),
+                                       spatial);
+      RestartExpected expected;
+      if (status)
+        status = spatial.restart_expected(expected);
+      RestartImage image;
+      if (status)
+        status = RestartReader::load(MPI_COMM_WORLD, root, expected, image);
+      std::vector<double> variance;
+      if (status) {
+        const auto cells = image.patch.cells;
+        const auto count = std::size_t(cells.x) * cells.y * cells.z;
+        variance.resize(count);
+        const double pi = std::acos(-1.0), amplitude = 0.003;
+        const double dx =
+            (model.mesh.upper.x - model.mesh.lower.x) / image.global_cells.x;
+        const double dy =
+            (model.mesh.upper.y - model.mesh.lower.y) / image.global_cells.y;
+        const double dz =
+            (model.mesh.upper.z - model.mesh.lower.z) / image.global_cells.z;
+        const double eigenvalue =
+            4 * std::pow(std::sin(pi / image.global_cells.x), 2) / (dx * dx);
+        const double rho = initial.pressure_reference *
+                           model.thermophysics.species[0].molecular_weight /
+                           (kUniversalGasConstant * initial.temperature);
+        const std::size_t start = 3 + model.transported_scalars.size();
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x) {
+              const auto cell =
+                  std::size_t(x) +
+                  std::size_t(cells.x) * (y + std::size_t(cells.y) * z);
+              const double gamma = image.fields.back().values[2 * cell];
+              const double tau = model.reaction.mixing_c_z *
+                                 std::pow(std::cbrt(dx * dy * dz), 2) /
+                                 (2 * gamma / rho);
+              const double perturbation =
+                  amplitude *
+                  std::sin(2 * pi * (image.patch.begin.x + x + 0.5) /
+                           image.global_cells.x);
+              double mean = 0, moment = 0;
+              for (std::size_t f = 0; f < 4; ++f)
+                mean += image.fields[start + f].values[3 * cell] / 4;
+              for (std::size_t f = 0; f < 4; ++f) {
+                const double sign = f % 2 ? -1 : 1;
+                auto &values = image.fields[start + f].values;
+                const double transported_deviation =
+                    values[3 * cell] - mean +
+                    sign * perturbation *
+                        (1 - image.dt * gamma / rho * eigenvalue);
+                moment += transported_deviation * transported_deviation / 4;
+                values[3 * cell] += sign * perturbation;
+                values[3 * cell + 1] -= sign * perturbation;
+              }
+              variance[cell] =
+                  moment * std::exp(-image.dt / tau - 4 * image.dt);
+            }
+        status = spatial.initialize_restart(image);
+      }
+      if (status)
+        status = spatial.advance({1, 1, 1, 1, 1}, report);
+      RestartSnapshot result;
+      if (status)
+        status = spatial.committed_restart_snapshot(result);
+      bool matches = bool(status);
+      if (status) {
+        const auto cells = image.patch.cells;
+        const std::size_t start = 3 + model.transported_scalars.size();
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x) {
+              const auto cell =
+                  std::size_t(x) +
+                  std::size_t(cells.x) * (y + std::size_t(cells.y) * z);
+              double mean = 0, moment = 0;
+              for (std::size_t f = 0; f < 4; ++f)
+                mean += result.fields.data[start + f].values.unchecked(
+                            {x, y, z}, 0) /
+                        4;
+              for (std::size_t f = 0; f < 4; ++f)
+                moment +=
+                    std::pow(result.fields.data[start + f].values.unchecked(
+                                 {x, y, z}, 0) -
+                                 mean,
+                             2) /
+                    4;
+              matches &= std::abs(moment - variance[cell]) < 3e-12;
+            }
+      }
+      okay = collective(matches);
+      if (!okay && rank == 0)
+        std::cerr << "ESF spatial continuation failed " << unsigned(status.code)
+                  << ":" << status.detail << "\n";
+    }
     if (rank == 0)
       std::cout << (okay ? "PASS" : "FAIL")
                 << ": product reaction changes accepted species; provider "

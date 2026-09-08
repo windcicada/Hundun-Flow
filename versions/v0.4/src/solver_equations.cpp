@@ -166,6 +166,8 @@ PlanFingerprint compute_semantic_fingerprint(
     hash = hash_mix(hash, UINT64_C(0x6d61737373726331));
     hash = hash_mix(hash, spec.mass_source_identity);
   }
+  if (spec.unity_lewis_total_enthalpy)
+    hash = hash_mix(hash, UINT64_C(0x756e6974794c6531));
   hash = hash_mix(hash, spec.scalars.size);
   for (std::size_t index = 0U; index < spec.scalars.size; ++index) {
     const ScalarEquationSpec& scalar = spec.scalars.data[index];
@@ -594,6 +596,8 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
   momentum_.transport_fingerprint_ = other.momentum_.transport_fingerprint_;
   momentum_.fingerprint_ = other.momentum_.fingerprint_;
   enthalpy_.cells_ = other.enthalpy_.cells_;
+  enthalpy_.unity_lewis_total_enthalpy_ =
+      other.enthalpy_.unity_lewis_total_enthalpy_;
   enthalpy_.density_ = other.enthalpy_.density_;
   enthalpy_.velocity_ = other.enthalpy_.velocity_;
   enthalpy_.pressure_ = other.enthalpy_.pressure_;
@@ -610,6 +614,8 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
   enthalpy_.transport_fingerprint_ = other.enthalpy_.transport_fingerprint_;
   enthalpy_.fingerprint_ = other.enthalpy_.fingerprint_;
   species_.cells_ = other.species_.cells_;
+  species_.unity_lewis_total_enthalpy_ =
+      other.species_.unity_lewis_total_enthalpy_;
   species_.density_ = other.species_.density_;
   species_.convection_ = other.species_.convection_;
   species_.convection_reach_ = other.species_.convection_reach_;
@@ -835,6 +841,8 @@ Status EquationPlanSet::compile(
         child_fingerprint(semantic, UINT64_C(0x6d6f6d656e74), spec.velocity);
 
     candidate.enthalpy_.cells_ = patch.cells;
+    candidate.enthalpy_.unity_lewis_total_enthalpy_ =
+        spec.unity_lewis_total_enthalpy;
     candidate.enthalpy_.density_ = spec.density;
     candidate.enthalpy_.velocity_ = spec.velocity;
     candidate.enthalpy_.pressure_ = spec.pressure_perturbation;
@@ -875,6 +883,8 @@ Status EquationPlanSet::compile(
       counts->push_back(0U);
     }
     candidate.species_.cells_ = patch.cells;
+    candidate.species_.unity_lewis_total_enthalpy_ =
+        spec.unity_lewis_total_enthalpy;
     candidate.species_.density_ = spec.density;
     candidate.species_.convection_ = schemes.species();
     candidate.species_.convection_reach_ =

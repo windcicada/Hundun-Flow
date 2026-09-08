@@ -181,7 +181,8 @@ struct Fixture {
   EquationPlanSet equations;
 };
 
-bool make_fixture(std::int32_t n, Fixture& out, bool stretched = false) {
+bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
+                  bool unity_lewis = false) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -235,6 +236,7 @@ bool make_fixture(std::int32_t n, Fixture& out, bool stretched = false) {
   spec.velocity_gradient = 7U;
   spec.pressure_reference = PressureReferenceKind::closed_mass;
   spec.closed_mass_service_stage = 1U;
+  spec.unity_lewis_total_enthalpy = unity_lewis;
   spec.maximum_cells_per_rank = static_cast<std::size_t>(n) * n * n;
   return static_cast<bool>(EquationPlanSet::compile(
       MPI_COMM_SELF, out.schemes, out.geometry, out.patch, out.boundary,
@@ -582,7 +584,7 @@ bool same_certificate(const EquationAssemblyCertificate& left,
          left.dt == right.dt;
 }
 
-bool test_production_enthalpy_assembly_oracle() {
+bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false) {
   constexpr std::int32_t n = 6;
   constexpr double velocity_x = 4.0;
   constexpr double enthalpy_slope = 3.0;
@@ -594,7 +596,7 @@ bool test_production_enthalpy_assembly_oracle() {
   const Int3 oracle_cell{3, 3, 3};
 
   Fixture fixture;
-  bool passed = expect(make_fixture(n, fixture),
+  bool passed = expect(make_fixture(n, fixture, false, unity_lewis),
                        "enthalpy production fixture compiles");
   if (!passed) {
     return false;
@@ -732,6 +734,11 @@ bool test_production_enthalpy_assembly_oracle() {
         fixture.equations.enthalpy(), state, material,
         as_const(gradients.view), {}, context, system, certificate);
     passed &= expect(static_cast<bool>(status), description);
+    if (!close(residual.view.unchecked(oracle_cell, 0U), expected))
+      std::cerr << description << " actual=" << std::scientific
+                << residual.view.unchecked(oracle_cell, 0U)
+                << " expected=" << expected << " error="
+                << residual.view.unchecked(oracle_cell, 0U) - expected << '\n';
     passed &= expect(close(residual.view.unchecked(oracle_cell, 0U), expected),
                      "production term matches independent cell-integral oracle");
     passed &= expect(certificate.valid() &&
@@ -786,8 +793,22 @@ bool test_production_enthalpy_assembly_oracle() {
     }
   }
   certificate = assemble_and_check(
-      -conductivity * 10.0 * volume,
-      "temperature conduction isolates in production assembler");
+      unity_lewis ? 0.0 : -conductivity * 10.0 * volume,
+      "frozen equation selects temperature or total-enthalpy conduction");
+  if (unity_lewis) {
+    reset_fields();
+    for (int z = -2; z < cells.z + 2; ++z)
+      for (int y = -2; y < cells.y + 2; ++y)
+        for (int x = -2; x < cells.x + 2; ++x) {
+          const double coordinate = x + 0.5;
+          for (auto *field : {&h_trial, &h_accepted, &h_previous})
+            field->view.unchecked({x, y, z}, 0) =
+                300000 + 0.5 * coordinate * coordinate;
+        }
+    certificate = assemble_and_check(
+        -conductivity / heat_capacity * n * n * volume,
+        "unity-Lewis total-enthalpy diffusion enters actual energy residual");
+  }
   const double transmissibility =
       (conductivity / heat_capacity) * spacing;
   passed &= expect(close(ax.view.unchecked({4, 3, 3}), transmissibility) &&
@@ -1180,6 +1201,7 @@ int main(int argc, char** argv) {
   passed &= test_energy_term_signs_and_units();
   passed &= test_viscous_dissipation_uses_complete_tau();
   passed &= test_production_enthalpy_assembly_oracle();
+  passed &= test_production_enthalpy_assembly_oracle(true);
   MPI_Finalize();
   return passed ? 0 : 1;
 }

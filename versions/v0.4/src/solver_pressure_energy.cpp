@@ -439,6 +439,8 @@ bool valid_enthalpy_authority(
 PlanFingerprint enthalpy_collective_fingerprint(
     const PressureEnergyEnthalpyBinding& binding) noexcept {
   std::uint64_t hash = hash_mix(kFnvOffset, kPressureEnergyEnthalpySchema);
+  if (binding.unity_lewis_total_enthalpy)
+    hash = hash_mix(hash, UINT64_C(0x756e6974794c6531));
   hash = mix_identity(hash, binding.identity);
   hash = hash_mix(hash, static_cast<std::uint8_t>(binding.convection));
   hash =
@@ -2506,7 +2508,10 @@ Status PressureEnergyEnthalpyOperator::bind(
             admissible = false;
           }
           const double conductivity = detail::positive_transmissibility(
-              *binding.kernels, binding.thermal_conductivity, axis, face);
+              *binding.kernels,
+              binding.unity_lewis_total_enthalpy ? binding.enthalpy_diffusivity
+                                                 : binding.thermal_conductivity,
+              axis, face);
           const double proxy = detail::positive_transmissibility(
               *binding.kernels, binding.enthalpy_diffusivity, axis, face);
           if (!std::isfinite(conductivity) || !(conductivity > 0.0) ||
@@ -2582,7 +2587,11 @@ Status PressureEnergyEnthalpyOperator::bind(
           for (std::int32_t x = 0; x < output.extents.x; ++x) {
             const Int3 face{x, y, z};
             output.unchecked(face) = detail::positive_transmissibility(
-                *binding.kernels, binding.thermal_conductivity, axis, face);
+                *binding.kernels,
+                binding.unity_lewis_total_enthalpy
+                    ? binding.enthalpy_diffusivity
+                    : binding.thermal_conductivity,
+                axis, face);
           }
         }
       }
@@ -2600,6 +2609,7 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.target_enthalpy_ = binding.target_enthalpy;
   candidate.boundary_velocity_ = binding.boundary_velocity;
   candidate.density_enthalpy_derivative_ = binding.density_enthalpy_derivative;
+  candidate.unity_lewis_total_enthalpy_ = binding.unity_lewis_total_enthalpy;
   candidate.heat_capacity_ = binding.heat_capacity;
   candidate.thermal_conductivity_ = binding.thermal_conductivity;
   candidate.enthalpy_diffusivity_ = binding.enthalpy_diffusivity;
@@ -2719,6 +2729,7 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
   current_binding.target_enthalpy = target_enthalpy_;
   current_binding.boundary_velocity = boundary_velocity_;
   current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
+  current_binding.unity_lewis_total_enthalpy = unity_lewis_total_enthalpy_;
   current_binding.heat_capacity = heat_capacity_;
   current_binding.thermal_conductivity = thermal_conductivity_;
   current_binding.enthalpy_diffusivity = enthalpy_diffusivity_;
@@ -2774,7 +2785,10 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
         for (std::int32_t x = 0; x < compiled.extents.x; ++x) {
           const Int3 face{x, y, z};
           const double expected = detail::positive_transmissibility(
-              *kernels_, thermal_conductivity_, axis, face);
+              *kernels_,
+              unity_lewis_total_enthalpy_ ? enthalpy_diffusivity_
+                                          : thermal_conductivity_,
+              axis, face);
           const double observed = compiled.unchecked(face);
           finite =
               finite && std::isfinite(expected) && std::isfinite(observed);
@@ -2935,6 +2949,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
   current_binding.target_enthalpy = target_enthalpy_;
   current_binding.boundary_velocity = boundary_velocity_;
   current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
+  current_binding.unity_lewis_total_enthalpy = unity_lewis_total_enthalpy_;
   current_binding.heat_capacity = heat_capacity_;
   current_binding.thermal_conductivity = thermal_conductivity_;
   current_binding.enthalpy_diffusivity = enthalpy_diffusivity_;
@@ -3037,7 +3052,8 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
     for_each_cell(cells, [&](Int3 cell) {
       const double direction = input.unchecked(cell, 0U);
       const double cp = heat_capacity_.unchecked(cell, 0U);
-      const double delta_t = direction / cp;
+      const double delta_t =
+          unity_lewis_total_enthalpy_ ? direction : direction / cp;
       if (!std::isfinite(direction) || !std::isfinite(cp) || !(cp > 0.0) ||
           !std::isfinite(delta_t)) {
         prerequisite = {StatusCode::numerical_failure,
@@ -3185,8 +3201,11 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
                 ? select_face(thermal_conductance_x_, thermal_conductance_y_,
                               thermal_conductance_z_, axis)
                       .unchecked(face)
-                : detail::positive_transmissibility(
-                      *kernels_, thermal_conductivity_, axis, face);
+                : detail::positive_transmissibility(*kernels_,
+                                                    unity_lewis_total_enthalpy_
+                                                        ? enthalpy_diffusivity_
+                                                        : thermal_conductivity_,
+                                                    axis, face);
         value += conductance *
                  (centre_temperature - delta_t.unchecked(neighbour, 0U));
       }

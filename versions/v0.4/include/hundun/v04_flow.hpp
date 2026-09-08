@@ -62,6 +62,8 @@ struct EquationPlanSpec {
   StageId closed_mass_service_stage{};
   // Zero disables interphase mass exchange. Frozen model identity otherwise.
   PlanFingerprint mass_source_identity{};
+  // ESF common composition/total-enthalpy diffusion, Gamma = lambda_eff/cp.
+  bool unity_lewis_total_enthalpy{};
 };
 
 struct EquationCompileDiagnostics {
@@ -1092,6 +1094,7 @@ class EnthalpyEquationPlan {
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;
   const CartesianKernelPlan* kernels_{};
   Int3 cells_{};
+  bool unity_lewis_total_enthalpy_{};
   FieldId density_{};
   FieldId velocity_{};
   FieldId pressure_{};
@@ -1140,6 +1143,7 @@ class SpeciesEquationPlan {
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;
   const CartesianKernelPlan* kernels_{};
   Int3 cells_{};
+  bool unity_lewis_total_enthalpy_{};
   FieldId density_{};
   ConvectionScheme convection_{ConvectionScheme::tvd2};
   std::uint8_t convection_reach_{2U};
@@ -1792,6 +1796,8 @@ struct PressureEnergyEnthalpyBinding {
   // Optional for algebraic clients; production supplies the frozen state
   // that selects conditional outlet h/Y boundary branches.
   ConstFieldView boundary_velocity{};
+  // Select div(Gamma grad(dh)) instead of div(lambda grad(dh/cp)).
+  bool unity_lewis_total_enthalpy{};
 };
 
 struct PressureEnergyEnthalpyCertificate {
@@ -1938,6 +1944,7 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
   ConstFieldView density_enthalpy_derivative_{};
   ConstFieldView heat_capacity_{};
   ConstFieldView thermal_conductivity_{};
+  bool unity_lewis_total_enthalpy_{};
   ConstFieldView enthalpy_diffusivity_{};
   ConstFaceFluxView target_flux_{};
   FrozenConvectionContext convection_context_{};

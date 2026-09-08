@@ -150,6 +150,17 @@ Status evaluate_thermophysical_rates(
     return {StatusCode::invalid_plan, kRatePlan};
   }
 
+  const bool unity_lewis = enthalpy_plan.unity_lewis_total_enthalpy_;
+  if (unity_lewis &&
+      (!detail::valid_cell_view(input.material.enthalpy_diffusivity, cells, 0U,
+                                1U, 1U) ||
+       aliases_output(input.material.enthalpy_diffusivity, output)))
+    return {StatusCode::invalid_plan, kRatePlan};
+  const auto thermal_coefficient = unity_lewis
+                                       ? input.material.enthalpy_diffusivity
+                                       : input.material.thermal_conductivity;
+  const auto thermal_coordinate =
+      unity_lewis ? input.state.enthalpy.trial : input.state.temperature.trial;
   const PrimitiveHistory histories[]{
       input.state.density, input.state.velocity,
       input.state.pressure_perturbation, input.state.enthalpy,
@@ -315,15 +326,13 @@ Status evaluate_thermophysical_rates(
   }
 
   const KernelBox box{{0, 0, 0}, cells};
-  const std::array<ConstFieldView, 1U> thermal_read{
-      input.state.temperature.trial};
+  const std::array<ConstFieldView, 1U> thermal_read{thermal_coordinate};
   const std::array<FieldView, 1U> diffusion_write{output.diffusion_scratch};
   const KernelInvocation conduction{{thermal_read.data(), thermal_read.size()},
                                     {diffusion_write.data(),
                                      diffusion_write.size()},
                                     box, 0U, 0U, 1U, 0U, nullptr};
-  Status status = cartesian_diffusion(
-      kernels, input.material.thermal_conductivity, conduction);
+  Status status = cartesian_diffusion(kernels, thermal_coefficient, conduction);
   if (!status) return status;
   if (input.immersed_interface != nullptr) {
     // Persist the target equation's spatial operator. The predictor controls
@@ -331,8 +340,7 @@ Status evaluate_thermophysical_rates(
     // accepted rate to a clipped donor closure would EX2-extrapolate a
     // different diffusion equation from the one audited at the final state.
     status = input.immersed_interface->correct_zero_normal_diffusion(
-        input.state.temperature.trial,
-        input.material.thermal_conductivity, output.diffusion_scratch);
+        thermal_coordinate, thermal_coefficient, output.diffusion_scratch);
     if (!status) return status;
   }
 
@@ -367,6 +375,8 @@ Status evaluate_thermophysical_rates(
   mix_view(input.material.molecular_viscosity);
   mix_view(input.material.effective_viscosity);
   mix_view(input.material.thermal_conductivity);
+  if (unity_lewis)
+    mix_view(input.material.enthalpy_diffusivity);
   state_hash = mix(state_hash, bits(input.bdf.a0));
   state_hash = mix(state_hash, bits(input.bdf.a1));
   state_hash = mix(state_hash, bits(input.bdf.a2));
@@ -469,8 +479,11 @@ Status evaluate_thermophysical_rates(
       if (turbulent < 0.0 &&
           turbulent > -1.0e-12 * std::max(1.0, molecular))
         turbulent = 0.0;
-      const double coefficient = molecular / spec.molecular_schmidt +
-                                 turbulent / spec.turbulent_schmidt;
+      const double coefficient =
+          unity_lewis && spec.role == TransportedScalarRole::species
+              ? input.material.enthalpy_diffusivity.unchecked(cell, 0U)
+              : molecular / spec.molecular_schmidt +
+                    turbulent / spec.turbulent_schmidt;
       if (!std::isfinite(molecular) || molecular < 0.0 ||
           !std::isfinite(effective) || effective < 0.0 || turbulent < 0.0 ||
           !std::isfinite(coefficient) || coefficient <= 0.0) {
