@@ -453,10 +453,49 @@ bool test_deterministic_freeze_and_fingerprint() {
   return passed;
 }
 
+bool test_product_source_admission() {
+  const std::array<FieldId, 4U> fields{0U, 1U, 2U, 3U};
+  const std::array<FieldId, 1U> reads{1U};
+  ContributionSpec spec = contribution(0U, 12U, {reads.data(), reads.size()}, 2U);
+  spec.capability = ContributionCapability::chemistry;
+  spec.source_identity = 0x4c11U;
+  ContributionRegistry closed;
+  bool passed = expect(static_cast<bool>(closed.configure({fields.data(), fields.size()})),
+                       "default source catalog configures");
+  passed &= expect(!closed.register_contribution(spec),
+                   "chemistry is never admitted through the inert default");
+  ContributionAdmission admission;
+  admission.chemistry = spec.source_identity;
+  ContributionRegistry reacting;
+  passed &= expect(static_cast<bool>(reacting.configure({fields.data(), fields.size()}, admission)),
+                   "product compiler binds an explicit chemistry identity");
+  ContributionSpec mismatched = spec;
+  ++mismatched.source_identity;
+  passed &= expect(!reacting.register_contribution(mismatched) && reacting.contributions().size == 0U,
+                   "wrong mechanism/model authority leaves the source plan unchanged");
+  passed &= expect(static_cast<bool>(reacting.register_contribution(spec)) &&
+                       static_cast<bool>(reacting.freeze()),
+                   "authorized chemistry is published as a chemistry contribution");
+  if (reacting.plan() == nullptr || reacting.contributions().size != 1U) return false;
+  passed &= expect(reacting.contributions().data[0].capability == ContributionCapability::chemistry &&
+                       reacting.contributions().data[0].source_identity == spec.source_identity,
+                   "runtime source descriptors retain capability and source authority");
+  ContributionRegistry inert;
+  spec.capability = ContributionCapability::inert_source;
+  spec.source_identity = 0U;
+  passed &= expect(static_cast<bool>(inert.configure({fields.data(), fields.size()})) &&
+                       static_cast<bool>(inert.register_contribution(spec)) &&
+                       static_cast<bool>(inert.freeze()) &&
+                       reacting.fingerprint() != inert.fingerprint(),
+                   "identical field wiring cannot disguise chemistry as an inert plan");
+  return passed;
+}
+
 }  // namespace
 
 int main() {
   bool passed = true;
+  passed &= test_product_source_admission();
   passed &= test_effective_viscosity_authority();
   passed &= test_effective_viscosity_conflicts_with_contribution_outputs();
   passed &= test_configuration_is_fail_closed_and_transactional();

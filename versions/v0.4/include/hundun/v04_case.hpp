@@ -93,6 +93,31 @@ enum class IbmReconstructionPolicy : std::uint8_t {
   adaptive_order
 };
 
+enum class ReactionMode : std::uint8_t {
+  none,
+  finite_rate_mean,
+  pasr_algebraic_v1,
+  esf_tpdf
+};
+
+struct ReactionSpec {
+  ReactionMode mode{ReactionMode::none};
+  std::string mechanism_sha256;
+  std::string phase;
+  enum class Representation : std::uint8_t {
+    external_provider, analytic_isomer, direct_cantera
+  };
+  Representation representation{Representation::external_provider};
+  std::filesystem::path mechanism_file;
+  double analytic_rate_s{2.0};
+  double analytic_cp_j_per_kg_k{1000.0};
+  double relative_tolerance{1e-8};
+  double absolute_tolerance{1e-14};
+  std::uint32_t maximum_internal_steps{2000};
+  double mixing_c_z{1.0};
+  double turbulent_schmidt{0.7};
+};
+
 struct CaseSpec {
   std::filesystem::path root;
 };
@@ -262,6 +287,7 @@ struct ValidatedModel {
   std::vector<TransportedScalarSpec> transported_scalars;
   std::vector<std::filesystem::path> data_files;
   std::optional<ImmersedBoundarySpec> immersed_boundary;
+  ReactionSpec reaction;
   PlanFingerprint fingerprint{};
 };
 

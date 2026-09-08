@@ -221,6 +221,8 @@ bool valid_contributions(Span<const EquationContributionView> contributions,
         view.stage != stage || view.stage != descriptors.data[i].stage ||
         view.conserved_quantity != descriptors.data[i].conserved_quantity ||
         !(view.units == descriptors.data[i].units) ||
+        view.capability != descriptors.data[i].capability ||
+        view.source_identity != descriptors.data[i].source_identity ||
         view.explicit_source_field != descriptors.data[i].explicit_source ||
         view.explicit_source_density.field !=
             descriptors.data[i].explicit_source ||

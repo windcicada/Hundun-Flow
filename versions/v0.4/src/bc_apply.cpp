@@ -3,6 +3,7 @@
 
 #include "hundun/v04_boundary.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>

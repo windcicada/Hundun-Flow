@@ -4,6 +4,7 @@
 #include "hundun/v04_case.hpp"
 
 #include "app_case_detail.hpp"
+#include "app_reaction_detail.hpp"
 #include "physics_input_detail.hpp"
 #include "yyjson.h"
 
@@ -52,6 +53,7 @@ constexpr std::uint8_t kCoastAxesWireVersion = 15U;
 constexpr std::uint8_t kCoastAxesPressureAlgorithmWireVersion = 16U;
 constexpr std::uint8_t kCoastAxesSimpleWireVersion = 17U;
 constexpr std::uint8_t kCoastAxesSimplePressureAlgorithmWireVersion = 18U;
+constexpr std::uint8_t kReactionWireFlag = 128U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -427,7 +429,8 @@ bool root_has_case_keys(yyjson_val* root) {
   }
   const bool has_turbulence = yyjson_obj_get(root, "turbulence") != nullptr;
   return yyjson_obj_size(root) == required.size() +
-                                         (has_turbulence ? 1U : 0U);
+                                         (has_turbulence ? 1U : 0U) +
+      (yyjson_obj_get(root, "reaction") != nullptr ? 1U : 0U);
 }
 
 bool parse_immersed_fluid_side(std::string_view value,
@@ -819,6 +822,43 @@ bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
          finite_real(yyjson_obj_get(value, "maximum_bdf_ratio"),
                      out.maximum_bdf_ratio) &&
          valid_time(out);
+}
+
+bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
+  const auto model = string_value(value, "model");
+  const auto representation = string_value(value, "representation");
+  const auto sha = string_value(value, "mechanism_sha256");
+  const auto phase = string_value(value, "phase");
+  if (!model || !representation || !sha || !phase) return false;
+  if (*model == "finite_rate_mean") out.mode = ReactionMode::finite_rate_mean;
+  else if (*model == "pasr_algebraic_v1") out.mode = ReactionMode::pasr_algebraic_v1;
+  else return false;
+  out.mechanism_sha256.assign(sha->data(), sha->size());
+  out.phase.assign(phase->data(), phase->size());
+  const bool pasr = out.mode == ReactionMode::pasr_algebraic_v1;
+  if (*representation == "analytic_isomer") {
+    out.representation = ReactionSpec::Representation::analytic_isomer;
+    if (yyjson_obj_size(value) != (pasr ? 7U : 6U) ||
+        !finite_real(yyjson_obj_get(value, "rate_s"), out.analytic_rate_s) ||
+        !finite_real(yyjson_obj_get(value, "cp_j_per_kg_k"), out.analytic_cp_j_per_kg_k)) return false;
+  } else if (*representation == "direct_cantera") {
+    out.representation = ReactionSpec::Representation::direct_cantera;
+    const auto file = string_value(value, "mechanism_file");
+    auto* solver = yyjson_obj_get(value, "chemistry_solver");
+    if (yyjson_obj_size(value) != (pasr ? 7U : 6U) || !file ||
+        !object_has_exact_keys(solver, {"relative_tolerance", "absolute_tolerance", "maximum_internal_steps"}) ||
+        !finite_real(yyjson_obj_get(solver, "relative_tolerance"), out.relative_tolerance) ||
+        !finite_real(yyjson_obj_get(solver, "absolute_tolerance"), out.absolute_tolerance) ||
+        !parse_uint32(yyjson_obj_get(solver, "maximum_internal_steps"), out.maximum_internal_steps)) return false;
+    out.mechanism_file = std::string(*file);
+  } else return false;
+  if (pasr) {
+    auto* mixing = yyjson_obj_get(value, "mixing");
+    if (!object_has_exact_keys(mixing, {"c_z", "turbulent_schmidt"}) ||
+        !finite_real(yyjson_obj_get(mixing, "c_z"), out.mixing_c_z) ||
+        !finite_real(yyjson_obj_get(mixing, "turbulent_schmidt"), out.turbulent_schmidt)) return false;
+  }
+  return detail::valid_reaction_spec(out);
 }
 
 bool finite_real(yyjson_val* value, double& out) noexcept {
@@ -1932,7 +1972,8 @@ bool unique_reference_paths(const ValidatedModel& model) {
 Status serialize_model(const ValidatedModel& model,
                        std::vector<std::uint8_t>& out) {
   try {
-    if (!valid_canonical_mesh(model.mesh) ||
+    if (!detail::valid_reaction_spec(model.reaction) ||
+        !valid_canonical_mesh(model.mesh) ||
         static_cast<std::uint8_t>(model.pressure_reference) >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
         !valid_solver(model.solver) || !valid_schemes(model.schemes) ||
@@ -1942,7 +1983,8 @@ Status serialize_model(const ValidatedModel& model,
         model.mesh.focus_regions.size() >
             std::numeric_limits<std::uint16_t>::max() ||
         model.data_files.size() > detail::kMaxReferencedFiles ||
-        model.data_files.size() + (model.immersed_boundary.has_value() ? 1U : 0U) +
+        model.data_files.size() + (model.reaction.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) +
+        (model.immersed_boundary.has_value() ? 1U : 0U) +
                 (model.mesh.kind == GeometryKind::coast_runtime_axes_v1 ? 2U
                                                                         : 1U) >
             detail::kMaxReferencedFiles ||
@@ -1983,7 +2025,7 @@ Status serialize_model(const ValidatedModel& model,
     const bool simple = model.solver.coupling == CouplingKind::simple;
     const bool coast_axes =
         model.mesh.kind == GeometryKind::coast_runtime_axes_v1;
-    writer.byte(
+    writer.byte((model.reaction.mode != ReactionMode::none ? kReactionWireFlag : 0U) | (
         coast_axes
             ? (simple ? (extended_solver
                              ? kCoastAxesSimplePressureAlgorithmWireVersion
@@ -1995,7 +2037,7 @@ Status serialize_model(const ValidatedModel& model,
                              ? kSimplePressureAlgorithmWireVersion
                              : kSimpleWireVersion)
                       : (extended_solver ? kPressureAlgorithmWireVersion
-                                         : kWireVersion)));
+                                         : kWireVersion))));
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
     writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
@@ -2059,6 +2101,17 @@ Status serialize_model(const ValidatedModel& model,
         !writer.text(model.immersed_boundary->stl_file.generic_string())) {
       return invalid_case(detail_wire);
     }
+    if (model.reaction.mode != ReactionMode::none) {
+      const auto& r = model.reaction;
+      writer.byte(static_cast<std::uint8_t>(r.mode));
+      writer.byte(static_cast<std::uint8_t>(r.representation));
+      if (!writer.text(r.mechanism_sha256) || !writer.text(r.phase) ||
+          !writer.text(r.mechanism_file.generic_string())) return invalid_case(detail_wire);
+      writer.real(r.analytic_rate_s); writer.real(r.analytic_cp_j_per_kg_k);
+      writer.real(r.relative_tolerance); writer.real(r.absolute_tolerance);
+      writer.u32(r.maximum_internal_steps);
+      writer.real(r.mixing_c_z); writer.real(r.turbulent_schmidt);
+    }
     writer.u64(model.fingerprint);
     std::vector<std::uint8_t> candidate = std::move(writer).take();
     if (candidate.empty() || candidate.size() > detail::kMaxWireBytes) {
@@ -2086,8 +2139,10 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t has_stl = 0U;
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
-    if (!reader.byte(version) ||
-        (version != kLegacyWireVersion &&
+    if (!reader.byte(version)) return invalid_case(detail_wire);
+    const bool has_reaction = (version & kReactionWireFlag) != 0U;
+    version &= ~kReactionWireFlag;
+    if ((version != kLegacyWireVersion &&
          version != kLegacyPressureAlgorithmWireVersion &&
          version != kWireVersion &&
          version != kPressureAlgorithmWireVersion &&
@@ -2259,6 +2314,24 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       model.immersed_boundary = ImmersedBoundarySpec{
           std::move(parsed), static_cast<ImmersedFluidSide>(fluid_side),
           static_cast<IbmReconstructionPolicy>(reconstruction_policy)};
+    }
+    if (has_reaction) {
+      auto& r = model.reaction;
+      std::uint8_t mode{}, representation{};
+      std::string mechanism_file;
+      if (!reader.byte(mode) || !reader.byte(representation) ||
+          !reader.text(r.mechanism_sha256) || !reader.text(r.phase) || !reader.text(mechanism_file) ||
+          !reader.real(r.analytic_rate_s) || !reader.real(r.analytic_cp_j_per_kg_k) ||
+          !reader.real(r.relative_tolerance) || !reader.real(r.absolute_tolerance) ||
+          !reader.u32(r.maximum_internal_steps) || !reader.real(r.mixing_c_z) ||
+          !reader.real(r.turbulent_schmidt)) return invalid_case(detail_wire);
+      r.mode = static_cast<ReactionMode>(mode);
+      r.representation = static_cast<ReactionSpec::Representation>(representation);
+      r.mechanism_file = std::move(mechanism_file);
+      if (r.mode == ReactionMode::none || !detail::valid_reaction_spec(r) ||
+          std::size_t(data_count) + (has_stl ? 1U : 0U) + (coast_axes_wire(version) ? 2U : 1U) +
+          (r.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) > detail::kMaxReferencedFiles)
+        return invalid_case(detail_wire);
     }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
         !unique_reference_paths(model) ||
@@ -2555,7 +2628,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
     yyjson_val* reacting = yyjson_obj_get(flow, "reacting");
     yyjson_val* pressure_correctors =
         yyjson_obj_get(solver, "pressure_correctors");
-    if (!yyjson_is_bool(reacting) || yyjson_get_bool(reacting) ||
+    auto* reaction = yyjson_obj_get(root, "reaction");
+    if (!yyjson_is_bool(reacting) ||
+        (yyjson_get_bool(reacting) != (reaction != nullptr)) ||
+        (reaction != nullptr && !parse_reaction(reaction, model.reaction)) ||
         !yyjson_is_uint(pressure_correctors) ||
         yyjson_get_uint(pressure_correctors) != 2U) {
       return invalid_case(detail_json_value);
@@ -2604,7 +2680,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
     const std::size_t data_file_count = yyjson_arr_size(data_files);
     const std::size_t total_reference_count =
-        data_file_count + (yyjson_is_str(stl_file) ? 1U : 0U) +
+        data_file_count + (model.reaction.representation == ReactionSpec::Representation::direct_cantera ? 1U : 0U) +
+        (yyjson_is_str(stl_file) ? 1U : 0U) +
         (coast_axes_schema ? 2U : 1U);
     if (data_file_count > detail::kMaxReferencedFiles ||
         total_reference_count > detail::kMaxReferencedFiles) {
@@ -2787,6 +2864,30 @@ Status compile_on_root(const fs::path& case_root, int rank,
       hash.text("no-immersed-boundary");
     }
 
+    if (model.reaction.mode != ReactionMode::none) {
+      const auto& r = model.reaction;
+      hash.text("reaction-case-v1");
+      hash.integer(static_cast<std::uint8_t>(r.mode));
+      hash.integer(static_cast<std::uint8_t>(r.representation));
+      hash.text(r.mechanism_sha256); hash.text(r.phase);
+      hash.real(r.analytic_rate_s); hash.real(r.analytic_cp_j_per_kg_k);
+      hash.real(r.relative_tolerance); hash.real(r.absolute_tolerance);
+      hash.integer(r.maximum_internal_steps); hash.real(r.mixing_c_z);
+      hash.real(r.turbulent_schmidt);
+      if (r.representation == ReactionSpec::Representation::direct_cantera) {
+        fs::path relative;
+        UniqueFd descriptor;
+        struct stat metadata {};
+        const auto opened = open_direct_file(root_descriptor.get(), r.mechanism_file.generic_string(),
+            ".yaml", rank, relative, descriptor, metadata);
+        if (!opened) return opened;
+        if (!referenced_targets.insert(std::make_pair(metadata.st_dev, metadata.st_ino)).second)
+          return invalid_case(detail_reference_path);
+        hash.text(relative.generic_string());
+        const auto hashed = hash_bounded_file(descriptor, metadata, hash);
+        if (!hashed) return hashed;
+      }
+    }
     model.fingerprint = hash.finish();
     return serialize_model(model, payload);
   } catch (const std::bad_alloc&) {

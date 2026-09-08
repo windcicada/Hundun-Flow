@@ -10,6 +10,7 @@
 #include "common_terminal_audit.h"
 #include "core_product_freeze_detail.hpp"
 #include "core_conservation_detail.hpp"
+#include "core_reaction_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_initialization.hpp"
@@ -55,7 +56,7 @@ constexpr std::uint32_t kProductHistoryIncompatible = 10213U;
 // Semantic history contract, independent of Git/build/partition identity.
 // Bump the affected component when its stored state, rate, flux or time
 // interpretation changes. Model/BC/transport parameters remain bound by plan.
-constexpr PlanFingerprint method_history_signature(bool transported_scalars) noexcept {
+constexpr PlanFingerprint method_history_signature(bool transported_scalars, bool reacting = false) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
   for (char byte : std::string_view(
       "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
@@ -71,6 +72,11 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars) noe
         ";scalar-paired-mass-remap-v1;composition-picard-v1;mass-roundoff-closure-v1;"
         "passive-envelope-v1;physical-donor-v2;composition-inner-accuracy-v1;"
         "ibm-scalar-impermeable-flux-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (reacting)
+    for (char byte : std::string_view(";finite-rate-conservative-ex2-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -550,6 +556,7 @@ struct ProductFields {
     std::size_t role_index{};
     std::size_t catalog_slot{};
   };
+  std::vector<FieldId> reaction_conserved, reaction_sources;
   std::vector<FieldId> scalars;
   std::vector<ScalarBinding> scalar_bindings;
   std::vector<FieldId> pressure_energy_candidate_species;
@@ -794,6 +801,13 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
         if (!status) return status;
         fields.pressure_energy_candidate_species.push_back(
             candidate_species);
+        if (model.reaction.mode != ReactionMode::none) {
+          FieldId source{};
+          status = registry.require_field("chemical_source_" + scalar.stable_name, 1U, 0U, source);
+          if (!status) return status;
+          fields.reaction_conserved.push_back(id);
+          fields.reaction_sources.push_back(source);
+        }
       }
       FieldId rate = 0U;
       const std::string rate_name = "rhs_nonadv_" + scalar.stable_name;
@@ -1203,6 +1217,8 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
     declarations.push_back({{rate, StateVisibility::trial}, 0U, false});
     declarations.push_back({{rate, StateVisibility::accepted}, 0U, true});
   }
+  for (FieldId source : fields.reaction_sources)
+    declarations.push_back({{source, StateVisibility::workspace}, 0U, false});
   ExecutionGraphCompiler compiler;
   Status status = compiler.configure({declarations.data(), declarations.size()});
   if (!status) return status;
@@ -1515,6 +1531,10 @@ Status compile_graph(const ProductFields& fields, std::uint8_t ghosts,
                         StateVisibility::trial});
       ghosts_force.push_back(
           {fields.scalars[index], StateVisibility::trial});
+    }
+    if (!fields.reaction_sources.empty()) reads.push_back(trial_rho);
+    for (FieldId source : fields.reaction_sources) {
+      writes.push_back({source, StateVisibility::workspace});
     }
     std::vector<std::uint8_t> widths(ghosts_force.size(), ghosts);
     widths[4U] = 1U;
@@ -2635,6 +2655,7 @@ struct CompiledCasePlan::Impl {
   TransportPlan transport;
   ClosedMassPlan closed_mass;
   ContributionRegistry contributions;
+  detail::ProductReactionSources reaction;
   TurbulencePlan turbulence;
   EquationPlanSet equations;
   PisoPlan piso;
@@ -3181,7 +3202,8 @@ std::uintptr_t CompiledCasePlan::mg_storage_address() const noexcept {
 Status ProductCompiler::compile(MPI_Comm communicator,
                                 const ValidatedModel& model,
                                 const std::filesystem::path& case_root,
-                                CompiledCasePlan& out) noexcept try {
+                                CompiledCasePlan& out,
+                                ProductCouplingBindings coupling) noexcept try {
   if (communicator == MPI_COMM_NULL) {
     return {StatusCode::invalid_plan, kProductInput};
   }
@@ -3198,8 +3220,11 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   status = product_local_stage(communicator, [&] {
     candidate.reset(new CompiledCasePlan::Impl);
     candidate->boundary_specs = model.boundaries;
-    return Status{};
+    return candidate->reaction.configure(model, coupling, case_root);
   });
+  if (!status) return status;
+  status = collective_semantic(communicator, candidate->reaction.enabled()
+      ? candidate->reaction.fingerprint() : 1U);
   if (!status) return status;
   status = CartesianGeometryCompiler::compile(
       communicator, model.mesh, {}, candidate->geometry, candidate->patch);
@@ -3682,7 +3707,27 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       for (const FieldDescriptor& descriptor : candidate->schema)
         declared.push_back(descriptor.id);
       status = candidate->contributions.configure(
-          {declared.data(), declared.size()});
+          {declared.data(), declared.size()}, {candidate->reaction.fingerprint(), 0U, 0U});
+      if (status) status = candidate->reaction.bind(
+          {candidate->fields.reaction_conserved.data(), candidate->fields.reaction_conserved.size()},
+          {candidate->fields.reaction_sources.data(), candidate->fields.reaction_sources.size()});
+      if (status && candidate->reaction.enabled()) {
+        std::vector<FieldId> reads{candidate->fields.rho, candidate->fields.pressure,
+                                  candidate->fields.enthalpy, candidate->fields.temperature};
+        reads.insert(reads.end(), candidate->fields.reaction_conserved.begin(),
+                     candidate->fields.reaction_conserved.end());
+        for (std::size_t i = 0; i < candidate->fields.reaction_sources.size() && status; ++i) {
+          ContributionSpec source;
+          source.conserved_quantity = candidate->fields.reaction_conserved[i];
+          source.explicit_source = candidate->fields.reaction_sources[i];
+          source.stage = 1U;
+          source.units.si_exponents = {1,-3,-1,0,0,0,0};
+          source.reads = {reads.data(), reads.size()};
+          source.capability = ContributionCapability::chemistry;
+          source.source_identity = candidate->reaction.fingerprint();
+          status = candidate->contributions.register_contribution(source);
+        }
+      }
     }
     return status;
   });
@@ -5706,10 +5751,15 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   material.thermal_conductivity = as_const(conductivity);
   ThermophysicalRateCertificate rate_certificate;
   if (status)
+    status = product.reaction.prepare(equation_state, product.thermodynamics,
+        material, product.equations.kernels(), product.layers, cells,
+        {product.pressure_mg_cell_activity.data(), product.pressure_mg_cell_activity.size()}, 0U);
+  status = product.reductions.consensus(status);
+  if (status)
     status = evaluate_thermophysical_rates(
         product.equations,
         {equation_state, material, as_const(velocity_gradient),
-         {1.0, -1.0, 0.0, 1U}, 1U, {},
+         {1.0, -1.0, 0.0, 1U}, 1U, product.reaction.contributions(),
          product.ibm_equations.has_value() ? &*product.ibm_equations
                                            : nullptr},
         {enthalpy_rate_trial,
@@ -5908,7 +5958,7 @@ Status ProductDriver::restart_expected(
     out.compatible_storage_schema = product.legacy_mg_schema_fingerprint;
   }
   out.method_history_signature =
-      method_history_signature(!product.fields.scalars.empty());
+      method_history_signature(!product.fields.scalars.empty(), product.reaction.enabled());
   if (history_policy == RestartHistoryPolicy::rebuild_method_history)
     out.compatible_method_plan = product.legacy_afc_v3_fingerprint;
   return {};
@@ -6552,10 +6602,10 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   if (status) fresh_diagnostic.committed = true;
 #endif
-  // The empty-activity route is a literal no-store bypass.  The original
-  // uniform cold histories are already kinematically compatible, so even
-  // derived-workspace revisions must remain untouched in this branch.
-  if (status && product.topology.has_value())
+  // Inert uniform cold histories already have zero nonadvective rates.
+  // Reacting uniform gas still needs its initial chemical derivative; omitting
+  // it silently delays chemistry until the second accepted step.
+  if (status && (product.topology.has_value() || product.reaction.enabled()))
     status = runtime.rebuild_cold_velocity_dependents(
         initial.pressure_reference, false);
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -6745,7 +6795,7 @@ Status ProductDriver::initialize_restart(
   const bool exact_history = complete_source_history && !method_recovery;
   const auto history_compatibility =
       image.history_compatibility(
-          method_history_signature(!product.fields.scalars.empty()));
+          method_history_signature(!product.fields.scalars.empty(), product.reaction.enabled()));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
@@ -14931,11 +14981,16 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) trace_state(step, 61U);
   if (status) attempt_stage = 62U;
   if (status)
+    status = product.reaction.prepare(equation_state, product.thermodynamics,
+        material, product.equations.kernels(), product.layers, cells,
+        {product.pressure_mg_cell_activity.data(), product.pressure_mg_cell_activity.size()}, step.accepted_step);
+  status = product.reductions.consensus(status);
+  if (status)
     status = evaluate_thermophysical_rates(
         product.equations,
         {equation_state, material, as_const(velocity_gradient), effective_bdf,
          1U,
-         {}, product.ibm_equations.has_value() ? &*product.ibm_equations
+         product.reaction.contributions(), product.ibm_equations.has_value() ? &*product.ibm_equations
                                                : nullptr},
         {enthalpy_rate_output,
          {species_rate_output.data(), species_rate_output.size()},
@@ -15668,7 +15723,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
          previous_flux,
          runtime.previous_pressure_reference,
          runtime.closed_mass_target,
-         method_history_signature(!product.fields.scalars.empty())};
+         method_history_signature(!product.fields.scalars.empty(), product.reaction.enabled())};
   return {};
 }
 

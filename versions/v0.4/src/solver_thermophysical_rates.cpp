@@ -42,7 +42,9 @@ bool same_cells(Int3 left, Int3 right) noexcept {
 bool descriptor_matches(const EquationContributionView& view,
                         const CompiledContribution& descriptor,
                         StageId stage) noexcept {
-  return view.stage == stage && descriptor.stage == stage &&
+  return view.capability == descriptor.capability &&
+         view.source_identity == descriptor.source_identity &&
+         view.stage == stage && descriptor.stage == stage &&
          view.conserved_quantity == descriptor.conserved_quantity &&
          view.units == descriptor.units &&
          view.explicit_source_field == descriptor.explicit_source &&

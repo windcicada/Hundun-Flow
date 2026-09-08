@@ -606,7 +606,16 @@ struct UnitDimension {
 enum class ContributionCapability : std::uint8_t {
   inert_source,
   chemistry,
-  reacting
+  reacting,
+  parcel_exchange
+};
+
+// A nonzero frozen model/asset identity admits exactly that source. Empty
+// admission preserves the inert-only contract used by existing flow cases.
+struct ContributionAdmission {
+  PlanFingerprint chemistry{};
+  PlanFingerprint reacting{};
+  PlanFingerprint parcel_exchange{};
 };
 
 struct ContributionSpec {
@@ -618,6 +627,7 @@ struct ContributionSpec {
   FieldId implicit_diagonal{};
   bool supplies_implicit_diagonal{};
   ContributionCapability capability{ContributionCapability::inert_source};
+  PlanFingerprint source_identity{};
 };
 
 struct CompiledContribution {
@@ -630,6 +640,8 @@ struct CompiledContribution {
   FieldId implicit_diagonal{};
   bool supplies_implicit_diagonal{};
   std::uint32_t registration_ordinal{};
+  ContributionCapability capability{ContributionCapability::inert_source};
+  PlanFingerprint source_identity{};
 };
 
 class ContributionPlan {
@@ -652,7 +664,8 @@ class ContributionPlan {
 
 class ContributionRegistry {
  public:
-  Status configure(Span<const FieldId> declared_fields) noexcept;
+  Status configure(Span<const FieldId> declared_fields,
+                   ContributionAdmission admission = {}) noexcept;
   Status register_contribution(const ContributionSpec& spec) noexcept;
   Status freeze() noexcept;
   Span<const CompiledContribution> contributions() const noexcept {
@@ -678,6 +691,7 @@ class ContributionRegistry {
   std::vector<CompiledContribution> contributions_;
   std::vector<FieldId> reads_;
   std::vector<FieldId> declared_fields_;
+  ContributionAdmission admission_{};
   std::uint32_t next_ordinal_{};
   ContributionPlan plan_;
   bool frozen_{};

@@ -1913,3 +1913,38 @@ foreach(sanitizer_test IN LISTS HUNDUN_V04_FOCUSED_SANITIZER_TESTS)
       "v0.4 sanitizer test is absent from focused manifest: ${sanitizer_test}")
   endif()
 endforeach()
+
+add_executable(v04_product_reaction_mpi_test mpi/product_reaction_mpi_test.cpp)
+target_link_libraries(v04_product_reaction_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(reaction_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_product_reaction_mpi_${reaction_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${reaction_ranks}
+      $<TARGET_FILE:v04_product_reaction_mpi_test>)
+  set_tests_properties(v04_product_reaction_mpi_${reaction_ranks} PROPERTIES TIMEOUT 30 PROCESSORS ${reaction_ranks})
+endforeach()
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_reaction_case_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-isomer" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_reaction_case_mpi_${rank_count} PROPERTIES TIMEOUT 30 PROCESSORS ${rank_count})
+endforeach()
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_product_pasr_case_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-pasr" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_pasr_case_mpi_${rank_count} PROPERTIES TIMEOUT 30 PROCESSORS ${rank_count})
+endforeach()
+
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  foreach(rank_count IN ITEMS 1 2 4)
+    add_test(NAME v04_product_cantera_case_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+        ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-cantera-isomer" ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(v04_product_cantera_case_mpi_${rank_count} PROPERTIES TIMEOUT 30 PROCESSORS ${rank_count})
+  endforeach()
+endif()

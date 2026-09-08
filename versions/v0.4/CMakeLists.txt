@@ -14,6 +14,7 @@ option(HUNDUN_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(HUNDUN_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(HUNDUN_ENABLE_HYPRE "Enable the isolated HYPRE Struct adapter" OFF)
 option(HUNDUN_BUILD_PORTABLE_CANTERA "Build the isolated Stage 4 donor backend (no product admission)" OFF)
+option(HUNDUN_ENABLE_REACTING_CANTERA "Connect the verified Cantera backend to product reacting cases" OFF)
 set(HUNDUN_CANTERA_PACKAGE_ROOT "" CACHE PATH "Root of the verified Cantera 3.2.0 package")
 set(HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM "" CACHE FILEPATH "Synthetic backend conformance mechanism")
 
@@ -26,11 +27,11 @@ endif()
 
 get_filename_component(hundun_repository_root
   "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-if(HUNDUN_BUILD_PORTABLE_CANTERA)
+if(HUNDUN_BUILD_PORTABLE_CANTERA OR HUNDUN_ENABLE_REACTING_CANTERA)
   include("${hundun_repository_root}/cmake/HundunPortableCantera.cmake")
   hundun_configure_cantera_package("${HUNDUN_CANTERA_PACKAGE_ROOT}")
-  # Intentionally separate: enabling this target does not link chemistry into
-  # hundun_v04_core, authorize a source contribution, or enable reacting CLI.
+  # The portable option retains the standalone backend. Product linkage is
+  # explicit through HUNDUN_ENABLE_REACTING_CANTERA; case admission is separate.
   add_library(hundun_v04_portable_cantera STATIC EXCLUDE_FROM_ALL
     src/models_cantera.cpp src/models_combustion.cpp src/models_chemistry_adapter.cpp
     src/models_spray_properties.cpp src/models_esf.cpp)
@@ -190,6 +191,11 @@ string(APPEND HUNDUN_BUILD_MANIFEST_CANONICAL
   "asan=${HUNDUN_ENABLE_ASAN}\n"
   "ubsan=${HUNDUN_ENABLE_UBSAN}\n"
   "hypre=${HUNDUN_ENABLE_HYPRE}\n")
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  file(SHA256 "${HUNDUN_CANTERA_PACKAGE_ROOT}/lib/libcantera_shared.so.3.2.0" HUNDUN_REACTING_CANTERA_SHA256)
+  string(APPEND HUNDUN_BUILD_MANIFEST_CANONICAL
+    "reacting_cantera=ON\ncantera_shared_sha256=${HUNDUN_REACTING_CANTERA_SHA256}\n")
+endif()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 hundun_target_manifest(core none HUNDUN_BUILD_MANIFEST_SHA256)
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/app_main.cpp" HUNDUN_APP_ENTRY)
@@ -339,6 +345,10 @@ function(hundun_v04_configure_core target_name)
     MPI::MPI_C)
   target_link_libraries(${target_name} PRIVATE
     Threads::Threads)
+  if(HUNDUN_ENABLE_REACTING_CANTERA)
+    target_compile_definitions(${target_name} PRIVATE HUNDUN_V04_REACTING_CANTERA=1)
+    target_link_libraries(${target_name} PRIVATE hundun_v04_portable_cantera)
+  endif()
   if(HUNDUN_ENABLE_HYPRE)
     target_compile_definitions(${target_name} PRIVATE
       HUNDUN_V04_HAVE_HYPRE=1)

@@ -8,6 +8,7 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -192,6 +193,8 @@ struct EquationContributionView {
   StageId stage{};
   FieldId explicit_source_field{};
   FieldId implicit_sink_field{};
+  ContributionCapability capability{ContributionCapability::inert_source};
+  PlanFingerprint source_identity{};
 };
 
 struct EquationAssemblyContext {

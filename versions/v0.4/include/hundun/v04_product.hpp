@@ -6,6 +6,7 @@
 #include "hundun/v04_flow.hpp"
 #include "hundun/v04_ibm.hpp"
 #include "hundun/v04_io.hpp"
+#include "hundun/v04_portable.hpp"
 
 #include <mpi.h>
 
@@ -89,12 +90,20 @@ class CompiledCasePlan {
   Impl* implementation_{};
 };
 
+// Borrowed, exclusive-lane providers. Their owners must outlive the compiled
+// plan and its driver. Case identity and species/thermo binding are validated
+// collectively before a provider can supply a product source.
+struct ProductCouplingBindings {
+  portable::GasQueryProvider* gas_query{};
+};
+
 class ProductCompiler {
  public:
   static Status compile(MPI_Comm communicator,
                         const ValidatedModel& model,
                         const std::filesystem::path& case_root,
-                        CompiledCasePlan& out) noexcept;
+                        CompiledCasePlan& out,
+                        ProductCouplingBindings coupling = {}) noexcept;
 };
 
 }  // namespace hundun::v04

@@ -84,6 +84,13 @@ PlanFingerprint contribution_fingerprint(
                               ? contribution.implicit_diagonal
                               : 0U);
     hash = hash_mix(hash, contribution.registration_ordinal);
+    // Keep inert-only plan identities byte-for-byte compatible. An admitted
+    // physical source additionally binds its kind and model/asset identity.
+    if (contribution.capability != ContributionCapability::inert_source) {
+      hash = hash_mix(hash, UINT64_C(0x736f757263657631));
+      hash = hash_mix(hash, static_cast<std::uint8_t>(contribution.capability));
+      hash = hash_mix(hash, contribution.source_identity);
+    }
   }
   hash = hash_mix(hash, mu_eff_claimed ? 1U : 0U);
   if (mu_eff_claimed) {
@@ -114,7 +121,8 @@ Status EffectiveViscosityAuthority::claim(
 }
 
 Status ContributionRegistry::configure(
-    Span<const FieldId> declared_fields) noexcept {
+    Span<const FieldId> declared_fields,
+    ContributionAdmission admission) noexcept {
   if (frozen_ || !declared_fields_.empty() || !contributions_.empty() ||
       !reads_.empty() || next_ordinal_ != 0U || plan_.valid()) {
     return {StatusCode::invalid_plan, 1U};
@@ -135,6 +143,7 @@ Status ContributionRegistry::configure(
       return {StatusCode::invalid_plan, 3U};
     }
     declared_fields_.swap(candidate);
+    admission_ = admission;
   } catch (...) {
     return {StatusCode::allocation_failure, 0U};
   }
@@ -146,8 +155,20 @@ Status ContributionRegistry::register_contribution(
   if (frozen_ || declared_fields_.empty()) {
     return {StatusCode::invalid_plan, 4U};
   }
-  if (spec.stage == 0U ||
-      spec.capability != ContributionCapability::inert_source) {
+  PlanFingerprint admitted = 0U;
+  switch (spec.capability) {
+    case ContributionCapability::inert_source: break;
+    case ContributionCapability::chemistry: admitted = admission_.chemistry; break;
+    case ContributionCapability::reacting: admitted = admission_.reacting; break;
+    case ContributionCapability::parcel_exchange:
+      admitted = admission_.parcel_exchange;
+      break;
+    default: return {StatusCode::invalid_plan, 5U};
+  }
+  const bool allowed = spec.capability == ContributionCapability::inert_source
+                           ? spec.source_identity == 0U
+                           : admitted != 0U && spec.source_identity == admitted;
+  if (spec.stage == 0U || !allowed) {
     return {StatusCode::invalid_plan, 5U};
   }
   if (!has_dimensions(spec.units)) {
@@ -224,7 +245,9 @@ Status ContributionRegistry::register_contribution(
       spec.explicit_source,
       spec.supplies_implicit_diagonal ? spec.implicit_diagonal : FieldId{},
       spec.supplies_implicit_diagonal,
-      next_ordinal_});
+      next_ordinal_,
+      spec.capability,
+      spec.source_identity});
   ++next_ordinal_;
   return {};
 }

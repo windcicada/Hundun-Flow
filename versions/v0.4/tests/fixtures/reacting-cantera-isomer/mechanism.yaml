@@ -1,0 +1,40 @@
+description: Original synthetic A -> B coupling verification, not a fuel mechanism.
+units: {length: m, time: s, quantity: kmol, activation-energy: J/kmol}
+phases:
+- name: synthetic-gas
+  thermo: ideal-gas
+  elements: [N]
+  species: [A, B]
+  kinetics: gas
+  reactions: all
+  transport: mixture-averaged
+species:
+- name: A
+  composition: {N: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200.0, 1000.0, 2000.0]
+    data:
+    - [3.3693097541669275, 0, 0, 0, 0, -667.62872778817666, 0]
+    - [3.3693097541669275, 0, 0, 0, 0, -667.62872778817666, 0]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 3.5
+    well-depth: 100.0
+- name: B
+  composition: {N: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200.0, 1000.0, 2000.0]
+    data:
+    - [3.3693097541669275, 0, 0, 0, 0, -1004.5597032048694, 0]
+    - [3.3693097541669275, 0, 0, 0, 0, -1004.5597032048694, 0]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 3.5
+    well-depth: 100.0
+reactions:
+- equation: A => B
+  rate-constant: {A: 2.0, b: 0.0, Ea: 0.0}

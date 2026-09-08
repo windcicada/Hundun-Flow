@@ -1487,6 +1487,33 @@ bool test_immersed_reconstruction_policy_is_typed_and_hashed() {
   return passed;
 }
 
+bool test_reaction_wire() {
+  ScratchCase scratch("reaction-wire");
+  scratch.write("case.json", case_json(kUniformMesh));
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel model;
+  if (!expect(bool(compile(scratch.root(), model)), "reaction wire base compiles")) return false;
+  model.reaction.mode = hundun::v04::ReactionMode::finite_rate_mean;
+  model.reaction.mechanism_sha256 = std::string(64, 'a');
+  model.reaction.phase = "explicit-external-gas";
+  auto b = model.thermophysics.species[0]; b.stable_name = "balance";
+  model.thermophysics.species.push_back(b);
+  model.transported_scalars.push_back({"air", TransportedScalarRole::species, 1, 1});
+  std::vector<std::uint8_t> bytes;
+  ValidatedModel recovered;
+  bool passed = expect(bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+      bool(hundun::v04::detail::deserialize_model_for_test(bytes, recovered)) &&
+      recovered.reaction.mode == model.reaction.mode &&
+      recovered.reaction.mechanism_sha256 == model.reaction.mechanism_sha256 &&
+      recovered.reaction.phase == model.reaction.phase,
+      "reaction configuration survives rank broadcast without becoming inert");
+  if (!bytes.empty()) bytes.pop_back();
+  recovered.fingerprint = 91;
+  passed &= expect(!hundun::v04::detail::deserialize_model_for_test(bytes, recovered) &&
+                   recovered.fingerprint == 91, "truncated coupling wire is rejected transactionally");
+  return passed;
+}
+
 bool test_field_registry() {
   FieldRegistry registry;
   FieldId first = 99;
@@ -1562,6 +1589,7 @@ int main(int argc, char** argv) {
   passed &= test_wire_rejects_duplicate_data_paths();
   passed &= test_defaults_and_enums();
   passed &= test_immersed_reconstruction_policy_is_typed_and_hashed();
+  passed &= test_reaction_wire();
   passed &= test_field_registry();
   passed &= test_field_id_overflow();
   const int finalize_status = MPI_Finalize();

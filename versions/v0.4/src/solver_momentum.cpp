@@ -199,6 +199,8 @@ bool valid_contribution(EquationContributionView view,
   if (view.stage != stage || descriptor.stage != stage ||
       view.conserved_quantity != descriptor.conserved_quantity ||
       !(view.units == descriptor.units) ||
+      view.capability != descriptor.capability ||
+      view.source_identity != descriptor.source_identity ||
       view.explicit_source_field != descriptor.explicit_source ||
       view.explicit_source_density.field != descriptor.explicit_source ||
       view.has_implicit_sink != descriptor.supplies_implicit_diagonal ||
