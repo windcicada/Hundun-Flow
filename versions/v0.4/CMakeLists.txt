@@ -252,6 +252,7 @@ set(hundun_v04_core_sources
   src/mesh_ibm_surface.cpp
   src/mesh_ibm_topology.cpp
   src/mesh_stl_scan.cpp
+  src/models_spray.cpp
   src/parallel_cpu.cpp
   src/parallel_halo.cpp
   src/parallel_ibm_donor.cpp

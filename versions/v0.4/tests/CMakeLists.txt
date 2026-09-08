@@ -260,6 +260,11 @@ target_link_libraries(v04_public_headers_test PRIVATE
   MPI::MPI_C)
 add_test(NAME v04_public_headers COMMAND v04_public_headers_test)
 
+add_executable(v04_models_spray_test
+  unit/models_spray_test.cpp)
+target_link_libraries(v04_models_spray_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_spray COMMAND v04_models_spray_test)
+
 add_executable(v04_mesh_ibm_quadratic_test
   unit/mesh_ibm_quadratic_test.cpp)
 target_link_libraries(v04_mesh_ibm_quadratic_test PRIVATE hundun_v04_test_core)

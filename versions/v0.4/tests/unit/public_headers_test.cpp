@@ -15,6 +15,7 @@
 #include "hundun/v04_parallel.hpp"
 #include "hundun/v04_physics.hpp"
 #include "hundun/v04_product.hpp"
+#include "hundun/v04_spray.hpp"
 #include "hundun/v04_status.hpp"
 #include "hundun/v04_types.hpp"
 
