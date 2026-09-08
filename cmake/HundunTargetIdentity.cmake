@@ -1,6 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+# Recurse only through source directories. A recursive CMakeLists.txt glob
+# from the repository root also matches nested build/compiler-probe files.
+function(hundun_v04_identity_inputs root output)
+  file(GLOB_RECURSE inputs CONFIGURE_DEPENDS
+    "${root}/versions/v0.4/include/*"
+    "${root}/versions/v0.4/src/*"
+    "${root}/cmake/*"
+    "${root}/third_party/yyjson/*")
+  list(APPEND inputs "${root}/CMakeLists.txt" "${root}/versions/v0.4/CMakeLists.txt")
+  set(${output} "${inputs}" PARENT_SCOPE)
+endfunction()
+
 # Sorted relative names and bytes, not timestamps or checkout locations.
 function(hundun_source_content_digest root output)
   set(inputs ${ARGN})

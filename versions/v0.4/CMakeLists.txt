@@ -60,13 +60,7 @@ set(HUNDUN_SOURCE_DIRTY_SUMMARY "unavailable")
 include("${hundun_repository_root}/cmake/HundunPerformanceSourceMetadata.cmake")
 include("${hundun_repository_root}/cmake/HundunTargetIdentity.cmake")
 find_package(Git QUIET)
-file(GLOB_RECURSE HUNDUN_V04_IDENTITY_INPUTS CONFIGURE_DEPENDS
-  "${hundun_repository_root}/CMakeLists.txt"
-  "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt"
-  "${CMAKE_CURRENT_SOURCE_DIR}/include/*"
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
-  "${hundun_repository_root}/cmake/*"
-  "${hundun_v04_yyjson_root}/*")
+hundun_v04_identity_inputs("${hundun_repository_root}" HUNDUN_V04_IDENTITY_INPUTS)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   ${HUNDUN_V04_IDENTITY_INPUTS}
   "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp")

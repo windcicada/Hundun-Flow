@@ -16,11 +16,17 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='hundun-identity-') as directory:
         root = Path(directory)
+        (root / 'versions/v0.4/src').mkdir(parents=True)
+        (root / 'versions/v0.4/src/model.cpp').write_text('int model;\n')
+        (root / 'versions/v0.4/CMakeLists.txt').write_text('# product inputs\n')
         (root / 'core.c').write_text('int value;\n')
         (root / 'runner.cpp').write_text('int main() {}\n')
         (root / 'CMakeLists.txt').write_text('''cmake_minimum_required(VERSION 3.21)
 project(identity_fixture NONE)
 include("%s")
+hundun_v04_identity_inputs("${CMAKE_CURRENT_SOURCE_DIR}" collected_inputs)
+hundun_source_content_digest("${CMAKE_CURRENT_SOURCE_DIR}" collected ${collected_inputs})
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/collected" "${collected}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/core.c" "${CMAKE_CURRENT_SOURCE_DIR}/runner.cpp")
 hundun_source_content_digest("${CMAKE_CURRENT_SOURCE_DIR}" content "${CMAKE_CURRENT_SOURCE_DIR}/core.c")
@@ -40,6 +46,19 @@ add_custom_target(identity_only ALL)
 
         baseline = configure('-DC_FLAGS=-O2', '-DTESTS=OFF', '-DHYPRE=OFF', '-DCONFIG=Release')
         assert len(baseline) == 2 and baseline[0] != baseline[1]
+        content = (build / 'collected').read_text()
+        scratch = root / 'another-build/CMakeFiles/CMakeScratch/transient'
+        scratch.mkdir(parents=True)
+        (scratch / 'CMakeLists.txt').write_text('throwaway compiler probe\n')
+        assert configure() == baseline
+        assert (build / 'collected').read_text() == content, 'build artifact entered source identity'
+        (scratch / 'CMakeLists.txt').unlink()
+        assert configure() == baseline
+        assert (build / 'collected').read_text() == content
+        (root / 'versions/v0.4/src/model.cpp').write_text('int model = 1;\n')
+        configure()
+        assert (build / 'collected').read_text() != content, 'real product input omitted'
+
         time.sleep(1.1)  # Makefile timestamp comparisons may have one-second resolution.
         (root / 'runner.cpp').write_text('int main() { return 0; }\n')
         subprocess.check_call([args.cmake, '--build', str(build)], stdout=subprocess.DEVNULL)

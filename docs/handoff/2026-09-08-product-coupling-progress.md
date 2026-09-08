@@ -125,6 +125,16 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
   新真实 Cantera ESF 3 项、CLI 3 项和 evidence workflow 自检。
 - 仍未作为完整合并发布。喷雾 parcel 的变长持久状态和原生质量/动量/焓耦合正在接线。
 
+## 构建身份排除生成目录
+
+- 双工具链并行复核暴露：GLOB_RECURSE 顶层 CMakeLists.txt 模式实际递归匹配整个仓库，
+  包含另一套构建目录的 CMakeScratch。摘要读取期间文件消失会使配置失败，也会让生成
+  文件污染源码内容身份。
+- 输入收集现在只递归明确的 v0.4 src/include、cmake 和 yyjson 目录，顶层/版本
+  CMakeLists.txt 显式追加。新建/删除嵌套构建临时文件不再改变摘要，真实产品源变化仍改变摘要。
+- 目标身份测试在宿主 Clang 和 GCC rootfs 通过；两套真实产品重新配置/构建均成功。
+  GCC 测试 fixture 初次因 PATH 缺少已有 /tmp/make 失败，加入该已有工具后复核通过。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |
