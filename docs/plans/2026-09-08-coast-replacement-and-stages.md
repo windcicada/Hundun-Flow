@@ -2,6 +2,10 @@
 
 更新日期：2026-09-08。状态：**进行中，尚未完成替代验收**。
 
+当前范围调整（用户 2026-09-08 新指示）：**不中断正在进行的基础流动优化与验收，
+暂时不加入两相模块。** Stage 6/S0–S2 暂挂，历史源码和方案保留只读；
+即使燃烧验收结束，也须用户恢复该范围后才接入两相。Stage 4/5 燃烧仍安排在基础流动验收之后。
+
 目标是在用户当前明确的业务范围内，完成 HUNDUN-FLOW 的 COAST 替代验收：先验收基础流动的正确性、稳定性、性能、模块合同与 I/O，再接入并完成已有 Stage 4 燃烧、Stage 5 ESF/TPDF/TCR 与 Stage 6 稀相喷雾。完成标准是实际 CLI 推进、共同事务、输出和 Restart 的组合行为通过约定案例；历史 seal、配置解析成功或纯核测试不自动成为当前产品验收。
 
 本文件是持续更新的目标台账，不是发布收据。它集中记录当前工作、退出条件、源码来源和未关闭项。详细推导和原始失败留在链接的证据报告中；旧报告中的“正在运行”“尚未测试”和下一候选仅描述当时状态，以本文件的当前状态及后续验收收据为准。
@@ -12,7 +16,7 @@
 |---|---|
 | 工作区 | `/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity` |
 | 本次盘点基线 | `86542bb96678ec844ae5ac95d8f6391993da239e`；其生产源码继承 `48493ed2b8655440228e85396b26a070f4e5103f`，两者之间仅有验收资料 |
-| 工作顺序 | 基础流动验收 → 当前接口下 Stage 4 → Stage 5 → Stage 6；每次冻结一个活动切片 |
+| 工作顺序 | 基础流动验收 → 当前接口下 Stage 4 → Stage 5；Stage 6 暂挂，当前不接入；每次冻结一个活动切片 |
 | 实验次数 | **每个配置仅运行 1 轮**；不采用旧计划的三轮/九对重复、median 或置信区间门。未来若需要统计性能验收，应先单独确认协议，不作为默认执行 |
 | 比较约束 | 保持所比较案例的物理、网格、固定 dt、容差、refinement 容量、工作量和输出策略；记录两侧不同的数值方法，不用网格缩放或迭代数差异冒充同工况速度 |
 | 协作边界 | 保留其他任务的修改；历史仓库、冻结程序、源 checkpoint 和旧证据只读。当前授权不要求重复询问每个 Stage 的普通接入步骤 |
@@ -25,13 +29,13 @@
 | 项目 | 状态 / 完成条件 |
 |---|---|
 | 已完成切片 | RHS norm 与实际线性停止阈值观测；局部、干净候选和单轮 9500→9510 观测通过 |
-| 下一活动切片 | 默认关闭的 M 内部 MG 层级归因；接口已只读梳理，尚未实现或验收 |
+| 当前活动切片 | 默认关闭的 M 内部 MG 层级归因；Native 层已实现并通过 16 项 Release 回归，干净构建及产品接线尚待完成 |
 | 新观测字段 | `linear_criterion_valid`、`linear_rhs_norm`、`linear_atol`、`linear_rtol`、`linear_residual_limit` |
 | 语义 | 记录 RHS norm 与实际线性停止阈值；初猜残差不能替代 RHS norm。它与已有补充物理审计的 `convergence_limit` 分开 |
 | 兼容性 | 新 CSV 使用 `observation_schema=4`；读取器兼容 schema 3，但旧数据不能补造缺失阈值 |
 | 当前回归发现 | BiCGStab 测试夹具已按既有 `fixed_general` 合同纠正；新 observer 初版误拒纯绝对容差和误接受精确零阈值附近非零值，两项均 RED→GREEN。均未改变生产求解控制 |
 | 下一切片退出条件 | Native MG 公开接口启用/关闭和 rank-local 开关的数值、状态、通信数量、generation/存储地址等价；1/2/4-rank V/F、replicated/distributed、prepared/direct 与故障恢复通过；阶段时间不重复相加，零热分配 |
-| 下一动作 | 在同一 Native MG 权威内复用逐层 Halo/ReductionEngine 累计量，补平滑/传递/粗解及两处直接 MPI 时间。取得层级成本后只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
+| 下一动作 | 完成 Native 层干净验收后，接入 compact 每-loop 摘要和每-step 层级 sidecar；验证完整性/失败关闭，再做单轮 Re3900 测量，按成本只选**一个**优化。C2 refinement 初猜保护已上线，不重复实现；不能从覆盖后的初始残差推断触发率 |
 
 实际线性停止阈值为 `max(atol, rtol*||b||)`，其中 `||b||` 是本次求解真正采用的 RHS 范数。
 
@@ -51,7 +55,8 @@ MG 观测的方案边界：复用 `NativeCartesianMgPlan::level_count()/level()`
 Halo/reduction/直接 MPI 是嵌套子项。保留 prepared epoch 入口共识、最终 checked-sum
 汇总与发布，关闭时不调用新计时器。目标测试包括 `v04_solver_mg_mpi_[124]`、
 `v04_solver_mg_update_contract_mpi_[24]` 及现有 reuse/line/coarse/Krylov 隔离入口。
-这是待实现方案，尚无逐层实测或性能收益结论。
+Native 层的 [开发回归与计时合同](../verification/2026-09-08-mg-apply-profile.md)
+已落地；尚无产品逐层实测或性能收益结论，不能把公开接口回归当成替代验收。
 
 ## 3. 基础流动模块台账
 
@@ -147,9 +152,9 @@ Stage 5 一维收据的最终科学状态为 `SOFTWARE_PASS_ATTRIBUTION_COMPLETE
 | C2 mean closures | C1；finite-rate/PaSR 按产品时序接入 | `kappa=0/1` 极限、species/热报告一致缩放、timescale unavailable 失败、shadow 不发布源项；流动中时序验收 |
 | C3 Stage 5 产品 | C1；ESF N=2/4 → IEM/逐场 chemistry → TCR field mapper | RNG retry 不变、2N 调用、13 阶段、共享 WALE/flux、逐 cell root history、off/shadow/validated、共同回退、Checkpoint 与实际 CLI |
 | C4 Stage 5 业务验证 | C2/C3；0D/MMS、小场/IBM/失败，再进入已冻结业务案例和可比性能窗口 | 科学 oracle 与案例身份明确；所有要求的 field/continuation/性能观察量有证据；采用当前单轮协议，不以纯核速度替代场执行 |
-| S0 Stage 6 力学 | C4；SoA/ID、轨迹、stencil、注入、物性、migration、IBM rebound | ballistic/Stokes/Galilean、插值、ownership/rollback、Restart、small 1/2/4-rank 合同 |
-| S1 Stage 6 交换 | S0 + Stage 4；film sampling、A–S、事件终止、gas/parcel 事务 | 单滴加热、d² oracle、A–S 亚步收敛；单/多 parcel 质量/动量/总热化学焓闭合；第二次 PISO 源项账本 |
-| S2 Stage 6 组合 | S1 + Stage 5；TAB 子滴、ESF common-source、driver/schema/Restart/diagnostics | 子滴守恒；每 parcel 只算一次交换；N=2/4 共用气源；injector/TAB/RNG/迁移持久化；两个 surrogate 的有界 smoke、失败矩阵和实际 CLI |
+| S0 Stage 6 力学（暂挂） | 用户恢复范围 + C4；SoA/ID、轨迹、stencil、注入、物性、migration、IBM rebound | ballistic/Stokes/Galilean、插值、ownership/rollback、Restart、small 1/2/4-rank 合同 |
+| S1 Stage 6 交换（暂挂） | S0 + Stage 4；film sampling、A–S、事件终止、gas/parcel 事务 | 单滴加热、d² oracle、A–S 亚步收敛；单/多 parcel 质量/动量/总热化学焓闭合；第二次 PISO 源项账本 |
+| S2 Stage 6 组合（暂挂） | S1 + Stage 5；TAB 子滴、ESF common-source、driver/schema/Restart/diagnostics | 子滴守恒；每 parcel 只算一次交换；N=2/4 共用气源；injector/TAB/RNG/迁移持久化；两个 surrogate 的有界 smoke、失败矩阵和实际 CLI |
 | A0 替代接受 | B0、C1–C4、S0–S2 | 对冻结业务案例逐项给出接受/拒绝和准确证据身份；新代码引入的问题已关闭，业务限制已说明；不得只用 development seal 宣称全部替代 |
 
 ## 8. 待确认的外部输入与维护规则
