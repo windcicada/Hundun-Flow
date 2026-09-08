@@ -45,6 +45,21 @@ struct ExchangeBatchReport {
   ExchangeDelta wall{}, outlet{}, external{};
   bool available{};
 };
+// A borrowed, revision-bound certificate for rows whose complete deposition
+// stencil was audited before owner routing. Invalidated by the next plan call.
+class RoutedExchangeSegments {
+public:
+  RoutedExchangeSegments() = default;
+
+private:
+  friend class OwnerExchangeRoutingPlan;
+  friend class ExchangeWorkspace;
+  const ExchangeSegment *data_{};
+  std::size_t size_{};
+  Revision revision_{};
+  const std::uint64_t *generation_{};
+  std::uint64_t captured_generation_{};
+};
 class ExchangeWorkspace {
 public:
   ExchangeWorkspace(std::size_t cell_capacity, std::size_t segment_capacity,
@@ -55,9 +70,17 @@ public:
                                const ExchangeSegment *, std::size_t,
                                double thermal_atol_j,
                                double thermal_rtol) noexcept;
+  ExchangeBatchReport evaluate_routed(Revision, const ExchangeCell *,
+                                      std::size_t, RoutedExchangeSegments,
+                                      double thermal_atol_j,
+                                      double thermal_rtol) noexcept;
   bool current(const ExchangeBatchReport &report) const noexcept;
 
 private:
+  ExchangeBatchReport evaluate_impl(Revision, const ExchangeCell *, std::size_t,
+                                    const ExchangeSegment *, std::size_t,
+                                    double, double,
+                                    bool complete_stencils) noexcept;
   std::vector<CellExchange> cells_;
   std::vector<std::size_t> order_;
   std::size_t species_{};

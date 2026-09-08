@@ -57,6 +57,27 @@ ExchangeBatchReport
 ExchangeWorkspace::evaluate(Revision revision, const ExchangeCell *cells,
                             std::size_t nc, const ExchangeSegment *segments,
                             std::size_t ns, double atol, double rtol) noexcept {
+  return evaluate_impl(revision, cells, nc, segments, ns, atol, rtol, true);
+}
+ExchangeBatchReport
+ExchangeWorkspace::evaluate_routed(Revision revision, const ExchangeCell *cells,
+                                   std::size_t nc, RoutedExchangeSegments rows,
+                                   double atol, double rtol) noexcept {
+  if (!rows.generation_ || *rows.generation_ != rows.captured_generation_ ||
+      rows.revision_ != revision) {
+    ExchangeBatchReport report;
+    report.status = Status::stale_revision;
+    report.revision = revision;
+    report.generation = ++generation_;
+    return report;
+  }
+  return evaluate_impl(revision, cells, nc, rows.data_, rows.size_, atol, rtol,
+                       false);
+}
+ExchangeBatchReport ExchangeWorkspace::evaluate_impl(
+    Revision revision, const ExchangeCell *cells, std::size_t nc,
+    const ExchangeSegment *segments, std::size_t ns, double atol, double rtol,
+    bool complete_stencils) noexcept {
   ++generation_;
   auto fail = [&](Status s, std::size_t i) {
     ExchangeBatchReport r;
@@ -90,10 +111,13 @@ ExchangeWorkspace::evaluate(Revision revision, const ExchangeCell *cells,
     if (s.channel == ExchangeChannel::interphase) {
       if (s.vapor_species_index >= species_)
         return fail(Status::identity_mismatch, i);
-      bool found = false;
-      for (std::size_t j = 0; j < nc; ++j)
-        found |= cells[j].global_cell == s.global_cell;
-      if (!found)
+      const auto *found =
+          nc ? std::lower_bound(cells, cells + nc, s.global_cell,
+                                [](const ExchangeCell &cell, std::uint64_t id) {
+                                  return cell.global_cell < id;
+                                })
+             : cells;
+      if (!nc || found == cells + nc || found->global_cell != s.global_cell)
         return fail(Status::invalid_input, i);
       const long double residual =
           static_cast<long double>(s.delta.thermochemical_enthalpy_delta_j) +
@@ -107,8 +131,9 @@ ExchangeWorkspace::evaluate(Revision revision, const ExchangeCell *cells,
     }
     order_[i] = i;
   }
-  // Validate deposition once per physical segment, not once per field.
-  for (std::size_t i = 0; i < ns; ++i) {
+  // Routed rows already passed the complete distributed stencil audit.
+  // Ordinary callers must still supply and validate each full stencil.
+  for (std::size_t i = 0; complete_stencils && i < ns; ++i) {
     const auto &a = segments[i];
     long double weight = 0;
     for (std::size_t j = 0; j < ns; ++j) {
@@ -147,16 +172,20 @@ ExchangeWorkspace::evaluate(Revision revision, const ExchangeCell *cells,
             });
   ExchangeBatchReport result;
   std::fill(species_mass_.begin(), species_mass_.end(), 0.0);
+  std::size_t first_segment = 0;
   for (std::size_t i = 0; i < nc; ++i) {
     spray::detail::GasCellExchangeInput in;
     in.gas_mass_kg = cells[i].gas_mass_kg;
     in.gas_momentum_kg_m_per_s = cells[i].gas_momentum_kg_m_per_s;
     in.thermal_absolute_tolerance_j = atol;
     in.thermal_relative_tolerance = rtol;
-    for (std::size_t j = 0; j < ns; ++j) {
-      const auto &s = segments[order_[j]];
-      if (s.channel == ExchangeChannel::interphase &&
-          s.global_cell == cells[i].global_cell) {
+    while (first_segment < ns &&
+           segments[order_[first_segment]].global_cell < cells[i].global_cell)
+      ++first_segment;
+    while (first_segment < ns && segments[order_[first_segment]].global_cell ==
+                                     cells[i].global_cell) {
+      const auto &s = segments[order_[first_segment++]];
+      if (s.channel == ExchangeChannel::interphase) {
         add(in.parcel, s.delta, s.deposition_weight);
         species_mass_[i * species_ + s.vapor_species_index] -=
             s.deposition_weight * s.delta.mass_delta_kg;

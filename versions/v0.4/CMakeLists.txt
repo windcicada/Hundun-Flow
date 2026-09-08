@@ -274,6 +274,7 @@ set(hundun_v04_core_sources
   src/models_chemistry_adapter.cpp
   src/models_exchange_batch.cpp
   src/models_exchange_routing.cpp
+  src/models_exchange_owner.cpp
   src/models_portable_composition.cpp
   src/models_spray.cpp
   src/models_spray_breakup.cpp

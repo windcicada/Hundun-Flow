@@ -4,6 +4,7 @@
 
 #include "../../src/core_spray_gas_detail.hpp"
 #include "../../src/mesh_focus_detail.hpp"
+#include "../../src/models_exchange_owner_detail.hpp"
 #include "../../src/models_spray_migration_detail.hpp"
 
 #include <cmath>
@@ -85,6 +86,142 @@ bool same(const ParcelMigrationValue &a, const ParcelMigrationValue &b) {
          a.tab_deformation == b.tab_deformation &&
          a.tab_deformation_rate_per_s == b.tab_deformation_rate_per_s &&
          a.breakup_ordinal == b.breakup_ordinal;
+}
+bool owner_exchange(int rank, int ranks) {
+  namespace p = hundun::v04::portable;
+  const Int3 global{17, 11, 7};
+  MeshPatch patch;
+  if (!hundun::v04::detail::make_mesh_patch(rank, ranks, global, patch))
+    return false;
+  p::OwnerExchangeRoutingPlan plan;
+  if (!plan.configure(MPI_COMM_WORLD, global, patch, 32, 32, 2, 1048576))
+    return false;
+  const p::Revision revision{17, UINT64_C(9007199254740993), 1};
+  // Each rank owns one physical segment; its stencil spans every rank.
+  std::vector<p::ExchangeSegment> rows(ranks);
+  for (int r = 0; r < ranks; ++r) {
+    MeshPatch target;
+    hundun::v04::detail::make_mesh_patch(r, ranks, global, target);
+    auto &row = rows[r];
+    row.revision = revision;
+    row.global_cell = global_id(target.begin, global);
+    row.parcel_id = {UINT64_MAX - rank, UINT64_C(9007199254740997)};
+    row.segment_ordinal = UINT64_C(9007199254740999);
+    row.deposition_weight = 1.0 / ranks;
+    row.delta.mass_delta_kg = -0.25;
+    row.delta.momentum_delta_kg_m_per_s = {-0.5, 0.25, 0};
+    row.delta.thermochemical_enthalpy_delta_j = -8;
+    row.delta.thermal_exchange_to_gas_j = 8;
+    row.delta.kinetic_energy_delta_j = 0.5;
+    row.vapor_species_index = 1;
+  }
+  p::ExchangeCell cell{global_id(patch.begin, global), 2, 2, {2, 0, 0}};
+  p::ExchangeWorkspace batch(1, 32, 2);
+  hot_allocations = 0;
+  count_hot_allocations = true;
+  auto status = plan.prepare(revision, rows.data(), rows.size());
+  auto certified = plan.candidates();
+  auto result = batch.evaluate_routed(revision, &cell, 1, certified, 0, 0);
+  count_hot_allocations = false;
+  bool ok =
+      status == p::Status::success && result.available && hot_allocations == 0;
+  if (result.available) {
+    const auto &gas = result.cells[0].gas;
+    const double dk = (2.5 * 2.5 + .25 * .25) / (2 * 2.25) - 1;
+    ok &=
+        gas.gas_mass_delta_kg == .25 &&
+        gas.gas_momentum_delta_kg_m_per_s == Vector3{.5, -.25, 0} &&
+        result.cells[0].gas_species_mass_delta_kg[0] == 0 &&
+        result.cells[0].gas_species_mass_delta_kg[1] == .25 &&
+        std::abs(gas.gas_thermochemical_enthalpy_delta_j - (7.5 - dk)) < 1e-14;
+  }
+  // Distinct 128-bit IDs above 2^53 survive; duplicates across ranks fail.
+  if (ranks > 1) {
+    rows[0].parcel_id.high = UINT64_MAX;
+    for (auto &row : rows)
+      row.parcel_id.high = UINT64_MAX;
+    ok &=
+        plan.prepare(revision, rows.data(), rows.size()) != p::Status::success;
+    ok &= !batch.evaluate_routed(revision, &cell, 1, certified, 0, 0).available;
+    for (auto &row : rows)
+      row.parcel_id.high = UINT64_MAX - rank;
+  }
+  if (rank == 0)
+    rows[0].deposition_weight *= .5;
+  ok &= plan.prepare(revision, rows.data(), rows.size()) ==
+        p::Status::conservation_failure;
+  if (rank == 0)
+    rows[0].deposition_weight *= 2;
+  if (rank == 0)
+    ++rows[0].revision.input_revision;
+  ok &= plan.prepare(revision, rows.data(), rows.size()) ==
+        p::Status::stale_revision;
+  if (rank == 0)
+    --rows[0].revision.input_revision;
+  if (rank == 0)
+    rows[0].delta.kinetic_energy_delta_j =
+        std::numeric_limits<double>::infinity();
+  ok &= plan.prepare(revision, rows.data(), rows.size()) ==
+        p::Status::invalid_input;
+  if (rank == 0)
+    rows[0].delta.kinetic_energy_delta_j = .5;
+  if (ranks > 1) {
+    auto different = revision;
+    if (rank == 0)
+      ++different.input_revision;
+    ok &= plan.prepare(different, nullptr, 0) == p::Status::stale_revision;
+  }
+  // All owner-plan storage is budgeted before allocation; a failed cold
+  // reconfiguration preserves the existing valid plan and its certificate.
+  ok &= plan.prepare(revision, rows.data(), rows.size()) == p::Status::success;
+  auto saved = plan.candidates();
+  const auto bytes = plan.owned_bytes();
+  ok &= !plan.configure(MPI_COMM_WORLD, global, patch, 32, 32, 2, bytes - 1);
+  ok &= batch.evaluate_routed(revision, &cell, 1, saved, 0, 0).available;
+  ok &= bool(plan.configure(MPI_COMM_WORLD, global, patch, 32, 32, 2, bytes));
+  ok &= !batch.evaluate_routed(revision, &cell, 1, saved, 0, 0).available;
+  // A routed wall inventory reaches exactly one owner without gas deposition.
+  auto wall = rows[0];
+  wall.channel = p::ExchangeChannel::wall;
+  wall.deposition_weight = 1;
+  ok &= plan.prepare(revision, &wall, 1) == p::Status::success;
+  result = batch.evaluate_routed(revision, &cell, 1, plan.candidates(), 0, 0);
+  ok &= result.available;
+  if (result.available) {
+    ok &= result.cells[0].gas.gas_mass_delta_kg == 0;
+    ok &= result.wall.mass_kg == (rank == 0 ? -.25 * ranks : 0);
+  }
+  // Auditor congestion is bounded even when every segment targets one bucket.
+  p::OwnerExchangeRoutingPlan limited;
+  ok &=
+      bool(limited.configure(MPI_COMM_WORLD, global, patch, 32, 0, 2, 1048576));
+  ok &= limited.prepare(revision, rows.data(), rows.size()) ==
+        p::Status::capacity_exceeded;
+  ok &= limited.prepare(revision, nullptr, 0) == p::Status::success;
+  // Receiver overflow rejects collectively after successful global auditing.
+  if (ranks > 1) {
+    p::OwnerExchangeRoutingPlan receive_limited;
+    ok &= bool(receive_limited.configure(MPI_COMM_WORLD, global, patch, 1, 32,
+                                         2, 1048576));
+    auto one = rows[0];
+    one.deposition_weight = 1;
+    ok &= receive_limited.prepare(revision, &one, 1) ==
+          p::Status::capacity_exceeded;
+  }
+  ok &= plan.prepare(revision, nullptr, 0) == p::Status::success;
+  result = batch.evaluate_routed(revision, &cell, 1, plan.candidates(), 0, 0);
+  ok &= result.available && result.cells[0].gas.gas_mass_delta_kg == 0;
+  plan.discard();
+  ok &= !batch.evaluate_routed(revision, &cell, 1, plan.candidates(), 0, 0)
+             .available;
+  // An ordinary raw batch retains the complete-stencil requirement.
+  if (ranks > 1) {
+    auto incomplete = rows[rank];
+    ok &= !batch.evaluate(revision, &cell, 1, &incomplete, 1, 0, 0).available;
+  }
+  if (!ok)
+    std::cerr << "owner exchange failed on rank " << rank << '\n';
+  return ok;
 }
 bool native_gas_halo(int rank, int ranks) {
   const Int3 global{17, 11, 7};
@@ -446,6 +583,7 @@ int main(int argc, char **argv) {
          "wrong position/cell mapping cannot migrate under a plausible owner "
          "field");
   passed &= native_gas_halo(rank, ranks);
+  passed &= owner_exchange(rank, ranks);
   int local = passed ? 1 : 0, global = 0;
   MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
   MPI_Finalize();
