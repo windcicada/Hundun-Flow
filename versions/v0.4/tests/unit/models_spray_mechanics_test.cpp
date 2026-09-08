@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include "core_spray_events_detail.hpp"
 #include "core_spray_gas_detail.hpp"
 #include "models_spray_mechanics_detail.hpp"
 
@@ -582,6 +583,145 @@ ParcelTrajectoryCandidate straight_candidate(Vector3 position,
   return make_parcel_trajectory_candidate(input);
 }
 
+struct BallisticInterval final : ParcelIntervalProvider {
+  ParcelIntervalReport
+  advance(const SprayParcelState &begin, double, double dt, ParcelPass,
+          portable::Revision revision) const noexcept override {
+    ParcelIntervalReport out;
+    out.available = true;
+    out.revision = revision;
+    out.parcel = begin;
+    for (unsigned d = 0; d < 3; ++d)
+      out.parcel.position_m[d] += dt * begin.velocity_m_per_s[d];
+    out.parcel.age_s += dt;
+    out.elapsed_duration_s = dt;
+    out.initial_liquid_absolute_enthalpy_j_per_kg = 100;
+    out.liquid_absolute_enthalpy_j_per_kg = 100;
+    out.exchange.available = true;
+    return out;
+  }
+};
+bool test_native_event_geometry() {
+  CartesianGeometryPlan geometry;
+  MeshPatch patch;
+  ImmersedSurfacePlan surface;
+  if (!compile_geometry(uniform_mesh(), geometry, patch) ||
+      !compile_cube_surface(geometry, patch, surface))
+    return false;
+  hundun::v04::detail::ProductParcelGeometry events;
+  const portable::Revision revision{11, 37, 1};
+  bool ok = bool(events.configure(geometry, {true, true, true})) &&
+            bool(events.bind_revision(revision));
+  BallisticInterval physics;
+  ParcelEventsInput input;
+  input.accepted_parcel = parcel({1, .5, .5}, {-1, 0, 0});
+  input.accepted_parcel.owner_global_cell = 1;
+  input.revision = revision;
+  input.interval = &physics;
+  input.geometry = &events;
+  input.duration_s = .25;
+  input.initial_substep_s = .25;
+  auto result = integrate_parcel_events(input);
+  ok &= expect(
+      result.available && result.parcel.owner_global_cell == 0 &&
+          result.segment_count == 1 && result.segments[0].global_cell == 0 &&
+          near(result.parcel.position_m, {.75, .5, .5}),
+      "native exact-face negative crossing changes owner at zero time");
+  input.accepted_parcel = parcel({3.75, .5, .5}, {1, 0, 0});
+  input.accepted_parcel.owner_global_cell = 3;
+  input.duration_s = .5;
+  input.initial_substep_s = .5;
+  result = integrate_parcel_events(input);
+  ok &= expect(result.available && result.segment_count == 2 &&
+                   result.segments[0].global_cell == 3 &&
+                   result.segments[1].global_cell == 0 &&
+                   near(result.parcel.position_m, {4.25, .5, .5}),
+               "native periodic crossing retains unwrapped trajectory and "
+               "correct owner");
+  // Two coincident faces need two topological updates without creating a
+  // zero-length exchange segment or losing any physical elapsed time.
+  input.accepted_parcel = parcel({1, 1, .5}, {-1, -1, 0});
+  input.accepted_parcel.owner_global_cell = 5;
+  result = integrate_parcel_events(input);
+  ok &= expect(
+      result.available && result.parcel.owner_global_cell == 0 &&
+          result.segment_count == 1 &&
+          near(result.parcel.position_m, {.5, .5, .5}),
+      "coincident native cell crossings preserve duration and inventory");
+  ok &= bool(events.configure(geometry, {false, false, false}));
+  input.accepted_parcel = parcel({3.75, .5, .5}, {1, 0, 0});
+  input.accepted_parcel.owner_global_cell = 3;
+  result = integrate_parcel_events(input);
+  ok &= expect(
+      result.available && result.physical_outlet && result.parent_removed &&
+          near(result.advanced_duration_s, .25) &&
+          near(result.outlet_inventory.mass_kg, 1e-8, 1e-22) &&
+          result.exchange.gas_mass_delta_kg == 0,
+      "native physical outlet exports inventory once at its actual face");
+  input.accepted_parcel = parcel({4, .5, .5}, {1, 0, 0});
+  input.accepted_parcel.owner_global_cell = 3;
+  result = integrate_parcel_events(input);
+  ok &= expect(
+      result.available && result.physical_outlet && result.segment_count == 0 &&
+          result.advanced_duration_s == 0 &&
+          near(result.outlet_inventory.mass_kg, 1e-8, 1e-22),
+      "initial outward face event exports without a fictitious interval");
+  std::array<bool, 6> walls{};
+  walls[1] = true;
+  ok &= bool(events.configure(geometry, {false, false, false}, walls));
+  input.accepted_parcel = parcel({4, .5, .5}, {1, 0, 0});
+  input.accepted_parcel.owner_global_cell = 3;
+  result = integrate_parcel_events(input);
+  ok &= expect(
+      result.available && !result.parent_removed &&
+          near(result.parcel.position_m, {3.5, .5, .5}) &&
+          near(result.parcel.velocity_m_per_s, {-1, 0, 0}) &&
+          near(result.wall_exchange.momentum_kg_m_per_s[0], 2e-8, 1e-22),
+      "initial incoming native wall hit rebounds with separate impulse ledger");
+  ok &= bool(events.configure(geometry, {false, false, false}, {}, &surface));
+  input.accepted_parcel = parcel({.75, 1.5, 1.5}, {1, 0, 0});
+  input.accepted_parcel.owner_global_cell = 20;
+  result = integrate_parcel_events(input);
+  ok &=
+      expect(result.available && !result.parent_removed &&
+                 near(result.parcel.position_m, {.75, 1.5, 1.5}) &&
+                 near(result.parcel.velocity_m_per_s, {-1, 0, 0}) &&
+                 near(result.wall_exchange.momentum_kg_m_per_s[0], 2e-8, 1e-22),
+             "native IBM surface collision wins over coincident cell crossing");
+  auto stale = revision;
+  ++stale.input_revision;
+  auto end = input.accepted_parcel;
+  end.position_m[0] = 1.25;
+  const auto failed = events.query(input.accepted_parcel, end, 0, .5,
+                                   ParcelPass::predictor, stale);
+  ok &= expect(!failed.available,
+               "native event geometry rejects stale revisions");
+  CartesianGeometryPlan stretched;
+  MeshPatch stretched_patch;
+  ok &= compile_geometry(tensor_mesh(), stretched, stretched_patch);
+  ok &= bool(events.configure(stretched, {false, false, false}));
+  auto a = parcel({.1, -1, 1.05}, {2, 0, 0});
+  auto b = a;
+  b.position_m[0] = 2.1;
+  const auto crossing =
+      events.query(a, b, 0, 1, ParcelPass::corrector, revision);
+  const double xface = stretched.x().faces().data[1];
+  ok &= expect(crossing.available && crossing.count == 1 &&
+                   near(crossing.events[0].elapsed_time_s, (xface - .1) / 2) &&
+                   crossing.events[0].next_global_cell == 1,
+               "native event locator uses actual nonuniform face coordinates");
+  CartesianGeometryPlan one;
+  MeshPatch one_patch;
+  ok &= compile_geometry(uniform_mesh({1, 1, 1}), one, one_patch);
+  ok &= bool(events.configure(one, {true, true, true}));
+  input.accepted_parcel = parcel({3.75, .5, .5}, {1, 0, 0});
+  result = integrate_parcel_events(input);
+  ok &= expect(result.available && result.event_count == 0 &&
+                   result.parcel.owner_global_cell == 0 &&
+                   near(result.parcel.position_m, {4.25, .5, .5}),
+               "one-cell periodic crossing does not invent an owner change");
+  return ok;
+}
 bool test_static_ibm_rebound() {
   CartesianGeometryPlan geometry;
   MeshPatch patch;
@@ -738,6 +878,7 @@ int main(int argc, char** argv) {
   passed &= test_native_gas_sampler();
   passed &= test_trajectory_candidates();
   passed &= test_static_ibm_rebound();
+  passed &= test_native_event_geometry();
   passed &= test_outlet_ledger();
   if (MPI_Finalize() != MPI_SUCCESS) {
     std::cerr << "FAIL: MPI_Finalize\n";

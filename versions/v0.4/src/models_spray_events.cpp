@@ -212,6 +212,40 @@ bool valid_children(const BreakupChildReport &r, const SprayParcelState &parent,
       return false;
   return true;
 }
+bool apply_wall(SprayParcelState &state, const ParcelEvent &event,
+                portable::ExchangeDelta &ledger) noexcept {
+  const double norm = std::sqrt(dot(event.wall_normal, event.wall_normal));
+  if (!finite3(event.wall_normal) || !std::isfinite(norm) || norm <= 0 ||
+      !std::isfinite(event.restitution) || event.restitution < 0 ||
+      event.restitution > 1)
+    return false;
+  Vector3 normal = event.wall_normal;
+  for (double &v : normal)
+    v /= norm;
+  const Vector3 old = state.velocity_m_per_s;
+  const double vn = dot(old, normal),
+               mass = state.droplet_mass_kg * state.multiplicity;
+  for (std::size_t d = 0; d < 3; ++d) {
+    state.velocity_m_per_s[d] -= (1 + event.restitution) * vn * normal[d];
+    ledger.momentum_kg_m_per_s[d] +=
+        mass * (old[d] - state.velocity_m_per_s[d]);
+  }
+  ledger.kinetic_energy_j +=
+      .5 * mass *
+      (dot(old, old) - dot(state.velocity_m_per_s, state.velocity_m_per_s));
+  return true;
+}
+void outlet_inventory(const SprayParcelState &state, double enthalpy,
+                      portable::ExchangeDelta &inventory) noexcept {
+  inventory.mass_kg = state.droplet_mass_kg * state.multiplicity;
+  for (std::size_t d = 0; d < 3; ++d)
+    inventory.momentum_kg_m_per_s[d] =
+        inventory.mass_kg * state.velocity_m_per_s[d];
+  inventory.thermochemical_enthalpy_j = inventory.mass_kg * enthalpy;
+  inventory.kinetic_energy_j =
+      .5 * inventory.mass_kg *
+      dot(state.velocity_m_per_s, state.velocity_m_per_s);
+}
 ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
   ParcelEventsReport result;
   result.revision = in.revision;
@@ -392,6 +426,38 @@ ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
         }
       step = events[0].elapsed_time_s - time;
       if (step <= 0) {
+        const auto kind = events[0].kind;
+        if (kind == ParcelEventKind::internal_cell_crossing ||
+            kind == ParcelEventKind::wall_collision ||
+            kind == ParcelEventKind::physical_outlet) {
+          if (result.event_count + located_count > in.maximum_events)
+            return reject(ParcelEventsStatus::capacity_exceeded, in.revision);
+          located_events[0].applied = true;
+          for (std::size_t i = 0; i < located_count; ++i)
+            result.events[result.event_count++] = located_events[i];
+          if (kind == ParcelEventKind::physical_outlet) {
+            outlet_inventory(state,
+                             whole.initial_liquid_absolute_enthalpy_j_per_kg,
+                             result.outlet_inventory);
+            result.physical_outlet = true;
+            result.parent_removed = true;
+            break;
+          }
+          if (kind == ParcelEventKind::wall_collision) {
+            if (!apply_wall(state, events[0], result.wall_exchange))
+              return reject(ParcelEventsStatus::event_failure, in.revision);
+          } else {
+            if (state.owner_global_cell == events[0].next_global_cell)
+              return reject(ParcelEventsStatus::event_failure, in.revision);
+            state.owner_global_cell = events[0].next_global_cell;
+          }
+          // Topology and wall impulses have no duration and no interphase
+          // exchange. Retry from the updated state; the event cap bounds an
+          // inconsistent provider that repeats a zero-time event forever.
+          located_count = 0;
+          step = std::min(in.initial_substep_s, target_time - time);
+          continue;
+        }
         // An accepted y already at its trigger (e.g. after a higher-priority
         // wall event) must retire at this time, not lose the remaining step.
         if (events[0].kind != ParcelEventKind::breakup || !in.breakup ||
@@ -464,40 +530,13 @@ ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
       if (event.kind == ParcelEventKind::physical_outlet) {
         result.physical_outlet = true;
         result.parent_removed = true;
-        auto &inventory = result.outlet_inventory;
-        inventory.mass_kg = state.droplet_mass_kg * state.multiplicity;
-        for (std::size_t d = 0; d < 3; ++d)
-          inventory.momentum_kg_m_per_s[d] =
-              inventory.mass_kg * state.velocity_m_per_s[d];
-        inventory.thermochemical_enthalpy_j =
-            inventory.mass_kg * refined.liquid_absolute_enthalpy_j_per_kg;
-        inventory.kinetic_energy_j =
-            .5 * inventory.mass_kg *
-            dot(state.velocity_m_per_s, state.velocity_m_per_s);
+        outlet_inventory(state, refined.liquid_absolute_enthalpy_j_per_kg,
+                         result.outlet_inventory);
         break;
       }
       if (event.kind == ParcelEventKind::wall_collision) {
-        const double norm =
-            std::sqrt(dot(event.wall_normal, event.wall_normal));
-        if (!finite3(event.wall_normal) || !std::isfinite(norm) || norm <= 0 ||
-            !std::isfinite(event.restitution) || event.restitution < 0 ||
-            event.restitution > 1)
+        if (!apply_wall(state, event, result.wall_exchange))
           return reject(ParcelEventsStatus::event_failure, in.revision);
-        Vector3 normal = event.wall_normal;
-        for (double &v : normal)
-          v /= norm;
-        const Vector3 old = state.velocity_m_per_s;
-        const double vn = dot(old, normal),
-                     mass = state.droplet_mass_kg * state.multiplicity;
-        for (std::size_t d = 0; d < 3; ++d) {
-          state.velocity_m_per_s[d] -= (1 + event.restitution) * vn * normal[d];
-          result.wall_exchange.momentum_kg_m_per_s[d] +=
-              mass * (old[d] - state.velocity_m_per_s[d]);
-        }
-        result.wall_exchange.kinetic_energy_j +=
-            .5 * mass *
-            (dot(old, old) -
-             dot(state.velocity_m_per_s, state.velocity_m_per_s));
       } else if (event.kind == ParcelEventKind::breakup) {
         if (!in.breakup)
           return reject(ParcelEventsStatus::provider_failure, in.revision);
