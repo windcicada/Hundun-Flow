@@ -1027,6 +1027,14 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
       if (patch_targets[slot] == 0.0) continue;
       const BoundaryFacePlan* plan = nullptr;
       binding.boundary->face(static_cast<CartesianFace>(slot), plan);
+      // Parameter arrays contain only locally owned physical boundaries.
+      // All ranks compare the descriptor hash below, while parent targets
+      // are checked on their owning ranks and then collectively validated.
+      if (!plan->local_owner) continue;
+      if (plan->flow_parameter >= binding.boundary->mass_flow_targets().size) {
+        local_valid = false;
+        break;
+      }
       const double target = binding.boundary->mass_flow_targets().data[plan->flow_parameter];
       local_valid &= std::abs(target - patch_targets[slot]) <=
           64.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, target);

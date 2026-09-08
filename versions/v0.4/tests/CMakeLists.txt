@@ -888,7 +888,7 @@ add_executable(v04_solver_mass_balanced_outlet_mpi_test
   mpi/solver_mass_balanced_outlet_mpi_test.cpp)
 target_link_libraries(v04_solver_mass_balanced_outlet_mpi_test PRIVATE
   hundun_v04_test_core MPI::MPI_C)
-foreach(rank_count IN ITEMS 1 2)
+foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_solver_mass_balanced_outlet_mpi_${rank_count}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
       $<TARGET_FILE:v04_solver_mass_balanced_outlet_mpi_test>)

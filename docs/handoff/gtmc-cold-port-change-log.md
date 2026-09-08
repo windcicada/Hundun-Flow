@@ -40,6 +40,19 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 
 ### Outlet/patch development candidate follow-up
 
+- G15: the committed b6eb072 64-rank native import crashed before writing a
+  restart. The same crash was minimized to the real 4-rank outlet/patch test
+  (0.39 s). `addr2line` located `PressureEnergyCandidateBoundaryFinalizer::bind`;
+  disassembly of the faulting load matched the parent mass-target lookup.
+  `bc_compile.cpp` allocates parameter arrays only for locally owned faces,
+  while the new global patch catalog is present on every rank. MPI 1/2 happened
+  to leave every rank owning x_min; MPI 4 exposed non-owning ranks. The binder
+  now checks parent targets only on owners, validates the local parameter
+  index, and keeps collective descriptor equality/error consensus for all
+  ranks. `tests/CMakeLists.txt` now includes MPI 4 for this regression.
+  After the repair MPI 1/2/4 all passed (1.14 s combined).
+  The b6eb072 import failure log is retained; its short/medium gates never ran.
+
 - G12: COAST `s76/SRC.Coast/boundary2_dp.F90`, `bndry2dp.F90`,
   `Calcmassflowrate.F90` were read on the remote host. Marker -2 uses Neumann
   pressure correction and scales the existing signed outlet flux pool by
