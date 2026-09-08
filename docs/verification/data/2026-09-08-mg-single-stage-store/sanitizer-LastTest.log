@@ -1,0 +1,82 @@
+Start testing: Sep 08 11:13 CST
+----------------------------------------------------------
+265/366 Testing: v04_solver_mg_reuse
+265/366 Test: v04_solver_mg_reuse
+Command: "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests/v04_solver_mg_reuse_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests
+"v04_solver_mg_reuse" start time: Sep 08 11:13 CST
+Output:
+----------------------------------------------------------
+v0.4 native Cartesian MG reuse tests passed
+<end of output>
+Test time =   0.71 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_reuse" end time: Sep 08 11:13 CST
+"v04_solver_mg_reuse" time elapsed: 00:00:00
+----------------------------------------------------------
+
+266/366 Testing: v04_solver_mg_chebyshev
+266/366 Test: v04_solver_mg_chebyshev
+Command: "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests/v04_solver_mg_chebyshev_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests
+"v04_solver_mg_chebyshev" start time: Sep 08 11:13 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   1.24 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_chebyshev" end time: Sep 08 11:13 CST
+"v04_solver_mg_chebyshev" time elapsed: 00:00:01
+----------------------------------------------------------
+
+275/366 Testing: v04_solver_mg_mpi_1
+275/366 Test: v04_solver_mg_mpi_1
+Command: "/usr/bin/mpiexec" "-n" "1" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests/v04_solver_mg_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests
+"v04_solver_mg_mpi_1" start time: Sep 08 11:13 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   6.77 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_mpi_1" end time: Sep 08 11:13 CST
+"v04_solver_mg_mpi_1" time elapsed: 00:00:06
+----------------------------------------------------------
+
+276/366 Testing: v04_solver_mg_mpi_2
+276/366 Test: v04_solver_mg_mpi_2
+Command: "/usr/bin/mpiexec" "-n" "2" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests/v04_solver_mg_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests
+"v04_solver_mg_mpi_2" start time: Sep 08 11:13 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   4.39 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_mpi_2" end time: Sep 08 11:13 CST
+"v04_solver_mg_mpi_2" time elapsed: 00:00:04
+----------------------------------------------------------
+
+277/366 Testing: v04_solver_mg_mpi_4
+277/366 Test: v04_solver_mg_mpi_4
+Command: "/usr/bin/mpiexec" "-n" "4" "/home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests/v04_solver_mg_mpi_test"
+Directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-sanitize-clang/versions/v0.4/tests
+"v04_solver_mg_mpi_4" start time: Sep 08 11:13 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   3.09 sec
+----------------------------------------------------------
+Test Passed.
+"v04_solver_mg_mpi_4" end time: Sep 08 11:13 CST
+"v04_solver_mg_mpi_4" time elapsed: 00:00:03
+----------------------------------------------------------
+
+End testing: Sep 08 11:13 CST
+
+v04_focused =  29.86 sec*proc
+

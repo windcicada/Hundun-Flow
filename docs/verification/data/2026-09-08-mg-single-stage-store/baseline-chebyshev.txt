@@ -1,0 +1,11 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 266: v04_solver_mg_chebyshev
+1/1 Test #266: v04_solver_mg_chebyshev ..........   Passed    0.33 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   0.33 sec*proc (1 test)
+
+Total Test time (real) =   0.35 sec

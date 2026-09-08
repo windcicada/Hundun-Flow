@@ -2903,7 +2903,8 @@ bool test_fixed_f_cycle_real_halo_failure_provenance(int rank, int size) {
   return all_true(passed);
 }
 
-bool test_rank_local_chebyshev_nonfinite_is_collective(int rank, int size) {
+bool test_rank_local_chebyshev_nonfinite_is_collective(
+    int rank, int size, std::uint8_t pre_sweeps) {
   Fixture fixture;
   bool passed = expect(initialize(fixture, {}, 4.0, {24, 12, 8}, 32U,
                                   MgCycleKind::f_cycle), rank,
@@ -2915,6 +2916,7 @@ bool test_rank_local_chebyshev_nonfinite_is_collective(int rank, int size) {
       MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
   NativeCartesianMgSpec spec = mg_spec(
       fixture, 895U, MgPointSmootherKind::chebyshev_jacobi, certified);
+  spec.policy.pre_sweeps = pre_sweeps;
   NativeCartesianMgPlan plan;
   passed &= expect(static_cast<bool>(NativeCartesianMgPlan::compile(
                        spec, services(fixture), coefficient_views(fixture),
@@ -3149,7 +3151,9 @@ int main(int argc, char** argv) {
   passed &= test_fixed_f_cycle_real_halo_failure_provenance(rank, size);
   if (size > 1) {
     passed &=
-        test_rank_local_chebyshev_nonfinite_is_collective(rank, size);
+        test_rank_local_chebyshev_nonfinite_is_collective(rank, size, 1U);
+    passed &=
+        test_rank_local_chebyshev_nonfinite_is_collective(rank, size, 2U);
     passed &= test_rank_local_line_pivot_failure_is_collective(rank, size);
   }
   passed = all_true(passed);

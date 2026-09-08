@@ -972,7 +972,8 @@ bool test_streamed_chebyshev_matches_legacy_degrees_and_shapes() {
   return passed;
 }
 
-bool test_streamed_chebyshev_nonfinite_failure_is_unpublished() {
+bool test_streamed_chebyshev_nonfinite_failure_is_unpublished(
+    std::uint8_t degree) {
   bool passed = true;
   for (const double invalid : {std::numeric_limits<double>::quiet_NaN(),
                                std::numeric_limits<double>::infinity()}) {
@@ -986,11 +987,11 @@ bool test_streamed_chebyshev_nonfinite_failure_is_unpublished() {
         streamed.initialize(
             MgPointSmootherKind::chebyshev_jacobi,
             MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 8.0, 0.3,
-            3U, mixed, MgNullSpace::none, false, {6, 4, 5}, true, 4.0) &&
+            degree, mixed, MgNullSpace::none, false, {6, 4, 5}, true, 4.0) &&
         legacy.initialize(
             MgPointSmootherKind::chebyshev_jacobi,
             MgOperatorClass::symmetric_diagonally_dominant_m_matrix, 8.0, 0.3,
-            3U, mixed, MgNullSpace::none, false, {6, 4, 5}, true, 4.0);
+            degree, mixed, MgNullSpace::none, false, {6, 4, 5}, true, 4.0);
     passed &= expect(fixtures_compiled,
                      "nonfinite streamed/legacy fixtures compile");
     if (!fixtures_compiled) continue;
@@ -1252,7 +1253,8 @@ int main(int argc, char** argv) {
   passed &= test_certificate_rejection_is_transactional();
   passed &= test_degree_one_through_four_oracle();
   passed &= test_streamed_chebyshev_matches_legacy_degrees_and_shapes();
-  passed &= test_streamed_chebyshev_nonfinite_failure_is_unpublished();
+  passed &= test_streamed_chebyshev_nonfinite_failure_is_unpublished(1U);
+  passed &= test_streamed_chebyshev_nonfinite_failure_is_unpublished(3U);
   passed &= test_non_cubic_seven_point_oracle();
   passed &= test_public_identity_and_configuration_rejection();
   passed &= test_boundary_nullspace_and_activity_routes();
