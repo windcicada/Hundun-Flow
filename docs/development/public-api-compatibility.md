@@ -14,6 +14,13 @@
 
 ## v0.4 thermophysical physical-ghost certificate 迁移
 
+GTMC G26 修复为所有输运模型交换 live/candidate 的 MPI/周期 k 与 k/cp，
+通用混合物的物理边界仍使用原 EOS 闭合，COAST 的有效输运物理零梯度不变。
+这是离散算子语义修复，不增加公共 API 或 Restart wire 字段；method-history
+signature 增加 `generic-thermal-neighbor-material-v1`。旧 V3 的速率历史不得
+静默当作新算子的精确 BDF 历史。本次开发验收从原始均值场重新导入 V1，
+明确采用 BE 恢复；旧 V3 的其他迁移必须显式重建方法历史。
+
 GTMC 开发修复增加显式 `BoundaryThermophysicalClosureKind::physical_inlet_face`
 模式；默认 `ghost_state` 保留旧数值契约。新模式仅对完整固定组分、定焓、
 压力外推的物理入口启用：p/h/Y 保持离散镜像，热物性由合法物理面状态计算。

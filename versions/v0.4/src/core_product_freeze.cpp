@@ -65,7 +65,7 @@ constexpr PlanFingerprint method_history_signature(bool transported_scalars,
       "thermal-inverse-representable-v1;stationary-ibm-placeholder-v1;"
       "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
       "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2;"
-      "physical-inlet-face-thermophysics-v1")) {
+      "physical-inlet-face-thermophysics-v1;generic-thermal-neighbor-material-v1")) {
     hash ^= static_cast<unsigned char>(byte);
     hash *= UINT64_C(1099511628211);
   }
@@ -182,7 +182,7 @@ Status refresh_coast_native_air_effective_thermal_transport(
 Status exchange_effective_thermal_ghosts(
     HaloEngine& halo, StageId stage, const BoundaryPlan& boundary,
     FieldView& conductivity, FieldView& enthalpy_diffusivity,
-    Status prerequisite) noexcept {
+    Status prerequisite, bool physical_zero_gradient) noexcept {
   std::array<FieldView, 2U> fields{conductivity, enthalpy_diffusivity};
   HaloTicket ticket;
   Status status =
@@ -192,8 +192,12 @@ Status exchange_effective_thermal_ghosts(
   if (status) {
     conductivity = fields[0U];
     enthalpy_diffusivity = fields[1U];
-    status = apply_physical_zero_gradient(
-        boundary, {fields.data(), fields.size()});
+    // Generic-mixture physical ghosts were EOS-closed from their boundary
+    // state. Only COAST's effective-transport contract replaces them with
+    // zero-gradient material; MPI/periodic neighbors are exchanged for both.
+    if (physical_zero_gradient)
+      status = apply_physical_zero_gradient(
+          boundary, {fields.data(), fields.size()});
     conductivity = fields[0U];
     enthalpy_diffusivity = fields[1U];
   }
@@ -5565,7 +5569,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   if (product.transport.kernel() == TransportKernel::coast_native_air)
     status = exchange_effective_thermal_ghosts(
         product.coupled_thermal_halo, 60U, product.boundary, conductivity,
-        enthalpy_diffusivity, status);
+        enthalpy_diffusivity, status, true);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -8189,8 +8193,6 @@ Status ProductDriver::Impl::execute_attempt(
 
   const auto refresh_live_effective_thermal_ghosts =
       [&](StageId stage, Status prerequisite) {
-        if (product.transport.kernel() != TransportKernel::coast_native_air)
-          return prerequisite;
         if (prerequisite)
           prerequisite = runtime_write_view(
               product.fields.thermal_conductivity, conductivity);
@@ -8204,7 +8206,8 @@ Status ProductDriver::Impl::execute_attempt(
               conductivity, enthalpy_diffusivity);
         prerequisite = exchange_effective_thermal_ghosts(
             product.coupled_thermal_halo, stage, product.boundary, conductivity,
-            enthalpy_diffusivity, prerequisite);
+            enthalpy_diffusivity, prerequisite,
+            product.transport.kernel() == TransportKernel::coast_native_air);
         return product.reductions.consensus(prerequisite);
       };
 
@@ -9463,8 +9466,7 @@ Status ProductDriver::Impl::execute_attempt(
       refreshed = product.turbulence.update(
           turbulence_input, effective_viscosity, turbulence_certificate);
     }
-    if (product.transport.kernel() == TransportKernel::coast_native_air)
-      refreshed = refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
+    refreshed = refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
     if (refreshed)
       refreshed = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
           product.boundary, product.thermodynamics, product.transport,
@@ -11651,13 +11653,12 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(pressure_energy_candidate_heat_capacity),
               pressure_energy_candidate_thermal_conductivity,
               pressure_energy_candidate_enthalpy_diffusivity);
-        if (product.transport.kernel() == TransportKernel::coast_native_air) {
-          evaluated = exchange_effective_thermal_ghosts(
-              product.candidate_thermal_halo, state_stage, product.boundary,
-              pressure_energy_candidate_thermal_conductivity,
-              pressure_energy_candidate_enthalpy_diffusivity, evaluated);
-          evaluated = product.reductions.consensus(evaluated);
-        }
+        evaluated = exchange_effective_thermal_ghosts(
+            product.candidate_thermal_halo, state_stage, product.boundary,
+            pressure_energy_candidate_thermal_conductivity,
+            pressure_energy_candidate_enthalpy_diffusivity, evaluated,
+            product.transport.kernel() == TransportKernel::coast_native_air);
+        evaluated = product.reductions.consensus(evaluated);
         if (!evaluated)
           return Status{evaluated.code,
                         kProductPressureEnergy + 209U};
@@ -14849,8 +14850,7 @@ Status ProductDriver::Impl::execute_attempt(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
-  if (final_rate_path_active && product.transport.kernel() ==
-                                    TransportKernel::coast_native_air)
+  if (final_rate_path_active)
     status = refresh_live_effective_thermal_ghosts(60U, status);
   else
     status = product.reductions.consensus(status);

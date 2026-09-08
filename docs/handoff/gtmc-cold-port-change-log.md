@@ -12,7 +12,11 @@ failed before the first new commit; a separate one-step replay reproduced the
 same failure. The user subsequently authorized implementing the original
 COAST zero-gradient/mass-closure outlet semantics for development testing.
 That historical candidate was superseded: clean 0a9ed82 accepted one new GTMC
-step before the G22 failure. G23 below is the current repair candidate.
+step before the G22 failure. Clean G23 `fcfc524` crossed that blocker and
+committed steps 20001–20066; its requested short100 was deliberately stopped
+after G25 established a stale-material defect, so it is NOT a short pass.
+G26 below is the current repair candidate; short100 and medium3000 must use
+a newly signed/clean build and must not concatenate candidates' step counts.
 Detailed receipts are outside the source tree:
 `/home/administrator/gtmc-hundun-port-20260908/candidate-f10f15a/RUN_STATUS.md`.
 
@@ -40,6 +44,59 @@ Whole Cartesian faces are authoritative; this is not a cut-cell-area model.
 ## Change inventory
 
 ### Outlet/patch development candidate follow-up
+
+- G26 (development fix under verification; based on clean `fcfc524`):
+  exchange generic-mixture thermal material on MPI/periodic neighbor slabs.
+  G25 diagnostic root cause: candidate conductivity ghosts stayed at initial
+  air values while received primitive ghosts and live conductivity changed.
+  On rank 22 / global (77,82,59), replacing ONLY the x-minus conductivity in
+  the production harmonic face formula predicts -1.02828700341196e-6 W;
+  observed candidate-minus-terminal energy residual is -1.0282845193999855e-6
+  W (2.484e-12 W remainder). The original first two attempts at step 20008
+  exhaust 12 refinements with energy about 1.38e-10 despite continuity below
+  16 eps. This is not a reason to relax either gate or raise iteration caps.
+  Locations/reasons:
+  `src/core_product_freeze.cpp:182` separates MPI exchange from COAST-only
+  physical zero-gradient material handling, preserving generic physical EOS
+  closure and G23 inlet-face material;
+  `:8194`, `:9469`, `:11656`, `:14854` refresh live/candidate/final-rate k and
+  k/cp for all transport kernels (COAST effective SGS conversion is unchanged);
+  `:5570` explicitly retains the existing COAST cold-start behavior.
+  `tests/mpi/product_pressure_energy_retry_mpi_test.cpp:1164` adds the real
+  8^3 ProductDriver warm-restart constant/Sutherland comparison;
+  `tests/CMakeLists.txt:1015` registers MPI 1/2/4 regression invocations.
+  `src/core_product_freeze.cpp:68` bumps method-history with
+  `generic-thermal-neighbor-material-v1`; the migration note in
+  `docs/development/public-api-compatibility.md` explains why old V3 rates
+  cannot be silently reused. This docs path is repository-relative.
+  BEFORE fix, the new test fails Sutherland on all three decompositions
+  (6/5792 globalization), while constant transport passes. AFTER the isolated
+  halo repair, all MPI 1/2/4 cases pass in 1.35 s and the existing retry suite
+  passes 3/3 in 7.57 s. Wider scalar/boundary/outlet checks pass 32/36; the
+  four failures are the previously reproduced variable-thermo MPI 1/2/4 and
+  stale-authority MPI 2 failures, not newly introduced regressions.
+  The original GTMC native-20007 one-step replay then accepts step 20008 with
+  BDF2, original dt=6.291342081924722e-9, no retry, C=1.942075401417315e-15,
+  E=1.8219410364787955e-15, solver/launcher exit 0. Neither tolerances nor
+  refinement capacity changed. Replay took 173.38 s max-rank step time in a
+  distinct Release/no-LTO diagnostic build; it is not a performance comparison
+  or short/medium acceptance. All 42 selected checks: 38 pass, 4 known fails.
+  After the production method-history bump, the new seam and existing retry
+  MPI 1/2/4 suites were rebuilt and repeated: 6/6 pass in 5.13 s.
+  All source paths above are relative to `versions/v0.4/`. The independent
+  worktree `thermal-halo-fix` leaves the active clean `fcfc524` short100 source
+  and executable unchanged. External receipts:
+  `/home/administrator/gtmc-hundun-port-20260908/pressure-refinement-diagnostic-v2/`.
+  Diagnostic replay retained the old method-history identity only for
+  controlled A/B; production now has the method-history bump and requires
+  new native import before any acceptance run.
+
+- G24/G25 (read-only diagnostic receipts, no numerical edits): G24 separates
+  the independent total-energy balance defect (about -392 W) from the much
+  smaller terminal equation defect; this audit remains unresolved and is not
+  physical validation. G25 disproves Aitken/slow continuity as the primary
+  retry blocker and temperature inversion as the energy-floor cause, then
+  establishes the stale thermal ghost root cause described in G26.
 
 - G23 (implementation under verification; user explicitly approved the
   boundary-contract change after G22): distinguish discrete Dirichlet p/h/Y
