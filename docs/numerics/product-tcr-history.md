@@ -1,7 +1,7 @@
 # 产品 TCR 历史与重启记录
 
 当前产品入口是 `reaction.model=esf_tpdf` 下的 `ensemble.tcr`。本增量支持
-周期及原生物理边界、无 IBM、backward_euler 的 `shadow` 和 `experimental`；`validated`
+周期、原生物理边界及静态 IBM、backward_euler 的 `shadow` 和 `experimental`；`validated`
 仍因缺少科学验收证据而拒绝。它不代表 Stage 5/6 全部接线已完成。
 
 ## 统计与反馈的时间位置

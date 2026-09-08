@@ -1948,6 +1948,14 @@ foreach(spray_ranks IN ITEMS 1 2 4)
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-ibm")
   set_tests_properties(v04_product_spray_ibm_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_spray_esf_ibm_wale_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-ibm-wale")
+  set_tests_properties(v04_product_spray_esf_ibm_wale_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_spray_esf_ibm_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-ibm")
+  set_tests_properties(v04_product_spray_esf_ibm_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
   add_test(NAME v04_product_spray_esf_wall_mpi_${spray_ranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-wall")
@@ -2025,9 +2033,9 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   endforeach()
 endif()
 
-set(coupled_cli_cases reacting-spray-esf-wall reacting-spray-esf-outlet reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
+set(coupled_cli_cases reacting-esf-ibm reacting-spray-esf-ibm reacting-spray-esf-wall reacting-spray-esf-outlet reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
-  list(APPEND coupled_cli_cases reacting-cantera-esf reacting-spray-esf-cantera)
+  list(APPEND coupled_cli_cases reacting-cantera-esf reacting-spray-esf-cantera reacting-spray-esf-ibm-cantera)
 endif()
 foreach(coupled_case IN LISTS coupled_cli_cases)
   set(coupled_initial_state "101325,300,0,0,0,0.25")

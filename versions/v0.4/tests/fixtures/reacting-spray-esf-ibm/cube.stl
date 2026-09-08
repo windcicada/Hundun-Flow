@@ -1,0 +1,86 @@
+solid cube
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.375
+vertex 0.375 0.375 0.625
+vertex 0.375 0.625 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.375
+vertex 0.375 0.625 0.625
+vertex 0.375 0.625 0.375
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.625 0.375 0.375
+vertex 0.625 0.625 0.375
+vertex 0.625 0.625 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.625 0.375 0.375
+vertex 0.625 0.625 0.625
+vertex 0.625 0.375 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.375
+vertex 0.625 0.375 0.375
+vertex 0.625 0.375 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.375
+vertex 0.625 0.375 0.625
+vertex 0.375 0.375 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.625 0.375
+vertex 0.375 0.625 0.625
+vertex 0.625 0.625 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.625 0.375
+vertex 0.625 0.625 0.625
+vertex 0.625 0.625 0.375
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.375
+vertex 0.375 0.625 0.375
+vertex 0.625 0.625 0.375
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.375
+vertex 0.625 0.625 0.375
+vertex 0.625 0.375 0.375
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.625
+vertex 0.625 0.375 0.625
+vertex 0.625 0.625 0.625
+endloop
+endfacet
+facet normal 0 0 0
+outer loop
+vertex 0.375 0.375 0.625
+vertex 0.625 0.625 0.625
+vertex 0.375 0.625 0.625
+endloop
+endfacet
+endsolid cube

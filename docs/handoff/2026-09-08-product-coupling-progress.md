@@ -358,12 +358,35 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
   `clang-tests.log` 和 `esf-boundary-gcc-tests.log`。C++ 变更行已格式化并通过 diff 检查。
 - IBM 随机场算子仍待接线；圆柱 PID 165884 仍为 Ts。完整合并尚未完成。
 
+## 原生随机场 IBM 与组合回归（2026-09-09）
+
+- ESF/TCR 现绑定实际 IbmEquationInterfacePlan。随机场组分使用二进制流体控制体的
+  不可穿透扩散，总焓使用原生零法向热重构，梯度复用同一零法向标量重构。
+  独立、冷绑定的 remote-donor 计划覆盖该重构实际引用的远程单元，包含源后字段；
+  不把普通 face Halo 或喷雾的两层采样 fringe 视作完整 IBM donor 权限。
+- 固体单元不执行随机场反应/混合，保留字段并将 TCR 时钟随共同事务推进；不会
+  生成虚假统计或分支。借用的几何/接口终身随产品计划保留，热阶段不分配。
+  新 donor 的容量进入 owner budget，消息/字节进入执行图和实际 IBM 观测计数。
+- 修正两处原生 IBM 能量残差及 accepted/candidate rate-donor 坐标选择：ESF 使用
+  h/Gamma，与已装配的 unity-Lewis 总焓方程一致；其他路径继续使用 T/lambda。
+  ESF 方法签名加入此合同；喷雾签名更新为包含稳定库存差和接触定位的 v2。
+- 1/2/4 ranks 的 ESF/TCR+IBM+喷雾通过质量/总能量、均值、PH/化学失败共同撤回、
+  V5 重启和再推进。WALE 组合额外确认实际非零 Dt；无喷雾 IBM ESF 的 V4 CLI 与
+  喷雾 V5 CLI 均完成 1→4 ranks 续算；真实 Cantera IBM 组合亦通过。
+- GCC11/Cantera 66/66 PASS（`build-coupling-evidence/esf-ibm-gcc-tests.log`）。
+  Clang 扩大回归 205 个唯一测试全部通过：首轮 189 项执行通过，16 项因脚本漏建
+  9 个可执行文件未启动；补建后 16/16 PASS。保留 `native-regression-clang.log`、
+  `native-regression-missing-clang.log` 和两个 JUnit 文件，不隐藏首次非零退出。
+  回归包含原单相 runner/Restart/PISO/Krylov/观测链和新耦合产品。
+- 仍须把 P3 的显式折点证据接到原生消费入口，然后冻结干净构建、核对主线并做
+  圆柱短续算。没有证据不自动切支；validated 科学证据门保持关闭。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |
 | --- | --- |
 | ESF / TCR | 实际空间输运/梯度/Halo、持续随机场、两个化学半区间、TCR 分支/折点历史、共同接受/拒绝、完整重启。科学证据不足的 validated 模式保持明确拒绝。 |
-| ESF 边界 | 平均喷雾的静态 IBM 已验收；随机场物理边界已验收；仍须接入 IBM 零通量扩散和固体单元处理。 |
+| ESF 边界 | 物理边界与静态 IBM 已验收，包含 WALE、真实 Cantera 及跨分区重启。 |
 | 共同事务和运行切换 | 全部模型状态与气相一次提交及回退；完整产品 Restart 和真实 CLI 验收后，再重建冻结程序并从封存 10510 做短续算验收，最后恢复圆柱长算。 |
 
 本节点是接线中的可验证增量，完整合并尚未完成。

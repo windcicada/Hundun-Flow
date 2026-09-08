@@ -2,6 +2,7 @@
 #pragma once
 #include "core_reaction_detail.hpp"
 #include "core_tcr_history_detail.hpp"
+#include "hundun/v04_ibm.hpp"
 #include "models_esf_detail.hpp"
 #include "models_exchange_batch_detail.hpp"
 
@@ -30,7 +31,7 @@ public:
     enthalpy_scheme_ = model.schemes.enthalpy;
     if (!gas.gas_advance() || !gas.gas_query() || ns_ < 2 || ns_ >= UINT8_MAX ||
         model.time.scheme != TimeScheme::backward_euler ||
-        model.immersed_boundary || spec_.tcr.mode == TcrMode::validated)
+        spec_.tcr.mode == TcrMode::validated)
       return invalid();
     if (!spec_.initial_species_offsets.empty() &&
         spec_.initial_species_offsets.size() != spec_.fields * (ns_ - 1))
@@ -83,6 +84,60 @@ public:
     query_rates_.resize(ns_);
     return {};
   }
+  Status configure_immersed_exchange(MPI_Comm comm,
+                                     const CartesianGeometryPlan &geometry,
+                                     MeshPatch patch,
+                                     const QuadraticStencilPlan &reconstruction,
+                                     Span<const RemoteDonorFieldSpec> fields,
+                                     std::uint64_t maximum_bytes) {
+    auto status = RemoteDonorExchangePlan::analyze(
+        comm, geometry.global_cells(), patch, reconstruction, fields, 10,
+        immersed_halo_);
+    if (!status)
+      return status;
+    const auto stats = immersed_halo_.stats();
+    const auto old_bytes = owned_bytes();
+    std::uint64_t bad = 0;
+    if (stats.received_cells > UINT64_MAX - stats.supplied_cells ||
+        stats.received_cells + stats.supplied_cells > UINT64_MAX / 256 ||
+        stats.bytes_per_exchange > UINT64_MAX / 2)
+      bad = 1;
+    const auto metadata =
+        bad ? 0 : (stats.received_cells + stats.supplied_cells) * 256;
+    const auto buffers = bad ? 0 : 2 * stats.bytes_per_exchange;
+    if (old_bytes > maximum_bytes || metadata > maximum_bytes - old_bytes ||
+        buffers > maximum_bytes - old_bytes - metadata)
+      bad = 1;
+    if (MPI_Allreduce(MPI_IN_PLACE, &bad, 1, MPI_UINT64_T, MPI_MAX, comm) !=
+        MPI_SUCCESS)
+      return {StatusCode::mpi_failure, 10215};
+    if (bad)
+      return {StatusCode::allocation_failure, 10215};
+    immersed_bytes_ = metadata + buffers;
+    status = immersed_halo_.bind(comm);
+    if (status)
+      immersed_exchange_ = true;
+    return status;
+  }
+  RemoteDonorExchangeStats halo_stats() const noexcept {
+    return immersed_exchange_ ? immersed_halo_.stats()
+                              : RemoteDonorExchangeStats{};
+  }
+  RemoteDonorExchangeCounters immersed_counters() const noexcept {
+    return immersed_exchange_ ? immersed_halo_.runtime_counters()
+                              : RemoteDonorExchangeCounters{};
+  }
+  Status
+  preflight_immersed_exchange(Span<const FieldView> fields) const noexcept {
+    return immersed_exchange_ ? immersed_halo_.preflight_exchange(10, fields)
+                              : Status{};
+  }
+  Status exchange_immersed(Span<FieldView> fields) noexcept {
+    return immersed_exchange_ ? immersed_halo_.exchange(10, fields) : Status{};
+  }
+  void bind_immersed(const IbmEquationInterfacePlan &plan) noexcept {
+    immersed_ = &plan;
+  }
   Status validate_restart_cell(const std::vector<RestartImageField> &fields,
                                std::size_t start, std::size_t cell,
                                Span<const double> mean_species, double mean_h,
@@ -128,7 +183,8 @@ public:
     if (!enabled())
       return 0;
     std::uint64_t bytes =
-        sizeof(*this) + workspace_->owned_bytes() + tcr_history.owned_bytes() +
+        sizeof(*this) + immersed_bytes_ + workspace_->owned_bytes() +
+        tcr_history.owned_bytes() +
         reactants_.capacity() * sizeof(std::size_t) +
         passive_schmidt_.capacity() * sizeof(std::array<double, 2>) +
         (spec_.initial_species_offsets.capacity() +
@@ -343,7 +399,14 @@ public:
     const auto evaluate = [&](ConstFieldView field, FieldView rate) noexcept {
       KernelInvocation call{{&field, 1}, {&rate, 1}, {{0, 0, 0}, cells_}, 0, 0,
                             1,           0};
-      return cartesian_diffusion(kernels, gamma, call);
+      auto result = cartesian_diffusion(kernels, gamma, call);
+      if (result && immersed_)
+        result =
+            field.field == enthalpy.field
+                ? immersed_->correct_zero_normal_diffusion(field, gamma, rate)
+                : immersed_->correct_impermeable_scalar_diffusion(field, gamma,
+                                                                  rate);
+      return result;
     };
     auto status = evaluate(enthalpy, enthalpy_rate);
     for (std::size_t s = 0; s < species.size && status; ++s)
@@ -362,6 +425,9 @@ public:
       KernelInvocation call{{&field, 1}, {&rate, 1}, {{0, 0, 0}, cells_}, 0, 0,
                             1,           0};
       status = cartesian_diffusion(kernels, as_const(diffusivity), call);
+      if (status && immersed_)
+        status = immersed_->correct_impermeable_scalar_diffusion(
+            field, as_const(diffusivity), rate);
     }
     return status;
   }
@@ -403,12 +469,24 @@ public:
           rates_[slot(i, f, c)] = -scratch_[i];
         call.required_face_flux_revision = 0;
         status = cartesian_diffusion(kernels, gamma, call);
+        auto scalar = input;
+        scalar.base += c * scalar.component_stride;
+        scalar.components = 1;
+        if (status && immersed_)
+          status = c == ns_ ? immersed_->correct_zero_normal_diffusion(
+                                  scalar, gamma, scratch)
+                            : immersed_->correct_impermeable_scalar_diffusion(
+                                  scalar, gamma, scratch);
         if (!status)
           return status;
         for (std::size_t i = 0; i < count_; ++i)
           rates_[slot(i, f, c)] += scratch_[i];
         scratch = scratch_view(rho, 3);
         status = cartesian_gradient(kernels, call);
+        if (status && immersed_)
+          // This native operator is the scalar homogeneous Neumann gradient;
+          // it replaces each cut-link value using its sealed reconstruction.
+          status = immersed_->correct_pressure_gradient(scalar, scratch);
         if (!status)
           return status;
         for (std::size_t i = 0; i < count_; ++i)
@@ -423,6 +501,17 @@ public:
           Int3 cell{x, y, z};
           const auto i = std::size_t(x) + std::size_t(cells_.x) *
                                               (y + std::size_t(cells_.y) * z);
+          if (!active(i)) {
+            for (std::size_t f = 0; f < spec_.fields; ++f)
+              for (std::size_t c = 0; c < stride_; ++c)
+                trial.data[f].unchecked(cell, c) =
+                    accepted.data[f].unchecked(cell, c);
+            for (std::size_t s = 0; s < sources.size; ++s)
+              sources.data[s].unchecked(cell, 0) = 0;
+            if (tcr_history.enabled() && !tcr_history.stage_inactive(i, step))
+              return numerical();
+            continue;
+          }
           const double density = rho.unchecked(cell, 0);
           if (!(density > 0) || !std::isfinite(density))
             return numerical();
@@ -541,6 +630,10 @@ public:
       for (int y = 0; y < cells_.y; ++y)
         for (int x = 0; x < cells_.x; ++x) {
           Int3 cell{x, y, z};
+          const auto i = std::size_t(x) + std::size_t(cells_.x) *
+                                              (y + std::size_t(cells_.y) * z);
+          if (!active(i))
+            continue;
           std::fill(means_.begin(), means_.end(), 0);
           for (std::size_t c = 0; c < stride_; ++c)
             for (std::size_t f = 0; f < spec_.fields; ++f)
@@ -571,6 +664,14 @@ public:
   }
 
 private:
+  bool active(std::size_t cell) const noexcept {
+    return !immersed_ || immersed_->cell_activity().data[cell] !=
+                             static_cast<std::uint8_t>(RegionFlag::solid);
+  }
+  RemoteDonorExchangePlan immersed_halo_;
+  const IbmEquationInterfacePlan *immersed_{};
+  std::uint64_t immersed_bytes_{};
+  bool immersed_exchange_{};
   static Status invalid() noexcept { return {StatusCode::invalid_plan, 10215}; }
   static Status numerical() noexcept {
     return {StatusCode::numerical_failure, 10216};

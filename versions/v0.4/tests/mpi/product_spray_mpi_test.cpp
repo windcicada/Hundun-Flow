@@ -128,11 +128,15 @@ std::vector<double> snapshot(const RestartSnapshot &s,
     v.push_back(s.cell_records.variable_cell_bytes.data[i]);
   return v;
 }
-bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm) {
-  ConstFieldView h, p, u, Y, passive;
+bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm,
+               bool turbulent) {
+  ConstFieldView h, p, u, Y, passive, cache;
   for (std::size_t i = 0; i < s.fields.size; ++i) {
     auto f = s.fields.data[i];
     switch (f.role) {
+    case RestartFieldRole::stochastic_transport:
+      cache = f.values;
+      break;
     case RestartFieldRole::enthalpy:
       h = f.values;
       break;
@@ -153,7 +157,7 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm) {
     }
   }
   // Independent constant-cp EOS from the fixture: equal MW=28, h_A-h_B=1e5.
-  std::array<double, 8> local{}, global{};
+  std::array<double, 9> local{}, global{};
   const double V =
       1. / (s.global_cells.x * s.global_cells.y * s.global_cells.z);
   for (int z = 0; z < h.interior.z; ++z)
@@ -179,6 +183,8 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm) {
         local[0] += rho * V;
         local[1] += (rho * (H + K) - P) * V;
         local[5] += rho * V;
+        if (cache.base && cache.unchecked(c, 1) > 0)
+          local[8] += 1;
         if (passive.base)
           local[7] += rho * V * passive.unchecked(c, 0);
       }
@@ -242,7 +248,7 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm) {
   }
   if (!agree(valid))
     return false;
-  MPI_Allreduce(local.data(), global.data(), 8, MPI_DOUBLE, MPI_SUM,
+  MPI_Allreduce(local.data(), global.data(), 9, MPI_DOUBLE, MPI_SUM,
                 MPI_COMM_WORLD);
   const double initial_mass =
       101325 * 28 / (kUniversalGasConstant * 400) * (ibm ? 63. / 64 : 1);
@@ -259,7 +265,8 @@ bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm) {
                   << " momentum_error=" << global[2] - 2 * injected
                   << " gas_target_error=" << global[5] - s.closed_mass_target
                   << " parcels=" << global[6] << '\n';
-  return std::abs(dm) < 1e-10 && std::abs(dE) < 1e-5 &&
+  return (!turbulent || global[8] > 0) && std::abs(dm) < 1e-10 &&
+         std::abs(dE) < 1e-5 &&
          (wall || ibm || std::abs(global[2] - 2 * injected) < 1e-9) &&
          std::abs(global[3]) < 1e-9 && std::abs(global[4]) < 1e-9 &&
          std::abs(global[5] - s.closed_mass_target) < 1e-10 &&
@@ -325,6 +332,22 @@ int main(int argc, char **argv) {
             valid = false;
             continue;
           }
+          const auto shape = first.patch.cells;
+          const double x = (cell % shape.x + first.patch.begin.x + .5) /
+                           first.global_cells.x,
+                       y = ((cell / shape.x) % shape.y + first.patch.begin.y +
+                            .5) /
+                           first.global_cells.y,
+                       z = (cell / (shape.x * shape.y) + first.patch.begin.z +
+                            .5) /
+                           first.global_cells.z;
+          if (model.immersed_boundary && x > .375 && x < .625 && y > .375 &&
+              y < .625 && z > .375 && z < .625) {
+            // Solid placeholders carry the native clock but never acquire a
+            // fictitious reacting-gas branch or statistics.
+            valid &= u64(row + 24) == first.step && u64(row + 24 + 20, 4) == 0;
+            continue;
+          }
           const auto eta = real(row + 24 + 24);
           valid &= eta >= .01 - 1e-13;
           if (eta > .01 + 1e-13)
@@ -336,7 +359,10 @@ int main(int argc, char **argv) {
         // trilinear deposition enriches eight interior or four wall-adjacent
         // cells before TCR observes eta.
         const int expected =
-            model.boundaries[0].flow_kind == BoundaryKind::slip ? 4 : 8;
+            (model.immersed_boundary ||
+             model.boundaries[0].flow_kind == BoundaryKind::slip)
+                ? 4
+                : 8;
         ok = agree(valid && total == expected);
         if (!ok && rank == 0)
           std::cerr << "TCR post-source enriched cells=" << total << '\n';
@@ -353,7 +379,8 @@ int main(int argc, char **argv) {
         if (ok)
           ok = agree(inventory(
               s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip,
-              model.immersed_boundary.has_value()));
+              model.immersed_boundary.has_value(),
+              model.turbulence != TurbulenceKind::none));
       }
     }
     if (ok) {
@@ -429,7 +456,8 @@ int main(int argc, char **argv) {
       if (ok)
         ok = agree(inventory(
             s, rank, model.boundaries[0].flow_kind == BoundaryKind::slip,
-            model.immersed_boundary.has_value()));
+            model.immersed_boundary.has_value(),
+            model.turbulence != TurbulenceKind::none));
     }
     if (ok) {
       int pid = int(getpid());

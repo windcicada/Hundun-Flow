@@ -86,9 +86,10 @@ method_history_signature(bool transported_scalars, bool reacting = false,
       hash *= UINT64_C(1099511628211);
     }
   if (esf)
-    for (char byte : std::string_view(
-             ";esf-native-transport-iem-two-half-chemistry-be-v1;"
-             "esf-mean-reconciliation-v1;esf-shared-gamma-total-h-v1")) {
+    for (char byte :
+         std::string_view(";esf-native-transport-iem-two-half-chemistry-be-v1;"
+                          "esf-mean-reconciliation-v1;esf-shared-gamma-total-h-"
+                          "v1;esf-ibm-neumann-solid-carry-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -100,7 +101,7 @@ method_history_signature(bool transported_scalars, bool reacting = false,
     }
   if (spray)
     for (char byte :
-         std::string_view(";spray-native-as-tab-be-v1;parcel-current-source-v1;"
+         std::string_view(";spray-native-as-tab-be-v2;parcel-current-source-v1;"
                           "parcel-cell-history-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
@@ -975,6 +976,7 @@ Status compile_graph(const ProductFields &fields, std::uint8_t ghosts,
                      RemoteDonorExchangeStats rate_donors,
                      RemoteDonorExchangeStats force_donors,
                      RemoteDonorExchangeStats spray_donors,
+                     RemoteDonorExchangeStats esf_donors,
                      FrozenExecutionGraph &graph) {
   std::size_t default_workspace = 0U;
   std::size_t momentum_workspace = 0U;
@@ -1489,8 +1491,12 @@ Status compile_graph(const ProductFields &fields, std::uint8_t ghosts,
   }
   std::uint64_t predictor_messages = 0, predictor_bytes = 0;
   if (!checked_add_u64(12U, spray_donors.peer_messages, predictor_messages) ||
+      !checked_add_u64(predictor_messages, esf_donors.peer_messages,
+                       predictor_messages) ||
       !checked_add_u64(predictor_route_halo_bytes,
-                       spray_donors.bytes_per_exchange, predictor_bytes))
+                       spray_donors.bytes_per_exchange, predictor_bytes) ||
+      !checked_add_u64(predictor_bytes, esf_donors.bytes_per_exchange,
+                       predictor_bytes))
     return {StatusCode::invalid_plan, kProductAnalysis};
   status = register_mutating(
       10U, std::move(predictor_reads), std::move(predictor_writes),
@@ -3334,6 +3340,11 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   donor(product.ibm_momentum_donors);
   donor(product.ibm_rate_donors);
   donor(product.ibm_force_donors);
+  const auto esf_donors = product.esf.immersed_counters();
+  add(result.ibm_control_collectives, esf_donors.control_consensus_calls);
+  add(result.ibm_exchanges, esf_donors.exchange_calls);
+  add(result.ibm_messages, esf_donors.peer_messages);
+  add(result.ibm_bytes, esf_donors.bytes);
   const LinearReductionCounters reduction = product.reductions.counters();
   result.reduction_collectives = reduction.blocking_operations;
   result.reduction_nanoseconds = reduction.wall_nanoseconds;
@@ -3730,9 +3741,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           kIbmCandidateVelocityDonorStage,
           *candidate->ibm_candidate_velocity_donors);
     }
-    const std::array<RemoteDonorFieldSpec, 2U> candidate_rate_fields{{
-        {candidate->fields.pressure_energy_candidate_pressure, 1U},
-        {candidate->fields.pressure_energy_candidate_temperature, 1U}}};
+    const std::array<RemoteDonorFieldSpec, 2U> candidate_rate_fields{
+        {{candidate->fields.pressure_energy_candidate_pressure, 1U},
+         {candidate->esf.enabled()
+              ? candidate->fields.pressure_energy_candidate_enthalpy
+              : candidate->fields.pressure_energy_candidate_temperature,
+          1U}}};
     if (status) {
       candidate->ibm_candidate_rate_donors.emplace();
       status = RemoteDonorExchangePlan::analyze(
@@ -3768,7 +3782,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = product_local_stage(communicator, [&] {
         rate_fields.reserve(2U + candidate->fields.scalars.size());
         rate_fields.push_back({candidate->fields.pressure, 1U});
-        rate_fields.push_back({candidate->fields.temperature, 1U});
+        rate_fields.push_back({candidate->esf.enabled()
+                                   ? candidate->fields.enthalpy
+                                   : candidate->fields.temperature,
+                               1U});
         for (FieldId scalar : candidate->fields.scalars)
           rate_fields.push_back({scalar, 1U});
         candidate->ibm_rate_donors.emplace();
@@ -3795,6 +3812,31 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           {force_fields.data(), force_fields.size()}, 160U,
           *candidate->ibm_force_donors);
     }
+  }
+  if (status && immersed && candidate->esf.enabled()) {
+    std::vector<RemoteDonorFieldSpec> fields;
+    status = product_local_stage(communicator, [&] {
+      const bool post = candidate->spray.enabled();
+      fields.push_back(
+          {post ? candidate->fields.post_enthalpy : candidate->fields.enthalpy,
+           1});
+      for (auto id :
+           post ? candidate->fields.post_scalars : candidate->fields.scalars)
+        fields.push_back({id, 1});
+      for (auto id : post ? candidate->fields.post_esf_fields
+                          : candidate->fields.esf_fields)
+        fields.push_back({id, candidate->fields.esf_components});
+      fields.push_back({post ? candidate->fields.post_transport
+                             : candidate->fields.esf_transport,
+                        static_cast<std::uint8_t>(post ? 4 : 2)});
+      return Status{};
+    });
+    if (status)
+      status = candidate->esf.configure_immersed_exchange(
+          communicator, candidate->geometry, candidate->patch,
+          candidate->ibm_boundary->reconstruction(),
+          {fields.data(), fields.size()},
+          model.mesh.limits.max_memory_bytes_per_rank);
   }
   if (!status) return status;
   if (status && candidate->spray.enabled()) {
@@ -3875,7 +3917,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                       candidate->ibm_force_donors.has_value()
                           ? candidate->ibm_force_donors->stats()
                           : RemoteDonorExchangeStats{},
-                      candidate->spray.halo_stats(), candidate->graph);
+                      candidate->spray.halo_stats(),
+                      candidate->esf.halo_stats(), candidate->graph);
     std::vector<SnapshotFieldSpec> snapshots{{candidate->fields.velocity, 3U},
                                              {candidate->fields.pressure, 1U},
                                              {candidate->fields.enthalpy, 1U}};
@@ -4175,6 +4218,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         candidate->equations.kernels(), *candidate->topology,
         *candidate->ibm_boundary, *candidate->ibm_equations);
     status = product_collective_status(communicator, status);
+    if (status && candidate->esf.enabled())
+      candidate->esf.bind_immersed(*candidate->ibm_equations);
     if (status) {
       candidate->ibm_physical_boundary_flux.emplace();
       status = IbmPhysicalBoundaryFluxAuthority::compile(
@@ -6124,14 +6169,16 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   if (product.ibm_rate_donors.has_value()) {
     std::size_t halo_count = 0U;
     halo_views[halo_count++] = trial_pressure;
-    halo_views[halo_count++] = trial_temperature;
+    halo_views[halo_count++] =
+        product.esf.enabled() ? trial_enthalpy : trial_temperature;
     append_scalar_halo_views(product.fields, species_trial, passive_trial,
                              halo_views, halo_count);
     status = product.ibm_rate_donors->exchange(
         161U, {halo_views.data(), halo_count});
     if (status) {
       trial_pressure = halo_views[0U];
-      trial_temperature = halo_views[1U];
+      (product.esf.enabled() ? trial_enthalpy : trial_temperature) =
+          halo_views[1U];
       restore_scalar_halo_views(product.fields, halo_views, 2U,
                                 species_trial, passive_trial);
     }
@@ -8414,6 +8461,15 @@ Status ProductDriver::Impl::execute_attempt(
     }
   }
   if (status) status = exchange(product.stage_halos[0U], 10U, halo_count);
+  if (product.esf.enabled() && !product.spray.enabled() &&
+      product.ibm_equations) {
+    status = product.reductions.consensus(
+        status ? product.esf.preflight_immersed_exchange(
+                     {halo_views.data(), halo_count})
+               : status);
+    if (status)
+      status = product.esf.exchange_immersed({halo_views.data(), halo_count});
+  }
   if (status)
     status = resolve_static_boundary_values(
         communicator, product.boundary, product.boundary_specs,
@@ -8742,6 +8798,14 @@ Status ProductDriver::Impl::execute_attempt(
       status = product.spray.exchange_source_transport(
           {exchanged.data(), count}, product.boundary.revision(),
           {authorities.data(), count});
+    if (product.ibm_equations) {
+      status = product.reductions.consensus(
+          status ? product.esf.preflight_immersed_exchange(
+                       {exchanged.data(), count})
+                 : status);
+      if (status)
+        status = product.esf.exchange_immersed({exchanged.data(), count});
+    }
     if (status) {
       // The exchange certifies the registered workspaces; semantic aliases
       // retain their storage/revision when supplied to native h/Y operators.
@@ -10342,14 +10406,16 @@ Status ProductDriver::Impl::execute_attempt(
     if (refreshed && product.ibm_rate_donors.has_value()) {
       halo_count = 0U;
       halo_views[halo_count++] = trial_pressure;
-      halo_views[halo_count++] = trial_temperature;
+      halo_views[halo_count++] =
+          product.esf.enabled() ? trial_enthalpy : trial_temperature;
       append_scalar_halo_views(product.fields, species_trial, passive_trial,
                                halo_views, halo_count);
       refreshed = product.ibm_rate_donors->exchange(
           161U, {halo_views.data(), halo_count});
       if (refreshed) {
         trial_pressure = halo_views[0U];
-        trial_temperature = halo_views[1U];
+        (product.esf.enabled() ? trial_enthalpy : trial_temperature) =
+            halo_views[1U];
         species_index = 0U;
         passive_index = 0U;
         for (std::size_t index = 0U;
@@ -10891,10 +10957,12 @@ Status ProductDriver::Impl::execute_attempt(
               }
           if (assembled) {
             zero_field(pressure_energy_e_p);
-            assembled =
-                product.ibm_equations->correct_zero_normal_diffusion(
-                    as_const(trial_temperature), as_const(conductivity),
-                    pressure_energy_e_p);
+            assembled = product.ibm_equations->correct_zero_normal_diffusion(
+                product.esf.enabled() ? as_const(trial_enthalpy)
+                                      : as_const(trial_temperature),
+                product.esf.enabled() ? as_const(enthalpy_diffusivity)
+                                      : as_const(conductivity),
+                pressure_energy_e_p);
           }
           for (std::int32_t z = 0; z < cells.z && assembled; ++z)
             for (std::int32_t y = 0; y < cells.y; ++y)
@@ -12406,12 +12474,15 @@ Status ProductDriver::Impl::execute_attempt(
         if (evaluated && product.ibm_candidate_rate_donors.has_value()) {
           std::array<FieldView, 2U> donor_fields{
               pressure_energy_candidate_pressure,
-              pressure_energy_candidate_temperature};
+              product.esf.enabled() ? pressure_energy_candidate_enthalpy
+                                    : pressure_energy_candidate_temperature};
           evaluated = product.ibm_candidate_rate_donors->exchange(
               kIbmCandidateEnergyRateDonorStage,
               {donor_fields.data(), donor_fields.size()});
           pressure_energy_candidate_pressure = donor_fields[0U];
-          pressure_energy_candidate_temperature = donor_fields[1U];
+          (product.esf.enabled() ? pressure_energy_candidate_enthalpy
+                                 : pressure_energy_candidate_temperature) =
+              donor_fields[1U];
         }
         evaluated = product.reductions.consensus(evaluated);
         if (!evaluated)
@@ -12905,12 +12976,15 @@ Status ProductDriver::Impl::execute_attempt(
                 }
             if (assembled) {
               zero_field(pressure_energy_e_p);
-              assembled =
-                  product.ibm_equations->correct_zero_normal_diffusion(
-                      as_const(pressure_energy_candidate_temperature),
-                      as_const(
-                          pressure_energy_candidate_thermal_conductivity),
-                      pressure_energy_e_p);
+              assembled = product.ibm_equations->correct_zero_normal_diffusion(
+                  product.esf.enabled()
+                      ? as_const(pressure_energy_candidate_enthalpy)
+                      : as_const(pressure_energy_candidate_temperature),
+                  product.esf.enabled()
+                      ? as_const(pressure_energy_candidate_enthalpy_diffusivity)
+                      : as_const(
+                            pressure_energy_candidate_thermal_conductivity),
+                  pressure_energy_e_p);
             }
             for (std::int32_t z = 0; z < cells.z && assembled; ++z)
               for (std::int32_t y = 0; y < cells.y && assembled; ++y)
@@ -15872,14 +15946,16 @@ Status ProductDriver::Impl::execute_attempt(
   if (status && product.ibm_rate_donors.has_value()) {
     halo_count = 0U;
     halo_views[halo_count++] = trial_pressure;
-    halo_views[halo_count++] = trial_temperature;
+    halo_views[halo_count++] =
+        product.esf.enabled() ? trial_enthalpy : trial_temperature;
     append_scalar_halo_views(product.fields, species_trial, passive_trial,
                              halo_views, halo_count);
     status = product.ibm_rate_donors->exchange(
         161U, {halo_views.data(), halo_count});
     if (status) {
       trial_pressure = halo_views[0U];
-      trial_temperature = halo_views[1U];
+      (product.esf.enabled() ? trial_enthalpy : trial_temperature) =
+          halo_views[1U];
       restore_scalar_halo_views(product.fields, halo_views, 2U,
                                 species_trial, passive_trial);
     }

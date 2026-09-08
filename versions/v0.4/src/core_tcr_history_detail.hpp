@@ -66,6 +66,12 @@ public:
     encode(trial_[cell], trial_bytes_.data() + cell * record_bytes);
     return true;
   }
+  bool stage_inactive(std::size_t cell, std::uint64_t step) noexcept {
+    tcr::detail::TrialRequest request;
+    request.expected_revision = accepted_[cell].revision;
+    request.mode = tcr::detail::Mode::off;
+    return stage(cell, tcr::detail::prepare(accepted_[cell], request), step);
+  }
   void seal() noexcept { pending_ = enabled(); }
   void discard() noexcept { pending_ = false; }
   void commit() noexcept {
