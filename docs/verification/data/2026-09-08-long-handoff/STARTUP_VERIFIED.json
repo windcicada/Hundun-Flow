@@ -1,0 +1,62 @@
+{
+  "schema": "HUNDUN_RE3900_LONG_STARTUP_V1",
+  "startup_verified": true,
+  "long_run_complete": false,
+  "run_root": "/home/wyf/code_dev/.benchmarks/hundun-piso-simple-product-20260903/trial-D0p02-zpi2-52/long-observed-35000-20260908",
+  "service": "hundun-re3900-observed-long-20260908.service",
+  "health_step_range": [
+    10001,
+    10016
+  ],
+  "accepted_health_rows": 16,
+  "terminal_maxima": {
+    "eos": 0.0,
+    "continuity": 2.0864669393733558e-07,
+    "energy": 9.576842172929002e-07,
+    "closed_mass": 0.0,
+    "gauge": 0.0
+  },
+  "all_bdf2": true,
+  "retries": 0,
+  "restart_anchor": {
+    "kind": "restart",
+    "previous_step": 10000,
+    "previous_time": 0.13808912271981852,
+    "restart_manifest_sha256": "b5bafe56b0c600016b7ebadda82edd896fe83fe6a3c6f17cef26b895f57310a2",
+    "history": {
+      "source_format_version": 3,
+      "source_signature": 12213963202598979269,
+      "target_signature": 12213963202598979269,
+      "policy": "require_compatible"
+    }
+  },
+  "observer_validated_steps": 17,
+  "observer_loops": 102,
+  "observer_complete": false,
+  "observer_issues": [
+    "missing/truncated expected step 10018"
+  ],
+  "evidence_records": 17,
+  "runtime_validator_exit": 0,
+  "epoch_start": 7000,
+  "sampling_start": 17001,
+  "sample_steps": 0,
+  "artifacts_sha256": {
+    "HANDOFF_VALIDATED.json": "eda0f43b6881536cb4a7edf08a549bf89933b5572dd59e0c8ac85d98aa72d4c2",
+    "SOURCE-10000.sha256": "dcc51de883a866a761391405ccc1750023f0beebcdf498a1417e3acb8388a29f",
+    "FROZEN.sha256": "238a2a21fa49fb4bdde26e838807c8be9558c108a68d9b24db0834644059124c",
+    "bridge.log": "83cad00bf51ed243c59395e8dfea31913c53ef57ce3b8dbf86dbf46655b60918",
+    "launch-long.sh": "6abef3643379292f69e8bae76f54d070c264e15528725f3162b32419993be247",
+    "GITHUB_MAIN_VERIFIED.txt": "84131ab6826d02cefc12dc545deae6a3b8b8efc32832c49c7a6d2b34b52f34a8",
+    "startup-observation.json": "333091c4d6dba8cfbe6bc3897f5a0a957b9e1ecfe260d8f3a449d396bf0c8655",
+    "startup-loops.jsonl": "05b2d9f4ffb0632bf385bcf830ca6d64deae7b13792fb23654ddf36a22f8466c",
+    "startup-runtime-validation.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source-unchanged-after-start.log": "93528df3fd0c1935e04e26ecbebd54a0edf685f923efe6af550c4a4ab248c95c"
+  },
+  "limitations": [
+    "Live output copied without stopping the run; stream prefixes can end on different steps.",
+    "Startup/partial observation is not 35000-step stability or COAST replacement acceptance.",
+    "Next new-run checkpoint and Visit are due at step 10500; source 10000 remains durable.",
+    "Statistics reset_reason is inherited epoch provenance, not a new reset."
+  ]
+}

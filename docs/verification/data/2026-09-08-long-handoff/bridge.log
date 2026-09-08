@@ -1,0 +1,4 @@
+2026-09-08T13:59:09.351901 RESUME original 128 ranks from in-memory step 9951; target durable 10000; timeout 1800s
+2026-09-08T14:05:21.538270 DURABLE_HANDOFF generation-10000-171280289222885
+2026-09-08T14:05:21.548606 PAUSE original service; physical state is not rolled back; old output is a stopped prefix, not COMPLETED
+2026-09-08T14:05:28.155614 VERIFIED all 128 original ranks stopped
