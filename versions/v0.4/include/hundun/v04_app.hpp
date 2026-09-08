@@ -232,6 +232,23 @@ enum class PressureEnergySolveKind : std::uint8_t {
   pressure_continuity, diagonal_schur, spatial_schur
 };
 
+// Compact rank-local delta for one pressure/energy solve, including failed
+// applies. The six cycle phases are disjoint subsets of apply_nanoseconds;
+// communication and finest smoothing are nested, not additional costs.
+// Disabled by default. Incomplete/saturated telemetry never rejects a solve.
+struct MgSolveProfile {
+  bool enabled{};
+  bool complete{true};
+  std::uint64_t attempts{}, successes{}, failures{};
+  std::uint64_t apply_nanoseconds{}, reduction_nanoseconds{};
+  std::uint64_t halo_wait_nanoseconds{}, halo_control_nanoseconds{};
+  std::uint64_t halo_control_calls{};
+  MgPhaseProfile pre_smooth{}, residual{}, restriction{}, prolongation{};
+  MgPhaseProfile post_smooth{}, terminal{}, direct_mpi{};
+  std::uint64_t finest_pre_smooth_nanoseconds{};
+  std::uint64_t finest_post_smooth_nanoseconds{};
+};
+
 struct PressureEnergySolveObservation {
   std::uint8_t corrector{};
   std::uint8_t refinement{};
@@ -240,6 +257,7 @@ struct PressureEnergySolveObservation {
   std::array<std::uint64_t, 3U> local_nanoseconds{};
   std::uint64_t mg_refill_nanoseconds{}, mg_copy_nanoseconds{};
   std::uint64_t structured_wait_nanoseconds{}, structured_control_nanoseconds{};
+  MgSolveProfile mg_apply{};
 };
 
 struct PressureEnergyGlobalizationAttemptReport {
@@ -545,6 +563,15 @@ struct DriverStepReport {
   DriverCellTrace cell_trace{};
 };
 
+// Geometry is frozen at create(), before lazy pressure-MG compilation. A
+// requested but not yet initialized profile has cumulative == nullptr.
+struct DriverPressureMgProfileView {
+  bool enabled{};
+  bool initialized{};
+  std::size_t level_count{};
+  const MgApplyProfile* cumulative{};
+};
+
 class ProductDriver {
  public:
   ProductDriver() noexcept = default;
@@ -565,6 +592,17 @@ class ProductDriver {
   // Collective cold configuration. Same global cells/window on every rank;
   // samples remain rank-local until the caller's ordinary reporting boundary.
   Status set_cell_trace_window(const DriverCellTraceWindow& window) noexcept;
+  // Rank-local, synchronous/quiescent configuration, including before lazy
+  // MG compilation. Each call resets the observation epoch, not method state.
+  // No allocation or communication; ranks may opt in independently.
+  Status set_pressure_mg_profiling(bool enabled) noexcept;
+  // Cumulative pressure/energy preconditioner work only (not Fresh projection
+  // or coefficient refill/copy). Copy before advance/reset/initialization;
+  // destruction/replacement invalidates the borrowed owner. Move transfers it.
+  DriverPressureMgProfileView pressure_mg_profile() const noexcept;
+  // Frozen owned-interior geometry, available immediately after create().
+  // Invalid driver/index returns invalid_plan and leaves out unchanged.
+  Status pressure_mg_level(std::size_t index, MgLevelView& out) const noexcept;
   Status initialize_restart(const RestartImage& image,
                             RestartStorageCompatibility compatibility =
                                 RestartStorageCompatibility::strict,

@@ -98,6 +98,71 @@ constexpr StageId kFreshVelocityPreviousHaloStage = 174U;
 constexpr StageId kFreshVelocityTrialHaloStage = 175U;
 constexpr std::uint32_t kAuxiliaryFgmresMaximumRestart = 12U;
 
+MgSolveProfile pressure_mg_solve_delta(const MgApplyProfile& before,
+                                      const MgApplyProfile& after) noexcept {
+  MgSolveProfile result;
+  result.enabled = true;
+  result.complete = before.complete && after.complete;
+  if (!before.enabled || !after.enabled || before.level_count == 0U ||
+      before.level_count != after.level_count ||
+      after.level_count > after.levels.size()) {
+    result.complete = false;
+    return result;
+  }
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  const auto delta = [&](std::uint64_t first, std::uint64_t last) noexcept {
+    if (first == maximum || last == maximum || last < first) {
+      result.complete = false;
+      return std::uint64_t{0U};
+    }
+    return last - first;
+  };
+  const auto accumulate = [&](std::uint64_t& total,
+                               std::uint64_t value) noexcept {
+    if (value > maximum - total) {
+      result.complete = false;
+      total = maximum;
+    } else {
+      total += value;
+    }
+  };
+  const auto phase = [&](MgPhaseProfile& total, const MgPhaseProfile& first,
+                          const MgPhaseProfile& last) noexcept {
+    accumulate(total.calls, delta(first.calls, last.calls));
+    accumulate(total.nanoseconds, delta(first.nanoseconds, last.nanoseconds));
+  };
+  result.attempts = delta(before.attempts, after.attempts);
+  result.successes = delta(before.successes, after.successes);
+  result.failures = delta(before.failures, after.failures);
+  result.apply_nanoseconds = delta(before.apply_nanoseconds, after.apply_nanoseconds);
+  result.reduction_nanoseconds = delta(before.reduction_nanoseconds,
+                                        after.reduction_nanoseconds);
+  for (std::size_t level = 0U; level < after.level_count; ++level) {
+    const auto& first = before.levels[level];
+    const auto& last = after.levels[level];
+    phase(result.pre_smooth, first.pre_smooth, last.pre_smooth);
+    phase(result.residual, first.residual, last.residual);
+    phase(result.restriction, first.restriction, last.restriction);
+    phase(result.prolongation, first.prolongation, last.prolongation);
+    phase(result.post_smooth, first.post_smooth, last.post_smooth);
+    phase(result.terminal, first.terminal, last.terminal);
+    phase(result.direct_mpi, first.direct_mpi, last.direct_mpi);
+    accumulate(result.halo_wait_nanoseconds,
+               delta(first.halo_wait_nanoseconds, last.halo_wait_nanoseconds));
+    accumulate(result.halo_control_nanoseconds,
+               delta(first.halo_control_nanoseconds, last.halo_control_nanoseconds));
+    accumulate(result.halo_control_calls,
+               delta(first.halo_control_calls, last.halo_control_calls));
+  }
+  result.finest_pre_smooth_nanoseconds = delta(
+      before.levels[0U].pre_smooth.nanoseconds,
+      after.levels[0U].pre_smooth.nanoseconds);
+  result.finest_post_smooth_nanoseconds = delta(
+      before.levels[0U].post_smooth.nanoseconds,
+      after.levels[0U].post_smooth.nanoseconds);
+  return result;
+}
+
 std::uint64_t product_double_bits(double value) noexcept {
   std::uint64_t bits = 0U;
   static_assert(sizeof(bits) == sizeof(value));
@@ -2657,6 +2722,10 @@ struct ProductDriver::Impl {
   PressureLinearOperator pressure_operator;
   std::optional<IbmPressureOperator> ibm_pressure_operator;
   NativeCartesianMgPlan pressure_mg;
+  // One scratch baseline, reused by non-overlapping pressure/energy solves.
+  // The bounded per-loop report stores only a compact delta, never 32 levels.
+  MgApplyProfile pressure_mg_profile_before{};
+  bool pressure_mg_profiling{};
   ConservativeEnthalpyEndpoint enthalpy_endpoint;
   std::optional<detail::ScalarMassRemap> scalar_remap;
   detail::ScalarMassRemap::Report scalar_remap_report{};
@@ -9995,6 +10064,9 @@ Status ProductDriver::Impl::execute_attempt(
             value.structured_control_nanoseconds = after.structured_control_nanoseconds - before.structured_control_nanoseconds;
             value.mg_refill_nanoseconds = mg_after.refill_nanoseconds - mg_before.refill_nanoseconds;
             value.mg_copy_nanoseconds = mg_after.copy_nanoseconds - mg_before.copy_nanoseconds;
+            if (driver.pressure_mg_profiling)
+              value.mg_apply = pressure_mg_solve_delta(
+                  driver.pressure_mg_profile_before, mg.apply_profile());
             for (std::size_t i = 0U; i < value.local_nanoseconds.size(); ++i)
               attempt.local_solve_nanoseconds[i] += value.local_nanoseconds[i];
             if (attempt.solve_observation_count < attempt.solve_observations.size())
@@ -10002,6 +10074,8 @@ Status ProductDriver::Impl::execute_attempt(
           }
         } capture{pressure_energy_globalization, {corrector, refinement_iteration},
                   *this, pressure_mg, resource_snapshot(), pressure_mg.counters()};
+        if (pressure_mg_profiling)
+          pressure_mg_profile_before = pressure_mg.apply_profile();
         detail::LocalPhaseTimer<3U> solve_timer(
             capture.value.local_nanoseconds);
         jacobian_observation = {};
@@ -13820,7 +13894,12 @@ Status ProductDriver::Impl::execute_attempt(
           pressure_one, spec, services, pressure_system, pressure_mg,
           &pressure_mg_counters);
     }
-    if (status) pressure_mg_initialized = true;
+    if (status) {
+      pressure_mg_initialized = true;
+      // The plan is valid here. This local setter changes only observation;
+      // all ranks retain the original compile/solve collective sequence.
+      static_cast<void>(pressure_mg.set_apply_profiling(pressure_mg_profiling));
+    }
   }
   if (status) attempt_stage = 44U;
   if (status && ibm_pressure_operator.has_value())
@@ -15071,6 +15150,36 @@ Status ProductDriver::constrain_convective_time_limit(
     if (maximum_rate > 0.0)
       limits.convective = std::min(limits.convective, 1.0 / maximum_rate);
   }
+  return {};
+}
+
+Status ProductDriver::set_pressure_mg_profiling(bool enabled) noexcept {
+  if (implementation_ == nullptr || implementation_->time.has_active_proposal())
+    return {StatusCode::invalid_plan, kProductInput};
+  if (implementation_->pressure_mg_initialized) {
+    const Status status = implementation_->pressure_mg.set_apply_profiling(enabled);
+    if (!status) return status;
+  }
+  implementation_->pressure_mg_profiling = enabled;
+  return {};
+}
+
+DriverPressureMgProfileView ProductDriver::pressure_mg_profile() const noexcept {
+  if (implementation_ == nullptr) return {};
+  const auto& runtime = *implementation_;
+  return {runtime.pressure_mg_profiling, runtime.pressure_mg_initialized,
+          runtime.plan.implementation_->mg_workspace.level_count(),
+          runtime.pressure_mg_initialized ? &runtime.pressure_mg.apply_profile()
+                                          : nullptr};
+}
+
+Status ProductDriver::pressure_mg_level(std::size_t index, MgLevelView& out) const noexcept {
+  if (implementation_ == nullptr) return {StatusCode::invalid_plan, kProductInput};
+  const auto* required =
+      implementation_->plan.implementation_->mg_workspace.level_requirements(index);
+  if (required == nullptr) return {StatusCode::invalid_plan, kProductInput};
+  out = {required->global_shape, required->patch.cells, required->coarsening,
+         required->line_axis_mask};
   return {};
 }
 

@@ -1,0 +1,51 @@
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+    Start 252: v04_product_pressure_energy_retry_mpi_2
+1/1 Test #252: v04_product_pressure_energy_retry_mpi_2 ...***Failed    2.03 sec
+candidate-work baseline=14 extrapolation=0 ladder=322 incomplete=280 rejected_extrapolations=0
+refinement status=0/0 accepted/attempts=1/1 calls/term=12/1 trajectory=14 terminal=0/2.3243278908215706e-14/1.0460406810870792e-10/0/1.2687156813780412e-31 early-exit=2/1
+full-probe U/k/h=0.0030000000000000001/1.6249999999999999e-05/200933.24368773258:200934.24368773249:200935.24368773249 status=6/10210 stage=54 attempts/accepted=1/0 diag-corrector/select/commit=2/1/0 first-admissible=20 dp/dh=1.8714285355697616e-08/5.4073846728786893e-05 terminal=0/0/0/0/0 refinement=12/2 rollback=1
+rank 0 FAIL: rank-local ProductDriver MG profiles cover all retry and next-target solves, reconcile cumulative work, and leave disabled ranks empty
+rank 1 FAIL: rank-local ProductDriver MG profiles cover all retry and next-target solves, reconcile cumulative work, and leave disabled ranks empty
+rank 1 FAIL: full-dt rejection rolls back exactly, half-dt retry matches a direct BE control, and the following target remains bitwise identical and terminal-positive
+rank 0 FAIL: full-dt rejection rolls back exactly, half-dt retry matches a direct BE control, and the following target remains bitwise identical and terminal-positive
+retry-observation loops=14,2 dt/outcome_bound=1 mg-profile=0 mg-applies=0/0
+retry/control first status=0/0,0/0 attempts=2/1 origin=3/1 dt=0.0044999999999999997/0.0044999999999999997 same=1 terminal1=0/5.6994396657825053e-15/5.2306640959063825e-11/0/0 second same=1 bdf=2/2 terminal2=1.2580836701012501e-16/1.5225052333350336e-12/2.7310788077790582e-11/0/5.2384614615454193e-28
+retry-exhaustion outcome=6/10210 stop=455 attempts=2
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0001357076477417 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0001357076477417
+warm-candidate-work status=0/0 baseline=3 extrapolation=1 ladder=2 incomplete=0 rejected_extrapolations=0
+candidate-loop i=0 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=1 extrapolated_alpha=0 complete=0 selected_extrapolation=0 rejected=0 ladder=1 selected_alpha=1
+candidate-loop i=2 extrapolated_alpha=1.0055573199903851 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0055573199903851
+candidate-loop i=3 extrapolated_alpha=1.0169532438415794 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0169532438415794
+candidate-loop i=4 extrapolated_alpha=1.0407498450995283 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.0407498450995283
+candidate-loop i=5 extrapolated_alpha=1.090024989868605 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.090024989868605
+candidate-loop i=6 extrapolated_alpha=1.2034284034319145 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.2034284034319145
+candidate-loop i=7 extrapolated_alpha=1.5192237111066726 complete=1 selected_extrapolation=1 rejected=0 ladder=0 selected_alpha=1.5192237111066726
+candidate-loop i=8 extrapolated_alpha=2 complete=1 selected_extrapolation=0 rejected=1 ladder=1 selected_alpha=1
+warm-candidate-work status=0/0 baseline=9 extrapolation=7 ladder=3 incomplete=0 rejected_extrapolations=1
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[59503,1],1]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   4.06 sec*proc (1 test)
+
+Total Test time (real) =   2.04 sec
+
+The following tests FAILED:
+	252 - v04_product_pressure_energy_retry_mpi_2 (Failed)  v04_focused
+Errors while running CTest
