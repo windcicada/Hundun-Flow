@@ -167,12 +167,43 @@ ParcelGridCouplingStencil stencil_failure(
   return result;
 }
 
-bool build_axis_stencil(const AxisMetrics& metrics, double coordinate,
-                        AxisStencil& out) noexcept {
+bool build_axis_stencil(const AxisMetrics &metrics, double coordinate,
+                        AxisStencil &out, bool periodic) noexcept {
   const Span<const double> centres = metrics.centres();
   if (!std::isfinite(coordinate) || centres.data == nullptr ||
       centres.size == 0U) {
     return false;
+  }
+  if (periodic) {
+    const auto faces = metrics.faces();
+    if (!faces.data || faces.size != centres.size + 1)
+      return false;
+    const double length = faces.data[faces.size - 1] - faces.data[0];
+    if (!std::isfinite(length) || length <= 0)
+      return false;
+    if (centres.size == 1) {
+      out.indices[0] = 0;
+      out.weights[0] = 1;
+      out.count = 1;
+      return true;
+    }
+    const auto last = centres.size - 1;
+    if (coordinate < centres.data[0] || coordinate > centres.data[last]) {
+      // Translate the last centre to the previous periodic image. Its gap
+      // to the first centre is determined by the actual two end-cell widths.
+      if (coordinate > centres.data[last])
+        coordinate -= length;
+      const double left = centres.data[last] - length;
+      const double spacing = centres.data[0] - left;
+      const double high_weight = (coordinate - left) / spacing;
+      if (!std::isfinite(spacing) || spacing <= 0 ||
+          !std::isfinite(high_weight) || high_weight < 0 || high_weight > 1)
+        return false;
+      out.indices = {static_cast<std::int32_t>(last), 0};
+      out.weights = {1 - high_weight, high_weight};
+      out.count = 2;
+      return true;
+    }
   }
   if (centres.size == 1U || coordinate <= centres.data[0U]) {
     out.indices[0U] = 0;
@@ -340,9 +371,10 @@ bool inside_domain(Vector3 point, Real3 lower, Real3 upper) noexcept {
 
 }  // namespace
 
-ParcelGridCouplingStencil build_parcel_grid_coupling_stencil(
-    const CartesianGeometryPlan& geometry, const MeshPatch& patch,
-    Vector3 position_m) noexcept {
+ParcelGridCouplingStencil
+build_parcel_grid_coupling_stencil(const CartesianGeometryPlan &geometry,
+                                   const MeshPatch &patch, Vector3 position_m,
+                                   std::array<bool, 3U> periodic) noexcept {
   ParcelGridCouplingStencil result;
   const Int3 cells = geometry.global_cells();
   const Real3 lower = geometry.lower();
@@ -351,10 +383,26 @@ ParcelGridCouplingStencil build_parcel_grid_coupling_stencil(
       !finite(position_m)) {
     return stencil_failure(ParcelGridStencilStatus::invalid_input);
   }
-  if (position_m[0U] < lower.x || position_m[0U] > upper.x ||
-      position_m[1U] < lower.y || position_m[1U] > upper.y ||
-      position_m[2U] < lower.z || position_m[2U] > upper.z) {
-    return stencil_failure(ParcelGridStencilStatus::outside_domain);
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double low = axis == 0 ? lower.x : axis == 1 ? lower.y : lower.z;
+    const double high = axis == 0 ? upper.x : axis == 1 ? upper.y : upper.z;
+    if (periodic[axis]) {
+      const double length = high - low;
+      if (!std::isfinite(length) || length <= 0)
+        return stencil_failure(ParcelGridStencilStatus::invalid_input);
+      if (position_m[axis] < low || position_m[axis] >= high) {
+        double offset = std::fmod(position_m[axis] - low, length);
+        if (!std::isfinite(offset))
+          return stencil_failure(ParcelGridStencilStatus::invalid_input);
+        if (offset < 0)
+          offset += length;
+        position_m[axis] = low + offset;
+        if (position_m[axis] >= high)
+          position_m[axis] = low;
+      }
+    } else if (position_m[axis] < low || position_m[axis] > high) {
+      return stencil_failure(ParcelGridStencilStatus::outside_domain);
+    }
   }
   const std::array<const AxisMetrics*, 3U> metrics{
       &geometry.x(), &geometry.y(), &geometry.z()};
@@ -362,7 +410,8 @@ ParcelGridCouplingStencil build_parcel_grid_coupling_stencil(
   for (std::size_t axis = 0U; axis < axes.size(); ++axis) {
     if (metrics[axis]->centres().size !=
             static_cast<std::size_t>(component(cells, axis)) ||
-        !build_axis_stencil(*metrics[axis], position_m[axis], axes[axis])) {
+        !build_axis_stencil(*metrics[axis], position_m[axis], axes[axis],
+                            periodic[axis])) {
       return stencil_failure(ParcelGridStencilStatus::invalid_input);
     }
     result.boundary_clamped |= axes[axis].clamped;

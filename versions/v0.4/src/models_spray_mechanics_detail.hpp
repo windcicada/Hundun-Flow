@@ -45,9 +45,10 @@ struct ParcelGridCouplingStencil {
   }
 };
 
-[[nodiscard]] ParcelGridCouplingStencil build_parcel_grid_coupling_stencil(
-    const CartesianGeometryPlan& geometry, const MeshPatch& patch,
-    Vector3 position_m) noexcept;
+[[nodiscard]] ParcelGridCouplingStencil
+build_parcel_grid_coupling_stencil(const CartesianGeometryPlan &geometry,
+                                   const MeshPatch &patch, Vector3 position_m,
+                                   std::array<bool, 3U> periodic = {}) noexcept;
 
 enum class TrajectoryCandidateKind : std::uint8_t { predictor, corrector };
 

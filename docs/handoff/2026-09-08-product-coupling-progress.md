@@ -166,6 +166,25 @@ Cantera 区间积分器在后续 ESF 接线中消费；此节点不宣称已接�
 - 当前 ProductCompiler 仍明确拒绝 spray 配置，待生命周期和所有气相消费者共同接通后解除。
   此配置增量不代表已运行两相产品，更不代表完整合并完成。
 
+## 原生气相采样、周期模板与角点数据
+
+- `ProductParcelGas` 适配器读取原生 MeanState 的 p/h/U/Ns−1 字段，按完整组分索引映射
+  构造 PH 样本；实际网格面坐标用于 parcel 单元/owner 定位。过期修订、无效组成或超出
+  可用 Halo 的采样明确不可用，不部分覆盖调用者的完整组分缓冲。
+- 共同三线性模板新增可选周期轴，使用真实端部单元中心间距跨周期边界插值，保留全局
+  单元排序、非负权重与总和一。物理域退出保持独立判断，关闭周期时原模板行为保留。
+- 4-rank 实测发现主 Halo 只填六个面，二维分区的角点仍为 NaN。新增显式目标入口复用
+  `RemoteDonorExchangePlan` 补齐边/角点，未改主 Halo 或既有 quadratic 入口的身份路径。
+  新入口冷阶段核对所有 rank 的字段顺序/组分宽度、域尺寸和周期属性，防止错序消费。
+- 17×11×7 非均匀网格的真实 Halo+角点收集+原生场采样在 1/2/4 ranks 通过；热阶段
+  通信/采样无 C++ 动态分配。原始失败与定位证据见 `spray-native-gas-mpi-diagnostic.log`。
+- FilmEnvironmentBridge 可重绑目标修订并复用既有液体/气膜工作区，实际 A–S 区间在
+  第二个已接受步继续推进；旧修订仍拒绝。无需逐步重建和分配气膜工作区。
+- 最终 Clang 11/11 PASS，GCC11/Cantera 9/9 PASS，包括原 IBM donor 计划、压力权限、
+  原生喷雾采样/迁移与 ESF/TCR CLI。日志 `spray-sampling-final-{clang,gcc}.log`。
+- 这些是 native product 所需的采样/通信适配器；ProductCompiler 的 spray 拒绝仍保留，
+  尚未共同提交 parcel/注射器，也尚未发布喷雾气相源。完整合并和圆柱恢复仍未执行。
+
 ## 完整合并前仍须完成
 
 | 待接线 | 必须验收的产品合同 |

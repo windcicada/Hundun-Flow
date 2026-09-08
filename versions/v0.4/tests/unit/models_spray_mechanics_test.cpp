@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include "core_spray_gas_detail.hpp"
 #include "models_spray_mechanics_detail.hpp"
 
 #include <mpi.h>
@@ -125,6 +126,143 @@ ParcelAccelerationSample stokes_relaxation(
                           sample.velocity_m_per_s[axis]);
   }
   return {true, acceleration};
+}
+
+bool test_native_gas_sampler() {
+  CartesianGeometryPlan geometry;
+  MeshPatch patch;
+  if (!compile_geometry(tensor_mesh(), geometry, patch))
+    return false;
+  const auto cells = patch.cells;
+  const std::size_t count = std::size_t(cells.x) * cells.y * cells.z;
+  std::array<std::vector<double>, 5> buffers;
+  std::array<ConstFieldView, 5> views{};
+  for (std::size_t f = 0; f < views.size(); ++f) {
+    const unsigned components = f == 2 ? 3 : 1;
+    buffers[f].resize(count * components);
+    auto &v = views[f];
+    v.base = buffers[f].data();
+    v.interior = cells;
+    v.components = components;
+    v.stride_y = cells.x;
+    v.stride_z = cells.x * cells.y;
+    v.component_stride = count;
+    v.field = f;
+    v.revision = 9;
+    v.storage_identity = 100 + f;
+    v.revision_domain = 1000;
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x) {
+          const double cx = geometry.x().centres().data[x];
+          const double cy = geometry.y().centres().data[y];
+          const auto i = std::size_t(x) + cells.x * (y + cells.y * z);
+          buffers[f][i] = f == 0   ? 10 * cx
+                          : f == 1 ? 300000 + 100 * cx
+                          : f == 2 ? 2 * cx
+                          : f == 3 ? .2 + .01 * cx
+                                   : .3 + .01 * cy;
+          if (f == 2) {
+            buffers[f][count + i] = cy;
+            buffers[f][2 * count + i] = 0;
+          }
+        }
+  }
+  const std::array<std::size_t, 2> mapping{2, 0};
+  hundun::v04::detail::ProductParcelGas sampler;
+  const portable::Revision revision{11, 71, 1};
+  if (!sampler.configure(geometry, patch, {true, false, false}, 100,
+                         {mapping.data(), mapping.size()}, 1) ||
+      !sampler.bind(revision, .1, 101325, views[0], views[1], views[2],
+                    {views.data() + 3, 2}))
+    return false;
+  const auto p = parcel({.75, -.2, 1.5}, {0, 0, 0});
+  std::array<double, 3> ys{-1, -1, -1};
+  const auto gas = sampler.sample(p, .05, ParcelPass::corrector, revision,
+                                  ys.data(), ys.size());
+  bool passed = expect(
+      gas.status == portable::Status::success && gas.revision == revision &&
+          gas.composition_fingerprint == 100 && gas.species_count == 3 &&
+          near(gas.pressure_pa, 101332.5) &&
+          near(gas.enthalpy_j_per_kg, 300075) &&
+          near(gas.velocity_m_per_s, {1.5, -.2, 0}) && near(ys[0], .298) &&
+          near(ys[2], .2075) && near(ys[1], .4945),
+      "native nonuniform PH/U/Y fields feed the full-species parcel query by "
+      "name mapping");
+  const auto before = ys;
+  auto stale = revision;
+  ++stale.input_revision;
+  const auto rejected = sampler.sample(p, .05, ParcelPass::predictor, stale,
+                                       ys.data(), ys.size());
+  passed &= expect(
+      rejected.status == portable::Status::stale_revision && ys == before,
+      "stale accepted field revision cannot publish parcel gas values");
+  spray::detail::ParcelLocation location;
+  passed &= expect(sampler.locate(p.position_m, revision, location) &&
+                       location.global_cell == 17 && location.owner_rank == 0,
+                   "actual stretched faces locate parcel ownership");
+  auto wrapped = p.position_m;
+  wrapped[0] += 4;
+  passed &= expect(sampler.locate(wrapped, revision, location) &&
+                       location.global_cell == 17,
+                   "periodic image resolves to the same physical owner");
+  for (double &v : buffers[3])
+    v = std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(sampler.sample(p, .05, ParcelPass::corrector, revision,
+                                  ys.data(), ys.size())
+                               .status != portable::Status::success &&
+                       ys == before,
+                   "invalid native composition does not partially overwrite "
+                   "the sample buffer");
+  return passed;
+}
+
+bool test_periodic_stencil() {
+  CartesianGeometryPlan geometry;
+  MeshPatch patch;
+  if (!compile_geometry(tensor_mesh(), geometry, patch))
+    return false;
+  const double first = geometry.x().centres().data[0];
+  const double last_image = geometry.x().centres().data[3] - 4;
+  const double y0 = geometry.y().centres().data[0];
+  const double z0 = geometry.z().centres().data[0];
+  const auto stencil = build_parcel_grid_coupling_stencil(
+      geometry, patch, {0, y0, z0}, {true, false, false});
+  bool passed = expect(stencil.succeeded() && stencil.entry_count == 2 &&
+                           !stencil.boundary_clamped,
+                       "periodic seam interpolates across both end cells");
+  double mass = 0, sampled = 0;
+  for (std::size_t i = 0; i < stencil.entry_count; ++i) {
+    const auto &e = stencil.entries[i];
+    const double expected =
+        (e.global_index.x == 0 ? -last_image : first) / (first - last_image);
+    passed &= expect((e.global_index.x == 0 || e.global_index.x == 3) &&
+                         near(e.weight, expected),
+                     "stretched periodic weights use end-cell centre spacing");
+    // Tensor-linear continuation across this seam, independently manufactured.
+    const double x = e.global_index.x == 0 ? first : last_image;
+    sampled += e.weight * (7 + 3 * x);
+    mass += e.weight * 9.0;
+  }
+  passed &=
+      expect(near(sampled, 7) && near(mass, 9),
+             "same periodic stencil interpolates and deposits conservatively");
+  const auto wrapped = build_parcel_grid_coupling_stencil(
+      geometry, patch, {8, y0, z0}, {true, false, false});
+  passed &=
+      expect(wrapped.succeeded() && wrapped.entry_count == stencil.entry_count,
+             "unwrapped periodic parcel position resolves without clamping");
+  for (std::size_t i = 0; i < wrapped.entry_count && i < stencil.entry_count;
+       ++i)
+    passed &= expect(wrapped.entries[i].global_cell ==
+                             stencil.entries[i].global_cell &&
+                         wrapped.entries[i].weight == stencil.entries[i].weight,
+                     "whole-period translations preserve stencil identity");
+  passed &= expect(!build_parcel_grid_coupling_stencil(
+                        geometry, patch, {0, -3, z0}, {true, false, false})
+                        .available,
+                   "periodicity does not mask a physical-domain exit");
+  return passed;
 }
 
 bool test_shared_stencil() {
@@ -596,6 +734,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   bool passed = test_shared_stencil();
+  passed &= test_periodic_stencil();
+  passed &= test_native_gas_sampler();
   passed &= test_trajectory_candidates();
   passed &= test_static_ibm_rebound();
   passed &= test_outlet_ledger();

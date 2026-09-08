@@ -731,6 +731,16 @@ struct RemoteDonorFieldSpec {
   std::uint8_t components{};
 };
 
+// Explicit geometry-certified ghost targets for non-quadratic consumers,
+// including tensor parcel stencils. Values are borrowed only during analyze.
+struct RemoteDonorTargets {
+  PlanFingerprint geometry{};
+  std::uint8_t reach{};
+  std::array<bool, 3> periodic{};
+  Span<const GlobalCellId> global_cells{};
+  Span<const Int3> local_indices{};
+};
+
 struct RemoteDonorExchangeStats {
   std::uint64_t received_cells{};
   std::uint64_t supplied_cells{};
@@ -771,6 +781,11 @@ class RemoteDonorExchangePlan {
                         Span<const RemoteDonorFieldSpec> fields,
                         StageId stage,
                         RemoteDonorExchangePlan& out) noexcept;
+  static Status analyze_cells(MPI_Comm communicator, Int3 global_cells,
+                              MeshPatch patch, RemoteDonorTargets targets,
+                              Span<const RemoteDonorFieldSpec> fields,
+                              StageId stage,
+                              RemoteDonorExchangePlan &out) noexcept;
   Status bind(MPI_Comm communicator) noexcept;
   // Pure rank-local validation.  Callers that may present rank-dependent
   // views must globalize this status before any rank enters exchange().
@@ -787,9 +802,14 @@ class RemoteDonorExchangePlan {
   bool ready() const noexcept;
 
  private:
-  struct Impl;
-  void release() noexcept;
-  Impl* implementation_{};
+   static Status analyze_values(MPI_Comm communicator, Int3 global_cells,
+                                MeshPatch patch, RemoteDonorTargets targets,
+                                Span<const RemoteDonorFieldSpec> fields,
+                                StageId stage,
+                                RemoteDonorExchangePlan &out) noexcept;
+   struct Impl;
+   void release() noexcept;
+   Impl *implementation_{};
 };
 
 struct SurfaceTractionPoint {

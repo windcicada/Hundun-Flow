@@ -86,5 +86,22 @@ int main(int argc, char **argv) {
               "A-S physical transfer counts evaporated mass once");
   ok &= check(sampler.queries >= 5,
               "each interval state obtains a new external gas sample");
+  const portable::Revision next{5, 10, 1};
+  ok &= check(
+      bridge.bind_revision(next) == portable::Status::success &&
+          interval
+              .advance(integrated.parcel, 0, 1e-7, ParcelPass::corrector, next)
+              .available &&
+          bridge.query(parcel, 0, ParcelPass::predictor, revision).status ==
+              portable::Status::stale_revision,
+      "next accepted step reuses the actual film and A-S lane with a new "
+      "revision");
+  auto invalid_revision = next;
+  invalid_revision.algorithm_version = 2;
+  ok &= check(bridge.bind_revision(invalid_revision) ==
+                      portable::Status::invalid_input &&
+                  bridge.query(parcel, 0, ParcelPass::predictor, next)
+                      .environment.available,
+              "failed revision binding preserves the current prepared lane");
   return ok ? 0 : 1;
 }

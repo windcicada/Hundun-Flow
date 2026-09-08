@@ -76,12 +76,11 @@ bool in_padded(Int3 cell, Int3 shape, Int3 ghosts) noexcept {
 }
 
 bool periodic_extent_valid(Int3 global, unsigned reach,
-                           const QuadraticStencilPlan& reconstruction) noexcept {
+                           const std::array<bool, 3> &periodic) noexcept {
   const std::int32_t extents[3]{global.x, global.y, global.z};
   for (int axis = 0; axis < 3; ++axis) {
-    if (reconstruction.periodic_axis(static_cast<CartesianAxis>(axis)) &&
-        static_cast<std::int64_t>(extents[axis]) <=
-            2 * static_cast<std::int64_t>(reach)) {
+    if (periodic[axis] && static_cast<std::int64_t>(extents[axis]) <=
+                              2 * static_cast<std::int64_t>(reach)) {
       return false;
     }
   }
@@ -93,8 +92,8 @@ bool periodic_extent_valid(Int3 global, unsigned reach,
 // certified padded field; no arbitrary modulo or multi-period aliases are
 // accepted here.
 bool canonicalize_raw(Int3 raw, Int3 global, unsigned reach,
-                      const QuadraticStencilPlan& reconstruction,
-                      Int3& canonical) noexcept {
+                      const std::array<bool, 3> &periodic,
+                      Int3 &canonical) noexcept {
   const std::int32_t raw_values[3]{raw.x, raw.y, raw.z};
   const std::int32_t extents[3]{global.x, global.y, global.z};
   std::int32_t canonical_values[3]{};
@@ -105,8 +104,7 @@ bool canonicalize_raw(Int3 raw, Int3 global, unsigned reach,
       canonical_values[axis] = raw_values[axis];
       continue;
     }
-    if (!reconstruction.periodic_axis(static_cast<CartesianAxis>(axis)) ||
-        extent <= 2 * static_cast<std::int64_t>(reach)) {
+    if (!periodic[axis] || extent <= 2 * static_cast<std::int64_t>(reach)) {
       return false;
     }
     if (value < 0) {
@@ -292,9 +290,87 @@ void RemoteDonorExchangePlan::release() noexcept {
 
 Status RemoteDonorExchangePlan::analyze(
     MPI_Comm communicator, Int3 global_cells, MeshPatch patch,
-    const QuadraticStencilPlan& reconstruction,
+    const QuadraticStencilPlan &reconstruction,
     Span<const RemoteDonorFieldSpec> fields, StageId stage,
-    RemoteDonorExchangePlan& out) noexcept try {
+    RemoteDonorExchangePlan &out) noexcept {
+  RemoteDonorTargets targets;
+  targets.geometry = reconstruction.fingerprint();
+  targets.reach = reconstruction.maximum_halo_reach();
+  for (unsigned d = 0; d < 3; ++d)
+    targets.periodic[d] =
+        reconstruction.periodic_axis(static_cast<CartesianAxis>(d));
+  targets.global_cells = reconstruction.donor_global_cells();
+  targets.local_indices = reconstruction.donor_local_indices();
+  return analyze_values(communicator, global_cells, patch, targets, fields,
+                        stage, out);
+}
+
+Status RemoteDonorExchangePlan::analyze_cells(
+    MPI_Comm communicator, Int3 global_cells, MeshPatch patch,
+    RemoteDonorTargets targets, Span<const RemoteDonorFieldSpec> fields,
+    StageId stage, RemoteDonorExchangePlan &out) noexcept {
+  if (communicator == MPI_COMM_NULL)
+    return {StatusCode::invalid_plan, kDonorInput};
+  int rank = 0, size = 0;
+  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS ||
+      MPI_Comm_size(communicator, &size) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kDonorCollective};
+  const auto valid = donor_local_stage(communicator, rank, size, [&] {
+    return !targets.geometry || !fields.data || !fields.size ||
+                   targets.global_cells.size != targets.local_indices.size ||
+                   (targets.global_cells.size &&
+                    (!targets.global_cells.data || !targets.local_indices.data))
+               ? Status{StatusCode::invalid_plan, kDonorInput}
+               : Status{};
+  });
+  if (!valid)
+    return valid;
+  auto schema = mix(kFnvOffset, stage);
+  for (int n : {global_cells.x, global_cells.y, global_cells.z})
+    schema = mix(schema, n);
+  for (bool p : targets.periodic)
+    schema = mix(schema, p);
+  schema = mix(schema, fields.size);
+  for (std::size_t i = 0; i < fields.size; ++i) {
+    schema = mix(schema, fields.data[i].field);
+    schema = mix(schema, fields.data[i].components);
+  }
+  std::uint64_t minimum{}, maximum{};
+  if (MPI_Allreduce(&schema, &minimum, 1, MPI_UINT64_T, MPI_MIN,
+                    communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(&schema, &maximum, 1, MPI_UINT64_T, MPI_MAX,
+                    communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kDonorCollective};
+  if (minimum != maximum)
+    return {StatusCode::invalid_plan, kDonorInput};
+  // The generic consumer's identity includes every target coordinate. The
+  // quadratic adapter keeps its established certified reconstruction identity.
+  if (targets.geometry &&
+      targets.global_cells.size == targets.local_indices.size &&
+      (!targets.global_cells.size ||
+       (targets.global_cells.data && targets.local_indices.data))) {
+    auto hash = mix(kFnvOffset, UINT64_C(0x43454c4c47415401));
+    hash = mix(hash, targets.geometry);
+    for (bool p : targets.periodic)
+      hash = mix(hash, p);
+    hash = mix(hash, targets.reach);
+    hash = mix(hash, targets.global_cells.size);
+    for (std::size_t i = 0; i < targets.global_cells.size; ++i) {
+      hash = mix(hash, targets.global_cells.data[i]);
+      const auto c = targets.local_indices.data[i];
+      for (auto v : {c.x, c.y, c.z})
+        hash = mix(hash, static_cast<std::uint32_t>(v));
+    }
+    targets.geometry = hash ? hash : 1;
+  }
+  return analyze_values(communicator, global_cells, patch, targets, fields,
+                        stage, out);
+}
+
+Status RemoteDonorExchangePlan::analyze_values(
+    MPI_Comm communicator, Int3 global_cells, MeshPatch patch,
+    RemoteDonorTargets targets, Span<const RemoteDonorFieldSpec> fields,
+    StageId stage, RemoteDonorExchangePlan &out) noexcept try {
   if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, kDonorInput};
   int rank = -1;
@@ -303,14 +379,13 @@ Status RemoteDonorExchangePlan::analyze(
       MPI_Comm_size(communicator, &size) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kDonorCollective};
   Status status = donor_local_stage(communicator, rank, size, [&] {
-    return out.implementation_ != nullptr ||
-                   reconstruction.fingerprint() == 0U ||
+    return out.implementation_ != nullptr || targets.geometry == 0U ||
                    fields.data == nullptr || fields.size == 0U || stage == 0U
                ? Status{StatusCode::invalid_plan, kDonorInput}
                : Status{};
   });
   if (!status) return status;
-  const unsigned local_reach = reconstruction.maximum_halo_reach();
+  const unsigned local_reach = targets.reach;
   unsigned global_reach = 0U;
   if (MPI_Allreduce(&local_reach, &global_reach, 1, MPI_UNSIGNED, MPI_MAX,
                     communicator) != MPI_SUCCESS)
@@ -329,9 +404,10 @@ Status RemoteDonorExchangePlan::analyze(
       local_valid = local_valid && fields.data[prior].field != field.field;
     values_per_cell += field.components;
   }
-  const auto globals = reconstruction.donor_global_cells();
-  const auto locals = reconstruction.donor_local_indices();
-  local_valid = local_valid && globals.size == locals.size;
+  const auto globals = targets.global_cells;
+  const auto locals = targets.local_indices;
+  local_valid = local_valid && globals.size == locals.size &&
+                (globals.size == 0 || (globals.data && locals.data));
   int valid_integer = local_valid ? 1 : 0;
   int globally_valid = 0;
   if (MPI_Allreduce(&valid_integer, &globally_valid, 1, MPI_INT, MPI_MIN,
@@ -339,8 +415,8 @@ Status RemoteDonorExchangePlan::analyze(
     return {StatusCode::mpi_failure, kDonorCollective};
   if (globally_valid == 0)
     return {StatusCode::invalid_plan, kDonorInput};
-  local_valid = periodic_extent_valid(global_cells, global_reach,
-                                      reconstruction);
+  local_valid =
+      periodic_extent_valid(global_cells, global_reach, targets.periodic);
   valid_integer = local_valid ? 1 : 0;
   if (MPI_Allreduce(&valid_integer, &globally_valid, 1, MPI_INT, MPI_MIN,
                     communicator) != MPI_SUCCESS)
@@ -362,7 +438,7 @@ Status RemoteDonorExchangePlan::analyze(
                      {static_cast<std::int32_t>(global_reach),
                       static_cast<std::int32_t>(global_reach),
                       static_cast<std::int32_t>(global_reach)}) ||
-          !canonicalize_raw(raw, global_cells, global_reach, reconstruction,
+          !canonicalize_raw(raw, global_cells, global_reach, targets.periodic,
                             canonical_from_raw) ||
           !same(canonical, canonical_from_raw)) {
         local_valid = false;
@@ -520,7 +596,7 @@ Status RemoteDonorExchangePlan::analyze(
         (receive_values + send_values) * sizeof(double);
     candidate->stats.peer_messages = peer_messages;
     std::uint64_t hash = kFnvOffset;
-    hash = mix(hash, reconstruction.fingerprint());
+    hash = mix(hash, targets.geometry);
     hash = mix(hash, stage);
     hash = mix(hash, values_per_cell);
     hash = mix(hash, candidate->reach);
@@ -537,7 +613,7 @@ Status RemoteDonorExchangePlan::analyze(
   if (!status) return status;
   out.implementation_ = candidate.release();
   return {};
-} catch (const std::bad_alloc&) {
+} catch (const std::bad_alloc &) {
   return {StatusCode::allocation_failure, kDonorLayout};
 } catch (...) {
   return {StatusCode::invalid_plan, kDonorInput};

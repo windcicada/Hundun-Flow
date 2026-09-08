@@ -34,6 +34,15 @@ public:
                         const ParcelGasStateProvider &, portable::Revision);
   FilmEnvironmentBridge(const FilmEnvironmentBridge &) = delete;
   FilmEnvironmentBridge &operator=(const FilmEnvironmentBridge &) = delete;
+  // Reuse the cold-reserved exclusive lane for the next native attempt.
+  // No sampled state is cached across queries; failed binding preserves the
+  // current revision and all owned capacities.
+  portable::Status bind_revision(portable::Revision revision) noexcept {
+    if (revision.algorithm_version != 1 || !revision.input_revision)
+      return portable::Status::invalid_input;
+    revision_ = revision;
+    return portable::Status::success;
+  }
   FilmEnvironmentReport query(const SprayParcelState &, double, ParcelPass,
                               portable::Revision) const noexcept;
   ParcelTransferEnvironment sample(const SprayParcelState &, double, ParcelPass,
