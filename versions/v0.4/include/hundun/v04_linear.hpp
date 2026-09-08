@@ -577,6 +577,31 @@ struct LinearReductionCounters {
   std::uint64_t wall_nanoseconds{};
 };
 
+// Optional, borrowed, rank-local FGMRES observation. Reset on every call;
+// available means preflight passed, not that the solve succeeded. On failure
+// counts describe the executed prefix and never authorize publishing solution.
+// The sink must remain valid and disjoint from solver fields/workspace for the
+// call. Its presence/address need not agree across ranks. No allocation, timer,
+// collective, solver control or persistent history is added by this observation.
+struct FgmresRecoveryObservation {
+  bool available{};
+  std::uint64_t unsafe_norms{};
+  std::uint64_t discarded_columns{};
+  std::uint64_t explicit_reorthogonalizations{};
+  // Only actual continued cycles count as restarts. The first two sum to the
+  // existing norm_breakdown_restarts; a converging/failing event is not a restart.
+  std::uint64_t unsafe_restarts{};
+  std::uint64_t happy_restarts{};
+  std::uint64_t length_restarts{};
+  // Attempted A calls, including failures. These five disjoint categories sum
+  // to LinearSolveResult::operator_applies, which excludes recycle projection A.
+  std::uint64_t initial_residual_applies{};
+  std::uint64_t arnoldi_applies{};
+  std::uint64_t unsafe_residual_applies{};
+  std::uint64_t interior_residual_applies{};
+  std::uint64_t cycle_residual_applies{};
+};
+
 inline constexpr std::size_t kReductionMaximumLocationPayload = 5U;
 
 // Deterministic max-location reduction.  Equal values select the smallest
@@ -761,7 +786,7 @@ class SolverWorkspace {
   friend LinearSolveResult solve_fgmres(
       const LinearOperator&, LinearPreconditioner&,
       const LinearSolveInvocation&, SolverWorkspace&, ReductionEngine&,
-      ResourceCounters*) noexcept;
+      ResourceCounters*, FgmresRecoveryObservation*) noexcept;
   friend LinearIdentity compose_linear_identity(
       const SymbolicPlan&, const NumericState&, const HierarchyState&,
       const SolverWorkspace&) noexcept;
@@ -1041,7 +1066,8 @@ LinearSolveResult solve_fgmres(
     LinearPreconditioner& preconditioner,
     const LinearSolveInvocation& invocation, SolverWorkspace& workspace,
     ReductionEngine& reductions,
-    ResourceCounters* resources = nullptr) noexcept;
+    ResourceCounters* resources = nullptr,
+    FgmresRecoveryObservation* recovery_observation = nullptr) noexcept;
 LinearSolveResult solve_bicgstab(
     const LinearOperator& linear_operator,
     LinearPreconditioner& preconditioner,

@@ -1,0 +1,34 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 282: v04_solver_krylov_mpi_1
+1/1 Test #282: v04_solver_krylov_mpi_1 ..........***Failed    2.32 sec
+rank 0 FAIL: FGMRES observation separates discarded-column recovery and true-residual A calls
+-------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code.. Per user-direction, the job has been aborted.
+-------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[54666,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+v04_focused    =   2.32 sec*proc (1 test)
+
+Total Test time (real) =   2.33 sec
+
+The following tests FAILED:
+	282 - v04_solver_krylov_mpi_1 (Failed)                  v04_focused
+[ERROR_MESSAGE] 
+Errors while running CTest
+

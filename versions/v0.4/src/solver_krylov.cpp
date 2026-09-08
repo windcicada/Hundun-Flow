@@ -1515,7 +1515,10 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
                                const LinearSolveInvocation& invocation,
                                SolverWorkspace& workspace,
                                ReductionEngine& reductions,
-                               ResourceCounters* resources) noexcept {
+                               ResourceCounters* resources,
+                               FgmresRecoveryObservation*
+                                   recovery_observation) noexcept {
+  if (recovery_observation != nullptr) *recovery_observation = {};
   const std::uint64_t initial_calls = reductions.counters().calls;
   LinearPreconditionerStatusScope preconditioner_status_scope{
       LinearPreconditionerStatusScope::rank_local};
@@ -1532,6 +1535,7 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
     return invalid_result(prepared, LinearTermination::invalid_plan,
                           reductions, initial_calls);
   }
+  if (recovery_observation != nullptr) recovery_observation->available = true;
   const bool prepared_batch =
       preconditioner_apply_lifecycle ==
       LinearPreconditionerApplyLifecycle::prepared_batch;
@@ -1613,6 +1617,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
                           resources, reductions, initial_calls);
   }
   FieldView v0 = workspace.vector(v_begin, shape);
+  if (recovery_observation != nullptr)
+    ++recovery_observation->initial_residual_applies;
   status = compute_true_residual(linear_operator, invocation.rhs, x, v0,
                                  v_begin, ax, ax_slot, workspace, reductions,
                                  result, result.initial_true_residual);
@@ -2106,6 +2112,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
                               LinearTermination::preconditioner_failure,
                               resources, reductions, initial_calls);
       }
+      if (recovery_observation != nullptr)
+        ++recovery_observation->arnoldi_applies;
       const OperatorApplyStatus operator_apply = apply_operator(
           linear_operator, z, ax, ax_slot, workspace, result);
       if (operator_apply.collective_failure) {
@@ -2164,7 +2172,12 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
                               resources, reductions, initial_calls);
       }
 
+      if (recovery_observation != nullptr && unsafe_recurrence)
+        ++recovery_observation->unsafe_norms;
+
       if (unsafe_recurrence && column != 0U) {
+        if (recovery_observation != nullptr)
+          ++recovery_observation->discarded_columns;
         ++result.iterations;
         const std::size_t valid_basis_count =
             static_cast<std::size_t>(column);
@@ -2201,6 +2214,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
         status = revise(workspace, x_slot, x, status);
         v0 = workspace.vector(v_begin, shape);
         ax = workspace.vector(ax_slot, shape);
+        if (recovery_observation != nullptr)
+          ++recovery_observation->unsafe_residual_applies;
         status = compute_true_residual(
             linear_operator, invocation.rhs, x, v0, v_begin, ax, ax_slot,
             workspace, reductions, result, result.final_true_residual);
@@ -2256,6 +2271,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
               initial_calls);
         }
         ++result.norm_breakdown_restarts;
+        if (recovery_observation != nullptr)
+          ++recovery_observation->unsafe_restarts;
         std::fill(h.data, h.data + h_size, 0.0);
         std::fill(cosine.data, cosine.data + restart, 0.0);
         std::fill(sine.data, sine.data + restart, 0.0);
@@ -2267,6 +2284,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
 
       bool explicitly_orthogonalized = false;
       if (unsafe_recurrence || next_norm == 0.0) {
+        if (recovery_observation != nullptr)
+          ++recovery_observation->explicit_reorthogonalizations;
         // The rearranged squared norm can become non-positive through
         // cancellation even when the Arnoldi residual is nonzero.  Form that
         // residual from the current operator vector and projections, apply a
@@ -2441,6 +2460,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
         status = revise(workspace, trial_slot, trial, status);
         ax = workspace.vector(ax_slot, shape);
         double audited_residual = 0.0;
+        if (recovery_observation != nullptr)
+          ++recovery_observation->interior_residual_applies;
         status = compute_true_residual_norm_in_place(
             linear_operator, invocation.rhs, trial, ax, ax_slot, workspace,
             reductions, result, audited_residual);
@@ -2498,6 +2519,8 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
       status = revise(workspace, x_slot, x, status);
       v0 = workspace.vector(v_begin, shape);
       ax = workspace.vector(ax_slot, shape);
+      if (recovery_observation != nullptr)
+        ++recovery_observation->cycle_residual_applies;
       status = compute_true_residual(
           linear_operator, invocation.rhs, x, v0, v_begin, ax, ax_slot,
           workspace, reductions, result, result.final_true_residual);
@@ -2563,6 +2586,10 @@ LinearSolveResult solve_fgmres(const LinearOperator& linear_operator,
               initial_calls);
         }
         ++result.norm_breakdown_restarts;
+        if (recovery_observation != nullptr)
+          ++recovery_observation->happy_restarts;
+      } else if (recovery_observation != nullptr) {
+        ++recovery_observation->length_restarts;
       }
       restarted = true;
       break;

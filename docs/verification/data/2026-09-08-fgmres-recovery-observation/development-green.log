@@ -1,0 +1,19 @@
+[OUTPUT] 
+Internal ctest changing into directory: /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+[HANDLER_OUTPUT] 
+Test project /home/wyf/code_dev/.worktrees/hundun-flow-strict-coast-parity/build-review-fixes
+
+    Start 282: v04_solver_krylov_mpi_1
+1/3 Test #282: v04_solver_krylov_mpi_1 ..........   Passed    0.32 sec
+    Start 284: v04_solver_krylov_mpi_2
+2/3 Test #284: v04_solver_krylov_mpi_2 ..........   Passed    0.32 sec
+    Start 286: v04_solver_krylov_mpi_4
+3/3 Test #286: v04_solver_krylov_mpi_4 ..........   Passed    0.34 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Label Time Summary:
+v04_focused    =   2.30 sec*proc (3 tests)
+
+Total Test time (real) =   0.98 sec

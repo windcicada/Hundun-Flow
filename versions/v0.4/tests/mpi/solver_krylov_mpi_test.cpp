@@ -1521,9 +1521,10 @@ bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
     LinearSolveControl selected = control(300U, 4U);
     selected.true_residual_interval = 1U;
     detail::force_single_reduction_fgmres_breakdown_for_test(1U);
+    FgmresRecoveryObservation observation;
     const LinearSolveResult result = solve_fgmres(
         op, preconditioner, invocation(fixture, selected),
-        fixture.workspace, fixture.reductions);
+        fixture.workspace, fixture.reductions, nullptr, &observation);
     detail::force_single_reduction_fgmres_breakdown_for_test(0U);
     const ResidualOracle oracle = independent_true_residual(
         fixture, communicator, -1.2, 3.0, -0.7);
@@ -1545,6 +1546,16 @@ bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
             finite_solution(fixture) && error < 1.0e-8,
         rank,
         "first-column unsafe norm is explicitly recovered without a restart");
+    passed &= expect(observation.available && observation.unsafe_norms > 0U &&
+        observation.explicit_reorthogonalizations == observation.unsafe_norms &&
+        observation.discarded_columns == 0U && observation.unsafe_restarts == 0U &&
+        observation.happy_restarts == 0U && observation.length_restarts > 0U &&
+        observation.unsafe_residual_applies == 0U &&
+        observation.initial_residual_applies == 1U &&
+        observation.arnoldi_applies == result.iterations &&
+        observation.interior_residual_applies + observation.cycle_residual_applies ==
+            result.iterations, rank,
+        "explicit first-column recovery is distinct from unsafe and length restarts");
   }
   {
     SolveFixture fixture;
@@ -1562,9 +1573,10 @@ bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
     LinearSolveControl selected = control(300U, 4U);
     selected.true_residual_interval = 1U;
     detail::force_single_reduction_fgmres_breakdown_for_test(2U);
+    FgmresRecoveryObservation observation;
     const LinearSolveResult result = solve_fgmres(
         op, preconditioner, invocation(fixture, selected),
-        fixture.workspace, fixture.reductions);
+        fixture.workspace, fixture.reductions, nullptr, &observation);
     detail::force_single_reduction_fgmres_breakdown_for_test(0U);
     const ResidualOracle oracle = independent_true_residual(
         fixture, communicator, -1.2, 3.0, -0.7);
@@ -1585,6 +1597,24 @@ bool test_fgmres_norm_breakdown_lifecycle(MPI_Comm communicator, int rank) {
             finite_solution(fixture) && error < 1.0e-8,
         rank,
         "later unsafe norm restarts remain bounded through convergence");
+    passed &= expect(
+        observation.available && observation.unsafe_norms > 0U &&
+            observation.discarded_columns == observation.unsafe_norms &&
+            observation.unsafe_restarts == result.norm_breakdown_restarts &&
+            observation.happy_restarts == 0U &&
+            observation.length_restarts == 0U &&
+            observation.initial_residual_applies == 1U &&
+            observation.arnoldi_applies == result.iterations &&
+            observation.unsafe_residual_applies == observation.discarded_columns &&
+            observation.interior_residual_applies +
+                    observation.unsafe_residual_applies == result.iterations &&
+            observation.cycle_residual_applies == 0U &&
+            observation.initial_residual_applies + observation.arnoldi_applies +
+                    observation.unsafe_residual_applies +
+                    observation.interior_residual_applies +
+                    observation.cycle_residual_applies == op.calls(),
+        rank,
+        "FGMRES observation separates discarded-column recovery and true-residual A calls");
   }
   return all_true(passed, communicator);
 }
@@ -2470,6 +2500,166 @@ bool same_complete_result(const LinearSolveResult& left,
              right.recycle_capture_reduction_calls &&
          left.recycle_capture_blocking_operations ==
              right.recycle_capture_blocking_operations;
+}
+
+std::uint64_t observed_operator_applies(const FgmresRecoveryObservation& value) {
+  return value.initial_residual_applies + value.arnoldi_applies +
+         value.unsafe_residual_applies + value.interior_residual_applies +
+         value.cycle_residual_applies;
+}
+
+bool empty_recovery_counts(const FgmresRecoveryObservation& value) {
+  return observed_operator_applies(value) == 0U && value.unsafe_norms == 0U &&
+      value.discarded_columns == 0U && value.explicit_reorthogonalizations == 0U &&
+      value.unsafe_restarts == 0U && value.happy_restarts == 0U &&
+      value.length_restarts == 0U;
+}
+
+bool test_fgmres_recovery_observation_lifecycle(MPI_Comm communicator,
+                                               int rank, int size) {
+  bool passed = true;
+  // Compare disabled to enabled, then to a sink on only root/nonroot. The
+  // independent operator and reduction counters also cover collective order.
+  for (const int sink_rank : {-1, 0, size - 1}) {
+    for (const bool fail_operator : {false, true}) {
+      std::array<SolveFixture, 2U> fixtures;
+      bool initialized = true;
+      for (auto& fixture : fixtures)
+        initialized &= initialize_fixture(communicator, LinearAlgorithm::fgmres,
+                                           4U, fixture);
+      if (!all_true(initialized, communicator)) return false;
+      std::array<LinearSolveResult, 2U> results;
+      std::array<LinearReductionCounters, 2U> work;
+      std::array<std::uint32_t, 2U> operator_calls{};
+      std::array<std::uint32_t, 2U> preconditioner_calls{};
+      FgmresRecoveryObservation observation;
+      const bool local_sink = sink_rank < 0 || rank == sink_rank;
+      auto selected = control(300U, 4U);
+      selected.true_residual_interval = 2U;
+      for (std::size_t run = 0U; run < fixtures.size(); ++run) {
+        auto& fixture = fixtures[run];
+        fill_system(fixture, -1.2, 3.0, -0.7, 2.5);
+        const auto before = snapshot_solution(fixture.solution.view);
+        TridiagonalOperator op(communicator, fixture.local, fixture.expected,
+            -1.2, 3.0, -0.7, false, fail_operator ? size - 1 : -1, 2U);
+        ScalingPreconditioner preconditioner(fixture.expected, 1.0 / 3.0, false);
+        const auto before_work = fixture.reductions.counters();
+        std::size_t allocations = 0U;
+        {
+          allocation_observer::Guard guard;
+          results[run] = solve_fgmres(op, preconditioner,
+              invocation(fixture, selected), fixture.workspace, fixture.reductions,
+              nullptr, run == 1U && local_sink ? &observation : nullptr);
+          allocations = allocation_observer::count.load(std::memory_order_relaxed);
+        }
+        work[run] = reduction_delta(fixture.reductions.counters(), before_work);
+        operator_calls[run] = op.calls();
+        preconditioner_calls[run] = preconditioner.calls();
+        passed &= expect(allocations == 0U, rank,
+            "FGMRES optional recovery observation adds no hot C++ allocation");
+        if (fail_operator) {
+          passed &= expect(!results[run].status &&
+              results[run].lowest_failing_rank == size - 1 &&
+              same_solution(fixture.solution.view, before), rank,
+              "observed single-rank A failure preserves caller solution on every rank");
+        } else {
+          const auto oracle = independent_true_residual(
+              fixture, communicator, -1.2, 3.0, -0.7);
+          passed &= expect(results[run].status && residual_is_accepted(oracle, selected) &&
+              residual_report_matches(results[run].final_true_residual, oracle), rank,
+              "observed FGMRES solution satisfies independent residual oracle");
+        }
+      }
+      passed &= expect(same_complete_result(results[0U], results[1U]) &&
+          same_solution(fixtures[0U].solution.view,
+              snapshot_solution(fixtures[1U].solution.view)) &&
+          same_reduction_work(work[0U], work[1U]) &&
+          operator_calls[0U] == operator_calls[1U] &&
+          preconditioner_calls[0U] == preconditioner_calls[1U], rank,
+          "rank-local recovery sink leaves solution and all non-timing work unchanged");
+      if (local_sink) {
+        passed &= expect(observation.available &&
+            observed_operator_applies(observation) == operator_calls[1U] &&
+            observed_operator_applies(observation) == results[1U].operator_applies &&
+            observation.unsafe_restarts + observation.happy_restarts ==
+                results[1U].norm_breakdown_restarts, rank,
+            "recovery categories account for external A calls and legacy restart total");
+        if (fail_operator)
+          passed &= expect(observation.initial_residual_applies == 1U &&
+              observation.arnoldi_applies == 1U &&
+              observation.unsafe_residual_applies == 0U &&
+              observation.interior_residual_applies == 0U &&
+              observation.cycle_residual_applies == 0U, rank,
+              "failed solve reports only the two attempted A calls, not completed iterations");
+        else
+          passed &= expect(observation.length_restarts > 0U &&
+              observation.interior_residual_applies > 0U &&
+              observation.cycle_residual_applies > 0U, rank,
+              "ordinary restarted solve distinguishes interior and cycle residual audits");
+      }
+    }
+  }
+
+  SolveFixture fixture;
+  if (!all_true(initialize_fixture(communicator, LinearAlgorithm::fgmres, 4U,
+                                   fixture), communicator)) return false;
+  // A=I gives a zero Arnoldi residual exactly after the shift. Nonuniform b
+  // makes the finite-precision solution update inexact. A deliberately tiny
+  // public tolerance exercises a happy restart, not a negative norm injection.
+  fill_system(fixture, 0.0, 1.0, 0.0);
+  const auto initial = snapshot_solution(fixture.solution.view);
+  TridiagonalOperator identity(communicator, fixture.local, fixture.expected,
+                               0.0, 1.0, 0.0, false);
+  ScalingPreconditioner preconditioner(fixture.expected, 1.0, false);
+  auto selected = control(10U, 4U);
+  selected.absolute_tolerance = 1e-30;
+  selected.relative_tolerance = 0.0;
+  FgmresRecoveryObservation observation;
+  const auto happy = solve_fgmres(identity, preconditioner, invocation(fixture, selected),
+      fixture.workspace, fixture.reductions, nullptr, &observation);
+  passed &= expect(observation.available && observation.happy_restarts > 0U &&
+      observation.happy_restarts == happy.norm_breakdown_restarts &&
+      observation.unsafe_norms == 0U && observation.discarded_columns == 0U &&
+      observation.unsafe_restarts == 0U && observation.length_restarts == 0U &&
+      observation.interior_residual_applies == 0U &&
+      observation.explicit_reorthogonalizations == happy.iterations &&
+      observation.cycle_residual_applies == happy.iterations &&
+      observed_operator_applies(observation) == identity.calls(), rank,
+      "happy recovery has distinct reason and never claims negative-norm direction loss");
+  if (happy.status) {
+    const auto oracle = independent_true_residual(fixture, communicator, 0.0, 1.0, 0.0);
+    passed &= expect(residual_is_accepted(oracle, selected), rank,
+        "happy recovery cannot bypass the true-residual oracle");
+  } else {
+    passed &= expect(same_solution(fixture.solution.view, initial) &&
+        (happy.termination == LinearTermination::breakdown ||
+         happy.termination == LinearTermination::maximum_iterations), rank,
+        "unattainable tolerance remains a bounded transactional failure");
+  }
+  if (rank == 0)
+    std::cout << "FGMRES_RECOVERY identity iterations=" << happy.iterations
+        << " happy_restarts=" << observation.happy_restarts
+        << " unsafe_restarts=" << observation.unsafe_restarts
+        << " A=" << happy.operator_applies
+        << " sink_bytes=" << sizeof(FgmresRecoveryObservation) << '\n';
+  for (int c = 0; c < fixture.local.cells; ++c)
+    fixture.rhs.view.unchecked({c, 0, 0}, 0U) = 0.0;
+  const auto zero = solve_fgmres(identity, preconditioner, invocation(fixture, selected),
+      fixture.workspace, fixture.reductions, nullptr, &observation);
+  passed &= expect(zero.status && zero.termination == LinearTermination::zero_rhs &&
+      observation.available && empty_recovery_counts(observation), rank,
+      "reused observation resets all counts for a zero-RHS solve");
+  observation.unsafe_norms = 77U;
+  observation.initial_residual_applies = 77U;
+  if (rank == size - 1) selected.absolute_tolerance = -1.0;
+  const auto before_invalid = snapshot_solution(fixture.solution.view);
+  const auto invalid = solve_fgmres(identity, preconditioner, invocation(fixture, selected),
+      fixture.workspace, fixture.reductions, nullptr, &observation);
+  passed &= expect(invalid.status.code == StatusCode::invalid_plan &&
+      !observation.available && empty_recovery_counts(observation) &&
+      same_solution(fixture.solution.view, before_invalid), rank,
+      "single-rank invalid preflight resets stale observation without publishing solution");
+  return all_true(passed, communicator);
 }
 
 bool capture_work_is_one_cycle(const GuardSelectionProbe& capture,
@@ -4444,6 +4634,7 @@ int main(int argc, char** argv) {
   passed &= test_rejections_are_transactional(MPI_COMM_WORLD, rank, size);
   passed &= test_breakdown_maxiter_and_stale_identity(MPI_COMM_WORLD, rank);
   passed &= test_fgmres_norm_breakdown_lifecycle(MPI_COMM_WORLD, rank);
+  passed &= test_fgmres_recovery_observation_lifecycle(MPI_COMM_WORLD, rank, size);
   passed &= test_fgmres_rank_selective_failures(MPI_COMM_WORLD, rank, size);
   passed &= test_operator_provenance_matching(MPI_COMM_WORLD, rank);
   passed &= test_fgmres_collective_status_scope(MPI_COMM_WORLD, rank, size);
