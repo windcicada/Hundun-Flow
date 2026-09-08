@@ -13,6 +13,9 @@ option(HUNDUN_BUILD_TESTS "Build HUNDUN-FLOW tests" OFF)
 option(HUNDUN_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(HUNDUN_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(HUNDUN_ENABLE_HYPRE "Enable the isolated HYPRE Struct adapter" OFF)
+option(HUNDUN_BUILD_PORTABLE_CANTERA "Build the isolated Stage 4 donor backend (no product admission)" OFF)
+set(HUNDUN_CANTERA_PACKAGE_ROOT "" CACHE PATH "Root of the verified Cantera 3.2.0 package")
+set(HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM "" CACHE FILEPATH "Synthetic backend conformance mechanism")
 
 find_package(MPI 3 REQUIRED COMPONENTS C)
 find_package(Threads REQUIRED)
@@ -23,6 +26,19 @@ endif()
 
 get_filename_component(hundun_repository_root
   "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+if(HUNDUN_BUILD_PORTABLE_CANTERA)
+  include("${hundun_repository_root}/cmake/HundunPortableCantera.cmake")
+  hundun_configure_cantera_package("${HUNDUN_CANTERA_PACKAGE_ROOT}")
+  # Intentionally separate: enabling this target does not link chemistry into
+  # hundun_v04_core, authorize a source contribution, or enable reacting CLI.
+  add_library(hundun_v04_portable_cantera STATIC EXCLUDE_FROM_ALL
+    src/models_cantera.cpp src/models_combustion.cpp src/models_chemistry_adapter.cpp
+    src/models_spray_properties.cpp src/models_esf.cpp)
+  target_include_directories(hundun_v04_portable_cantera PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(hundun_v04_portable_cantera PRIVATE
+    hundun_third_party_cantera)
+endif()
 set(hundun_v04_yyjson_root "${hundun_repository_root}/third_party/yyjson")
 foreach(hundun_v04_yyjson_file IN ITEMS yyjson.c yyjson.h UPSTREAM.json)
   if(NOT EXISTS "${hundun_v04_yyjson_root}/${hundun_v04_yyjson_file}")
@@ -252,6 +268,24 @@ set(hundun_v04_core_sources
   src/mesh_ibm_surface.cpp
   src/mesh_ibm_topology.cpp
   src/mesh_stl_scan.cpp
+  src/models_combustion.cpp
+  src/models_esf.cpp
+  src/models_tcr.cpp
+  src/models_chemistry_adapter.cpp
+  src/models_exchange_batch.cpp
+  src/models_exchange_routing.cpp
+  src/models_portable_composition.cpp
+  src/models_spray.cpp
+  src/models_spray_breakup.cpp
+  src/models_spray_mechanics.cpp
+  src/models_spray_migration.cpp
+  src/models_spray_parcel.cpp
+  src/models_spray_source.cpp
+  src/models_spray_transaction.cpp
+  src/models_spray_transfer.cpp
+  src/models_spray_properties.cpp
+  src/models_spray_film_bridge.cpp
+  src/models_spray_events.cpp
   src/parallel_cpu.cpp
   src/parallel_halo.cpp
   src/parallel_ibm_donor.cpp

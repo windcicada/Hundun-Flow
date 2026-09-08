@@ -300,6 +300,171 @@ target_link_libraries(v04_public_headers_test PRIVATE
   MPI::MPI_C)
 add_test(NAME v04_public_headers COMMAND v04_public_headers_test)
 
+add_executable(v04_models_chemistry_test unit/models_chemistry_test.cpp)
+target_include_directories(v04_models_chemistry_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+add_test(NAME v04_models_chemistry COMMAND v04_models_chemistry_test)
+
+add_executable(v04_models_chemistry_adapter_test unit/models_chemistry_adapter_test.cpp)
+target_include_directories(v04_models_chemistry_adapter_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_chemistry_adapter_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_chemistry_adapter COMMAND v04_models_chemistry_adapter_test)
+set_tests_properties(v04_models_chemistry_adapter PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_properties_test unit/models_spray_properties_test.cpp)
+target_include_directories(v04_models_spray_properties_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_properties_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_spray_properties COMMAND v04_models_spray_properties_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset"
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-beta.asset")
+set_tests_properties(v04_models_spray_properties PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_film_bridge_test unit/models_spray_film_bridge_test.cpp)
+target_include_directories(v04_models_spray_film_bridge_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_film_bridge_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_spray_film_bridge COMMAND v04_models_spray_film_bridge_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset")
+set_tests_properties(v04_models_spray_film_bridge PROPERTIES TIMEOUT 15)
+
+# Small portable validation cases: each manifest configuration is one test.
+# No Allrun, repetitions or implicit resource escalation.
+foreach(portable_validation IN ITEMS v1 v2 v2_tab)
+  add_executable(v04_portable_${portable_validation} validation/portable_${portable_validation}.cpp)
+  target_include_directories(v04_portable_${portable_validation} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  target_link_libraries(v04_portable_${portable_validation} PRIVATE hundun_v04_test_core MPI::MPI_C)
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/validation/portable_${portable_validation}_manifest.json" portable_manifest)
+  string(JSON portable_cases LENGTH "${portable_manifest}" cases)
+  math(EXPR portable_last "${portable_cases}-1")
+  foreach(portable_case RANGE ${portable_last})
+    string(JSON portable_id GET "${portable_manifest}" cases ${portable_case} id)
+    string(JSON portable_timeout GET "${portable_manifest}" cases ${portable_case} timeout_s)
+    string(JSON portable_ranks GET "${portable_manifest}" cases ${portable_case} ranks)
+    string(JSON portable_argc LENGTH "${portable_manifest}" cases ${portable_case} argv)
+    math(EXPR portable_arglast "${portable_argc}-1")
+    set(portable_args)
+    foreach(portable_arg RANGE ${portable_arglast})
+      string(JSON portable_value GET "${portable_manifest}" cases ${portable_case} argv ${portable_arg})
+      string(REPLACE "@FIXTURE_DIR@" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures" portable_value "${portable_value}")
+      list(APPEND portable_args "${portable_value}")
+    endforeach()
+    if(portable_validation MATCHES "^v2")
+      add_test(NAME v04_portable_${portable_validation}_${portable_id}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${portable_ranks}
+        ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_portable_${portable_validation}> ${MPIEXEC_POSTFLAGS} ${portable_args})
+    else()
+      add_test(NAME v04_portable_${portable_validation}_${portable_id}
+        COMMAND v04_portable_${portable_validation} ${portable_args})
+    endif()
+    string(REGEX REPLACE "^v2.*" "v2" portable_label "${portable_validation}")
+    set_tests_properties(v04_portable_${portable_validation}_${portable_id} PROPERTIES
+      TIMEOUT ${portable_timeout} PROCESSORS ${portable_ranks} LABELS "portable_${portable_label}")
+  endforeach()
+endforeach()
+
+add_executable(v04_models_exchange_routing_test mpi/models_exchange_routing_test.cpp)
+target_include_directories(v04_models_exchange_routing_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_exchange_routing_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(portable_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_models_exchange_routing_mpi_${portable_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${portable_ranks}
+    ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_models_exchange_routing_test> ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_models_exchange_routing_mpi_${portable_ranks} PROPERTIES TIMEOUT 20)
+endforeach()
+add_executable(v04_models_portable_composition_test mpi/models_portable_composition_test.cpp)
+target_include_directories(v04_models_portable_composition_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_portable_composition_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(portable_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_models_portable_composition_mpi_${portable_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${portable_ranks}
+    ${MPIEXEC_PREFLAGS} $<TARGET_FILE:v04_models_portable_composition_test> ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_models_portable_composition_mpi_${portable_ranks} PROPERTIES TIMEOUT 20)
+endforeach()
+
+if(HUNDUN_BUILD_PORTABLE_CANTERA)
+  if(NOT EXISTS "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}")
+    message(FATAL_ERROR "Portable Cantera tests require an explicit synthetic mechanism")
+  endif()
+  add_executable(v04_models_cantera_backend_test unit/models_cantera_backend_test.cpp)
+  target_link_libraries(v04_models_cantera_backend_test PRIVATE
+    hundun_v04_portable_cantera)
+  target_include_directories(v04_models_cantera_backend_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  add_test(NAME v04_models_cantera_backend COMMAND v04_models_cantera_backend_test
+    "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}")
+  set_tests_properties(v04_models_cantera_backend PROPERTIES TIMEOUT 30)
+endif()
+
+add_executable(v04_models_combustion_test
+  unit/models_combustion_test.cpp)
+target_link_libraries(v04_models_combustion_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_combustion COMMAND v04_models_combustion_test)
+
+foreach(portable_slice IN ITEMS esf esf_reaction esf_backend tcr)
+  add_executable(v04_models_${portable_slice}_test unit/models_${portable_slice}_test.cpp)
+  target_include_directories(v04_models_${portable_slice}_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  target_link_libraries(v04_models_${portable_slice}_test PRIVATE hundun_v04_test_core)
+  add_test(NAME v04_models_${portable_slice} COMMAND v04_models_${portable_slice}_test)
+  set_tests_properties(v04_models_${portable_slice} PROPERTIES TIMEOUT 15)
+endforeach()
+
+add_executable(v04_models_exchange_batch_test unit/models_exchange_batch_test.cpp)
+target_include_directories(v04_models_exchange_batch_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_exchange_batch_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_exchange_batch COMMAND v04_models_exchange_batch_test)
+set_tests_properties(v04_models_exchange_batch PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_combustion_allocation_test
+  unit/models_combustion_allocation_test.cpp)
+target_link_libraries(v04_models_combustion_allocation_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_combustion_allocation COMMAND v04_models_combustion_allocation_test)
+
+add_executable(v04_models_combustion_common_source_test
+  unit/models_combustion_common_source_test.cpp)
+target_link_libraries(v04_models_combustion_common_source_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_combustion_common_source COMMAND v04_models_combustion_common_source_test)
+
+add_executable(v04_models_spray_test
+  unit/models_spray_test.cpp)
+target_link_libraries(v04_models_spray_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_spray COMMAND v04_models_spray_test)
+
+add_executable(v04_models_spray_parcel_test unit/models_spray_parcel_test.cpp)
+target_include_directories(v04_models_spray_parcel_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_parcel_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_models_spray_parcel COMMAND v04_models_spray_parcel_test)
+
+foreach(spray_slice IN ITEMS breakup mechanics source transfer events)
+  add_executable(v04_models_spray_${spray_slice}_test
+    unit/models_spray_${spray_slice}_test.cpp)
+  target_include_directories(v04_models_spray_${spray_slice}_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  target_link_libraries(v04_models_spray_${spray_slice}_test PRIVATE
+    hundun_v04_test_core)
+  add_test(NAME v04_models_spray_${spray_slice}
+    COMMAND v04_models_spray_${spray_slice}_test)
+endforeach()
+
+add_executable(v04_models_spray_transaction_test mpi/models_spray_transaction_test.cpp)
+target_link_libraries(v04_models_spray_transaction_test PRIVATE hundun_v04_test_core)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_models_spray_transaction_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_models_spray_transaction_test>"
+      ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_models_spray_transaction_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} TIMEOUT 30)
+endforeach()
+
+add_executable(v04_models_spray_migration_test mpi/models_spray_migration_test.cpp)
+target_link_libraries(v04_models_spray_migration_test PRIVATE hundun_v04_test_core)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_models_spray_migration_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" ${rank_count}
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_models_spray_migration_test>"
+      ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_models_spray_migration_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} TIMEOUT 30)
+endforeach()
+
 add_executable(v04_mesh_ibm_quadratic_test
   unit/mesh_ibm_quadratic_test.cpp)
 target_link_libraries(v04_mesh_ibm_quadratic_test PRIVATE hundun_v04_test_core)

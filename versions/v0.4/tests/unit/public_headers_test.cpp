@@ -4,6 +4,9 @@
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_boundary.hpp"
 #include "hundun/v04_case.hpp"
+#include "hundun/v04_cantera.hpp"
+#include "hundun/v04_chemistry.hpp"
+#include "hundun/v04_combustion.hpp"
 #include "hundun/v04_execution.hpp"
 #include "hundun/v04_field.hpp"
 #include "hundun/v04_flow.hpp"
@@ -15,6 +18,7 @@
 #include "hundun/v04_parallel.hpp"
 #include "hundun/v04_physics.hpp"
 #include "hundun/v04_product.hpp"
+#include "hundun/v04_spray.hpp"
 #include "hundun/v04_status.hpp"
 #include "hundun/v04_types.hpp"
 

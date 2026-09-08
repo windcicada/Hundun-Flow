@@ -1,0 +1,1073 @@
+{
+  "format": "hundun-portable-v2-manifest-v1",
+  "scope": "Portable module composition with prescribed gas and ordinary values. Not a product driver, MPI/Halo performance test, real-fuel validation or COAST replacement acceptance.",
+  "execution_gate": "Coordinator must confirm complete P1-P8 before any V2 execution",
+  "cross_configuration_comparison": {
+    "program": "compare_portable_v2.py ctest-junit.xml",
+    "groups": "alpha/beta spray and analytic closed exchange, each N=2/4, ranks 1/2/4",
+    "contract": "bit-identical FNV1a64 per physical cell/parcel values with order-independent XOR; no rank ownership number in the observation",
+    "interpretation": "Reproducibility check only; analytic budgets and state validity remain independent physical tests"
+  },
+  "execution": {
+    "program": "portable_v2",
+    "repetitions": 1,
+    "one_invocation_per_configuration": true,
+    "timeout_s": 20,
+    "timeout_means_failure": true,
+    "no_parameter_or_resource_escalation": true,
+    "maximum_ranks": 4,
+    "mesh_cells": [
+      4,
+      4,
+      4
+    ],
+    "maximum_local_cells": 64,
+    "maximum_local_parcels": 8,
+    "maximum_aggregate_segments": 256,
+    "maximum_parcel_segments": 64,
+    "maximum_parcel_events": 16,
+    "maximum_parcel_attempts": 512
+  },
+  "source_order": {
+    "model_id": "portable_source_transport_reaction_v1",
+    "order": [
+      "parcel intervals and events",
+      "route each segment by unique global-cell owner",
+      "one common gas source per field",
+      "IEM/TCR seam",
+      "two chemistry half intervals",
+      "checked parcel migration",
+      "collective accepted-value preparation"
+    ],
+    "splitting_order": 1,
+    "strang_claim": false
+  },
+  "inputs": {
+    "spray_common": {
+      "mesh_cells": [
+        4,
+        4,
+        4
+      ],
+      "cell_width_m": [
+        0.01,
+        0.01,
+        0.01
+      ],
+      "gas_pressure_pa": 100000,
+      "gas_temperature_k": 400,
+      "gas_velocity_m_per_s": [
+        0,
+        0,
+        0
+      ],
+      "full_mass_fractions_in_explicit_asset_order": [
+        0.01,
+        0.99
+      ],
+      "duration_per_step_s": 0.00001,
+      "global_injectors": 3,
+      "injector_ids": [
+        100,
+        101,
+        102
+      ],
+      "seed": 224466,
+      "origins_m": [
+        [
+          0.019999,
+          0.005,
+          0.005
+        ],
+        [
+          0.005,
+          0.019999,
+          0.005
+        ],
+        [
+          0.005,
+          0.005,
+          0.019999
+        ]
+      ],
+      "axes": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "injection_speed_m_s": 1,
+      "represented_mass_per_parcel": "one physical droplet mass rho_liquid*pi*d^3/6",
+      "injected_trial_mass": "1.25 times represented mass; one parcel and 0.25 mass reservoir remainder",
+      "diameter_m": 0.0001,
+      "initial_liquid_temperature_k": 298.15,
+      "injection_once_at_first_step": true,
+      "iem_mixing_time_s": 1,
+      "esf_random_stochastic_stage": 17,
+      "tcr_mode": "off",
+      "reaction_enabled": true,
+      "relative_parcel_error_tolerance": 0.000001,
+      "minimum_substep_s": 1e-12,
+      "global_initial_gas_mass_kg": 0.00005388201505914127
+    },
+    "spray_alpha": {
+      "inherits": "spray_common",
+      "gas_species": [
+        "A",
+        "B"
+      ],
+      "vapor_species": "A",
+      "vapor_index": 0,
+      "rate_per_s": 2,
+      "gas_cp_j_kg_k": 1000,
+      "gas_h_j_per_kg": 102850,
+      "liquid_density_initial_kg_m3": 800,
+      "liquid_initial_h_j_kg": -100000,
+      "asset_content_fnv1a64": "6004043157121730787",
+      "mechanism_sha256": "bd156f5dfa9a7a528525696097015cbf4afad6a5f27bf330c62516169b4dd1c1",
+      "initial_total_mass_kg": 0.000053883271696202705,
+      "untouched_global_cell": 63,
+      "untouched_reactant_y_after_steps": [0.009999800001999986666733333066668, 0.009999600007999893334399991466724],
+      "untouched_reference_formula": "0.01 exp(-2 t), t=1e-5 and 2e-5; Decimal 60 digits",
+      "global_chemistry_calls_per_step": "64*2*N"
+    },
+    "spray_beta": {
+      "inherits": "spray_common",
+      "gas_species": [
+        "B",
+        "A"
+      ],
+      "vapor_species": "B",
+      "vapor_index": 0,
+      "rate_per_s": 3,
+      "gas_cp_j_kg_k": 1200,
+      "gas_h_j_per_kg": 221220,
+      "liquid_density_initial_kg_m3": 900,
+      "liquid_initial_h_j_kg": -300000,
+      "asset_content_fnv1a64": "668675689539421851",
+      "mechanism_sha256": "7f3b7689de32e783e83d67f3e0dd78efba12ac768fb3b18922ae4aca29ad4ffe",
+      "initial_total_mass_kg": 0.00005388342877583538,
+      "untouched_global_cell": 63,
+      "untouched_reactant_y_after_steps": [0.989970300445495545033412299526002, 0.989940601781964360534593584864151],
+      "untouched_reference_formula": "0.99 exp(-3 t), t=1e-5 and 2e-5; Decimal 60 digits",
+      "global_chemistry_calls_per_step": "64*2*N"
+    },
+    "closed_analytic": {
+      "mesh_cells": [
+        4,
+        4,
+        4
+      ],
+      "cell_width_m": [
+        1,
+        1,
+        1
+      ],
+      "gas_mass_per_cell_kg": 1,
+      "gas_pressure_pa": 118228.68897920402,
+      "gas_h_j_per_kg": 101000,
+      "full_mass_fractions": [
+        0.01,
+        0.99
+      ],
+      "gas_initial_momentum_per_cell_kg_m_s": [
+        0,
+        0,
+        0
+      ],
+      "target_global_cell": 0,
+      "parcel_masses_kg": [
+        0.1,
+        0.1
+      ],
+      "parcel_positions_m": [
+        [
+          0.25,
+          0.5,
+          0.5
+        ],
+        [
+          0.25,
+          0.5,
+          0.5
+        ]
+      ],
+      "parcel_initial_velocities_m_s": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ]
+      ],
+      "parcel_liquid_density_kg_m3": 800,
+      "parcel_temperature_k": 298.15,
+      "parcel_absolute_h_j_kg": -100000,
+      "interphase_acceleration_m_s2": [
+        -1,
+        0,
+        0
+      ],
+      "duration_s": 0.25,
+      "reaction_enabled": false,
+      "external_force": false,
+      "evaporation": false,
+      "initial_total_mass_kg": 64.2,
+      "reference": {
+        "parcel_total_delta_momentum_x_kg_m_s": -0.05,
+        "parcel_total_delta_kinetic_j": -0.06875,
+        "gas_delta_momentum_x_kg_m_s": 0.05,
+        "gas_delta_kinetic_j": 0.00125,
+        "gas_delta_enthalpy_j": 0.0675
+      },
+      "formula": "For each m=0.1: u_new=u_old-0.25. Sum deltaP before gas K=(0.05)^2/(2*1); gas deltaH=0.06875-0.00125. This is a deliberately separate analytic conservation fixture."
+    }
+  },
+  "tolerances": {
+    "untouched_chemistry": {
+      "reactant_y": {"absolute": 1e-14, "relative": 1e-12},
+      "enthalpy_j_per_kg": {"absolute": 1e-8, "relative": 1e-12}
+    },
+    "spray_budget": {
+      "mass": {
+        "absolute": 1e-18,
+        "relative": 1e-12
+      },
+      "momentum": {
+        "absolute": 1e-18,
+        "relative": 1e-12
+      },
+      "enthalpy_plus_kinetic": {
+        "absolute": 1e-11,
+        "relative": 1e-12
+      }
+    },
+    "closed_budget": {
+      "mass": {
+        "absolute": 1e-12,
+        "relative": 1e-12
+      },
+      "momentum": {
+        "absolute": 1e-13,
+        "relative": 1e-12
+      },
+      "enthalpy_plus_kinetic": {
+        "absolute": 5e-8,
+        "relative": 1e-14
+      }
+    },
+    "closed_cell_reference": {
+      "momentum": {
+        "absolute": 1e-14,
+        "relative": 1e-12
+      },
+      "specific_enthalpy": {
+        "absolute": 1e-8,
+        "relative": 1e-13
+      },
+      "gas_kinetic": {
+        "absolute": 1e-15,
+        "relative": 1e-12
+      }
+    },
+    "identity_clocks_counts_and_rejected_state": "exact comparison, never floating tolerance"
+  },
+  "cross_configuration_review": {
+    "inputs_identical_across_ranks": true,
+    "compare_observables": [
+      "total_mass_kg",
+      "total_h_plus_k_j"
+    ],
+    "rank_consistency_tolerance_ref": "spray_budget or closed_budget according to configuration",
+    "N2_N4_common_source_comparison": "same physical exchange and first-step sampler query count for the same pack; chemistry calls legitimately scale as 2N",
+    "rank_dependent_observables_not_compared": [
+      "physical_parcels_migrated",
+      "local cell counts"
+    ],
+    "requires_coordinator_output_aggregation": true
+  },
+  "provenance": [
+    {
+      "kind": "HUNDUN portable modules",
+      "baseline": "5149e92 interface freeze plus coordinator-reviewed P1-P8 additions",
+      "files": [
+        "models_spray_film_bridge_detail.hpp",
+        "models_spray_events_detail.hpp",
+        "models_portable_composition_detail.hpp",
+        "models_spray_migration_detail.hpp",
+        "models_spray_parcel_detail.hpp"
+      ],
+      "usage": "Direct consumption of existing portable seams, no duplicate production driver"
+    },
+    {
+      "kind": "independent analytic reference",
+      "method": "60-digit Decimal ideal-gas inventory and exact elementary constant-acceleration work; references registered before executing the harness"
+    },
+    {
+      "kind": "OpenFOAM",
+      "used": false,
+      "note": "No source, scripts, dictionaries, cases or output copied; no floating upstream master reference."
+    }
+  ],
+  "cases": [
+    {
+      "id": "spray_alpha_n2_r1",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "alpha",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 1,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_alpha",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": false,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_alpha_n2_r2",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "alpha",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 2,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_alpha",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_alpha_n2_r4",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "alpha",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_alpha",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_alpha_n4_r1",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 1,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_alpha",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": false,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_alpha_n4_r2",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 2,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_alpha",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_alpha_n4_r4",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_alpha",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_beta_n2_r1",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "beta",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-beta.asset"
+      ],
+      "ranks": 1,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_beta",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": false,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_beta_n2_r2",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "beta",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-beta.asset"
+      ],
+      "ranks": 2,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_beta",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_beta_n2_r4",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "beta",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-beta.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_beta",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_beta_n4_r1",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "beta",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-beta.asset"
+      ],
+      "ranks": 1,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_beta",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": false,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_beta_n4_r2",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "beta",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-beta.asset"
+      ],
+      "ranks": 2,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_beta",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "spray_beta_n4_r4",
+      "mode": "spray",
+      "argv": [
+        "spray",
+        "beta",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-beta.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "steps": {
+        "accepted_physical_steps": 2,
+        "first_step_with_injection": true,
+        "second_step_branches": [
+          "continuous",
+          "restored_from_first_accepted_values"
+        ]
+      },
+      "input_ref": "spray_beta",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 3,
+        "actual_cross_rank_migration": true,
+        "source_same_in_every_field": true,
+        "restored_next_step_equals_continuous": "exact values including IDs, clocks, injector reservoir and random addresses"
+      },
+      "validation": [
+        "full-Y prescribed sampler",
+        "identity-checked liquid asset and gas-film bridge",
+        "FixedASParcelIntervalProvider",
+        "P5 time-ordered Cartesian crossing events",
+        "P8 single deposition of remote segments onto uniquely owned gas cells",
+        "source then IEM then two chemistry half intervals",
+        "checked migration",
+        "accepted value snapshot restore"
+      ],
+      "limitations": [
+        "prescribed gas is not a coupled flow solve",
+        "no real fuel",
+        "no wall/outlet/breakup in this composition configuration"
+      ]
+    },
+    {
+      "id": "closed_analytic_n2_r1",
+      "mode": "closed",
+      "argv": [
+        "closed",
+        "alpha",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 1,
+      "timeout_s": 20,
+      "input_ref": "closed_analytic",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 2,
+        "chemistry_calls": 0,
+        "source_same_in_every_field": true,
+        "gas_cell_zero_momentum_x_kg_m_s": 0.05,
+        "gas_cell_zero_kinetic_energy_j": 0.00125,
+        "gas_cell_zero_enthalpy_j_per_kg": 101000.0675
+      },
+      "validation": [
+        "explicit reaction_enabled=false; no fallback provider",
+        "analytic constant interphase acceleration and exact impulse/work integrals",
+        "gas kinetic correction after the sum of both parcel momenta",
+        "one common source in every stochastic field"
+      ],
+      "limitations": [
+        "constant-acceleration interphase conservation fixture, not Schiller-Naumann or A-S validation"
+      ]
+    },
+    {
+      "id": "closed_analytic_n2_r2",
+      "mode": "closed",
+      "argv": [
+        "closed",
+        "alpha",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 2,
+      "timeout_s": 20,
+      "input_ref": "closed_analytic",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 2,
+        "chemistry_calls": 0,
+        "source_same_in_every_field": true,
+        "gas_cell_zero_momentum_x_kg_m_s": 0.05,
+        "gas_cell_zero_kinetic_energy_j": 0.00125,
+        "gas_cell_zero_enthalpy_j_per_kg": 101000.0675
+      },
+      "validation": [
+        "explicit reaction_enabled=false; no fallback provider",
+        "analytic constant interphase acceleration and exact impulse/work integrals",
+        "gas kinetic correction after the sum of both parcel momenta",
+        "one common source in every stochastic field"
+      ],
+      "limitations": [
+        "constant-acceleration interphase conservation fixture, not Schiller-Naumann or A-S validation"
+      ]
+    },
+    {
+      "id": "closed_analytic_n2_r4",
+      "mode": "closed",
+      "argv": [
+        "closed",
+        "alpha",
+        "2",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "input_ref": "closed_analytic",
+      "field_count": 2,
+      "expected": {
+        "global_parcels": 2,
+        "chemistry_calls": 0,
+        "source_same_in_every_field": true,
+        "gas_cell_zero_momentum_x_kg_m_s": 0.05,
+        "gas_cell_zero_kinetic_energy_j": 0.00125,
+        "gas_cell_zero_enthalpy_j_per_kg": 101000.0675
+      },
+      "validation": [
+        "explicit reaction_enabled=false; no fallback provider",
+        "analytic constant interphase acceleration and exact impulse/work integrals",
+        "gas kinetic correction after the sum of both parcel momenta",
+        "one common source in every stochastic field"
+      ],
+      "limitations": [
+        "constant-acceleration interphase conservation fixture, not Schiller-Naumann or A-S validation"
+      ]
+    },
+    {
+      "id": "closed_analytic_n4_r1",
+      "mode": "closed",
+      "argv": [
+        "closed",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 1,
+      "timeout_s": 20,
+      "input_ref": "closed_analytic",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 2,
+        "chemistry_calls": 0,
+        "source_same_in_every_field": true,
+        "gas_cell_zero_momentum_x_kg_m_s": 0.05,
+        "gas_cell_zero_kinetic_energy_j": 0.00125,
+        "gas_cell_zero_enthalpy_j_per_kg": 101000.0675
+      },
+      "validation": [
+        "explicit reaction_enabled=false; no fallback provider",
+        "analytic constant interphase acceleration and exact impulse/work integrals",
+        "gas kinetic correction after the sum of both parcel momenta",
+        "one common source in every stochastic field"
+      ],
+      "limitations": [
+        "constant-acceleration interphase conservation fixture, not Schiller-Naumann or A-S validation"
+      ]
+    },
+    {
+      "id": "closed_analytic_n4_r2",
+      "mode": "closed",
+      "argv": [
+        "closed",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 2,
+      "timeout_s": 20,
+      "input_ref": "closed_analytic",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 2,
+        "chemistry_calls": 0,
+        "source_same_in_every_field": true,
+        "gas_cell_zero_momentum_x_kg_m_s": 0.05,
+        "gas_cell_zero_kinetic_energy_j": 0.00125,
+        "gas_cell_zero_enthalpy_j_per_kg": 101000.0675
+      },
+      "validation": [
+        "explicit reaction_enabled=false; no fallback provider",
+        "analytic constant interphase acceleration and exact impulse/work integrals",
+        "gas kinetic correction after the sum of both parcel momenta",
+        "one common source in every stochastic field"
+      ],
+      "limitations": [
+        "constant-acceleration interphase conservation fixture, not Schiller-Naumann or A-S validation"
+      ]
+    },
+    {
+      "id": "closed_analytic_n4_r4",
+      "mode": "closed",
+      "argv": [
+        "closed",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "input_ref": "closed_analytic",
+      "field_count": 4,
+      "expected": {
+        "global_parcels": 2,
+        "chemistry_calls": 0,
+        "source_same_in_every_field": true,
+        "gas_cell_zero_momentum_x_kg_m_s": 0.05,
+        "gas_cell_zero_kinetic_energy_j": 0.00125,
+        "gas_cell_zero_enthalpy_j_per_kg": 101000.0675
+      },
+      "validation": [
+        "explicit reaction_enabled=false; no fallback provider",
+        "analytic constant interphase acceleration and exact impulse/work integrals",
+        "gas kinetic correction after the sum of both parcel momenta",
+        "one common source in every stochastic field"
+      ],
+      "limitations": [
+        "constant-acceleration interphase conservation fixture, not Schiller-Naumann or A-S validation"
+      ]
+    },
+    {
+      "id": "fault_alpha_n4_r4",
+      "mode": "fault",
+      "argv": [
+        "fault",
+        "alpha",
+        "4",
+        "@FIXTURE_DIR@/synthetic-liquid-alpha.asset"
+      ],
+      "ranks": 4,
+      "timeout_s": 20,
+      "input_ref": "spray_alpha",
+      "field_count": 4,
+      "steps": {
+        "first_step_candidates": [
+          "clean",
+          "rank-zero prescribed sampler failure",
+          "retry same accepted inputs and addresses"
+        ],
+        "second_step_branches": [
+          "continuous",
+          "restored"
+        ]
+      },
+      "expected": {
+        "failure_rank": 0,
+        "failure_module": 2,
+        "failed_report_cells": null,
+        "failed_report_parcels": null,
+        "accepted_inputs_changed": false,
+        "stateful_injector_publication": false,
+        "retry_equals_clean": "exact values",
+        "restored_next_step_equals_continuous": "exact values"
+      },
+      "validation": [
+        "one-rank provider failure rejects all ranks without partial candidates",
+        "old borrowed report invalidated by new attempt",
+        "input snapshot and committed injector counters unchanged",
+        "same-address retry",
+        "full snapshot restore"
+      ]
+    }
+  ]
+}
