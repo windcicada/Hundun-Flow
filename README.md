@@ -140,3 +140,9 @@ mpirun -np 4 build/release/versions/v0.4/hundun run case \
 ## 许可证
 
 HUNDUN-FLOW采用Apache License 2.0，见[LICENSE](LICENSE)。第三方组件及许可证见[THIRD_PARTY.md](THIRD_PARTY.md)。
+
+## 圆柱绕流瞬时场
+
+Re = 3900，第 12500 步，t = 0.172611 s，展向截面 z/D = 0.8005。上图为速度大小（m/s），下图为压力扰动 π（Pa），圆柱轮廓取自算例 STL。
+
+![圆柱绕流速度与压力云图](docs/images/re3900-velocity-pressure-step12500.png)
