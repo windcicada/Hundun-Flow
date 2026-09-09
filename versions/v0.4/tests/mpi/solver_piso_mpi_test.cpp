@@ -2244,8 +2244,7 @@ bool test_exact_eos_correction_collective_transaction(MPI_Comm world,
                    "distributed exact-EOS fixture starts from a physical candidate");
   if (!all_true(passed, world)) return false;
   auto rebuild_c1 = [&](RevisionToken time,
-                        double absolute_pressure_reference =
-                            pressure_reference_value) {
+                        double absolute_pressure_reference) {
     intermediate_input = fixture.intermediate_input(bdf, time);
     intermediate_input.thermophysical_boundary.binding.pressure_reference =
         absolute_pressure_reference;
@@ -2344,7 +2343,7 @@ bool test_exact_eos_correction_collective_transaction(MPI_Comm world,
     return status.code == expected && !certificate.valid() && atomic;
   };
 
-  Status status = rebuild_c1(8956U);
+  Status status = rebuild_c1(8956U, pressure_reference_value);
   Status gauge_status;
   PisoExactThermodynamicCandidateView candidate =
       certified_candidate(gauge_status);
@@ -2368,7 +2367,7 @@ bool test_exact_eos_correction_collective_transaction(MPI_Comm world,
         -pressure_reference_value;
   }
   fill(correction, 0.0);
-  status = rebuild_c1(8957U);
+  status = rebuild_c1(8957U, pressure_reference_value);
   candidate = exact_candidate();
   gauge_status = fixture.prepare_closed_gauge(
       pressure_certificate, pressure_input.pressure_reference,
@@ -2403,7 +2402,7 @@ bool test_exact_eos_correction_collective_transaction(MPI_Comm world,
   passed &= expect(static_cast<bool>(populate_exact_candidate(false)), rank,
                    "exact-EOS fixture restores its physical state after pressure poison");
   if (!all_true(passed, world)) return false;
-  status = rebuild_c1(8959U);
+  status = rebuild_c1(8959U, pressure_reference_value);
   PisoExactThermodynamicCandidateView stale = certified_candidate(gauge_status);
   if (rank == size - 1) ++stale.temperature.revision;
   passed &= expect(static_cast<bool>(status) && static_cast<bool>(gauge_status) &&
@@ -2412,7 +2411,7 @@ bool test_exact_eos_correction_collective_transaction(MPI_Comm world,
                    "one-rank stale exact-EOS revision reaches collective rejection without partial publication");
   if (!all_true(passed, world)) return false;
 
-  status = rebuild_c1(8960U);
+  status = rebuild_c1(8960U, pressure_reference_value);
   PisoExactThermodynamicCandidateView stale_gauge =
       certified_candidate(gauge_status);
   if (rank == size - 1)
@@ -2431,7 +2430,7 @@ bool test_exact_eos_correction_collective_transaction(MPI_Comm world,
   passed &= expect(static_cast<bool>(populate_exact_candidate(true)), rank,
                    "positive exact candidate closes EOS at the non-affine limiting cell");
   if (!all_true(passed, world)) return false;
-  status = rebuild_c1(8961U);
+  status = rebuild_c1(8961U, pressure_reference_value);
   PisoStateCorrectionCertificate committed;
   candidate = certified_candidate(gauge_status);
   if (status) {

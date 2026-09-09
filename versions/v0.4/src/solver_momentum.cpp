@@ -263,12 +263,12 @@ double face_cross_traction(const CartesianKernelPlan& kernels,
   const Int3 left = axis_offset(face, axis, -1);
   const double mu_face =
       kernels.geometry_kind() == GeometryKind::uniform
-          ? detail::metric_interpolate_face<true>(
+          ? detail::metric_interpolate_material_face<true>(
                 kernels, axis,
                 axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
                 viscosity.unchecked(left, 0U),
                 viscosity.unchecked(face, 0U))
-          : detail::metric_interpolate_face<false>(
+          : detail::metric_interpolate_material_face<false>(
                 kernels, axis,
                 axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
                 viscosity.unchecked(left, 0U),
@@ -746,6 +746,12 @@ Status assemble_momentum_impl(
     const EquationAssemblyContext& context, EquationSystemView system,
     FieldView low_order_rhs_delta,
     EquationAssemblyCertificate& certificate, bool allow_partial) noexcept {
+  if (context.immersed_interface != nullptr &&
+      context.immersed_interface->has_inlet_sources()) {
+    const Status source_flux =
+        context.immersed_interface->validate_interface_flux(context.mass_flux);
+    if (!source_flux) return source_flux;
+  }
   Span<const CompiledContribution> selected_descriptors{};
   if (!detail::select_contribution_stage(
           {plan.contributions_.data(), plan.contributions_.size()},
@@ -967,6 +973,33 @@ Status assemble_momentum_impl(
   if (!status) {
     return status;
   }
+  if (context.immersed_interface != nullptr) {
+    for (std::uint8_t component = 0U; component < 3U; ++component) {
+      status = context.immersed_interface->add_source_convection_correction(
+          {IbmInterfaceInletFieldKind::velocity, component},
+          plan.convection_, state.velocity.trial, 1.0, system.residual, box);
+      if (!status) return status;
+    }
+  }
+
+  const bool source_low_order_delta = produce_low_order_delta &&
+      context.immersed_interface != nullptr &&
+      context.immersed_interface->has_inlet_sources();
+  if (source_low_order_delta) {
+    // Reuse the caller's delta scratch before producing the final integral.
+    // The low-order donor must be the same fixed inlet U as the high order.
+    for (std::int32_t z = box.begin.z; z < end.z; ++z)
+      for (std::int32_t y = box.begin.y; y < end.y; ++y)
+        for (std::int32_t x = box.begin.x; x < end.x; ++x)
+          for (std::uint8_t c = 0U; c < 3U; ++c)
+            low_order_rhs_delta.unchecked({x, y, z}, c) = 0.0;
+    for (std::uint8_t c = 0U; c < 3U; ++c) {
+      status = context.immersed_interface->add_source_first_order_upwind_correction(
+          {IbmInterfaceInletFieldKind::velocity, c}, state.velocity.trial,
+          1.0, low_order_rhs_delta, box);
+      if (!status) return status;
+    }
+  }
 
   for (std::int32_t z = box.begin.z; z < end.z; ++z) {
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
@@ -1020,13 +1053,16 @@ Status assemble_momentum_impl(
               (context.bdf.a0 * rho + sink) * volume +
               diffusion_diagonal + convective_diagonal;
           const double rhs = diagonal * velocity - residual;
-          const double low_order_delta =
+          double low_order_delta =
               produce_low_order_delta
                   ? system.residual.unchecked(cell, component) * volume -
                         first_order_convection_integral(
                             context.mass_flux, state.velocity.trial, cell,
                             component)
                   : 0.0;
+          if (source_low_order_delta)
+            low_order_delta -=
+                low_order_rhs_delta.unchecked(cell, component) * volume;
           if (!std::isfinite(residual) || !std::isfinite(diagonal) ||
               diagonal <= 0.0 || !std::isfinite(rhs) ||
               !std::isfinite(low_order_delta)) {
@@ -1073,6 +1109,9 @@ Status assemble_momentum_impl(
   certificate = {plan.fingerprint_, context.scope, context.time,
                  context.geometry, context.face_flux, assembled_state,
                  context.dt};
+  if (context.immersed_interface != nullptr &&
+      context.immersed_interface->has_inlet_sources())
+    certificate.inlet_sources = context.immersed_interface->fingerprint();
   return {};
 }
 
@@ -1299,6 +1338,14 @@ Status limit_momentum_predictor_correction(
           boundary.halo_topology()) ||
       reductions.capacity() < 4U))
     preflight = {StatusCode::invalid_plan, kMomentumAssembly};
+  if (preflight && workspace.immersed_interface != nullptr)
+    preflight = workspace.immersed_interface->validate_interface_flux(mass_flux);
+  const PlanFingerprint inlet_sources =
+      workspace.immersed_interface != nullptr &&
+              workspace.immersed_interface->has_inlet_sources()
+          ? workspace.immersed_interface->fingerprint() : 0U;
+  if (preflight && assembly.inlet_sources != inlet_sources)
+    preflight = {StatusCode::invalid_plan, kMomentumAssembly};
   preflight = collective_status(communicator, preflight);
   if (!preflight) return preflight;
   const CartesianKernelPlan& kernels = *plan.kernels_;
@@ -1398,6 +1445,12 @@ Status limit_momentum_predictor_correction(
   double local_cfl_absolute = 0.0;
   bool local_cfl_cell_valid = false;
   Status cfl_status;
+  const auto transport_face_active = [&](CartesianAxis axis, Int3 face) {
+    if (active_face(activity, cells, axis, face)) return true;
+    double prescribed = 0.0;
+    return workspace.immersed_interface != nullptr &&
+        workspace.immersed_interface->prescribed_face_flux(axis, face, prescribed);
+  };
   for (std::int32_t z = 0; z < cells.z && cfl_status; ++z) {
     for (std::int32_t y = 0; y < cells.y && cfl_status; ++y) {
       for (std::int32_t x = 0; x < cells.x; ++x) {
@@ -1418,17 +1471,17 @@ Status limit_momentum_predictor_correction(
             fxm, fxp, fym, fyp, fzm, fzp};
         const std::array<std::uint8_t, 6U> cell_active{{
             static_cast<std::uint8_t>(
-                active_face(activity, cells, CartesianAxis::x, cell)),
+                transport_face_active(CartesianAxis::x, cell)),
             static_cast<std::uint8_t>(
-                active_face(activity, cells, CartesianAxis::x, xp)),
+                transport_face_active(CartesianAxis::x, xp)),
             static_cast<std::uint8_t>(
-                active_face(activity, cells, CartesianAxis::y, cell)),
+                transport_face_active(CartesianAxis::y, cell)),
             static_cast<std::uint8_t>(
-                active_face(activity, cells, CartesianAxis::y, yp)),
+                transport_face_active(CartesianAxis::y, yp)),
             static_cast<std::uint8_t>(
-                active_face(activity, cells, CartesianAxis::z, cell)),
+                transport_face_active(CartesianAxis::z, cell)),
             static_cast<std::uint8_t>(
-                active_face(activity, cells, CartesianAxis::z, zp)),
+                transport_face_active(CartesianAxis::z, zp)),
         }};
         detail::CellConvectiveCflResult cell_cfl;
         const detail::CellConvectiveCflStatus cell_cfl_status =

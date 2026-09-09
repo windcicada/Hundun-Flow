@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_flow.hpp"
+#include "hundun/v04_ibm.hpp"
 
 #include <mpi.h>
 
@@ -341,6 +342,108 @@ bool make_fixture(Fixture& out, MPI_Comm communicator = MPI_COMM_SELF,
       ConservativeEnthalpyEndpoint::bind(endpoint_services, out.endpoint));
 }
 
+struct SourcePredictorFixture {
+  static constexpr Int3 global_cells{16, 16, 16};
+  static constexpr double enthalpy = 450000.0;
+  static constexpr double independent_species = 0.8;
+  static constexpr double mass_flux_magnitude = 1.0e-4;
+
+  Fixture base;
+  EBTopology topology;
+  BoundaryStencilPlan boundary;
+  SurfaceQuadraturePlan quadrature;
+  IbmEquationInterfacePlan interface;
+  Int3 source_cell{};
+  CartesianAxis source_axis{CartesianAxis::x};
+  Int3 source_face{};
+  double source_mass_flux{};
+};
+
+std::size_t source_flat(Int3 shape, Int3 cell) noexcept {
+  return static_cast<std::size_t>(cell.x) +
+         static_cast<std::size_t>(shape.x) *
+             (static_cast<std::size_t>(cell.y) +
+              static_cast<std::size_t>(shape.y) *
+                  static_cast<std::size_t>(cell.z));
+}
+
+bool make_source_predictor_fixture(SourcePredictorFixture& out) {
+  if (!make_fixture(out.base, MPI_COMM_SELF,
+                    SourcePredictorFixture::global_cells)) {
+    return false;
+  }
+  const Int3 cells = SourcePredictorFixture::global_cells;
+  const std::size_t cell_count = static_cast<std::size_t>(cells.x) *
+                                 static_cast<std::size_t>(cells.y) *
+                                 static_cast<std::size_t>(cells.z);
+  std::vector<std::uint8_t> marker(cell_count, 0U);
+  for (std::int32_t z = 0; z < cells.z; ++z)
+    for (std::int32_t y = 0; y < cells.y; ++y)
+      for (std::int32_t x = cells.x / 2; x < cells.x; ++x)
+        marker[source_flat(cells, {x, y, z})] = 1U;
+  ImmersedPlanLimits limits;
+  if (!ImportedIbmCompiler::compile(
+          MPI_COMM_SELF, out.base.geometry, out.base.patch,
+          {marker.data(), marker.size()}, UINT64_C(0x1d70a1), limits,
+          out.topology, out.boundary, out.quadrature)) {
+    return false;
+  }
+  const Span<const ImmersedLink> links = out.topology.links();
+  if (links.size == 0U) return false;
+  const ImmersedLink& source = links.data[links.size / 2U];
+  const bool negative_direction =
+      source.direction == ImmersedFaceDirection::x_negative ||
+      source.direction == ImmersedFaceDirection::y_negative ||
+      source.direction == ImmersedFaceDirection::z_negative;
+  out.source_mass_flux =
+      negative_direction ? SourcePredictorFixture::mass_flux_magnitude
+                         : -SourcePredictorFixture::mass_flux_magnitude;
+  Real3 velocity{};
+  const double normal_velocity = negative_direction ? 1.0 : -1.0;
+  out.source_cell = source.fluid_local_index;
+  out.source_face = source.fluid_local_index;
+  switch (source.direction) {
+    case ImmersedFaceDirection::x_negative:
+      out.source_axis = CartesianAxis::x;
+      velocity.x = normal_velocity;
+      break;
+    case ImmersedFaceDirection::x_positive:
+      out.source_axis = CartesianAxis::x;
+      ++out.source_face.x;
+      velocity.x = normal_velocity;
+      break;
+    case ImmersedFaceDirection::y_negative:
+      out.source_axis = CartesianAxis::y;
+      velocity.y = normal_velocity;
+      break;
+    case ImmersedFaceDirection::y_positive:
+      out.source_axis = CartesianAxis::y;
+      ++out.source_face.y;
+      velocity.y = normal_velocity;
+      break;
+    case ImmersedFaceDirection::z_negative:
+      out.source_axis = CartesianAxis::z;
+      velocity.z = normal_velocity;
+      break;
+    case ImmersedFaceDirection::z_positive:
+      out.source_axis = CartesianAxis::z;
+      ++out.source_face.z;
+      velocity.z = normal_velocity;
+      break;
+  }
+  const std::array<double, 1U> composition{
+      SourcePredictorFixture::independent_species};
+  const std::array<IbmInterfaceInletState, 1U> inlet{{
+      {source.global_link, out.source_mass_flux, velocity,
+       SourcePredictorFixture::enthalpy,
+       {composition.data(), composition.size()}},
+  }};
+  return static_cast<bool>(IbmEquationInterfacePlan::compile(
+      out.base.equations.kernels(), out.topology, out.boundary,
+      out.topology.interface_metric(), {inlet.data(), inlet.size()},
+      composition.size(), out.interface));
+}
+
 struct FluxHistory {
   FieldId dependency{};
   StateLayers layers;
@@ -374,7 +477,9 @@ bool make_flux_history(Int3 cells, FluxHistory& result) {
 }
 
 bool commit_zero_flux(const CartesianKernelPlan& kernels, Int3 cells,
-                      FluxHistory& history, ConstFaceFluxView& committed) {
+                      FluxHistory& history, ConstFaceFluxView& committed,
+                      const IbmEquationInterfacePlan* immersed_interface =
+                          nullptr) {
   if (!history.transaction.begin(history.layers) ||
       !history.transaction.revise_trial(history.dependency)) {
     return false;
@@ -404,8 +509,14 @@ bool commit_zero_flux(const CartesianKernelPlan& kernels, Int3 cells,
       {reads.data(), reads.size()}, {}, {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U,
       nullptr};
   const std::array dependencies{dependency};
-  return static_cast<bool>(reconstruct_mass_flux(kernels, invocation,
-                                                 pending)) &&
+  const Status reconstructed =
+      reconstruct_mass_flux(kernels, invocation, pending);
+  const Status constrained =
+      reconstructed && immersed_interface != nullptr
+          ? detail::constrain_pending_face_flux_for_test(
+                pending, *immersed_interface)
+          : reconstructed;
+  return static_cast<bool>(constrained) &&
          static_cast<bool>(history.writer.publish_pending(
              {dependencies.data(), dependencies.size()}, pending)) &&
          static_cast<bool>(history.transaction.collective_finish(
@@ -2544,6 +2655,143 @@ bool test_stale_previous_ghost_is_atomic(
                 "stale authority rejects before trial output writes");
 }
 
+bool test_prescribed_ibm_source_predictor() {
+  SourcePredictorFixture fixture;
+  bool passed = expect(make_source_predictor_fixture(fixture),
+                       "prescribed IBM predictor fixture compiles");
+  if (!passed) return false;
+
+  FluxHistory history;
+  ConstFaceFluxView previous_flux;
+  ConstFaceFluxView accepted_flux;
+  passed &= expect(
+      make_flux_history(fixture.base.patch.cells, history) &&
+          commit_zero_flux(fixture.base.equations.kernels(),
+                           fixture.base.patch.cells, history, previous_flux,
+                           &fixture.interface) &&
+          commit_zero_flux(fixture.base.equations.kernels(),
+                           fixture.base.patch.cells, history, accepted_flux,
+                           &fixture.interface),
+      "prescribed IBM predictor publishes two source-aware flux histories");
+  if (!passed) return false;
+
+  constexpr double accepted_enthalpy = 300000.0;
+  constexpr double accepted_species = 0.2;
+  PredictorData data(fixture.base.patch.cells, accepted_enthalpy,
+                     accepted_enthalpy, 0.0, 0.0);
+  PredictorCall call = make_call(
+      fixture.base, data, accepted_flux, previous_flux,
+      static_cast<std::uintptr_t>(0x1d70a2U), 1101U);
+  call.input.cell_activity = fixture.interface.cell_activity();
+  call.slow_path.immersed_interface = &fixture.interface;
+
+  const Status status =
+      fixture.base.equations.thermophysical_predictor().predict(
+          MPI_COMM_SELF, Status{}, call.input, call.output, call.slow_path,
+          call.diagnostics, call.certificate);
+  passed &= expect(static_cast<bool>(status),
+                   "prescribed IBM predictor succeeds");
+  if (!status) {
+    std::cerr << "prescribed IBM predictor status="
+              << static_cast<unsigned>(status.code)
+              << " detail=" << status.detail << '\n';
+    return false;
+  }
+
+  double queried_flux = 0.0;
+  passed &= expect(
+      fixture.interface.prescribed_face_flux(
+          fixture.source_axis, fixture.source_face, queried_flux) &&
+          queried_flux == fixture.source_mass_flux &&
+          fixture.interface.validate_interface_flux(accepted_flux) &&
+          fixture.interface.validate_interface_flux(previous_flux) &&
+          fixture.interface.validate_interface_flux(
+              as_const(call.output.paired_mass_flux)),
+      "accepted, previous and paired flux retain the exact source authority");
+
+  const double cell_volume =
+      1.0 / static_cast<double>(SourcePredictorFixture::global_cells.x) /
+      static_cast<double>(SourcePredictorFixture::global_cells.y) /
+      static_cast<double>(SourcePredictorFixture::global_cells.z);
+  const double source_mass_divergence =
+      -std::abs(fixture.source_mass_flux) / cell_volume;
+  const double source_enthalpy_divergence =
+      source_mass_divergence * SourcePredictorFixture::enthalpy;
+  const double source_species_divergence =
+      source_mass_divergence *
+      SourcePredictorFixture::independent_species;
+  const double expected_density =
+      high_rho(1.0, 1.0, source_mass_divergence,
+               source_mass_divergence);
+  const double expected_enthalpy =
+      high_rho_quantity(1.0, accepted_enthalpy, 1.0,
+                        accepted_enthalpy, source_enthalpy_divergence,
+                        source_enthalpy_divergence) /
+      expected_density;
+  const double expected_species =
+      high_rho_quantity(1.0, accepted_species, 1.0, accepted_species,
+                        source_species_divergence,
+                        source_species_divergence) /
+      expected_density;
+  const Int3 owner = fixture.source_cell;
+  passed &= expect(
+      close(call.output.density_workspace.unchecked(owner, 0U),
+            expected_density) &&
+          close(call.output.enthalpy.unchecked(owner, 0U),
+                expected_enthalpy) &&
+          close(call.output.independent_species.data[0U].unchecked(owner,
+                                                                   0U),
+                expected_species),
+      "high predictor reconstructs source rho, h and Y from one inlet state");
+
+  // Drive only the EX2 high species state outside its admissible range.  The
+  // accepted-rate BDF endpoint remains unchanged, which exposes the low h/Y
+  // source reconstruction without entering the enthalpy-only implicit route.
+  PredictorData low_data(fixture.base.patch.cells, accepted_enthalpy,
+                         accepted_enthalpy, 0.0, 0.0);
+  fill(low_data.species_rhs_previous, 100.0);
+  PredictorCall low_call = make_call(
+      fixture.base, low_data, accepted_flux, previous_flux,
+      static_cast<std::uintptr_t>(0x1d70a3U), 1102U);
+  low_call.input.cell_activity = fixture.interface.cell_activity();
+  low_call.slow_path.immersed_interface = &fixture.interface;
+  const Status low_status =
+      fixture.base.equations.thermophysical_predictor().predict(
+          MPI_COMM_SELF, Status{}, low_call.input, low_call.output,
+          low_call.slow_path, low_call.diagnostics, low_call.certificate);
+  passed &= expect(static_cast<bool>(low_status),
+                   "prescribed IBM low predictor succeeds after EX2 rejection");
+  if (!low_status) {
+    std::cerr << "prescribed IBM low predictor status="
+              << static_cast<unsigned>(low_status.code)
+              << " detail=" << low_status.detail << '\n';
+    return false;
+  }
+  const double actual_low_density =
+      low_call.output.low_order_density_workspace.unchecked(owner, 0U);
+  const double actual_low_enthalpy =
+      low_call.output.low_order_enthalpy_workspace.unchecked(owner, 0U);
+  const double actual_low_species =
+      low_call.output.low_order_independent_species.data[0U].unchecked(owner,
+                                                                       0U);
+  const bool low_matches = close(actual_low_density, expected_density) &&
+                           close(actual_low_enthalpy, expected_enthalpy) &&
+                           close(actual_low_species, expected_species);
+  if (!low_matches)
+    std::cerr << "IBM source low actual rho/h/Y=" << actual_low_density << '/'
+              << actual_low_enthalpy << '/' << actual_low_species
+              << " expected=" << expected_density << '/'
+              << expected_enthalpy << '/' << expected_species << '\n';
+  passed &= expect(low_matches,
+                   "low predictor uses the same prescribed h and Y source state");
+  passed &= expect(call.diagnostics.theta == 1.0 && call.certificate.valid() &&
+                       low_call.diagnostics.low_state ==
+                           ThermophysicalLowStateKind::bdf_accepted_rate &&
+                       low_call.certificate.valid(),
+                   "source-aware high endpoint and accepted-rate low endpoint certify");
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2639,6 +2887,8 @@ int main(int argc, char** argv) {
   if (passed)
     passed &= test_physical_inflow_outflow_factors(
         physical_fixture, static_cast<std::uintptr_t>(0x1d7022U));
+
+  if (passed) passed &= test_prescribed_ibm_source_predictor();
 
   int local = passed ? 1 : 0;
   int global = 0;

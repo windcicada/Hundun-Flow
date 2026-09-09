@@ -532,6 +532,8 @@ void CartesianKernelPlan::reset() noexcept {
   fingerprint_ = 0U;
   limiter_ = 1.0;
   reach_ = 0U;
+  physical_inlet_material_mask_ = 0U;
+  physical_inlet_material_enabled_ = false;
   for (std::size_t axis = 0U; axis < 3U; ++axis) {
     metric_faces_[axis].clear();
     metric_centres_[axis].clear();
@@ -561,6 +563,8 @@ void CartesianKernelPlan::move_from(CartesianKernelPlan&& other) noexcept {
   geometry_kind_ = other.geometry_kind_;
   limiter_ = other.limiter_;
   reach_ = other.reach_;
+  physical_inlet_material_mask_ = other.physical_inlet_material_mask_;
+  physical_inlet_material_enabled_ = other.physical_inlet_material_enabled_;
   for (std::size_t axis = 0U; axis < 3U; ++axis) {
     metric_faces_[axis] = std::move(other.metric_faces_[axis]);
     metric_centres_[axis] = std::move(other.metric_centres_[axis]);
@@ -577,7 +581,8 @@ Status CartesianKernelPlan::compile(const SchemePlan& schemes,
                                     const CartesianGeometryPlan& geometry,
                                     const MeshPatch& patch,
                                     const BoundaryPlan& boundary,
-                                    CartesianKernelPlan& out) noexcept {
+                                    CartesianKernelPlan& out,
+                                    bool physical_inlet_material) noexcept {
   const Int3 global = geometry.global_cells();
   const std::uint8_t reach = schemes.required_ghost_width();
   const std::int64_t end_x = static_cast<std::int64_t>(patch.begin.x) +
@@ -609,6 +614,8 @@ Status CartesianKernelPlan::compile(const SchemePlan& schemes,
   fingerprint = hash_mix(fingerprint, static_cast<std::uint64_t>(patch.cells.y));
   fingerprint = hash_mix(fingerprint, static_cast<std::uint64_t>(patch.cells.z));
   fingerprint = hash_mix(fingerprint, reach);
+  if (physical_inlet_material)
+    fingerprint=hash_mix(fingerprint,UINT64_C(0x494e4c4554464331));
   try {
     CartesianKernelPlan candidate;
     candidate.patch_begin_ = patch.begin;
@@ -621,6 +628,11 @@ Status CartesianKernelPlan::compile(const SchemePlan& schemes,
     candidate.geometry_kind_ = geometry.kind();
     candidate.limiter_ = schemes.limiter();
     candidate.reach_ = reach;
+    candidate.physical_inlet_material_enabled_ = physical_inlet_material;
+    if (physical_inlet_material)
+      for (std::size_t f=0U;f<6U;++f)
+        if (boundary.has_thermophysical_inlet_face(static_cast<CartesianFace>(f)))
+          candidate.physical_inlet_material_mask_ |= static_cast<std::uint8_t>(1U<<f);
     const AxisMetrics* const source[3]{&geometry.x(), &geometry.y(),
                                        &geometry.z()};
     const std::int32_t begins[3]{patch.begin.x, patch.begin.y,

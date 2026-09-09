@@ -98,6 +98,600 @@ bool positive_face(ImmersedFaceDirection direction) {
          direction == ImmersedFaceDirection::z_positive;
 }
 
+bool test_prescribed_interface_mass_flux() {
+  constexpr std::int32_t n = 16;
+  IbmForceFixture fixture;
+  bool passed = expect(fixture.initialize(MPI_COMM_SELF, n),
+                       "prescribed-flux IBM fixture compiles");
+  if (!passed) return false;
+
+  ValidatedModel model = product_model({n, n, n});
+  model.mesh = force_mesh(n);
+  model.fingerprint = 88002U;
+  FieldRegistry registry;
+  BoundaryPlan physical_boundary;
+  SchemePlan schemes;
+  TimeSchemePlan time;
+  passed &= expect(BoundaryCompiler::compile(
+                       MPI_COMM_SELF, model, fixture.geometry, fixture.patch,
+                       registry, physical_boundary, schemes, time),
+                   "prescribed-flux physical boundary compiles");
+  CartesianKernelPlan kernels;
+  passed &= expect(CartesianKernelPlan::compile(
+                       schemes, fixture.geometry, fixture.patch,
+                       physical_boundary, kernels),
+                   "prescribed-flux Cartesian kernel compiles");
+  if (!passed) return false;
+
+  const Span<const ImmersedLink> links = fixture.topology.links();
+  std::size_t source_index = links.size;
+  for (std::size_t index = 0U; index < links.size; ++index)
+    if (links.data[index].direction == ImmersedFaceDirection::y_negative) {
+      source_index = index;
+      break;
+    }
+  passed &= expect(source_index < links.size && links.size > 1U,
+                   "fixture exposes a GTMC-oriented source and a sealed link");
+  if (!passed) return false;
+  const std::size_t sealed_index = source_index == 0U ? 1U : 0U;
+
+  constexpr double prescribed_phi = 2.7866666668e-6;
+  const std::array<double, 2U> prescribed_species{{0.875, 0.125}};
+  const std::array<IbmInterfaceInletState, 1U> sources{{
+      {links.data[source_index].global_link, prescribed_phi,
+       {1.25, 2.5, 3.75}, 450000.0,
+       {prescribed_species.data(), prescribed_species.size()}},
+  }};
+  IbmEquationInterfacePlan interface;
+  passed &= expect(IbmEquationInterfacePlan::compile(
+                       kernels, fixture.topology, fixture.boundary,
+                       fixture.topology.interface_metric(),
+                       {sources.data(), sources.size()},
+                       prescribed_species.size(), interface),
+                   "prescribed interface mass-flux source compiles");
+  if (!passed) return false;
+
+  const Int3 cells = fixture.patch.cells;
+  OwnedFace x_flux = make_face(CartesianAxis::x, cells, 211U);
+  OwnedFace y_flux = make_face(CartesianAxis::y, cells, 211U);
+  OwnedFace z_flux = make_face(CartesianAxis::z, cells, 211U);
+  FaceFluxView flux{x_flux.view, y_flux.view, z_flux.view, 22U, {}};
+  passed &= expect(interface.constrain_interface_flux(flux),
+                   "prescribed and sealed IBM flux authority applies");
+  for (std::size_t index = 0U; index < links.size; ++index) {
+    const ImmersedLink& link = links.data[index];
+    const double value =
+        select(flux, link.direction).unchecked(face_index(link));
+    if (index == source_index)
+      passed &= expect(value == prescribed_phi,
+                       "source link carries the exact prescribed phi");
+    else
+      passed &= expect(value == 0.0 && !std::signbit(value),
+                       "sealed link carries canonical positive zero phi");
+  }
+  passed &= expect(interface.validate_interface_flux(as_const(flux)),
+                   "prescribed and sealed interface flux validates");
+  double queried_phi = -1.0;
+  const ImmersedLink& source_link = links.data[source_index];
+  const CartesianAxis source_axis =
+      static_cast<CartesianAxis>(face_axis(source_link.direction));
+  ForceOwnedField inlet_velocity = make_force_field(
+      41U, cells, 3U, fixture.boundary.maximum_halo_reach(), 521U, 621U);
+  ForceOwnedField inlet_gradient =
+      make_force_field(42U, cells, 9U, 0U, 522U, 622U);
+  const int reach = fixture.boundary.maximum_halo_reach();
+  for (int z = -reach; z < cells.z + reach; ++z)
+    for (int y = -reach; y < cells.y + reach; ++y)
+      for (int x = -reach; x < cells.x + reach; ++x) {
+        inlet_velocity.view.unchecked({x, y, z}, 0U) = 1.25;
+        inlet_velocity.view.unchecked({x, y, z}, 1U) = 2.5;
+        inlet_velocity.view.unchecked({x, y, z}, 2U) = 3.75;
+      }
+  passed &= expect(interface.correct_velocity_gradient(
+                       as_const(inlet_velocity.view), inlet_gradient.view),
+                   "prescribed inlet velocity gradient evaluates");
+  passed &= expect(std::abs(inlet_gradient.view.unchecked(
+                       source_link.fluid_local_index, 4U)) < 1.0e-10,
+                   "matching constant inlet velocity is not a no-slip wall");
+  ForceOwnedField inlet_mu = make_force_field(
+      43U, cells, 1U, fixture.boundary.maximum_halo_reach(), 523U, 623U);
+  constexpr double mu_inlet = 0.017;
+  std::fill(inlet_mu.storage.begin(), inlet_mu.storage.end(), mu_inlet);
+  double inlet_work = 123.0;
+  passed &= expect(interface.inlet_viscous_work_input(
+                       as_const(inlet_velocity.view), as_const(inlet_mu.view),
+                       inlet_work) && std::abs(inlet_work) < 1.0e-10,
+                   "constant matching inlet U produces zero viscous work");
+  constexpr double inlet_slope = 2.0;
+  for (int z = -reach; z < cells.z + reach; ++z)
+    for (int y = -reach; y < cells.y + reach; ++y)
+      for (int x = -reach; x < cells.x + reach; ++x) {
+        const double centre = fixture.extrapolated_centre(
+            fixture.geometry.y(), fixture.patch.begin.y + y);
+        inlet_velocity.view.unchecked({x, y, z}, 1U) =
+            2.5 + inlet_slope * (centre - source_link.wall_point.y);
+      }
+  const double expected_work = -2.5 * mu_inlet * (4.0 / 3.0) * inlet_slope *
+      fixture.topology.interface_metric().links().data[source_index]
+          .physical_quadrature_area;
+  passed &= expect(interface.inlet_viscous_work_input(
+                       as_const(inlet_velocity.view), as_const(inlet_mu.view),
+                       inlet_work) && std::abs(inlet_work - expected_work) < 1.0e-10,
+                   "linear normal inlet stress has matching signed energy work");
+  ForceOwnedField inlet_temperature = make_force_field(
+      44U, cells, 1U, fixture.boundary.maximum_halo_reach(), 524U, 624U);
+  ForceOwnedField inlet_heat_rate =
+      make_force_field(45U, cells, 1U, 0U, 525U, 625U);
+  std::fill(inlet_temperature.storage.begin(), inlet_temperature.storage.end(), 300.0);
+  const auto regions = fixture.topology.region();
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x)
+        if (regions.data[flat(cells, {x, y, z})] ==
+            static_cast<std::uint8_t>(RegionFlag::solid))
+          inlet_temperature.view.unchecked({x, y, z}, 0U) = 900.0;
+  const std::array<ConstFieldView, 1U> thermal_reads{as_const(inlet_temperature.view)};
+  const std::array<FieldView, 1U> thermal_writes{inlet_heat_rate.view};
+  const auto reset_thermal = [&]() {
+    return cartesian_diffusion(kernels, as_const(inlet_mu.view),
+        {{thermal_reads.data(), thermal_reads.size()},
+         {thermal_writes.data(), thermal_writes.size()},
+         {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U, nullptr});
+  };
+  passed &= expect(reset_thermal() && interface.correct_zero_normal_diffusion(
+                       as_const(inlet_temperature.view), as_const(inlet_mu.view),
+                       inlet_heat_rate.view) &&
+                       std::abs(inlet_heat_rate.view.unchecked(
+                           source_link.fluid_local_index, 0U)) < 1.0e-9,
+                   "inlet thermal flux excludes arbitrary hot solid placeholders");
+  passed &= expect(reset_thermal() &&
+                       interface.correct_positive_bounded_zero_normal_diffusion(
+                           as_const(inlet_temperature.view), as_const(inlet_mu.view),
+                           inlet_heat_rate.view) &&
+                       std::abs(inlet_heat_rate.view.unchecked(
+                           source_link.fluid_local_index, 0U)) < 1.0e-9,
+                   "bounded inlet thermal closure uses the same zero diffusive flux");
+  passed &= expect(interface.prescribed_face_flux(
+                       source_axis, face_index(source_link), queried_phi) &&
+                       queried_phi == prescribed_phi,
+                   "source-face lookup returns the exact prescribed phi");
+  double sealed_phi = -1.0;
+  passed &= expect(!interface.prescribed_face_flux(
+                       static_cast<CartesianAxis>(
+                           face_axis(links.data[sealed_index].direction)),
+                       face_index(links.data[sealed_index]), sealed_phi) &&
+                       sealed_phi == -1.0,
+                   "sealed face is absent from prescribed-flux authority");
+
+  select(flux, links.data[source_index].direction)
+      .unchecked(face_index(links.data[source_index])) = 0.0;
+  passed &= expect(interface.validate_interface_flux(as_const(flux)).code ==
+                       StatusCode::numerical_failure,
+                   "missing prescribed source phi is rejected");
+  passed &= expect(interface.constrain_interface_flux(flux),
+                   "interface flux authority restores prescribed phi");
+  select(flux, links.data[sealed_index].direction)
+      .unchecked(face_index(links.data[sealed_index])) = 1.0e-7;
+  passed &= expect(interface.validate_interface_flux(as_const(flux)).code ==
+                       StatusCode::numerical_failure,
+                   "nonzero sealed-link phi is rejected");
+
+  OwnedFace x_values = make_face(CartesianAxis::x, cells, 212U);
+  OwnedFace y_values = make_face(CartesianAxis::y, cells, 212U);
+  OwnedFace z_values = make_face(CartesianAxis::z, cells, 212U);
+  const FrozenConvectionFaceOutput face_values{
+      x_values.view, y_values.view, z_values.view};
+  const auto source_value = [&]() {
+    const ImmersedLink& link = links.data[source_index];
+    return select(FaceFluxView{face_values.x, face_values.y, face_values.z,
+                               23U, {}},
+                  link.direction)
+        .unchecked(face_index(link));
+  };
+  const auto sealed_value = [&]() {
+    const ImmersedLink& link = links.data[sealed_index];
+    return select(FaceFluxView{face_values.x, face_values.y, face_values.z,
+                               23U, {}},
+                  link.direction)
+        .unchecked(face_index(link));
+  };
+  passed &= expect(interface.override_source_face_values(
+                       {IbmInterfaceInletFieldKind::velocity, 1U},
+                       IbmInterfaceInletEvaluation::value, face_values) &&
+                       source_value() == 2.5 && sealed_value() == 7.0,
+                   "one inlet state overrides velocity on source faces only");
+  passed &= expect(interface.override_source_face_values(
+                       {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                       IbmInterfaceInletEvaluation::value, face_values) &&
+                       source_value() == 450000.0 && sealed_value() == 7.0,
+                   "the same inlet state overrides enthalpy");
+  passed &= expect(interface.override_source_face_values(
+                       {IbmInterfaceInletFieldKind::independent_species, 0U},
+                       IbmInterfaceInletEvaluation::value, face_values) &&
+                       source_value() == prescribed_species[0U] &&
+                       sealed_value() == 7.0,
+                   "the same inlet state overrides independent species");
+  passed &= expect(interface.override_source_face_values(
+                       {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                       IbmInterfaceInletEvaluation::fixed_state_variation,
+                       face_values) &&
+                       source_value() == 0.0 &&
+                       !std::signbit(source_value()) &&
+                       sealed_value() == 7.0,
+                   "fixed inlet state has canonical zero face variation");
+
+  const double prescribed_kinetic =
+      0.5 * (1.25 * 1.25 + 2.5 * 2.5 + 3.75 * 3.75);
+  passed &= expect(interface.override_source_face_values(
+                       {IbmInterfaceInletFieldKind::kinetic_energy, 0U},
+                       IbmInterfaceInletEvaluation::value, face_values) &&
+                       source_value() == prescribed_kinetic,
+                   "kinetic-energy inlet value is derived from the same U");
+
+  ForceOwnedField transported =
+      make_force_field(31U, cells, 1U, 2U, 511U, 611U);
+  ForceOwnedField correction =
+      make_force_field(32U, cells, 1U, 0U, 512U, 612U);
+  for (std::int32_t z = -2; z < cells.z + 2; ++z)
+    for (std::int32_t y = -2; y < cells.y + 2; ++y)
+      for (std::int32_t x = -2; x < cells.x + 2; ++x)
+        transported.view.unchecked({x, y, z}, 0U) =
+            10.0 + 0.25 * x + 0.5 * y + 0.75 * z;
+  const double volume = std::pow(3.0 / static_cast<double>(n), 3.0);
+  const double divergence_sign = positive_face(source_link.direction)
+                                     ? 1.0
+                                     : -1.0;
+  const std::array schemes_to_test{
+      ConvectionScheme::central2, ConvectionScheme::limited_central2,
+      ConvectionScheme::tvd2};
+  for (ConvectionScheme scheme : schemes_to_test) {
+    std::fill(correction.storage.begin(), correction.storage.end(), 7.0);
+    double ordinary_face = 0.0;
+    passed &= expect(reconstruct_cartesian_convection_face(
+                         kernels, scheme, as_const(transported.view), 0U,
+                         source_axis, face_index(source_link), prescribed_phi,
+                         ordinary_face),
+                     "single-face reconstruction uses production arithmetic");
+    passed &= expect(interface.add_source_convection_correction(
+                         {IbmInterfaceInletFieldKind::enthalpy, 0U}, scheme,
+                         as_const(transported.view), 1.0, correction.view),
+                     "prescribed inlet corrects high-order convection");
+    const double expected =
+        7.0 + divergence_sign * prescribed_phi *
+                  (450000.0 - ordinary_face) / volume;
+    passed &= expect(correction.view.unchecked(source_link.fluid_local_index,
+                                               0U) == expected,
+                     "high-order correction replaces exactly one face value");
+  }
+  std::fill(correction.storage.begin(), correction.storage.end(), 7.0);
+  const double ordinary_upwind =
+      transported.view.unchecked(source_link.solid_local_index, 0U);
+  passed &= expect(interface.add_source_first_order_upwind_correction(
+                       {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                       as_const(transported.view), 1.0, correction.view),
+                   "prescribed inlet corrects first-order upwind convection");
+  const double expected_upwind =
+      7.0 + divergence_sign * prescribed_phi *
+                (450000.0 - ordinary_upwind) / volume;
+  passed &= expect(correction.view.unchecked(source_link.fluid_local_index,
+                                             0U) == expected_upwind,
+                   "upwind correction replaces the solid placeholder donor");
+
+  // The nonlinear enthalpy residual uses the prescribed h_in on the source
+  // face, while every E_h action must see the exact derivative +0 there.  The
+  // same fixed-face authority must survive the generic and compiled paths.
+  passed &= expect(interface.constrain_interface_flux(flux),
+                   "source-aware frozen face starts from authoritative phi");
+  OwnedFace frozen_x = make_face(CartesianAxis::x, cells, 213U);
+  OwnedFace frozen_y = make_face(CartesianAxis::y, cells, 213U);
+  OwnedFace frozen_z = make_face(CartesianAxis::z, cells, 213U);
+  const FrozenConvectionFaceOutput frozen_output{
+      frozen_x.view, frozen_y.view, frozen_z.view};
+  OwnedFace direction_x = make_face(CartesianAxis::x, cells, 214U);
+  OwnedFace direction_y = make_face(CartesianAxis::y, cells, 214U);
+  OwnedFace direction_z = make_face(CartesianAxis::z, cells, 214U);
+  const FrozenConvectionFaceOutput directional_output{
+      direction_x.view, direction_y.view, direction_z.view};
+  const FrozenConvectionContext frozen_context{91001U, 91002U};
+  FrozenConvectionFaceField frozen;
+  FrozenConvectionFaceDirectionalDerivative ordinary_derivative;
+  passed &= expect(freeze_cartesian_target_convection_faces(
+                       kernels, ConvectionScheme::limited_central2,
+                       as_const(flux), as_const(transported.view), 0U,
+                       frozen_context, frozen_output, frozen) &&
+                       interface.override_source_face_values(
+                           {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                           IbmInterfaceInletEvaluation::value, frozen_output),
+                   "legacy freeze can be followed by an unsafe source overwrite");
+  passed &= expect(differentiate_frozen_cartesian_target_convection_faces(
+                       kernels, ConvectionScheme::limited_central2,
+                       as_const(flux), as_const(transported.view), 0U,
+                       frozen_context,
+                       FrozenConvectionLinearizationPolicy::
+                           semismooth_generalized_zero_slope,
+                       frozen, as_const(transported.view), 0U,
+                       directional_output, ordinary_derivative)
+                           .code == StatusCode::invalid_plan,
+                   "ordinary certificate rejects overwritten source h as stale");
+  const auto frozen_source_value = [&]() {
+    return select(FaceFluxView{frozen_output.x, frozen_output.y,
+                               frozen_output.z, 24U, {}},
+                  source_link.direction)
+        .unchecked(face_index(source_link));
+  };
+  const auto directional_source_value = [&]() {
+    return select(FaceFluxView{directional_output.x, directional_output.y,
+                               directional_output.z, 25U, {}},
+                  source_link.direction)
+        .unchecked(face_index(source_link));
+  };
+  for (ConvectionScheme scheme : schemes_to_test) {
+    FrozenConvectionFaceDirectionalDerivative derivative;
+    passed &= expect(interface.freeze_source_convection_faces(
+                         {IbmInterfaceInletFieldKind::enthalpy, 0U}, scheme,
+                         as_const(flux), as_const(transported.view), 0U,
+                         frozen_context, frozen_output, frozen) &&
+                         frozen.fixed_faces.size == 1U &&
+                         frozen.fixed_face_authority ==
+                             interface.fingerprint() &&
+                         frozen_source_value() == 450000.0 &&
+                         interface.validate_frozen_source_face_values(
+                             {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                             frozen) &&
+                         differentiate_frozen_cartesian_target_convection_faces(
+                             kernels, scheme, as_const(flux),
+                             as_const(transported.view), 0U, frozen_context,
+                             FrozenConvectionLinearizationPolicy::
+                                 semismooth_generalized_zero_slope,
+                             frozen, as_const(transported.view), 0U,
+                             directional_output, derivative) &&
+                         directional_source_value() == 0.0 &&
+                         !std::signbit(directional_source_value()),
+                     "all generic E_h schemes freeze h_in and return fixed +0");
+  }
+  passed &= expect(interface.freeze_source_convection_faces(
+                       {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                       ConvectionScheme::limited_central2, as_const(flux),
+                       as_const(transported.view), 0U, frozen_context,
+                       frozen_output, frozen),
+                   "limited E_h source face refreezes for compiled replay");
+  const std::size_t branch_count = frozen_x.values.size() +
+                                   frozen_y.values.size() +
+                                   frozen_z.values.size();
+  std::vector<std::uint16_t> branch_storage(branch_count);
+  FrozenConvectionBranchPlan branches;
+  passed &= expect(compile_frozen_limited_central2_branches(
+                       kernels, as_const(flux), as_const(transported.view), 0U,
+                       frozen_context,
+                       FrozenConvectionLinearizationPolicy::
+                           semismooth_generalized_zero_slope,
+                       frozen,
+                       {{branch_storage.data(), branch_storage.size()}},
+                       branches) &&
+                       apply_frozen_limited_central2_branches(
+                           kernels, branches, as_const(transported.view), 0U,
+                           directional_output) &&
+                       directional_source_value() == 0.0 &&
+                       !std::signbit(directional_source_value()),
+                   "compiled E_h replays the same canonical fixed-source +0");
+  const double certified_source_value = frozen_source_value();
+  select(FaceFluxView{frozen_output.x, frozen_output.y, frozen_output.z, 24U,
+                      {}},
+         source_link.direction)
+      .unchecked(face_index(source_link)) = certified_source_value + 1.0;
+  passed &= expect(interface.validate_frozen_source_face_values(
+                       {IbmInterfaceInletFieldKind::enthalpy, 0U}, frozen)
+                           .code == StatusCode::invalid_plan,
+                   "tampered frozen h_in is rejected by source authority");
+  select(FaceFluxView{frozen_output.x, frozen_output.y, frozen_output.z, 24U,
+                      {}},
+         source_link.direction)
+      .unchecked(face_index(source_link)) = certified_source_value;
+
+  auto reversed_sources = sources;
+  reversed_sources[0].velocity.y = -2.5;
+  const auto prior_fingerprint = interface.fingerprint();
+  passed &= expect(IbmEquationInterfacePlan::compile(
+                       kernels, fixture.topology, fixture.boundary,
+                       fixture.topology.interface_metric(),
+                       {reversed_sources.data(), reversed_sources.size()},
+                       prescribed_species.size(), interface).code ==
+                       StatusCode::invalid_plan &&
+                       interface.fingerprint() == prior_fingerprint,
+                   "inward mass flux with outward inlet U is rejected atomically");
+  {
+    ThermodynamicsPlan thermo;
+    TransportPlan transport;
+    ContributionRegistry contributions;
+    EquationPlanSet equations;
+    EquationPlanSpec spec;
+    spec.density = 60U;
+    spec.velocity = physical_boundary.velocity_field();
+    spec.pressure_perturbation = physical_boundary.pressure_field();
+    spec.enthalpy = physical_boundary.enthalpy_field();
+    spec.temperature = 59U;
+    spec.effective_viscosity = 61U;
+    spec.pressure_compressibility = 62U;
+    spec.velocity_gradient = 63U;
+    spec.pressure_reference = model.pressure_reference;
+    spec.closed_mass_service_stage = 1U;
+    spec.maximum_cells_per_rank = static_cast<std::size_t>(cells.x) * cells.y * cells.z;
+    const std::array<FieldId, 8U> fields{spec.density, spec.velocity,
+        spec.pressure_perturbation, spec.enthalpy, spec.temperature,
+        spec.effective_viscosity, spec.pressure_compressibility, spec.velocity_gradient};
+    passed &= expect(ThermodynamicsPlan::compile(model.thermophysics, {}, thermo) &&
+        TransportPlan::compile(model.thermophysics, thermo, transport) &&
+        contributions.configure({fields.data(), fields.size()}) && contributions.freeze() &&
+        EquationPlanSet::compile(MPI_COMM_SELF, schemes, fixture.geometry, fixture.patch,
+            physical_boundary, contributions, thermo, transport, spec, equations),
+        "source-bearing momentum equation plans compile");
+    if (!passed) return false;
+    auto u = make_force_field(spec.velocity, cells, 3U, reach, 601U, 701U);
+    auto rho = make_force_field(spec.density, cells, 1U, reach, 602U, 702U);
+    auto p = make_force_field(spec.pressure_perturbation, cells, 1U, reach, 603U, 703U);
+    auto mu = make_force_field(spec.effective_viscosity, cells, 1U, reach, 604U, 704U);
+    auto grad = make_force_field(spec.velocity_gradient, cells, 9U, 1U, 605U, 705U);
+    auto diagonal = make_force_field(70U, cells, 3U, 0U, 606U, 706U);
+    auto rhs = make_force_field(71U, cells, 3U, 0U, 607U, 707U);
+    auto residual = make_force_field(72U, cells, 3U, 0U, 608U, 708U);
+    auto delta = make_force_field(73U, cells, 3U, 0U, 609U, 709U);
+    std::fill(rho.storage.begin(), rho.storage.end(), 1.0);
+    std::fill(mu.storage.begin(), mu.storage.end(), 0.017);
+    std::fill(x_flux.values.begin(), x_flux.values.end(), 0.0);
+    std::fill(y_flux.values.begin(), y_flux.values.end(), 0.0);
+    std::fill(z_flux.values.begin(), z_flux.values.end(), 0.0);
+    passed &= expect(interface.constrain_interface_flux(flux), "source-only momentum phi binds");
+    auto ax = make_face(CartesianAxis::x, cells, 801U);
+    auto ay = make_face(CartesianAxis::y, cells, 802U);
+    auto az = make_face(CartesianAxis::z, cells, 803U);
+    EquationStateView state;
+    state.velocity = {as_const(u.view), as_const(u.view), as_const(u.view)};
+    state.density = {as_const(rho.view), as_const(rho.view), as_const(rho.view)};
+    state.pressure_perturbation = {as_const(p.view), as_const(p.view), as_const(p.view)};
+    EquationMaterialView material;
+    material.effective_viscosity = material.molecular_viscosity = as_const(mu.view);
+    EquationAssemblyContext context;
+    context.dt = 0.001;
+    context.bdf = {1000.0, -1000.0, 0.0, 1U};
+    context.time = 901U;
+    context.geometry = fixture.geometry.topology_revision();
+    context.boundary = physical_boundary.revision();
+    context.transport = transport.fingerprint();
+    context.face_flux = flux.revision;
+    context.contribution_stage = 1U;
+    context.scope = EquationAssemblyScope::momentum_predictor;
+    context.mass_flux = as_const(flux);
+    context.provisional_mass_flux = true;
+    context.immersed_interface = &interface;
+    EquationSystemView system;
+    system.diagonal = diagonal.view;
+    system.rhs = rhs.view;
+    system.residual = residual.view;
+    system.x_coefficient = ax.view;
+    system.y_coefficient = ay.view;
+    system.z_coefficient = az.view;
+    EquationAssemblyCertificate certificate;
+    select(flux, source_link.direction).unchecked(face_index(source_link)) = 0.0;
+    passed &= expect(assemble_momentum_predictor(equations.momentum(), state, material,
+        as_const(grad.view), {}, context, system, delta.view, certificate).code ==
+        StatusCode::numerical_failure,
+        "source-bearing momentum rejects a missing prescribed mass flux");
+    passed &= expect(interface.constrain_interface_flux(flux), "restore momentum source phi");
+    passed &= expect(assemble_momentum_predictor(equations.momentum(), state, material,
+        as_const(grad.view), {}, context, system, delta.view, certificate),
+        "full source-bearing momentum predictor assembles");
+    passed &= expect(certificate.inlet_sources == interface.fingerprint(),
+                     "momentum certificate binds the source-state authority");
+    for (unsigned c = 0U; c < 3U; ++c)
+      passed &= expect(std::abs(delta.view.unchecked(source_link.fluid_local_index, c)) < 1e-18,
+                       "fixed inlet has no high-minus-low momentum antidiffusion");
+    std::array<std::vector<std::uint8_t>, 3U> active_faces;
+    std::array<OwnedFace, 12U> limiter_faces;
+    for (unsigned group = 0U; group < 4U; ++group)
+      for (unsigned axis = 0U; axis < 3U; ++axis)
+        limiter_faces[3U * group + axis] =
+            make_face(static_cast<CartesianAxis>(axis), cells, 1001U + group);
+    const auto is_fluid = [&](Int3 q) {
+      return q.x >= 0 && q.y >= 0 && q.z >= 0 &&
+          q.x < cells.x && q.y < cells.y && q.z < cells.z &&
+          regions.data[flat(cells, q)] == static_cast<std::uint8_t>(RegionFlag::fluid);
+    };
+    for (unsigned axis = 0U; axis < 3U; ++axis) {
+      const auto shape = limiter_faces[axis].view.extents;
+      auto& active = active_faces[axis];
+      active.resize(static_cast<std::size_t>(shape.x) * shape.y * shape.z);
+      for (int z = 0; z < shape.z; ++z)
+        for (int y = 0; y < shape.y; ++y)
+          for (int x = 0; x < shape.x; ++x) {
+            const Int3 face{x, y, z};
+            Int3 left = face;
+            if (axis == 0U) --left.x;
+            else if (axis == 1U) --left.y;
+            else --left.z;
+            active[flat(shape, face)] = is_fluid(left) && is_fluid(face);
+          }
+    }
+    const MgDomainActivityView activity{regions,
+        {active_faces[0].data(), active_faces[0].size()},
+        {active_faces[1].data(), active_faces[1].size()},
+        {active_faces[2].data(), active_faces[2].size()},
+        fixture.topology.fingerprint(), fixture.topology.fingerprint()};
+    auto ratios = make_force_field(74U, cells, 3U, 1U, 610U, 710U);
+    MomentumPredictorLimiterWorkspace workspace;
+    workspace.cell_ratios = ratios.view;
+    for (unsigned c = 0U; c < 3U; ++c)
+      workspace.high_order_faces[c] = {limiter_faces[3U*c].view,
+          limiter_faces[3U*c+1U].view, limiter_faces[3U*c+2U].view, 1200U+c, {}};
+    workspace.common_face_alpha = {limiter_faces[9].view, limiter_faces[10].view,
+                                   limiter_faces[11].view, 1203U, {}};
+    const std::array<HaloFieldSpec, 1U> halo_fields{{{ratios.view.field, 1U, 3U}}};
+    HaloEngine halo;
+    ReductionEngine reductions;
+    passed &= expect(halo.reserve(MPI_COMM_SELF, fixture.patch,
+        {halo_fields.data(), halo_fields.size()}, physical_boundary.halo_topology()) &&
+        ReductionEngine::compile(MPI_COMM_SELF, ReductionMode::mpi_allreduce, 8U, reductions),
+        "source-bearing limiter communication resources compile");
+    MomentumPredictorLimiterReport report;
+    const auto limit = [&]() {
+      return limit_momentum_predictor_correction(MPI_COMM_SELF, equations.momentum(),
+          physical_boundary, fixture.patch, certificate, as_const(u.view), as_const(rho.view),
+          context.dt, 0.3, as_const(flux), activity, system, workspace, halo, reductions, report);
+    };
+    passed &= expect(limit().code == StatusCode::invalid_plan,
+                     "source-bearing limiter rejects omitted inlet authority");
+    workspace.immersed_interface = &interface;
+    passed &= expect(limit(), "source-bearing limiter accepts fixed cut-face inflow");
+    passed &= expect(report.advective_cfl.valid() &&
+        std::abs(report.advective_cfl.absolute_max - context.dt * prescribed_phi / (2.0 * volume)) < 1e-15,
+        "source inflow contributes exactly to absolute CFL without opening MG face");
+
+    // GTMC's nonlinear candidate replay must see the same fixed h_in as the
+    // full energy assembly which forms its Newton direction.
+    auto h = make_force_field(spec.enthalpy, cells, 1U, reach, 1301U, 1401U);
+    auto temperature = make_force_field(spec.temperature, cells, 1U, reach, 1302U, 1402U);
+    auto kappa = make_force_field(90U, cells, 1U, reach, 1303U, 1403U);
+    auto e_diagonal = make_force_field(91U, cells, 1U, 0U, 1304U, 1404U);
+    auto e_rhs = make_force_field(92U, cells, 1U, 0U, 1305U, 1405U);
+    auto e_residual = make_force_field(93U, cells, 1U, 0U, 1306U, 1406U);
+    auto replay = make_force_field(94U, cells, 1U, 0U, 1307U, 1407U);
+    auto pressure_work = make_force_field(95U, cells, 1U, 0U, 1308U, 1408U);
+    auto viscous_work = make_force_field(96U, cells, 1U, 0U, 1309U, 1409U);
+    auto conduction = make_force_field(97U, cells, 1U, 0U, 1310U, 1410U);
+    std::fill(h.storage.begin(), h.storage.end(), 1000.0);
+    std::fill(temperature.storage.begin(), temperature.storage.end(), 300.0);
+    std::fill(kappa.storage.begin(), kappa.storage.end(), 0.02);
+    std::fill(grad.storage.begin(), grad.storage.end(), 0.0);
+    state.enthalpy = {as_const(h.view), as_const(h.view), as_const(h.view)};
+    state.temperature = {as_const(temperature.view), as_const(temperature.view), as_const(temperature.view)};
+    state.pressure_reference = 101325.0;
+    state.accepted_pressure_reference = state.previous_pressure_reference = 101325.0;
+    material.thermal_conductivity = material.enthalpy_diffusivity = as_const(kappa.view);
+    context.thermo = thermo.fingerprint();
+    context.scope = EquationAssemblyScope::target_coupled;
+    context.provisional_mass_flux = false;
+    const EquationSystemView energy_system{e_diagonal.view, e_rhs.view, e_residual.view,
+                                           ax.view, ay.view, az.view};
+    EquationAssemblyCertificate full_energy, replay_energy;
+    const Status full_status = assemble_enthalpy(equations.enthalpy(), state, material,
+        as_const(grad.view), {}, context, energy_system, full_energy);
+    const Status replay_status = assemble_target_coupled_enthalpy_residual(
+        equations.enthalpy(), state, material, as_const(grad.view), context,
+        replay.view, {pressure_work.view, viscous_work.view, conduction.view}, replay_energy);
+    passed &= expect(full_status && replay_status, "both source-bearing energy paths assemble");
+    const Int3 source_cell = source_link.fluid_local_index;
+    const double expected_energy = -prescribed_phi * sources[0].enthalpy;
+    const double full_value = e_residual.view.unchecked(source_cell,0U);
+    const double replay_value = replay.view.unchecked(source_cell,0U);
+    if (std::abs(full_value-replay_value) > 1e-12)
+      std::cerr << "source energy full=" << full_value << " replay=" << replay_value
+                << " expected=" << expected_energy << '\n';
+    passed &= expect(std::abs(full_value-expected_energy) < 1e-12 &&
+        std::abs(replay_value-full_value) < 1e-12 && e_residual.storage == replay.storage,
+        "full and candidate energy residuals use the same prescribed inlet enthalpy");
+  }
+  return passed;
+}
+
 bool run() {
   constexpr std::int32_t n = 16;
   IbmForceFixture fixture;
@@ -1134,7 +1728,7 @@ bool run() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
-  const bool passed = run();
+  const bool passed = test_prescribed_interface_mass_flux() && run();
   MPI_Finalize();
   return passed ? 0 : 1;
 }

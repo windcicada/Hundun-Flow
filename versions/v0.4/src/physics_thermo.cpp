@@ -778,7 +778,17 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
       if (diagnostic != nullptr) diagnostic->residual = residual;
       const double scale =
           std::max({1.0, std::abs(h), std::abs(evaluated_h)});
-      if (std::abs(residual) <= relative_tolerance_ * scale) {
+      const double newton_temperature = temperature - residual / cp;
+      // A temperature hint is an acceleration aid, not a dead band. Large
+      // formation-enthalpy offsets can make a resolvable dh smaller than the
+      // configured residual tolerance, even though its EOS density response
+      // matters to the coupled continuity solve. Finish the Newton polish
+      // before accepting that tolerance; do not return the unchanged hint
+      // while simultaneously advertising a nonzero analytic drho/dh.
+      // Exact endpoints and adjacent-temperature representability checks
+      // below retain their original, separately bounded acceptance rules.
+      if (std::abs(residual) <= relative_tolerance_ * scale &&
+          (residual == 0.0 || newton_temperature == temperature)) {
         converged = true;
         break;
       }
@@ -824,7 +834,7 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
         }
         break;
       }
-      double next = temperature - residual / cp;
+      double next = newton_temperature;
       if (!finite(next) || next <= lower || next >= upper) {
         next = 0.5 * (lower + upper);
       }

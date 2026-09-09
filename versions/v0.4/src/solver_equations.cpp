@@ -122,6 +122,8 @@ PlanFingerprint compute_semantic_fingerprint(
   std::uint64_t hash = kFnvOffset;
   hash = hash_mix(hash, UINT64_C(0x7630346571756174));
   hash = hash_mix(hash, limiter_policy);
+  if (spec.physical_inlet_material)
+    hash=hash_mix(hash,UINT64_C(0x494e4c4554464331));
   hash = hash_mix(hash, static_cast<std::uint8_t>(geometry.kind()));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().x));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().y));
@@ -447,6 +449,7 @@ Status AssemblyEpoch::record(
         candidate_.geometry == certificate.geometry &&
         candidate_.face_flux == certificate.face_flux &&
         candidate_.state == certificate.state &&
+        candidate_.inlet_sources == certificate.inlet_sources &&
         candidate_.dt == certificate.dt;
     if (!same_cells || !same_certificate) {
       return fail({StatusCode::invalid_plan, kAssemblyEpoch});
@@ -782,7 +785,7 @@ Status EquationPlanSet::compile(
   EquationPlanSet candidate;
   try {
     local = CartesianKernelPlan::compile(schemes, geometry, patch, boundary,
-                                         candidate.kernels_);
+                                         candidate.kernels_, spec.physical_inlet_material);
     if (!local) {
       throw local;
     }

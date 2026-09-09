@@ -82,6 +82,19 @@ add_test(NAME v04_thin_domain_runner_self_test
   COMMAND $<TARGET_FILE:v04_thin_domain_runner> --self-test)
 set_tests_properties(v04_thin_domain_runner_self_test PROPERTIES TIMEOUT 30)
 
+foreach(rank_count IN ITEMS 1 2)
+  add_test(NAME v04_coast_restart_import_cli_mpi_${rank_count}
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/coast_restart_import_cli_test.py"
+      --binary "$<TARGET_FILE:v04_coast_restart_import>"
+      --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}"
+      --case-template "${CMAKE_CURRENT_SOURCE_DIR}/data/case_minimal_valid.json"
+      --thermo "${CMAKE_CURRENT_SOURCE_DIR}/data/gtmc_hundun_thermophysics.d")
+  set_tests_properties(v04_coast_restart_import_cli_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180 RUN_SERIAL TRUE
+    LABELS "gtmc-transfer")
+endforeach()
+
 add_library(v04_runner_log_failure_probe SHARED support/runner_log_failure_probe.c)
 target_link_libraries(v04_runner_log_failure_probe PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME v04_runner_log_completion_mpi_2
@@ -601,6 +614,8 @@ endforeach()
 
 add_executable(v04_solver_thermophysical_idp_test
   numerical/solver_thermophysical_idp_test.cpp)
+target_compile_definitions(v04_solver_thermophysical_idp_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
 target_link_libraries(v04_solver_thermophysical_idp_test PRIVATE
   hundun_v04_test_core
   MPI::MPI_C)
@@ -849,6 +864,22 @@ foreach(rank_count IN ITEMS 1 2 4)
     TIMEOUT 120)
 endforeach()
 
+add_executable(v04_mesh_ibm_import_mpi_test
+  mpi/mesh_ibm_import_mpi_test.cpp)
+target_link_libraries(v04_mesh_ibm_import_mpi_test PRIVATE
+  hundun_v04_test_core
+  MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2)
+  add_test(NAME v04_mesh_ibm_import_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_mesh_ibm_import_mpi_test>"
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_mesh_ibm_import_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}"
+    TIMEOUT 120)
+endforeach()
+
 add_executable(v04_mesh_ibm_plan_test
   integration/mesh_ibm_plan_test.cpp)
 target_link_libraries(v04_mesh_ibm_plan_test PRIVATE
@@ -1077,6 +1108,30 @@ foreach(rank_count IN ITEMS 2 4)
   endforeach()
 endforeach()
 
+add_executable(v04_solver_mass_balanced_outlet_mpi_test
+  mpi/solver_mass_balanced_outlet_mpi_test.cpp)
+target_link_libraries(v04_solver_mass_balanced_outlet_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_solver_mass_balanced_outlet_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      $<TARGET_FILE:v04_solver_mass_balanced_outlet_mpi_test>)
+  set_tests_properties(v04_solver_mass_balanced_outlet_mpi_${rank_count}
+    PROPERTIES TIMEOUT 120)
+endforeach()
+
+add_executable(v04_solver_scalar_mass_remap_mpi_test
+  mpi/solver_scalar_mass_remap_mpi_test.cpp)
+target_link_libraries(v04_solver_scalar_mass_remap_mpi_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_solver_scalar_mass_remap_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      $<TARGET_FILE:v04_solver_scalar_mass_remap_mpi_test>)
+  set_tests_properties(v04_solver_scalar_mass_remap_mpi_${rank_count}
+    PROPERTIES TIMEOUT 120)
+endforeach()
+
 add_executable(v04_app_init_case_test
   integration/app_init_case_test.cpp)
 target_link_libraries(v04_app_init_case_test PRIVATE
@@ -1180,6 +1235,13 @@ foreach(rank_count IN ITEMS 1 2 4)
             "$<TARGET_FILE:v04_product_pressure_energy_retry_mpi_test>"
             ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_pressure_energy_retry_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180)
+  add_test(NAME v04_product_generic_thermal_halo_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_product_pressure_energy_retry_mpi_test>"
+            --generic-thermal-halo ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_product_generic_thermal_halo_mpi_${rank_count}
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180)
 endforeach()
 
@@ -1758,6 +1820,11 @@ foreach(rank_count IN ITEMS 1 2 4)
   set_tests_properties(v04_mesh_decomposition_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}")
 endforeach()
+
+add_executable(v04_core_patch_inlets_test unit/core_patch_inlets_test.cpp)
+target_link_libraries(v04_core_patch_inlets_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_core_patch_inlets COMMAND v04_core_patch_inlets_test)
+set_tests_properties(v04_core_patch_inlets PROPERTIES TIMEOUT 120)
 
 add_executable(v04_app_case_test
   unit/app_case_test.cpp)

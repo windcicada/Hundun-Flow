@@ -12,8 +12,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
+#include <locale>
 #include <sstream>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "app_driver_detail.hpp"
@@ -48,6 +51,7 @@ constexpr std::uint32_t kApplicationPath = 10502U;
 constexpr std::uint32_t kApplicationTemplate = 10503U;
 constexpr std::uint32_t kApplicationAmbiguousInitialState = 10505U;
 constexpr std::uint32_t kApplicationControlMismatch = 10506U;
+constexpr std::uint32_t kApplicationDiagnostics = 10508U;
 
 void local_allocation_checkpoint(ApplicationFailurePhase phase, int rank) {
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
@@ -449,12 +453,13 @@ static Status run_application(MPI_Comm communicator,
   if (!status) return status;
   // These controls determine collective order, not local storage identity.
   // Check once before filesystem/product work; do not add hot halo checks.
-  const std::array<std::uint64_t, 7U> control{{
+  const std::array<std::uint64_t, 8U> control{{
       options.steps, options.output_interval, options.restart_interval,
       options.restart_directory.empty() ? 0U : 1U,
       static_cast<std::uint64_t>(options.restart_storage_compatibility),
       static_cast<std::uint64_t>(options.restart_history_policy),
-      options.initial_state.has_value() ? 1U : 0U}};
+      options.initial_state.has_value() ? 1U : 0U,
+      options.diagnostics_interval}};
   auto minimum = control, maximum = control;
   const int min_status = MPI_Allreduce(MPI_IN_PLACE, minimum.data(),
       static_cast<int>(minimum.size()), MPI_UINT64_T, MPI_MIN, communicator);
@@ -703,14 +708,19 @@ static Status run_application(MPI_Comm communicator,
         options.restart_interval != 0U &&
         (step.accepted_step % options.restart_interval == 0U ||
          step.accepted_step == target_step);
+    const bool diagnostics =
+        options.diagnostics_interval != 0U &&
+        (step.accepted_step % options.diagnostics_interval == 0U ||
+         step.accepted_step == target_step);
     CommittedOutputSnapshot snapshot;
     fs::path output_path;
-    if (output) {
-      report.failure_phase = ApplicationFailurePhase::visit;
-      timing.phase(4U);
+    if (output || diagnostics) {
+      report.failure_phase = output ? ApplicationFailurePhase::visit
+                                    : ApplicationFailurePhase::monitor;
+      timing.phase(output ? 4U : 5U);
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
-        output_path = options.run_directory / "Visit";
+        if (output) output_path = options.run_directory / "Visit";
         return driver.committed_output_snapshot(snapshot);
       });
     }
@@ -795,6 +805,56 @@ static Status run_application(MPI_Comm communicator,
         status =
             MonitorWriter::append(communicator, output_path, services, snapshot,
                                   monitor_text, &report.io_failure);
+    }
+    if (status && diagnostics) {
+      report.failure_phase = ApplicationFailurePhase::monitor;
+      timing.phase(5U);
+      std::string diagnostic_text;
+      status = detail::output_collective_stage(communicator, [&] {
+        local_allocation_checkpoint(report.failure_phase, rank);
+        const auto& balance = step.conservation;
+        const auto& terminal = step.terminal_equations;
+        if (!balance.valid || !terminal.valid ||
+            terminal.final_flux == 0U ||
+            terminal.final_flux != step.piso.final_flux_revision)
+          return Status{StatusCode::invalid_plan, kApplicationDiagnostics};
+        const std::array<std::pair<const char*, double>, 15U> values{{
+            {"dt", step.proposal.dt},
+            {"mass_kg", terminal.mass},
+            {"internal_energy_J", terminal.internal_energy},
+            {"kinetic_energy_J", terminal.kinetic_energy},
+            {"mass_outflow_kg_s", balance.mass_outflow},
+            {"enthalpy_outflow_W", balance.enthalpy_outflow},
+            {"kinetic_energy_outflow_W", balance.kinetic_energy_outflow},
+            {"conductive_heat_input_W", balance.conductive_heat_input},
+            {"viscous_work_input_W", balance.viscous_work_input},
+            {"mass_bdf_rate_kg_s", balance.mass_bdf_rate},
+            {"total_energy_bdf_rate_W", balance.total_energy_bdf_rate},
+            {"mass_balance_defect_kg_s", balance.mass_balance_defect},
+            {"total_energy_balance_defect_W", balance.total_energy_balance_defect},
+            {"cumulative_mass_defect_kg", balance.cumulative_mass_defect},
+            {"cumulative_energy_defect_J", balance.cumulative_energy_defect}}};
+        std::ostringstream payload;
+        payload.imbue(std::locale::classic());
+        payload << std::setprecision(17)
+                << "{\"schema\":\"HUNDUN_V04_DEVELOPMENT_DIAGNOSTICS_V1\""
+                << ",\"statistics_eligible\":false,\"bdf_order\":"
+                << static_cast<unsigned>(step.effective_bdf.order)
+                << ",\"epoch_start_step\":" << balance.epoch_start_step
+                << ",\"final_flux_revision\":" << terminal.final_flux;
+        for (const auto& value : values) {
+          if (!std::isfinite(value.second))
+            return Status{StatusCode::invalid_plan, kApplicationDiagnostics};
+          payload << ",\"" << value.first << "\":" << value.second;
+        }
+        payload << '}';
+        diagnostic_text = payload.str();
+        output_path = options.run_directory / "diagnostics.jsonl";
+        return Status{};
+      });
+      if (status)
+        status = MonitorWriter::append(communicator, output_path, services,
+            snapshot, diagnostic_text, &report.io_failure);
     }
     RestartSnapshot restart_snapshot;
     if (status && restart) {

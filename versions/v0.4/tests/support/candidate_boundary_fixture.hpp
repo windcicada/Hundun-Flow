@@ -40,6 +40,8 @@ struct CandidateBoundaryFixtureSpec {
   double backflow_velocity{-0.25};
   double backflow_temperature{350.0};
   std::int32_t cells_per_axis{6};
+  BoundaryKind outlet_kind{BoundaryKind::pressure_outlet};
+  double predictor_velocity{};
 };
 
 struct CandidateBoundaryScratch {
@@ -139,7 +141,7 @@ class CandidateBoundaryFixture {
     inlet.mass_flow_rate = spec.mass_flow_rate;
     inlet.temperature = spec.inlet_temperature;
     BoundaryFaceSpec& outlet = model.boundaries[outlet_face];
-    outlet.flow_kind = BoundaryKind::pressure_outlet;
+    outlet.flow_kind = spec.outlet_kind;
     outlet.pressure = spec.outlet_pressure;
     outlet.allow_backflow = spec.allow_backflow;
     outlet.backflow_velocity = {
@@ -465,6 +467,9 @@ class CandidateBoundaryFixture {
           const double volume = cell_volume(cell);
           for (std::uint8_t component = 0U; component < 3U; ++component)
             momentum_diagonal.view.unchecked(cell, component) = volume;
+          momentum_rhs.view.unchecked(cell, 0U) =
+              volume * spec.predictor_velocity;
+          velocity.view.unchecked(cell, 0U) = spec.predictor_velocity;
         }
     fill_face_flux(phi_h_by_a, 0.0);
     fill_face_flux(trial_flux, 0.0);
@@ -1412,6 +1417,13 @@ class CandidateBoundaryFixture {
         make_field(241U, patch.cells, 3U, 2U, 1912U, 2912U);
     fill(history_density, 1.0);
     fill(history_velocity, 0.0);
+    if (spec.predictor_velocity != 0.0) {
+      fill(history_density, density.view.unchecked({0,0,0}, 0U));
+      for (int z = -2; z < patch.cells.z + 2; ++z)
+        for (int y = -2; y < patch.cells.y + 2; ++y)
+          for (int x = -2; x < patch.cells.x + 2; ++x)
+            history_velocity.view.unchecked({x,y,z}, 0U) = spec.predictor_velocity;
+    }
     const std::array<ConstFieldView, 2U> reads{
         as_const(history_density.view), as_const(history_velocity.view)};
     const KernelInvocation invocation{

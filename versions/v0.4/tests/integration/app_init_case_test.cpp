@@ -6,12 +6,14 @@
 #include <mpi.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <set>
 
 namespace {
 
@@ -19,6 +21,14 @@ namespace fs = std::filesystem;
 using namespace hundun::v04;
 
 bool run() {
+  const auto source_cases = [] {
+    std::set<fs::path> paths;
+    for (const auto& entry : fs::recursive_directory_iterator(HUNDUN_V04_SOURCE_ROOT))
+      if (entry.is_regular_file() && entry.path().filename() == "case.json")
+        paths.insert(entry.path());
+    return paths;
+  };
+  const auto original_source_cases = source_cases();
   const fs::path root = fs::temp_directory_path() /
                         ("hundun-v04-init-case-" +
                          std::to_string(::getpid()));
@@ -173,6 +183,29 @@ bool run() {
               text.find("\"face_flux_revision\":0") == std::string::npos &&
               text.find("\"final_flux_revision\":0") == std::string::npos;
   }
+  // Independent diagnostics never require full-field Visit output.
+  {
+    ApplicationRunOptions diagnostics = run_options;
+    diagnostics.run_directory = root / "run-diagnostics";
+    diagnostics.output_interval = diagnostics.restart_interval = 0U;
+    diagnostics.diagnostics_interval = 1U;
+    ApplicationRunReport diagnostic_report;
+    passed &= static_cast<bool>(ApplicationService::run(
+        MPI_COMM_SELF, diagnostics, diagnostic_report));
+    std::ifstream input(diagnostics.run_directory / "diagnostics.jsonl");
+    const std::string text{std::istreambuf_iterator<char>(input),
+                           std::istreambuf_iterator<char>()};
+    const bool ledger = std::count(text.begin(), text.end(), '\n') == 2 &&
+        text.find("HUNDUN_V04_DEVELOPMENT_DIAGNOSTICS_V1") != std::string::npos &&
+        text.find("\"mass_balance_defect_kg_s\":") != std::string::npos &&
+        text.find("\"cumulative_energy_defect_J\":") != std::string::npos &&
+        text.find("\"statistics_eligible\":false") != std::string::npos &&
+        !fs::exists(diagnostics.run_directory / "Visit") &&
+        !fs::exists(diagnostics.run_directory / "monitor.jsonl") &&
+        !fs::exists(root / "run" / "diagnostics.jsonl");
+    if (!ledger) std::cerr << "FAIL: optional committed conservation ledger without Visit\n";
+    passed &= ledger;
+  }
   // The ordinary application must distinguish an exact continuation from an
   // explicitly requested method recovery, even for an intact current image.
   ApplicationRunOptions recovery_options = resumed_options;
@@ -322,16 +355,7 @@ bool run() {
     }
   }
 
-  for (fs::recursive_directory_iterator iterator(HUNDUN_V04_SOURCE_ROOT, error),
-       end;
-       !error && iterator != end; iterator.increment(error)) {
-    if (iterator->is_regular_file(error) &&
-        iterator->path().filename() == "case.json") {
-      passed = false;
-      break;
-    }
-  }
-  passed &= !error;
+  passed &= source_cases() == original_source_cases;
   CaseValidationReport unchanged;
   unchanged.product = UINT64_C(0xdeadbeef);
   passed &= !ApplicationService::validate(MPI_COMM_SELF, root / "missing",

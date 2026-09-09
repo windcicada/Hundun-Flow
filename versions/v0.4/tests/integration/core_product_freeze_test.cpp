@@ -277,6 +277,31 @@ bool test_pressure_aitken_initial_alpha() {
   return passed;
 }
 
+bool test_pressure_extrapolation_backoff() {
+  detail::ProductPressureExtrapolationBackoff history;
+  bool passed = expect(history.propose(1.0, 0.2, 1.0) > 1.0,
+                       "fresh contracting sequence retains extrapolation");
+  // Actual GTMC C2 tail: a selected extrapolation barely contracts, then a
+  // unit step contracts well. The latter must not erase the stall evidence.
+  passed &= expect(history.propose(2.5903536328684625e-12,
+                                  2.4163234401876022e-12,
+                                  1.4650590905438001) == 1.0,
+                   "stalled extrapolation falls back to the unit step");
+  passed &= expect(history.propose(2.4163234401876022e-12,
+                                  7.5922757359009528e-13, 1.0) == 1.0,
+                   "a good unit step does not re-enable stalled extrapolation");
+  passed &= expect(history.propose(1.0, 0.2, 1.0) == 1.0,
+                   "backoff persists through the remaining C2 sequence");
+  detail::ProductPressureExtrapolationBackoff fresh;
+  passed &= expect(fresh.propose(1.0, 0.95, 1.0) == 1.0 &&
+                       fresh.propose(1.0, 0.2, 1.0) > 1.0,
+                   "ordinary unit-step stagnation does not disable acceleration");
+  detail::ProductPressureExtrapolationBackoff next_sequence;
+  passed &= expect(next_sequence.propose(1.0, 0.2, 1.0) > 1.0,
+                   "the next sequence starts with independent backoff state");
+  return passed;
+}
+
 bool test_freeze() {
   ValidatedModel model = test::product_model();
   model.solver.pressure = {1.0e-8, 2.0e-7, 333U, 7U, 16U};
@@ -1315,6 +1340,7 @@ int main(int argc, char** argv) {
                       test_pressure_coupled_merit_policy() &&
                       test_simple_diagonal_schur_policy() &&
                       test_pressure_aitken_initial_alpha() &&
+                      test_pressure_extrapolation_backoff() &&
                       test_freeze() &&
                       test_live_thermal_halo_resource_contract() &&
                       test_pressure_energy_restart_schema() &&

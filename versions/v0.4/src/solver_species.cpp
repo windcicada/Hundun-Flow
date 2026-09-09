@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_flow.hpp"
+#include "hundun/v04_ibm.hpp"
 
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
@@ -268,7 +269,8 @@ Status assemble_transport(
     ConstFieldView diffusivity,
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
-    EquationAssemblyCertificate& certificate, bool allow_partial) noexcept {
+    EquationAssemblyCertificate& certificate, bool allow_partial,
+    const IbmInterfaceInletField* inlet_field) noexcept {
   Span<const CompiledContribution> descriptors{};
   if (!detail::select_contribution_stage(
           all_descriptors, context.contribution_stage, descriptors)) {
@@ -396,6 +398,11 @@ Status assemble_transport(
   if (!evaluated) {
     return evaluated;
   }
+  if (context.immersed_interface != nullptr && inlet_field != nullptr) {
+    evaluated = context.immersed_interface->add_source_convection_correction(
+        *inlet_field, convection, scalar.trial, 1.0, system.residual, box);
+    if (!evaluated) return evaluated;
+  }
 
   // Assemble all non-diffusive pieces while the convection density is live.
   const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
@@ -507,14 +514,16 @@ Status assemble_transport(
     return evaluated;
   }
 
-  certificate = {fingerprint,
-                 context.scope,
-                 context.time,
-                 context.geometry,
-                 context.face_flux,
-                 scalar_state_revision(state, scalar, diffusivity,
-                                       contributions),
-                 context.dt};
+  RevisionToken assembled_state =
+      scalar_state_revision(state, scalar, diffusivity, contributions);
+  if (context.immersed_interface != nullptr && inlet_field != nullptr) {
+    assembled_state = context.immersed_interface->constrain_certificate(
+        assembled_state, scalar.trial.revision, diffusivity.revision);
+    if (assembled_state == 0U)
+      return {StatusCode::invalid_plan, kScalarAssembly};
+  }
+  certificate = {fingerprint, context.scope, context.time, context.geometry,
+                 context.face_flux, assembled_state, context.dt};
   return {};
 }
 
@@ -727,6 +736,8 @@ Status assemble_species_impl(
       }
     }
   }
+  const IbmInterfaceInletField inlet_field{
+      IbmInterfaceInletFieldKind::independent_species, species};
   return assemble_transport(
       *plan.kernels_, plan.cells_, plan.fingerprint_, plan.density_,
       plan.convection_, plan.specs_[species],
@@ -741,7 +752,7 @@ Status assemble_species_impl(
       plan.unity_lewis_total_enthalpy_
           ? material.enthalpy_diffusivity
           : material.scalar_mass_diffusivity.data[species],
-      contributions, context, system, certificate, allow_partial);
+      contributions, context, system, certificate, allow_partial, &inlet_field);
 }
 
 Status assemble_scalar_impl(
@@ -780,7 +791,7 @@ Status assemble_scalar_impl(
                 plan.contribution_counts_[scalar]},
       state.passive_scalars.data[scalar], state,
       material.scalar_mass_diffusivity.data[diffusivity], contributions,
-      context, system, certificate, allow_partial);
+      context, system, certificate, allow_partial, nullptr);
 }
 
 Status assemble_tile(

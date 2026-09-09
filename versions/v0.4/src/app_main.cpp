@@ -97,6 +97,7 @@ void usage(int rank) {
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
                  " [--restart <restart-dir>] [--output-interval <N>]"
                  " [--restart-interval <N>]"
+                 " [--diagnostics-interval <N>]"
                  " [--initial-state p,T,Ux,Uy,Uz[,q...]]"
                  " [--restart-method-recovery]"
                  " [--restart-storage-compatibility mg-bundle-ghost-v1]\n"
@@ -284,6 +285,8 @@ int main(int argc, char* argv[]) {
         parsed = nonnegative_integer(value, options.output_interval);
       } else if (flag == "--restart-interval") {
         parsed = nonnegative_integer(value, options.restart_interval);
+      } else if (flag == "--diagnostics-interval") {
+        parsed = nonnegative_integer(value, options.diagnostics_interval);
       } else if (flag == "--restart" &&
                  options.restart_directory.empty()) {
         options.restart_directory = std::string{value};

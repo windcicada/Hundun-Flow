@@ -17,10 +17,13 @@
 namespace hundun::v04 {
 
 class IbmPhysicalBoundaryFluxAuthority;
+class ImportedIbmCompiler;
+class BoundaryStencilPlan;
 class PressureEnergyPressureFluxOperator;
 class PressureEnergySchurOperator;
 class PressureEnergySharedPressureCertificate;
 class PressureEnergySharedPressureInputCertificate;
+class SurfaceQuadraturePlan;
 
 using GlobalCellId = std::uint64_t;
 using SurfaceTriangleId = std::uint64_t;
@@ -184,6 +187,7 @@ class QuadraticStencilPlan {
   const IbmReconstructionAudit& audit() const noexcept { return audit_; }
 
  private:
+  friend class ImportedIbmCompiler;
   friend class QuadraticStencilCompiler;
   friend class BoundaryStencilCompiler;
   friend class SurfaceQuadratureCompiler;
@@ -325,6 +329,42 @@ struct ImmersedLink {
   Real3 surface_patch_centroid{};
 };
 
+// Rank-local binding for one prescribed Cartesian mass flux across an
+// immersed fluid--solid link.  face_mass_flux uses FaceFluxView orientation:
+// positive values point from the negative-index cell toward the positive one.
+// A cold adapter may resolve a global source description into the subset of
+// global_link values owned by this rank without exposing case/schema details
+// to the equation layer.
+struct IbmInterfaceMassFluxSource {
+  std::uint64_t global_link{};
+  double face_mass_flux{};
+};
+
+struct IbmInterfaceInletState {
+  std::uint64_t global_link{};
+  double face_mass_flux{};
+  Real3 velocity{};
+  double enthalpy{};
+  Span<const double> independent_species{};
+};
+
+enum class IbmInterfaceInletFieldKind : std::uint8_t {
+  velocity,
+  enthalpy,
+  independent_species,
+  kinetic_energy
+};
+
+struct IbmInterfaceInletField {
+  IbmInterfaceInletFieldKind kind{IbmInterfaceInletFieldKind::enthalpy};
+  std::size_t component{};
+};
+
+enum class IbmInterfaceInletEvaluation : std::uint8_t {
+  value,
+  fixed_state_variation
+};
+
 // Physical STL quadrature assigned to one Cartesian fluid--solid link.
 // Matrix entries use row-major [spatial_coordinate][normal_component].
 // normal_first_moment therefore stores integral(x_i n_j dA), while
@@ -392,6 +432,7 @@ class IbmInterfaceMetricPlan {
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 
  private:
+  friend class ImportedIbmCompiler;
   friend class IbmInterfaceMetricCompiler;
   std::vector<IbmInterfaceLinkMetric> links_;
   IbmInterfaceMetricConservation conservation_{};
@@ -460,6 +501,7 @@ class EBTopology {
 
  private:
   friend class IbmPhysicalBoundaryFluxAuthority;
+  friend class ImportedIbmCompiler;
   friend class EBTopologyCompiler;
   friend class BoundaryStencilCompiler;
   friend class SurfaceQuadratureCompiler;
@@ -491,6 +533,21 @@ class EBTopologyCompiler {
                         ImmersedFluidSide fluid_side,
                         ImmersedPlanLimits limits,
                         EBTopology& out) noexcept;
+};
+
+// Compile a Cartesian immersed-boundary authority directly from an immutable,
+// globally replicated cell marker (RegionFlag values in x-fastest order).
+// This path intentionally does not reinterpret the marker through an STL.
+class ImportedIbmCompiler {
+ public:
+  static Status compile(MPI_Comm communicator,
+                        const CartesianGeometryPlan& geometry,
+                        const MeshPatch& patch,
+                        Span<const std::uint8_t> global_marker,
+                        PlanFingerprint marker_source,
+                        ImmersedPlanLimits limits, EBTopology& topology,
+                        BoundaryStencilPlan& boundary,
+                        SurfaceQuadraturePlan& quadrature) noexcept;
 };
 
 class IbmInterfaceMetricCompiler {
@@ -546,6 +603,7 @@ class BoundaryStencilPlan {
   int lowest_failing_rank() const noexcept { return lowest_failing_rank_; }
 
  private:
+  friend class ImportedIbmCompiler;
   friend class BoundaryStencilCompiler;
   std::vector<BoundaryStencilLink> links_;
   QuadraticStencilPlan reconstruction_;
@@ -591,11 +649,38 @@ class IbmEquationInterfacePlan {
                         const BoundaryStencilPlan& boundary,
                         const IbmInterfaceMetricPlan& metric,
                         IbmEquationInterfacePlan& out) noexcept;
+  static Status compile(
+      const CartesianKernelPlan& kernels, const EBTopology& topology,
+      const BoundaryStencilPlan& boundary,
+      const IbmInterfaceMetricPlan& metric,
+      Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
+      IbmEquationInterfacePlan& out) noexcept;
+  static Status compile(
+      const CartesianKernelPlan& kernels, const EBTopology& topology,
+      const BoundaryStencilPlan& boundary,
+      const IbmInterfaceMetricPlan& metric,
+      Span<const IbmInterfaceInletState> inlet_states,
+      std::size_t independent_species_count,
+      IbmEquationInterfacePlan& out) noexcept;
   static Status compile(const CartesianKernelPlan& kernels,
                         const EBTopology& topology,
                         const BoundaryStencilPlan& boundary,
                         IbmEquationInterfacePlan& out) noexcept;
+  static Status compile(
+      const CartesianKernelPlan& kernels, const EBTopology& topology,
+      const BoundaryStencilPlan& boundary,
+      Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
+      IbmEquationInterfacePlan& out) noexcept;
+  static Status compile(
+      const CartesianKernelPlan& kernels, const EBTopology& topology,
+      const BoundaryStencilPlan& boundary,
+      Span<const IbmInterfaceInletState> inlet_states,
+      std::size_t independent_species_count,
+      IbmEquationInterfacePlan& out) noexcept;
 
+  Status constrain_interface_flux(FaceFluxView flux) const noexcept;
+  // Compatibility spelling for the sealed-wall path.  Source-aware plans
+  // enforce their prescribed values after clearing all inactive faces.
   Status zero_interface_flux(FaceFluxView flux) const noexcept;
   Span<const std::uint8_t> cell_activity() const noexcept {
     return topology_ == nullptr ? Span<const std::uint8_t>{} : topology_->region();
@@ -603,6 +688,49 @@ class IbmEquationInterfacePlan {
   Status validate_interface_flux(ConstFaceFluxView flux,
                                  double absolute_tolerance = 0.0) const
       noexcept;
+  // Overwrite only prescribed source links in an unsealed face-value field.
+  // Fixed inlet data has exactly zero directional variation.  Callers remain
+  // responsible for sealing the resulting reconstruction into their own
+  // numeric certificate after this operation succeeds.
+  Status override_source_face_values(
+      IbmInterfaceInletField field,
+      IbmInterfaceInletEvaluation evaluation,
+      FrozenConvectionFaceOutput values) const noexcept;
+  // Freeze the Cartesian target reconstruction, replace prescribed source
+  // links by the fixed inlet state, and reseal that sparse ownership into the
+  // numeric certificate.  The resulting E_h face derivative is exactly +0 on
+  // every listed source in both generic and compiled paths.
+  Status freeze_source_convection_faces(
+      IbmInterfaceInletField field, ConvectionScheme scheme,
+      ConstFaceFluxView target_flux, ConstFieldView transported,
+      std::uint8_t component, FrozenConvectionContext context,
+      FrozenConvectionFaceOutput output,
+      FrozenConvectionFaceField& frozen) const noexcept;
+  Status validate_frozen_source_face_values(
+      IbmInterfaceInletField field,
+      const FrozenConvectionFaceField& frozen) const noexcept;
+  // Returns true only for an exact prescribed source face.  phi is assigned
+  // only on success; sealed immersed faces remain absent from this authority.
+  bool prescribed_face_flux(CartesianAxis axis, Int3 face,
+                            double& phi) const noexcept;
+  // Adds only the sparse difference between ordinary Cartesian face
+  // reconstruction and the prescribed inlet state.  The Cartesian kernel
+  // remains the sole bulk divergence implementation.
+  Status add_source_convection_correction(
+      IbmInterfaceInletField field, ConvectionScheme scheme,
+      ConstFieldView transported, double scale, FieldView output,
+      KernelBox box = {}) const noexcept;
+  Status add_source_first_order_upwind_correction(
+      IbmInterfaceInletField field, ConstFieldView transported, double scale,
+      FieldView output, KernelBox box = {}) const noexcept;
+  bool has_inlet_sources() const noexcept {
+    return inlet_state_bound_ && !prescribed_interface_fluxes_.empty();
+  }
+  // Physical work into the fluid at fixed-velocity inlet links, using the
+  // same resolved traction as constrain_momentum (stationary walls do no work).
+  Status inlet_viscous_work_input(ConstFieldView velocity,
+                                 ConstFieldView effective_viscosity,
+                                 double& input) const noexcept;
   Status constrain_pressure_predictor(FieldView h_by_a,
                                       FaceFluxView phi_h_by_a) const noexcept;
   Status constrain_corrected_state(FieldView velocity,
@@ -651,11 +779,38 @@ class IbmEquationInterfacePlan {
     double gradient_majorant{};
     double solid_pressure_derivative_weight{};
   };
+  struct PrescribedInterfaceFlux {
+    std::uint32_t topology_link{};
+    double face_mass_flux{};
+    Real3 velocity{};
+    double enthalpy{};
+    std::size_t independent_species_begin{};
+    bool has_inlet_state{};
+  };
+  const PrescribedInterfaceFlux* inlet_for_link(
+      std::uint32_t topology_link) const noexcept;
+  static Status compile_sources(
+      const CartesianKernelPlan& kernels, const EBTopology& topology,
+      const BoundaryStencilPlan& boundary,
+      const IbmInterfaceMetricPlan& metric,
+      Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
+      Span<const IbmInterfaceInletState> inlet_states,
+      std::size_t independent_species_count, bool inlet_state_bound,
+      IbmEquationInterfacePlan& out) noexcept;
+  Status add_source_convection_correction_impl(
+      IbmInterfaceInletField field, const ConvectionScheme* scheme,
+      ConstFieldView transported, double scale, FieldView output,
+      KernelBox box) const noexcept;
   const CartesianKernelPlan* kernels_{};
   const EBTopology* topology_{};
   const BoundaryStencilPlan* boundary_{};
   const IbmInterfaceMetricPlan* metric_{};
   std::vector<WallLinearization> wall_linearization_;
+  std::vector<PrescribedInterfaceFlux> prescribed_interface_fluxes_;
+  std::vector<FrozenConvectionFixedFace> prescribed_source_faces_;
+  std::vector<double> prescribed_independent_species_;
+  std::size_t independent_species_count_{};
+  bool inlet_state_bound_{};
   PlanFingerprint fingerprint_{};
 };
 
@@ -698,6 +853,7 @@ class SurfaceQuadraturePlan {
   int lowest_failing_rank() const noexcept { return lowest_failing_rank_; }
 
  private:
+  friend class ImportedIbmCompiler;
   friend class SurfaceQuadratureCompiler;
   std::vector<SurfaceQuadraturePoint> local_points_;
   QuadraticStencilPlan reconstruction_;

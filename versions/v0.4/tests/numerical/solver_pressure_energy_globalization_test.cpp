@@ -142,6 +142,63 @@ make_candidates(const PressureEnergyGlobalizationSample& baseline) {
   return candidates;
 }
 
+bool test_gtmc_converged_energy_does_not_block_continuity_descent() {
+  auto baseline = make_baseline(2U);
+  baseline.global_normalized_continuity = 8.31067656797612e-14;
+  baseline.global_normalized_energy = 7.3898770143759773e-12;
+  baseline.energy_merit_weight =
+      16.0 * std::numeric_limits<double>::epsilon() / 1.0e-10;
+  auto candidates = make_candidates(baseline);
+  candidates[0].global_normalized_continuity = 2.6501587219084223e-14;
+  candidates[0].global_normalized_energy = 7.3907623740830489e-12;
+  PressureEnergyGlobalizationSelectionCertificate certificate;
+  const Status status = select_pressure_energy_globalization(
+      baseline, {candidates.data(), 1U}, certificate);
+  bool passed = expect(static_cast<bool>(status) && certificate.valid() &&
+                    certificate.alpha == 1.0,
+                "GTMC full step reduces unconverged continuity while energy "
+                "remains below its terminal tolerance");
+  passed &= expect(certificate.baseline_normalized_energy ==
+                       baseline.global_normalized_energy &&
+                       certificate.candidate_normalized_continuity ==
+                           candidates[0].global_normalized_continuity,
+                   "weighted merit preserves raw residual evidence");
+  auto mutated = certificate;
+  mutated.energy_merit_weight = 1.0;
+  passed &= expect(!mutated.valid(), "weight mutation invalidates certificate");
+  auto unweighted = baseline;
+  unweighted.energy_merit_weight = 1.0;
+  auto trial = candidates[0];
+  trial.energy_merit_weight = 1.0;
+  passed &= expect(!select_pressure_energy_globalization(
+                       unweighted, {&trial, 1U}, certificate),
+                   "legacy equal-weight policy reproduces the GTMC rejection");
+  passed &= expect(!select_pressure_energy_globalization(
+                       baseline, {&trial, 1U}, certificate),
+                   "foreign candidate weight is rejected");
+  for (double invalid : {0.0, -1.0,
+                         std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+    auto bad = baseline;
+    bad.energy_merit_weight = invalid;
+    trial = candidates[0];
+    trial.energy_merit_weight = invalid;
+    passed &= expect(!select_pressure_energy_globalization(
+                         bad, {&trial, 1U}, certificate),
+                     "nonpositive or nonfinite merit weight is rejected");
+  }
+  trial = candidates[0];
+  trial.alpha = 1.5;
+  passed &= expect(static_cast<bool>(select_pressure_energy_extrapolation(
+                       baseline, trial, certificate)) && certificate.valid(),
+                   "weighted extrapolation uses the same signed merit");
+  trial.energy_merit_weight = 1.0;
+  passed &= expect(!select_pressure_energy_extrapolation(
+                       baseline, trial, certificate),
+                   "extrapolation rejects a foreign weight");
+  return passed;
+}
+
 bool test_full_step_is_selected_first() {
   const auto baseline = make_baseline(1U);
   auto candidates = make_candidates(baseline);
@@ -531,6 +588,7 @@ bool test_selection_is_allocation_free_and_rank_independent() {
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   bool passed = test_full_step_is_selected_first();
+  passed &= test_gtmc_converged_energy_does_not_block_continuity_descent();
   passed &= test_safeguarded_extrapolation_is_distinct_and_fail_closed();
   passed &= test_evaluated_prefix_selects_without_requiring_the_frozen_tail();
   passed &= test_non_decreasing_full_step_is_rejected_before_c2_half_step();

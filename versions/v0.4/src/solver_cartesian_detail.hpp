@@ -200,6 +200,13 @@ inline double metric_interpolate_face(const CartesianKernelPlan& plan,
 }
 
 template <bool Uniform>
+inline double metric_interpolate_material_face(const CartesianKernelPlan& plan,
+    std::size_t axis, std::int32_t normal, double left, double right) noexcept {
+  if (plan.physical_inlet_material(axis,normal)) return normal==0 ? left : right;
+  return metric_interpolate_face<Uniform>(plan,axis,normal,left,right);
+}
+
+template <bool Uniform>
 inline double metric_inverse_volume(const CartesianKernelPlan& plan,
                                     Int3 local) noexcept {
   return metric_inverse_width<Uniform>(plan, 0U, local.x) *

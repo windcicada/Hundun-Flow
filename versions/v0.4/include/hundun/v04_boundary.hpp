@@ -149,6 +149,9 @@ class BoundaryPlan {
 
   Status face(CartesianFace selected,
               const BoundaryFacePlan*& out) const noexcept;
+  // Complete fixed-composition inlet with Dirichlet h and extrapolated p.
+  // Shared eligibility rule for physical-face closure and material consumers.
+  bool has_thermophysical_inlet_face(CartesianFace selected) const noexcept;
   Span<const BoundaryIndexSpan> spans() const noexcept {
     return {spans_.data(), spans_.size()};
   }
@@ -405,12 +408,19 @@ struct BoundaryThermophysicalGhostAuthority {
   }
 };
 
+enum class BoundaryThermophysicalClosureKind : std::uint8_t {
+  ghost_state,
+  physical_inlet_face
+};
+
 struct BoundaryThermophysicalGhostInput {
   double pressure_reference{};
   ConstFieldView pressure_perturbation{};
   ConstFieldView enthalpy{};
   Span<const ConstFieldView> independent_species{};
   BoundaryThermophysicalGhostAuthority authority{};
+  BoundaryThermophysicalClosureKind closure_kind{
+      BoundaryThermophysicalClosureKind::ghost_state};
 };
 
 struct BoundaryThermophysicalGhostOutput {
@@ -459,10 +469,15 @@ struct BoundaryThermophysicalGhostBinding {
   ConstFieldView enthalpy{};
   Span<const ConstFieldView> independent_species{};
   ConstFieldView density{};
+  BoundaryThermophysicalClosureKind closure_kind{
+      BoundaryThermophysicalClosureKind::ghost_state};
 };
 
 class BoundaryThermophysicalGhostCertificate {
  public:
+  BoundaryThermophysicalClosureKind closure_kind() const noexcept {
+    return closure_kind_;
+  }
   bool valid() const noexcept;
   bool matches(const BoundaryPlan& boundary,
                BoundaryThermophysicalGhostContext context,
@@ -519,6 +534,8 @@ class BoundaryThermophysicalGhostCertificate {
   std::uint64_t density_digest_{};
   BoundaryThermophysicalGhostPhase phase_{
       BoundaryThermophysicalGhostPhase::invalid};
+  BoundaryThermophysicalClosureKind closure_kind_{
+      BoundaryThermophysicalClosureKind::ghost_state};
 };
 
 struct BoundaryThermophysicalGhostUse {
@@ -532,6 +549,17 @@ struct BoundaryThermophysicalGhostUse {
 // leaves every output unchanged.
 class BoundaryThermophysicalFaceClosure {
  public:
+  // Re-publish fixed inlet material after generic halo/zero-gradient or
+  // turbulence updates. Null output views are omitted. Temperature remains
+  // 2*T_face-T_owner; material slots contain physical face values. The SGS
+  // dynamic-viscosity contribution is extrapolated from the owner separately
+  // from molecular viscosity. No reusable density certificate is issued.
+  static Status refresh_inlet_material(
+      const BoundaryPlan& boundary, const ThermodynamicsPlan& thermodynamics,
+      const TransportPlan& transport, double pressure_reference,
+      ConstFieldView pressure_perturbation,
+      const BoundaryThermophysicalGhostOutput& output,
+      FieldView effective_viscosity = {}) noexcept;
   // Compatibility entry point for the original four-field authority.  It
   // performs the same numeric closure but deliberately publishes no reusable
   // physical-ghost certificate.

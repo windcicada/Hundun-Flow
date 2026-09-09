@@ -215,7 +215,53 @@ struct ThermophysicalGhostDigests {
   std::uint64_t density{kFnvOffset};
 };
 
-void mix_ghost_digests(ThermophysicalGhostDigests &digests,
+struct InletFaceCell {
+  bool selected{};
+  CartesianFace face{};
+  Int3 mirror{};
+  Int3 owner{};
+};
+
+InletFaceCell inlet_face_cell(const BoundaryPlan &boundary,
+    BoundaryThermophysicalClosureKind kind, Int3 cell, Int3 n) noexcept {
+  if (kind != BoundaryThermophysicalClosureKind::physical_inlet_face) return {};
+  const std::int32_t indices[]{cell.x,cell.y,cell.z};
+  const std::int32_t extents[]{n.x,n.y,n.z};
+  for (std::size_t axis=0U;axis<3U;++axis) {
+    const auto i=indices[axis], extent=extents[axis];
+    if (i>=0 && i<extent) continue;
+    const auto face=static_cast<CartesianFace>(2U*axis+(i>=extent ? 1U : 0U));
+    if (!boundary.has_thermophysical_inlet_face(face)) continue;
+    // Corners extend a single physical face trace with clamped tangential
+    // coordinates; do not invent an EOS state by composing inlet mirrors.
+    Int3 mirror{std::clamp(cell.x,0,n.x-1),std::clamp(cell.y,0,n.y-1),
+                std::clamp(cell.z,0,n.z-1)};
+    Int3 owner=mirror;
+    // Allocation padding can exceed the compiled primitive stencil reach.
+    // Extend a filled trace, never certify an unfilled padding value as a BC.
+    const auto layer=std::min(i<0 ? -i : i-extent+1,
+                             static_cast<std::int32_t>(boundary.required_ghost_width()));
+    const auto source=i<0 ? -layer : extent-1+layer;
+    const auto reflected=i<0 ? layer-1 : extent-layer;
+    if (axis==0U) { mirror.x=source; owner.x=reflected; }
+    else if (axis==1U) { mirror.y=source; owner.y=reflected; }
+    else { mirror.z=source; owner.z=reflected; }
+    return {true,face,mirror,owner};
+  }
+  return {};
+}
+
+std::uint64_t mix_primitive_cell(std::uint64_t hash,
+    const BoundaryThermophysicalGhostBinding &binding, Int3 cell) noexcept {
+  hash=mix_int3(hash,cell);
+  hash=hash_mix(hash,double_bits(binding.pressure_perturbation.unchecked(cell,0U)));
+  hash=hash_mix(hash,double_bits(binding.enthalpy.unchecked(cell,0U)));
+  for (std::size_t s=0U;s<binding.independent_species.size;++s)
+    hash=hash_mix(hash,double_bits(binding.independent_species.data[s].unchecked(cell,0U)));
+  return hash;
+}
+
+void mix_ghost_digests(const BoundaryPlan &boundary, ThermophysicalGhostDigests &digests,
                        const BoundaryThermophysicalGhostBinding &binding,
                        Int3 cell) noexcept {
   digests.primitive = mix_int3(digests.primitive, cell);
@@ -234,15 +280,21 @@ void mix_ghost_digests(ThermophysicalGhostDigests &digests,
   digests.density = mix_int3(digests.density, cell);
   digests.density = hash_mix(
       digests.density, double_bits(binding.density.unchecked(cell, 0U)));
+  const auto inlet=inlet_face_cell(boundary,binding.closure_kind,cell,
+                                   binding.enthalpy.interior);
+  if (inlet.selected) {
+    digests.primitive=mix_primitive_cell(digests.primitive,binding,inlet.mirror);
+    digests.primitive=mix_primitive_cell(digests.primitive,binding,inlet.owner);
+  }
 }
 
 ThermophysicalGhostDigests thermophysical_ghost_digests(
-    const BoundaryThermophysicalGhostBinding &binding, Int3 interior,
+    const BoundaryPlan &boundary, const BoundaryThermophysicalGhostBinding &binding, Int3 interior,
     Int3 ghosts, const std::array<bool, 6U> &physical) noexcept {
   ThermophysicalGhostDigests digests;
   const Status visited = for_each_physical_ghost(
       interior, ghosts, physical, [&](Int3 cell) noexcept {
-        mix_ghost_digests(digests, binding, cell);
+        mix_ghost_digests(boundary, digests, binding, cell);
         return Status{};
       });
   (void)visited;
@@ -256,6 +308,7 @@ std::uint64_t consumer_binding(
     const BoundaryThermophysicalGhostBinding &binding) noexcept {
   std::uint64_t hash = kFnvOffset;
   hash = hash_mix(hash, boundary.local_layout_fingerprint());
+  hash = hash_mix(hash, static_cast<std::uint8_t>(binding.closure_kind));
   hash = hash_mix(hash, double_bits(binding.pressure_reference));
   hash = mix_view_identity(hash, binding.pressure_perturbation);
   hash = mix_view_identity(hash, binding.enthalpy);
@@ -270,7 +323,7 @@ std::uint64_t consumer_binding(
 }
 
 Status evaluate_cell(
-    const ThermodynamicsPlan &thermodynamics, const TransportPlan &transport,
+    const BoundaryPlan &boundary, const ThermodynamicsPlan &thermodynamics, const TransportPlan &transport,
     const BoundaryThermophysicalGhostInput &input, Int3 cell,
     std::array<double, kMaximumIndependentSpecies> &composition,
     std::array<double, kOutputCount> &values) noexcept {
@@ -279,8 +332,49 @@ Status evaluate_cell(
     composition[species] =
         input.independent_species.data[species].unchecked(cell, 0U);
   }
-  const double perturbation = input.pressure_perturbation.unchecked(cell, 0U);
-  const double enthalpy = input.enthalpy.unchecked(cell, 0U);
+  double perturbation = input.pressure_perturbation.unchecked(cell, 0U);
+  double enthalpy = input.enthalpy.unchecked(cell, 0U);
+  const auto inlet=inlet_face_cell(boundary,input.closure_kind,cell,input.enthalpy.interior);
+  ThermoState owner_thermo;
+  if (inlet.selected) {
+    const Int3 n=input.enthalpy.interior, owner=inlet.owner;
+    if (owner.x<0 || owner.y<0 || owner.z<0 || owner.x>=n.x || owner.y>=n.y || owner.z>=n.z)
+      return {StatusCode::invalid_plan,kClosureInput};
+    for (std::size_t s=0U;s<input.independent_species.size;++s)
+      composition[s]=input.independent_species.data[s].unchecked(owner,0U);
+    Status checked=thermodynamics.evaluate(
+        input.pressure_reference+input.pressure_perturbation.unchecked(owner,0U),
+        input.enthalpy.unchecked(owner,0U),
+        {composition.data(),input.independent_species.size},{},owner_thermo);
+    if (!checked) return checked;
+    const auto spans=boundary.spans();
+    for (std::size_t s=0U;s<input.independent_species.size;++s) {
+      const auto view=input.independent_species.data[s];
+      bool found=false;
+      for (std::size_t j=0U;j<spans.size;++j) {
+        const auto &span=spans.data[j];
+        if (span.face!=inlet.face || span.stage!=BoundaryStage::scalar || span.field!=view.field) continue;
+        if (span.relation!=BoundaryRelation::dirichlet ||
+            span.value_source!=BoundaryValueSource::compiled_scalar ||
+            span.parameter>=boundary.scalar_targets().size)
+          return {StatusCode::invalid_plan,kClosureInput};
+        const double target=boundary.scalar_targets().data[span.parameter];
+        if (view.unchecked(inlet.mirror,0U)!=2.0*target-composition[s]) {
+          return {StatusCode::numerical_failure,kClosureState};
+        }
+        composition[s]=target;
+        found=true;
+        break;
+      }
+      if (!found) return {StatusCode::invalid_plan,kClosureInput};
+    }
+    // The resolved h target is encoded by the already-authorized mirror.
+    // Unlike Y, it may vary over a total/static-state inlet face.
+    perturbation=0.5*input.pressure_perturbation.unchecked(inlet.mirror,0U)+
+                 0.5*input.pressure_perturbation.unchecked(owner,0U);
+    enthalpy=0.5*input.enthalpy.unchecked(inlet.mirror,0U)+
+             0.5*input.enthalpy.unchecked(owner,0U);
+  }
   const double pressure_absolute = input.pressure_reference + perturbation;
   if (!std::isfinite(input.pressure_reference) ||
       !std::isfinite(perturbation) || !finite_positive(pressure_absolute) ||
@@ -307,7 +401,7 @@ Status evaluate_cell(
     return {StatusCode::numerical_failure, kClosureState};
   }
   values = {thermo.rho,
-            thermo.temperature,
+            inlet.selected ? 2.0*thermo.temperature-owner_thermo.temperature : thermo.temperature,
             thermo.cp,
             thermo.drho_dp_hY,
             thermo.drho_dh_pY,
@@ -318,6 +412,130 @@ Status evaluate_cell(
 }
 
 }  // namespace
+
+bool BoundaryPlan::has_thermophysical_inlet_face(CartesianFace selected) const noexcept {
+  const BoundaryFacePlan *plan=nullptr;
+  if (!face(selected,plan) || plan==nullptr || !plan->local_owner || plan->periodic) return false;
+  const auto kind=plan->flow_kind;
+  if (kind!=BoundaryKind::velocity_inlet && kind!=BoundaryKind::mass_flow_inlet &&
+      kind!=BoundaryKind::static_state_inlet && kind!=BoundaryKind::total_state_inlet) return false;
+  bool pressure=false, enthalpy=false;
+  for (const auto &span : spans_) {
+    if (span.face!=selected) continue;
+    if (span.stage==BoundaryStage::pressure)
+      pressure=span.relation==BoundaryRelation::zero_gradient;
+    if (span.stage==BoundaryStage::enthalpy)
+      enthalpy=span.relation==BoundaryRelation::dirichlet;
+  }
+  if (!pressure || !enthalpy) return false;
+  for (const auto &field : transported_fields_) {
+    if (field.role!=BoundaryScalarRole::species) continue;
+    bool found=false;
+    for (const auto &span : spans_)
+      if (span.face==selected && span.stage==BoundaryStage::scalar && span.field==field.field)
+        found=span.relation==BoundaryRelation::dirichlet &&
+              span.value_source==BoundaryValueSource::compiled_scalar;
+    if (!found) return false;
+  }
+  return true;
+}
+
+Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+    const BoundaryPlan &boundary,const ThermodynamicsPlan &thermodynamics,
+    const TransportPlan &transport,double pressure_reference,
+    ConstFieldView pressure,const BoundaryThermophysicalGhostOutput &output,
+    FieldView effective) noexcept {
+  const Int3 n=boundary.local_cells(), ghosts=pressure.ghosts;
+  if (!finite_positive(pressure_reference) || !valid_scalar_view(pressure,n,ghosts) ||
+      thermodynamics.fingerprint()==0U || transport.fingerprint()==0U ||
+      thermodynamics.independent_species_count()>kMaximumIndependentSpecies)
+    return {StatusCode::invalid_plan,kClosureInput};
+  const std::array<FieldView,9U> fields{output.density,output.temperature,
+      output.heat_capacity_cp,output.density_pressure_derivative,
+      output.density_enthalpy_derivative,output.molecular_viscosity,
+      output.thermal_conductivity,output.conductivity_over_cp,effective};
+  for (std::size_t i=0U;i<fields.size();++i) {
+    if (fields[i].base==nullptr) continue;
+    if (!valid_scalar_view(fields[i],n,ghosts) ||
+        detail::field_views_overlap(pressure,as_const(fields[i])))
+      return {StatusCode::invalid_plan,kClosureInput};
+    for (std::size_t j=0U;j<i;++j)
+      if (fields[j].base!=nullptr && detail::field_views_overlap(as_const(fields[j]),as_const(fields[i])))
+        return {StatusCode::invalid_plan,kClosureInput};
+  }
+  if (effective.base!=nullptr && output.molecular_viscosity.base==nullptr)
+    return {StatusCode::invalid_plan,kClosureInput};
+  std::array<bool,6U> physical{};
+  if (!physical_faces(boundary,physical)) return {StatusCode::invalid_plan,kClosureInput};
+  // The first pass validates the whole surface before any output is changed.
+  for (unsigned pass=0U;pass<2U;++pass) {
+    const Status status=for_each_physical_ghost(n,ghosts,physical,[&](Int3 cell) noexcept {
+      const auto inlet=inlet_face_cell(boundary,BoundaryThermophysicalClosureKind::physical_inlet_face,cell,n);
+      if (!inlet.selected) return Status{};
+      const auto owner=inlet.owner;
+      if (owner.x<0 || owner.y<0 || owner.z<0 || owner.x>=n.x || owner.y>=n.y || owner.z>=n.z)
+        return Status{StatusCode::invalid_plan,kClosureInput};
+      const BoundaryFacePlan *face=nullptr;
+      if (!boundary.face(inlet.face,face) || face==nullptr ||
+          face->flow_parameter>=boundary.temperature_targets().size)
+        return Status{StatusCode::invalid_plan,kClosureInput};
+      std::array<double,kMaximumIndependentSpecies> y{};
+      std::size_t species=0U;
+      const auto transported=boundary.transported_fields();
+      const auto spans=boundary.spans();
+      for (std::size_t f=0U;f<transported.size;++f) {
+        if (transported.data[f].role!=BoundaryScalarRole::species) continue;
+        if (species>=thermodynamics.independent_species_count()) return Status{StatusCode::invalid_plan,kClosureInput};
+        bool found=false;
+        for (std::size_t j=0U;j<spans.size;++j) {
+          const auto &span=spans.data[j];
+          if (span.face!=inlet.face || span.stage!=BoundaryStage::scalar || span.field!=transported.data[f].field) continue;
+          if (span.parameter>=boundary.scalar_targets().size) return Status{StatusCode::invalid_plan,kClosureInput};
+          y[species++]=boundary.scalar_targets().data[span.parameter];
+          found=true;
+          break;
+        }
+        if (!found) return Status{StatusCode::invalid_plan,kClosureInput};
+      }
+      if (species!=thermodynamics.independent_species_count()) return Status{StatusCode::invalid_plan,kClosureInput};
+      const double temperature=boundary.temperature_targets().data[face->flow_parameter];
+      double h=0.0, cp=0.0, gas=0.0;
+      Status evaluated=thermodynamics.mixture_enthalpy(temperature,{y.data(),species},h,cp,gas);
+      ThermoState thermo;
+      if (evaluated) evaluated=thermodynamics.evaluate(pressure_reference+pressure.unchecked(owner,0U),
+          h,{y.data(),species},{},thermo);
+      MolecularTransportState molecular;
+      if (evaluated) evaluated=transport.evaluate(temperature,{y.data(),species},molecular);
+      if (!evaluated) return evaluated;
+      double mu_effective=molecular.viscosity;
+      if (effective.base!=nullptr) {
+        const double turbulent=effective.unchecked(owner,0U)-output.molecular_viscosity.unchecked(owner,0U);
+        if (!std::isfinite(turbulent) || turbulent<0.0) return Status{StatusCode::numerical_failure,kClosureState};
+        mu_effective+=turbulent;
+      }
+      double t_stencil=temperature;
+      if (output.temperature.base!=nullptr) {
+        const double t_owner=output.temperature.unchecked(owner,0U);
+        if (!finite_positive(t_owner)) return Status{StatusCode::numerical_failure,kClosureState};
+        t_stencil=2.0*temperature-t_owner;
+      }
+      double k=molecular.conductivity, gamma=k/thermo.cp;
+      if (transport.kernel()==TransportKernel::coast_native_air) {
+        evaluated=transport.effective_enthalpy_transport(molecular.viscosity,mu_effective,thermo.cp,k,gamma);
+        if (!evaluated) return evaluated;
+      }
+      const std::array<double,9U> values{thermo.rho,t_stencil,thermo.cp,thermo.drho_dp_hY,
+          thermo.drho_dh_pY,molecular.viscosity,k,gamma,mu_effective};
+      for (std::size_t i=0U;i<fields.size();++i) {
+        if (!std::isfinite(values[i])) return Status{StatusCode::numerical_failure,kClosureState};
+        if (pass!=0U && fields[i].base!=nullptr) fields[i].unchecked(cell,0U)=values[i];
+      }
+      return Status{};
+    });
+    if (!status) return status;
+  }
+  return {};
+}
 
 bool BoundaryThermophysicalGhostCertificate::valid() const noexcept {
   return collective_semantics_ != 0U && collective_lineage_ != 0U &&
@@ -334,7 +552,7 @@ bool BoundaryThermophysicalGhostCertificate::valid() const noexcept {
 bool BoundaryThermophysicalGhostCertificate::matches(
     const BoundaryPlan &boundary, BoundaryThermophysicalGhostContext context,
     const BoundaryThermophysicalGhostBinding &binding) const noexcept {
-  if (!valid() || !context.valid() ||
+  if (!valid() || !context.valid() || binding.closure_kind!=closure_kind_ ||
       context.numeric_boundary != boundary.revision() ||
       context.geometry != boundary.geometry_fingerprint() ||
       boundary.semantic_fingerprint() != boundary_semantic_ ||
@@ -368,7 +586,7 @@ bool BoundaryThermophysicalGhostCertificate::matches(
   std::array<bool, 6U> physical{};
   if (!physical_faces(boundary, physical)) return false;
   const ThermophysicalGhostDigests digests = thermophysical_ghost_digests(
-      binding, interior, ghosts, physical);
+      boundary, binding, interior, ghosts, physical);
   return consumer_binding(boundary, binding) == consumer_binding_ &&
          digests.primitive == primitive_digest_ &&
          digests.density == density_digest_;
@@ -431,6 +649,8 @@ Status BoundaryThermophysicalFaceClosure::close(
   const Int3 interior = boundary.local_cells();
   const Int3 ghosts = authority.ghosts;
   if (boundary.semantic_fingerprint() == 0U ||
+      (input.closure_kind!=BoundaryThermophysicalClosureKind::ghost_state &&
+       input.closure_kind!=BoundaryThermophysicalClosureKind::physical_inlet_face) ||
       boundary.local_layout_fingerprint() == 0U ||
       thermodynamics.fingerprint() == 0U || transport.fingerprint() == 0U ||
       !context.valid() || context.numeric_boundary != boundary.revision() ||
@@ -545,23 +765,23 @@ Status BoundaryThermophysicalFaceClosure::close(
   std::array<double, kOutputCount> values{};
   Status pass = for_each_physical_ghost(
       interior, ghosts, physical, [&](Int3 cell) noexcept {
-        return evaluate_cell(thermodynamics, transport, input, cell,
+        return evaluate_cell(boundary, thermodynamics, transport, input, cell,
                              composition, values);
       });
   if (!pass) return pass;
   const BoundaryThermophysicalGhostBinding binding{
       input.pressure_reference, input.pressure_perturbation, input.enthalpy,
-      input.independent_species, as_const(output.density)};
+      input.independent_species, as_const(output.density), input.closure_kind};
   ThermophysicalGhostDigests digests;
   pass = for_each_physical_ghost(
       interior, ghosts, physical, [&](Int3 cell) noexcept {
-        const Status status = evaluate_cell(thermodynamics, transport, input,
+        const Status status = evaluate_cell(boundary, thermodynamics, transport, input,
                                             cell, composition, values);
         if (!status) return status;
         for (std::size_t field = 0U; field < outputs.size(); ++field) {
           outputs[field].unchecked(cell, 0U) = values[field];
         }
-        mix_ghost_digests(digests, binding, cell);
+        mix_ghost_digests(boundary, digests, binding, cell);
         return Status{};
       });
   if (!pass) return pass;
@@ -569,6 +789,8 @@ Status BoundaryThermophysicalFaceClosure::close(
   const std::uint64_t density = nonzero(digests.density);
   std::uint64_t semantics = kFnvOffset;
   semantics = hash_mix(semantics, UINT64_C(0x425447484f535431));
+  if (input.closure_kind==BoundaryThermophysicalClosureKind::physical_inlet_face)
+    semantics=hash_mix(semantics,UINT64_C(0x494e4c4554464331));
   semantics = hash_mix(semantics, boundary.semantic_fingerprint());
   semantics = hash_mix(semantics, thermodynamics.fingerprint());
   semantics = hash_mix(semantics, transport.fingerprint());
@@ -647,6 +869,7 @@ Status BoundaryThermophysicalFaceClosure::close(
   candidate.primitive_digest_ = primitive;
   candidate.density_digest_ = density;
   candidate.phase_ = context.phase;
+  candidate.closure_kind_ = input.closure_kind;
   certificate = candidate;
   return {};
 }

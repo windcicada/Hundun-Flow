@@ -64,6 +64,7 @@ struct EquationPlanSpec {
   PlanFingerprint mass_source_identity{};
   // ESF common composition/total-enthalpy diffusion, Gamma = lambda_eff/cp.
   bool unity_lewis_total_enthalpy{};
+  bool physical_inlet_material{};
 };
 
 struct EquationCompileDiagnostics {
@@ -506,6 +507,7 @@ struct MomentumPredictorLimiterWorkspace {
   FieldView cell_ratios{};
   std::array<FaceFluxView, 3U> high_order_faces{};
   FaceFluxView common_face_alpha{};
+  const IbmEquationInterfacePlan* immersed_interface{};
 };
 
 struct MomentumPredictorSolveReport {
@@ -525,6 +527,7 @@ struct EquationAssemblyCertificate {
   RevisionToken face_flux{};
   RevisionToken state{};
   double dt{};
+  PlanFingerprint inlet_sources{};
 
   bool valid() const noexcept {
     return plan != 0U && time != 0U && geometry != 0U && face_flux != 0U &&
@@ -955,6 +958,7 @@ class ThermophysicalPredictorPlan {
   Status predict_high_local(
       const ThermophysicalPredictorInput& input,
       ThermophysicalPredictorOutput output,
+      const IbmEquationInterfacePlan* immersed_interface,
       ThermophysicalPredictorCertificate& certificate,
       ThermophysicalPredictorFailure& failure) const noexcept;
   const CartesianKernelPlan* kernels_{};
@@ -1433,7 +1437,7 @@ inline constexpr double kPressureEnergyAitkenMaximumAlpha = 2.0;
 // A pure, already-globally-reduced sample.  The policy below neither evaluates
 // candidate fields nor performs MPI communication; its caller is responsible
 // for synchronously producing p/h/rho/T/U and final mass-flux provenance.
-// Merit is the Euclidean norm of the two normalized residuals.  This permits
+// Merit is the weighted Euclidean norm of the two normalized residuals. This permits
 // a coupled Newton direction to exchange residual between blocks while still
 // requiring joint descent.  A candidate must satisfy
 // merit(alpha) <= (1-c*alpha)*merit(0), as well as strict decrease.
@@ -1448,6 +1452,10 @@ struct PressureEnergyGlobalizationSample {
   PlanFingerprint correction_direction{};
   PlanFingerprint state_provenance{};
   PlanFingerprint mass_flux_provenance{};
+  // Merit = hypot(C, energy_merit_weight * E). Use C_target/E_target
+  // when the two terminal gates differ; raw residuals remain unmodified.
+  // One preserves the legacy joint-L2 policy and its provenance.
+  double energy_merit_weight{1.0};
 };
 
 enum class PressureEnergyGlobalizationScope : std::uint8_t {
@@ -1484,6 +1492,7 @@ struct PressureEnergyGlobalizationSelectionCertificate {
   bool armijo_sufficient_decrease{};
   bool full_nonlinear_newton{};
   bool extrapolated{};
+  double energy_merit_weight{1.0};
 
   bool valid() const noexcept;
 };
@@ -1807,6 +1816,9 @@ struct PressureEnergyEnthalpyBinding {
   LinearIdentity identity{};
   FrozenConvectionLinearizationPolicy linearization_policy{
       FrozenConvectionLinearizationPolicy::semismooth_generalized_zero_slope};
+  // Optional prescribed IBM inlet authority.  Its target h is part of the
+  // nonlinear residual, but the frozen-state directional face value is zero.
+  const IbmEquationInterfacePlan* immersed_interface{};
   // Optional for algebraic clients; production supplies the frozen state
   // that selects conditional outlet h/Y boundary branches.
   ConstFieldView boundary_velocity{};
@@ -1845,6 +1857,7 @@ struct PressureEnergyEnthalpyCertificate {
   std::uintptr_t halo_instance{};
   PlanFingerprint activity_local_fingerprint{};
   PlanFingerprint activity_collective_fingerprint{};
+  PlanFingerprint inlet_sources{};
   std::size_t active_cells{};
   std::size_t inactive_cells{};
   std::uint64_t generalized_face_count{};
@@ -1853,6 +1866,7 @@ struct PressureEnergyEnthalpyCertificate {
   bool exact_cartesian_spatial_response{};
   bool exact_temperature_space_conduction{};
   bool ibm_spatial_derivative{};
+  bool fixed_inlet_source_variation{};
   bool inactive_rows_identity{};
   bool inactive_interfaces_zero{};
   bool allocation_free_apply{};
@@ -1949,6 +1963,7 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
   const CartesianGeometryPlan* geometry_{};
   const CartesianKernelPlan* kernels_{};
   const BoundaryPlan* boundary_{};
+  const IbmEquationInterfacePlan* immersed_interface_{};
   MeshPatch patch_{};
   ConvectionScheme convection_{ConvectionScheme::limited_central2};
   PressureEnergyEnthalpyServices services_{};
@@ -3739,6 +3754,15 @@ struct FreshPhysicalBoundaryFluxClosureInput {
   FaceFluxView final_flux{};
 };
 
+// Each rank supplies the same ordered patch descriptors, with only its owned
+// boundary face indices. Binding copies these views; empty local support is valid.
+struct PhysicalMassFlowPatch {
+  CartesianFace face{};
+  Real3 direction{};
+  double mass_flow_rate{};
+  Span<const Int3> local_faces{};
+};
+
 struct PressureEnergyCandidateBoundaryFinalizerBinding {
   MPI_Comm communicator{MPI_COMM_NULL};
   const CartesianGeometryPlan* geometry{};
@@ -3754,6 +3778,7 @@ struct PressureEnergyCandidateBoundaryFinalizerBinding {
   StageId candidate_pressure_correction_donor_stage{};
   FieldId candidate_pressure_correction_field{};
   std::uint8_t candidate_pressure_correction_donor_reach{};
+  Span<const PhysicalMassFlowPatch> mass_flow_patches{};
 };
 
 // Deep same-target physical-face module.  It has its own issuer identity:
@@ -4189,6 +4214,9 @@ class PressureVelocityCoupler {
  private:
   friend class PressureEnergyCandidateBoundaryFinalizer;
   friend class PressureEnergyPressureFluxOperator;
+  Status candidate_local_mass_storage(
+      const PisoFrozenMomentumStageAuthority& authority,
+      ConstFieldView density, double& local_rate) const noexcept;
   enum class StateCorrectionContract : std::uint8_t {
     pressure_unsealed,
     pressure_sealed,

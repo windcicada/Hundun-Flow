@@ -153,6 +153,14 @@ bool test_static_model_binding() {
                        none.effective.storage == none.molecular.storage,
                    "verification none path copies molecular viscosity exactly");
 
+  TurbulencePlanSpec resolved_spec;
+  resolved_spec.kind = TurbulenceKind::vreman;
+  TurbulenceFixture resolved;
+  passed &= expect(resolved.initialize(resolved_spec) &&
+      resolved.plan.subgrid_kind() == SubgridKind::vreman &&
+      resolved.plan.wall_treatment() == WallTreatmentKind::resolved,
+      "Vreman supports resolved walls without enabling a wall function");
+
   CartesianGeometryPlan geometry;
   MeshPatch patch;
   ContributionRegistry contributions;
@@ -174,10 +182,11 @@ bool test_static_model_binding() {
 }
 
 bool test_candidate_effective_viscosity_is_stateless_and_model_exact() {
-  std::array<TurbulencePlanSpec, 3U> specs{};
+  std::array<TurbulencePlanSpec, 4U> specs{};
   specs[0].kind = TurbulenceKind::none;
   specs[1].kind = TurbulenceKind::wale;
   specs[2].kind = TurbulenceKind::vreman_wall_function;
+  specs[3].kind = TurbulenceKind::vreman;
 
   bool passed = true;
   for (std::size_t model = 0U; model < specs.size(); ++model) {

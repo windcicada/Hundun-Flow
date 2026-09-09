@@ -4,6 +4,7 @@
 #include "hundun/v04_execution.hpp"
 
 #include "hundun/v04_boundary.hpp"
+#include "hundun/v04_ibm.hpp"
 #include "hundun/v04_mesh.hpp"
 
 #include "core_arena_detail.hpp"
@@ -105,7 +106,7 @@ Status reconstruct_axis(const CartesianKernelPlan& plan,
     for (std::int32_t y = face_begin.y; y < face_end.y; ++y) {
       for (std::int32_t x = face_begin.x; x < face_end.x; ++x) {
         const Int3 face{x, y, z};
-        const double rate =
+        double rate =
             detail::metric_interpolate_face<Uniform>(
                 plan, Axis, axis_index<Axis>(face),
                 cell_product(density, velocity,
@@ -114,6 +115,16 @@ Status reconstruct_axis(const CartesianKernelPlan& plan,
                              velocity_component),
                 cell_product(density, velocity, face, velocity_component)) *
             detail::metric_face_area<Uniform>(plan, Axis, face);
+        const auto normal=axis_index<Axis>(face);
+        if (plan.physical_inlet_material(Axis,normal)) {
+          const Int3 left=set_axis<Axis>(face,normal-1);
+          const Int3 ghost=normal==0 ? left : face;
+          rate=density.unchecked(ghost,0U)*
+              detail::metric_interpolate_face<Uniform>(plan,Axis,normal,
+                  velocity.unchecked(left,velocity_component),
+                  velocity.unchecked(face,velocity_component))*
+              detail::metric_face_area<Uniform>(plan,Axis,face);
+        }
         if (!std::isfinite(rate)) {
           return {StatusCode::numerical_failure, kFaceNumerical};
         }
@@ -268,6 +279,17 @@ Status overwrite_pending_face_flux_for_test(PendingFaceFluxView& pending,
         for (std::int32_t x = 0; x < face.extents.x; ++x)
           face.unchecked({x, y, z}) = value;
   return {};
+}
+
+Status constrain_pending_face_flux_for_test(
+    PendingFaceFluxView& pending,
+    const IbmEquationInterfacePlan& immersed_interface) noexcept {
+  if (!pending.valid() ||
+      !PendingFaceFluxAccess::lease_valid(pending)) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  return immersed_interface.constrain_interface_flux(
+      PendingFaceFluxAccess::raw(pending));
 }
 #endif
 

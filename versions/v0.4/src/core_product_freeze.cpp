@@ -13,6 +13,7 @@
 #include "core_product_freeze_detail.hpp"
 #include "core_reaction_detail.hpp"
 #include "core_spray_detail.hpp"
+#include "core_patch_inlets_detail.hpp"
 #include "field_view_interval_detail.hpp"
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_initialization.hpp"
@@ -61,14 +62,15 @@ constexpr std::uint32_t kProductHistoryIncompatible = 10213U;
 constexpr PlanFingerprint
 method_history_signature(bool transported_scalars, bool reacting = false,
                          bool esf = false, bool tcr = false,
-                         bool spray = false) noexcept {
+                         bool spray = false, bool inlet_patches = false) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
   for (char byte : std::string_view(
       "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
       "accepted-ibm-thermal-zero-normal-v3;momentum-rates-v1;"
-      "thermal-inverse-representable-v1;stationary-ibm-placeholder-v1;"
+      "thermal-inverse-representable-v1;thermal-inverse-newton-polish-v1;stationary-ibm-placeholder-v1;"
       "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
-      "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2")) {
+      "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2;"
+      "physical-inlet-face-thermophysics-v1;generic-thermal-neighbor-material-v1")) {
     hash ^= static_cast<unsigned char>(byte);
     hash *= UINT64_C(1099511628211);
   }
@@ -109,6 +111,11 @@ method_history_signature(bool transported_scalars, bool reacting = false,
   if (spray && esf)
     for (char byte :
          std::string_view(";p8-source-before-transport-tcr-chemistry-be-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (inlet_patches)
+    for (char byte : std::string_view(";labelled-mass-inlets-v2;ibm-prescribed-state-convection-v2")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -277,7 +284,7 @@ Status refresh_coast_native_air_effective_thermal_transport(
 Status exchange_effective_thermal_ghosts(
     HaloEngine& halo, StageId stage, const BoundaryPlan& boundary,
     FieldView& conductivity, FieldView& enthalpy_diffusivity,
-    Status prerequisite) noexcept {
+    Status prerequisite, bool physical_zero_gradient) noexcept {
   std::array<FieldView, 2U> fields{conductivity, enthalpy_diffusivity};
   HaloTicket ticket;
   Status status =
@@ -287,8 +294,12 @@ Status exchange_effective_thermal_ghosts(
   if (status) {
     conductivity = fields[0U];
     enthalpy_diffusivity = fields[1U];
-    status = apply_physical_zero_gradient(
-        boundary, {fields.data(), fields.size()});
+    // Generic-mixture physical ghosts were EOS-closed from their boundary
+    // state. Only COAST's effective-transport contract replaces them with
+    // zero-gradient material; MPI/periodic neighbors are exchanged for both.
+    if (physical_zero_gradient)
+      status = apply_physical_zero_gradient(
+          boundary, {fields.data(), fields.size()});
     conductivity = fields[0U];
     enthalpy_diffusivity = fields[1U];
   }
@@ -319,6 +330,7 @@ bool product_candidate_boundary_supported(
       case BoundaryKind::velocity_inlet:
       case BoundaryKind::mass_flow_inlet:
       case BoundaryKind::pressure_outlet:
+      case BoundaryKind::zero_gradient_mass_outlet:
       case BoundaryKind::no_slip_wall:
       case BoundaryKind::moving_wall:
       case BoundaryKind::slip:
@@ -2293,9 +2305,13 @@ Status local_pressure_outlet_closure(
     if (face_index >= boundary_specs.size())
       return {StatusCode::invalid_plan, kProductBinding};
     const BoundaryFaceSpec& spec = boundary_specs[face_index];
-    if (spec.flow_kind != BoundaryKind::pressure_outlet) continue;
-    if (span.relation != BoundaryRelation::dirichlet ||
-        span.value_source != BoundaryValueSource::resolved_scalar ||
+    if (!is_candidate_transport_outlet(spec.flow_kind)) continue;
+    const bool neumann =
+        spec.flow_kind == BoundaryKind::zero_gradient_mass_outlet;
+    if (span.relation != (neumann ? BoundaryRelation::zero_gradient
+                                 : BoundaryRelation::dirichlet) ||
+        span.value_source != (neumann ? BoundaryValueSource::none
+                                     : BoundaryValueSource::resolved_scalar) ||
         span.field != pressure_perturbation.field ||
         span.component_begin != 0U || span.component_count != 1U ||
         !std::isfinite(spec.pressure) || spec.pressure <= 0.0) {
@@ -2316,8 +2332,17 @@ Status local_pressure_outlet_closure(
             0.5 * (pressure_perturbation.unchecked(owner, 0U) +
                    pressure_perturbation.unchecked(ghost, 0U));
         double residual = 0.0;
+        // The Neumann outlet declares an EOS reference, not a fixed face
+        // pressure. Audit its actual ghost/owner equality; do not invent a
+        // Dirichlet sample or bypass the mandatory open-boundary witness.
+        const double observed = neumann
+            ? pressure_reference + pressure_perturbation.unchecked(ghost, 0U)
+            : face_absolute_pressure;
+        const double target = neumann
+            ? pressure_reference + pressure_perturbation.unchecked(owner, 0U)
+            : spec.pressure;
         if (hf_coast_common_terminal_outlet_v1(
-                face_absolute_pressure, spec.pressure, &residual) != 0)
+                observed, target, &residual) != 0)
           return {StatusCode::numerical_failure, kProductBinding};
         maximum = std::max(maximum, residual);
         if (samples == std::numeric_limits<std::uint64_t>::max())
@@ -2387,6 +2412,7 @@ double vector_dot(Real3 left, Real3 right) noexcept {
 Status resolve_static_boundary_values(
     MPI_Comm communicator, const BoundaryPlan& boundary,
     const std::array<BoundaryFaceSpec, 6U>& boundary_specs,
+    detail::CompiledPatchInlets& patch_inlets,
     const CartesianGeometryPlan& geometry, MeshPatch patch,
     const ThermodynamicsPlan& thermodynamics, double pressure_reference,
     ConstFieldView density, ConstFieldView velocity, ConstFieldView enthalpy,
@@ -2598,6 +2624,7 @@ Status resolve_static_boundary_values(
           runtime_spec.allow_backflow))
       continue;
     if (runtime_spec.flow_kind == BoundaryKind::mass_flow_inlet) {
+      if (!patch_inlets.face_patch[face_index].empty()) continue;
       const Real3 resolved_direction = runtime_spec.direction;
       const Real3 inward = [&]() noexcept {
         const Real3 outward = boundary_outward_normal(face);
@@ -2634,6 +2661,42 @@ Status resolve_static_boundary_values(
       if (local)
         mass_flow_scales[face_index] =
             runtime_spec.mass_flow_rate / global_capacity;
+    }
+  }
+  if (!patch_inlets.patches.empty()) {
+    std::fill(patch_inlets.local_capacity.begin(), patch_inlets.local_capacity.end(), 0.0);
+    for (std::size_t face_index = 0U; face_index < 6U && local; ++face_index) {
+      const auto& membership = patch_inlets.face_patch[face_index];
+      if (membership.empty()) continue;
+      const auto face = static_cast<CartesianFace>(face_index);
+      const BoundaryFacePlan* face_plan = nullptr;
+      local = boundary.face(face, face_plan);
+      if (!local || face_plan == nullptr) {
+        local = {StatusCode::invalid_plan, kProductBinding};
+        break;
+      }
+      if (!face_plan->local_owner) continue;
+      const int inner_count = face_index < 2U ? patch.cells.y : patch.cells.x;
+      const int outer_count = face_index >= 4U ? patch.cells.y : patch.cells.z;
+      const Real3 outward = boundary_outward_normal(face);
+      for (int outer = 0; outer < outer_count; ++outer)
+        for (int inner = 0; inner < inner_count; ++inner) {
+          const auto index = membership[static_cast<std::size_t>(outer) * inner_count + inner];
+          if (index < 0) continue;
+          const Int3 owner = boundary_owner_cell(face, patch.cells, inner, outer);
+          const auto& inlet = patch_inlets.patches[static_cast<std::size_t>(index)];
+          patch_inlets.local_capacity[static_cast<std::size_t>(index)] +=
+              density.unchecked(owner, 0U) * boundary_face_area(geometry, patch, face, owner) *
+              -vector_dot(inlet.boundary.direction, outward);
+        }
+    }
+    if (MPI_Allreduce(patch_inlets.local_capacity.data(), patch_inlets.global_capacity.data(),
+        static_cast<int>(patch_inlets.patches.size()), MPI_DOUBLE, MPI_SUM, communicator) != MPI_SUCCESS)
+      mass_flow_collective_failed = true;
+    for (std::size_t i = 0U; i < patch_inlets.patches.size() && local; ++i) {
+      if (patch_inlets.patches[i].immersed) continue;
+      if (!(patch_inlets.global_capacity[i] > 0.0) || !std::isfinite(patch_inlets.global_capacity[i]))
+        local = {StatusCode::numerical_failure, kProductBinding};
     }
   }
   const int local_collective_failure =
@@ -2684,9 +2747,20 @@ Status resolve_static_boundary_values(
                 static_cast<std::size_t>(outer) * span.tangent_inner_count +
                 inner;
             if (runtime_spec.flow_kind == BoundaryKind::mass_flow_inlet) {
-              vectors[begin + face_cell] = {scale * resolved_direction.x,
-                                            scale * resolved_direction.y,
-                                            scale * resolved_direction.z};
+              const auto& membership = patch_inlets.face_patch[face_index];
+              if (membership.empty()) {
+                vectors[begin + face_cell] = {scale * resolved_direction.x,
+                                              scale * resolved_direction.y,
+                                              scale * resolved_direction.z};
+              } else if (membership[face_cell] < 0) {
+                vectors[begin + face_cell] = {};
+              } else {
+                const auto index = static_cast<std::size_t>(membership[face_cell]);
+                const auto& inlet = patch_inlets.patches[index].boundary;
+                const double patch_scale = inlet.mass_flow_rate / patch_inlets.global_capacity[index];
+                vectors[begin + face_cell] = {patch_scale * inlet.direction.x,
+                    patch_scale * inlet.direction.y, patch_scale * inlet.direction.z};
+              }
             } else {
               const Int3 owner = boundary_owner_cell(
                   face, patch.cells, static_cast<std::int32_t>(inner),
@@ -2909,6 +2983,7 @@ struct CompiledCasePlan::Impl {
   IbmReconstructionAudit ibm_surface_reconstruction{};
   BoundaryPlan boundary;
   std::array<BoundaryFaceSpec, 6U> boundary_specs{};
+  detail::CompiledPatchInlets patch_inlets;
   SchemePlan schemes;
   TimeSchemePlan time;
   ThermodynamicsPlan thermodynamics;
@@ -3520,14 +3595,63 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     candidate->cpu_fingerprint = candidate->cpu.semantic_fingerprint();
   const bool immersed = model.immersed_boundary.has_value();
   if (status && immersed) {
+    if (model.immersed_boundary->marker_file) {
+      std::vector<std::uint8_t> marker;
+      const Int3 cells = candidate->geometry.global_cells();
+      status = product_local_stage(communicator, [&] {
+        return detail::read_case_binary(case_root, *model.immersed_boundary->marker_file,
+            static_cast<std::uint64_t>(cells.x) * cells.y * cells.z,
+            model.immersed_boundary->marker_fingerprint, marker);
+      });
+      if (status) {
+        candidate->topology.emplace();
+        candidate->ibm_boundary.emplace();
+        candidate->quadrature.emplace();
+        ImmersedPlanLimits limits;
+        limits.stencil.policy = model.immersed_boundary->reconstruction_policy;
+        if (limits.stencil.policy == IbmReconstructionPolicy::adaptive_order)
+          limits.stencil.standard_reach = 2U;
+        status = ImportedIbmCompiler::compile(communicator, candidate->geometry,
+            candidate->patch, {marker.data(), marker.size()},
+            model.immersed_boundary->marker_fingerprint, limits,
+            *candidate->topology, *candidate->ibm_boundary, *candidate->quadrature);
+      }
+      if (status) {
+        candidate->stl_fingerprint = model.immersed_boundary->marker_fingerprint;
+        status = product_local_stage(communicator, [&] {
+          return make_pressure_mg_activity(*candidate->topology, candidate->patch.cells,
+              candidate->pressure_mg_cell_activity, candidate->pressure_mg_x_activity,
+              candidate->pressure_mg_y_activity, candidate->pressure_mg_z_activity,
+              candidate->pressure_mg_activity_fingerprint,
+              candidate->pressure_mg_activity_collective);
+        });
+      }
+      if (status)
+        status = reduce_ibm_reconstruction_audit(communicator,
+            candidate->ibm_boundary->reconstruction().audit(),
+            candidate->ibm_boundary_reconstruction);
+      if (status)
+        status = reduce_ibm_reconstruction_audit(communicator,
+            candidate->quadrature->reconstruction().audit(),
+            candidate->ibm_surface_reconstruction);
+    } else {
     candidate->scan.emplace();
     StlScanBudget scan_budget{model.mesh.limits.max_memory_bytes_per_rank / 2U,
                               model.mesh.limits.max_memory_bytes_per_rank,
                               UINT64_C(16000000), UINT64_C(100000), 1U};
-    status = StlScanCompiler::compile(
-        communicator, case_root, model.immersed_boundary->stl_file,
-        candidate->geometry, candidate->patch, CartesianAxis::y, scan_budget,
-        *candidate->scan);
+    // The path-to-optional argument conversion allocates. Agree that local
+    // failure before peers enter the scanner's first collective; the outer
+    // function-try-block alone cannot make a failed argument copy collective.
+    std::optional<std::filesystem::path> stl_file;
+    status = product_local_stage(communicator, [&] {
+      stl_file.emplace(model.immersed_boundary->stl_file);
+      return Status{};
+    });
+    if (status)
+      status = StlScanCompiler::compile(
+          communicator, case_root, stl_file,
+          candidate->geometry, candidate->patch, CartesianAxis::y, scan_budget,
+          *candidate->scan);
     if (status) {
       status = product_local_stage(communicator, [&] {
         candidate->surface.emplace();
@@ -3618,6 +3742,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       // Scan triangles and line intersections are cold construction
       // workspace.  Surface/topology plans are the sealed runtime authority.
       candidate->scan.reset();
+    }
     }
   }
   if (!status) return status;
@@ -4099,6 +4224,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = TransportPlan::compile(
           model.thermophysics, candidate->thermodynamics, candidate->transport);
     if (status)
+      status = detail::compile_patch_inlets(model, case_root, candidate->geometry,
+          candidate->patch, candidate->topology ? &*candidate->topology : nullptr,
+          candidate->thermodynamics, candidate->patch_inlets);
+    if (status)
       status =
           ClosedMassPlan::compile(model.pressure_reference, model.thermophysics,
                                   candidate->closed_mass);
@@ -4191,6 +4320,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         candidate->spray.enabled() ? candidate->spray.fingerprint()
         : candidate->esf.enabled() ? candidate->reaction.fingerprint()
                                    : 0U;
+    equation_spec.physical_inlet_material = true;
     equation_spec.density = candidate->fields.rho;
     equation_spec.velocity = candidate->fields.velocity;
     equation_spec.pressure_perturbation = candidate->fields.pressure;
@@ -4215,9 +4345,16 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   if (status && immersed) {
     candidate->ibm_equations.emplace();
-    status = IbmEquationInterfacePlan::compile(
-        candidate->equations.kernels(), *candidate->topology,
-        *candidate->ibm_boundary, *candidate->ibm_equations);
+    if (model.patch_inlets)
+      status = IbmEquationInterfacePlan::compile(
+          candidate->equations.kernels(), *candidate->topology,
+          *candidate->ibm_boundary,
+          {candidate->patch_inlets.immersed_states.data(), candidate->patch_inlets.immersed_states.size()},
+          candidate->thermodynamics.independent_species_count(), *candidate->ibm_equations);
+    else
+      status = IbmEquationInterfacePlan::compile(
+          candidate->equations.kernels(), *candidate->topology,
+          *candidate->ibm_boundary, *candidate->ibm_equations);
     status = product_collective_status(communicator, status);
     if (status && candidate->esf.enabled())
       candidate->esf.bind_immersed(*candidate->ibm_equations);
@@ -4623,7 +4760,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             std::max<std::size_t>(
                 candidate->krylov_requirements.reduction_capacity,
                 candidate->auxiliary_krylov_requirements.reduction_capacity),
-            std::max<std::size_t>(8U, scalar_reduction_capacity)),
+            std::max<std::size_t>(candidate->patch_inlets.patches.size(),
+                std::max<std::size_t>(8U, scalar_reduction_capacity))),
         candidate->reductions);
   // Freeze the incompatible-cold-start projection only after every borrowed
   // address (halos, reductions, linear/MG workspaces, cell fields, and face
@@ -4822,6 +4960,40 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = candidate->reductions.consensus(status);
   }
   if (status && product_candidate_boundary_supported(candidate->boundary)) {
+    std::vector<PhysicalMassFlowPatch> external_patches;
+    std::vector<std::vector<Int3>> external_support;
+    status = product_local_stage(communicator, [&]() -> Status {
+      const auto& inlets = candidate->patch_inlets;
+      external_support.resize(inlets.patches.size());
+      for (std::size_t i = 0U; i < inlets.patches.size(); ++i) {
+        const auto& inlet = inlets.patches[i];
+        if (inlet.immersed) continue;
+        const auto face = static_cast<CartesianFace>(inlet.face);
+        const BoundaryFacePlan* plan = nullptr;
+        Status local = candidate->boundary.face(face, plan);
+        if (!local || !plan) return {StatusCode::invalid_plan, kProductBinding};
+        const Int3 cells = candidate->patch.cells;
+        if (plan->local_owner) {
+          const int inner_count = inlet.face < 2U ? cells.y : cells.x;
+          const int outer_count = inlet.face >= 4U ? cells.y : cells.z;
+          const auto& map = inlets.face_patch[inlet.face];
+          for (int outer = 0; outer < outer_count; ++outer)
+            for (int inner = 0; inner < inner_count; ++inner) {
+              if (map[static_cast<std::size_t>(outer) * inner_count + inner] !=
+                  static_cast<std::int32_t>(i)) continue;
+              Int3 f = boundary_owner_cell(face, cells, inner, outer);
+              if (inlet.face % 2U != 0U)
+                (inlet.face < 2U ? f.x : inlet.face < 4U ? f.y : f.z)++;
+              external_support[i].push_back(f);
+            }
+        }
+        external_patches.push_back({face, inlet.boundary.direction,
+            inlet.boundary.mass_flow_rate,
+            {external_support[i].data(), external_support[i].size()}});
+      }
+      return {};
+    });
+    if (!status) return status;
     const PressureEnergyCandidateBoundaryFinalizerBinding finalizer_binding{
         communicator,
         &candidate->geometry,
@@ -4847,7 +5019,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             : FieldId{0U},
         candidate->ibm_candidate_pressure_donors.has_value()
             ? candidate->ibm_candidate_pressure_donors->reach()
-            : std::uint8_t{0U}};
+            : std::uint8_t{0U},
+        {external_patches.data(), external_patches.size()}};
     status = PressureEnergyCandidateBoundaryFinalizer::bind(
         finalizer_binding, candidate->candidate_boundary_finalizer);
   }
@@ -5889,7 +6062,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   if (!status) return status;
   if (status)
     status = resolve_static_boundary_values(
-        communicator, product.boundary, product.boundary_specs,
+        communicator, product.boundary, product.boundary_specs, product.patch_inlets,
         product.geometry, product.patch, product.thermodynamics,
         cold_pressure_reference, accepted_density,
         as_const(velocity_layers[0U]), accepted_enthalpy,
@@ -6029,7 +6202,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
       product.transport.kernel() == TransportKernel::coast_native_air)
     status = exchange_effective_thermal_ghosts(
         product.coupled_thermal_halo, 60U, product.boundary, conductivity,
-        enthalpy_diffusivity, status);
+        enthalpy_diffusivity, status, true);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -6072,6 +6245,15 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
             resolved_boundary_values());
     }
   }
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+
+  if (status)
+    status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+        product.boundary, product.thermodynamics, product.transport,
+        cold_pressure_reference, as_const(trial_pressure),
+        {trial_density, {}, {}, {}, {}, molecular_viscosity, {}, {}},
+        effective_viscosity);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -6164,6 +6346,14 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
       }
     }
   }
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+
+  status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+      product.boundary, product.thermodynamics, product.transport,
+      cold_pressure_reference, as_const(trial_pressure),
+      {{}, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity, {}},
+      effective_viscosity);
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -6474,7 +6664,7 @@ Status ProductDriver::restart_expected(
   out.method_history_signature = method_history_signature(
       !product.fields.scalars.empty(), product.reaction.enabled(),
       product.esf.enabled(), product.esf.tcr_history.enabled(),
-      product.spray.enabled());
+      product.spray.enabled(), !product.patch_inlets.patches.empty());
   if (history_policy == RestartHistoryPolicy::rebuild_method_history)
     out.compatible_method_plan = product.legacy_afc_v3_fingerprint;
   const auto records = product.spray.enabled()
@@ -6675,7 +6865,7 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
   status = product.reductions.consensus(status);
   if (status)
     status = resolve_static_boundary_values(
-        runtime.communicator, product.boundary, product.boundary_specs,
+        runtime.communicator, product.boundary, product.boundary_specs, product.patch_inlets,
         product.geometry, product.patch, product.thermodynamics,
         initial.pressure_reference, initial_density, initial_velocity,
         initial_enthalpy,
@@ -6829,7 +7019,7 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
            as_const(initial_enthalpy_with_ghosts),
            {runtime.species_accepted.data(),
             runtime.species_accepted.size()},
-           authority},
+           authority, BoundaryThermophysicalClosureKind::physical_inlet_face},
           {initial_density_with_ghosts, initial_temperature_with_ghosts,
            initial_heat_capacity, initial_compressibility,
            initial_enthalpy_compressibility, initial_molecular_viscosity,
@@ -7318,7 +7508,7 @@ Status ProductDriver::initialize_restart(
       image.history_compatibility(method_history_signature(
           !product.fields.scalars.empty(), product.reaction.enabled(),
           product.esf.enabled(), product.esf.tcr_history.enabled(),
-          product.spray.enabled()));
+          product.spray.enabled(), !product.patch_inlets.patches.empty()));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
@@ -7955,7 +8145,7 @@ Status ProductDriver::initialize_restart(
     }
     if (status)
       status = resolve_static_boundary_values(
-          runtime.communicator, product.boundary, product.boundary_specs,
+          runtime.communicator, product.boundary, product.boundary_specs, product.patch_inlets,
           product.geometry, product.patch, product.thermodynamics,
           image.previous_pressure_reference, previous_density,
           previous_velocity, as_const(previous_enthalpy),
@@ -8356,7 +8546,7 @@ Status ProductDriver::Impl::execute_attempt(
                              Span<const ConstFieldView> species) noexcept {
       return resolve_static_boundary_values(
           communicator, product.boundary, product.boundary_specs,
-          product.geometry, product.patch, product.thermodynamics,
+          product.patch_inlets, product.geometry, product.patch, product.thermodynamics,
           pressure_reference, density, velocity_history.accepted, h, species,
           {passives.data(), np}, {species_values.data(), species_values.size()},
           boundary_scalars, boundary_vectors, boundary_normal_gradients, false);
@@ -8473,7 +8663,7 @@ Status ProductDriver::Impl::execute_attempt(
   }
   if (status)
     status = resolve_static_boundary_values(
-        communicator, product.boundary, product.boundary_specs,
+        communicator, product.boundary, product.boundary_specs, product.patch_inlets,
         product.geometry, product.patch,
         product.thermodynamics, pressure_reference, rho_history.accepted,
         velocity_history.accepted, enthalpy_history.accepted,
@@ -8837,7 +9027,7 @@ Status ProductDriver::Impl::execute_attempt(
       post_cache = exchanged[count - 1];
       status = resolve_static_boundary_values(
           communicator, product.boundary, product.boundary_specs,
-          product.geometry, product.patch, product.thermodynamics,
+          product.patch_inlets, product.geometry, product.patch, product.thermodynamics,
           pressure_reference, as_const(post_rho), velocity_history.accepted,
           as_const(post_h), {post_species_read.data(), ns},
           {post_passive_read.data(), np},
@@ -9181,9 +9371,6 @@ Status ProductDriver::Impl::execute_attempt(
 
   const auto refresh_live_effective_thermal_ghosts =
       [&](StageId stage, Status prerequisite) {
-        if (!product.esf.enabled() &&
-            product.transport.kernel() != TransportKernel::coast_native_air)
-          return prerequisite;
         if (prerequisite)
           prerequisite = runtime_write_view(
               product.fields.thermal_conductivity, conductivity);
@@ -9203,7 +9390,8 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(heat_capacity), conductivity, enthalpy_diffusivity);
         prerequisite = exchange_effective_thermal_ghosts(
             product.coupled_thermal_halo, stage, product.boundary, conductivity,
-            enthalpy_diffusivity, prerequisite);
+            enthalpy_diffusivity, prerequisite,
+            product.transport.kernel() == TransportKernel::coast_native_air);
         return product.reductions.consensus(prerequisite);
       };
 
@@ -9828,7 +10016,7 @@ Status ProductDriver::Impl::execute_attempt(
       passive_accepted[passive] = as_const(passive_trial[passive]);
   }
   status = resolve_static_boundary_values(
-      communicator, product.boundary, product.boundary_specs,
+      communicator, product.boundary, product.boundary_specs, product.patch_inlets,
       product.geometry, product.patch,
       product.thermodynamics, attempt_pressure_reference,
       pressure_reference_kind == PressureReferenceKind::boundary_absolute
@@ -9971,6 +10159,12 @@ Status ProductDriver::Impl::execute_attempt(
         prerequisite = apply_boundary_ghosts(
             BoundaryStage::pressure, product.boundary,
             {&trial_pressure, 1U}, boundary_values);
+      if (prerequisite)
+        prerequisite = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+            product.boundary, product.thermodynamics, product.transport,
+            attempt_pressure_reference, as_const(trial_pressure),
+            {trial_density, {}, {}, {}, {}, molecular_viscosity,
+             conductivity, enthalpy_diffusivity}, effective_viscosity);
     }
     prerequisite = product.reductions.consensus(prerequisite);
     if (prerequisite && product.ibm_momentum_donors.has_value()) {
@@ -10214,7 +10408,8 @@ Status ProductDriver::Impl::execute_attempt(
               product.time.spec().convective_cfl, as_const(provisional_flux),
               momentum_activity, momentum_system,
               {momentum_low_order_rhs_delta, momentum_limiter_faces,
-               momentum_limiter_alpha},
+               momentum_limiter_alpha,
+               product.ibm_equations.has_value() ? &*product.ibm_equations : nullptr},
               product.momentum_limiter_halo, product.reductions,
               momentum_predictor_limiter);
         if (prerequisite) {
@@ -10295,7 +10490,7 @@ Status ProductDriver::Impl::execute_attempt(
     boundary_thermo_certificate = {};
     Status refreshed = prerequisite;
     refreshed = resolve_static_boundary_values(
-        communicator, product.boundary, product.boundary_specs,
+        communicator, product.boundary, product.boundary_specs, product.patch_inlets,
         product.geometry, product.patch, product.thermodynamics,
         attempt_pressure_reference, as_const(trial_density),
         as_const(trial_velocity), as_const(trial_enthalpy),
@@ -10380,7 +10575,7 @@ Status ProductDriver::Impl::execute_attempt(
               {attempt_pressure_reference, as_const(trial_pressure),
                as_const(trial_enthalpy),
                {species_accepted.data(), species_accepted.size()},
-               authority},
+               authority, BoundaryThermophysicalClosureKind::physical_inlet_face},
               {trial_density, trial_temperature, heat_capacity,
                compressibility, enthalpy_compressibility,
                molecular_viscosity, conductivity,
@@ -10459,9 +10654,13 @@ Status ProductDriver::Impl::execute_attempt(
       refreshed = product.turbulence.update(
           turbulence_input, effective_viscosity, turbulence_certificate);
     }
-    if (product.esf.enabled() ||
-        product.transport.kernel() == TransportKernel::coast_native_air)
-      return refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
+    refreshed = refresh_live_effective_thermal_ghosts(halo_stage, refreshed);
+    if (refreshed)
+      refreshed = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+          product.boundary, product.thermodynamics, product.transport,
+          attempt_pressure_reference, as_const(trial_pressure),
+          {{}, {}, {}, {}, {}, molecular_viscosity, conductivity,
+           enthalpy_diffusivity}, effective_viscosity);
     return product.reductions.consensus(refreshed);
   };
 
@@ -11003,17 +11202,27 @@ Status ProductDriver::Impl::execute_attempt(
               pressure_energy_target_flux,
               EquationAssemblyScope::target_coupled);
         FrozenConvectionFaceField frozen;
-        if (inspected)
-          inspected = freeze_cartesian_target_convection_faces(
-              product.equations.kernels(),
-              product.equations.thermophysical_predictor()
-                  .enthalpy_convection(),
-              pressure_energy_target_flux, as_const(trial_enthalpy), 0U,
-              {product.equations.semantic_fingerprint(),
-               product.boundary.revision()},
-              {energy_frozen_x_enthalpy, energy_frozen_y_enthalpy,
-               energy_frozen_z_enthalpy},
-              frozen);
+        if (inspected) {
+          const auto scheme = product.equations.thermophysical_predictor()
+                                  .enthalpy_convection();
+          const FrozenConvectionContext context{
+              product.equations.semantic_fingerprint(),
+              product.boundary.revision()};
+          const FrozenConvectionFaceOutput output{
+              energy_frozen_x_enthalpy, energy_frozen_y_enthalpy,
+              energy_frozen_z_enthalpy};
+          if (product.ibm_equations.has_value() &&
+              product.ibm_equations->has_inlet_sources())
+            inspected = product.ibm_equations->freeze_source_convection_faces(
+                {IbmInterfaceInletFieldKind::enthalpy, 0U}, scheme,
+                pressure_energy_target_flux, as_const(trial_enthalpy), 0U,
+                context, output, frozen);
+          else
+            inspected = freeze_cartesian_target_convection_faces(
+                product.equations.kernels(), scheme,
+                pressure_energy_target_flux, as_const(trial_enthalpy), 0U,
+                context, output, frozen);
+        }
         inspected = product.reductions.consensus(inspected);
         if (inspected) {
           pressure_energy_frozen_enthalpy = frozen;
@@ -11044,7 +11253,7 @@ Status ProductDriver::Impl::execute_attempt(
       {attempt_pressure_reference, as_const(trial_pressure),
        as_const(trial_enthalpy),
        {species_accepted.data(), species_accepted.size()},
-       as_const(trial_density)}};
+       as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
   PisoIntermediateCertificate intermediate_one;
   if (status) attempt_stage = 41U;
   if (status)
@@ -11233,6 +11442,8 @@ Status ProductDriver::Impl::execute_attempt(
         energy_enthalpy_binding.geometry = &product.geometry;
         energy_enthalpy_binding.kernels = &product.equations.kernels();
         energy_enthalpy_binding.boundary = &product.boundary;
+        energy_enthalpy_binding.immersed_interface =
+            product.ibm_equations.has_value() ? &*product.ibm_equations : nullptr;
         energy_enthalpy_binding.boundary_velocity = as_const(trial_velocity);
         energy_enthalpy_binding.patch = product.patch;
         energy_enthalpy_binding.convection =
@@ -11781,12 +11992,22 @@ Status ProductDriver::Impl::execute_attempt(
             }
         return fingerprint == 0U ? PlanFingerprint{1U} : fingerprint;
       };
+  // A transported constant needs roundoff-level continuity pairing; energy
+  // retains the case terminal tolerance. Keep these independent gates and
+  // use their ratio only in the globalization merit, never in raw metrics.
+  const double coupled_continuity_target = scalar_remap.has_value()
+      ? std::min(product.summary.terminal_continuity_tolerance,
+                 16.0 * std::numeric_limits<double>::epsilon())
+      : product.summary.terminal_continuity_tolerance;
+  const double energy_merit_weight = coupled_continuity_target /
+      product.summary.terminal_continuity_tolerance;
   const auto initialize_candidate_sample =
       [&](double alpha, std::size_t ordinal, std::uint8_t corrector,
           PlanFingerprint direction,
           PressureEnergyCandidateArtifacts& artifacts) noexcept {
         artifacts = {};
         PressureEnergyGlobalizationSample& sample = artifacts.sample;
+        sample.energy_merit_weight = energy_merit_weight;
         sample.alpha = alpha;
         sample.global_normalized_continuity =
             std::numeric_limits<double>::infinity();
@@ -12307,7 +12528,7 @@ Status ProductDriver::Impl::execute_attempt(
                 as_const(semantic_species);
           }
           evaluated = resolve_static_boundary_values(
-              communicator, product.boundary, product.boundary_specs,
+              communicator, product.boundary, product.boundary_specs, product.patch_inlets,
               product.geometry, product.patch, product.thermodynamics,
               artifacts.pressure_reference,
               as_const(pressure_energy_candidate_density),
@@ -12435,7 +12656,7 @@ Status ProductDriver::Impl::execute_attempt(
                           .data(),
                       pressure_energy_candidate_species_boundary_aliases
                           .size()},
-                     authority},
+                     authority, BoundaryThermophysicalClosureKind::physical_inlet_face},
                     {pressure_energy_candidate_density,
                      pressure_energy_candidate_temperature,
                      pressure_energy_candidate_heat_capacity,
@@ -12650,19 +12871,27 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(pressure_energy_candidate_heat_capacity),
               pressure_energy_candidate_thermal_conductivity,
               pressure_energy_candidate_enthalpy_diffusivity);
-        if (product.esf.enabled() ||
-            product.transport.kernel() == TransportKernel::coast_native_air) {
-          evaluated = exchange_effective_thermal_ghosts(
-              product.candidate_thermal_halo, state_stage, product.boundary,
-              pressure_energy_candidate_thermal_conductivity,
-              pressure_energy_candidate_enthalpy_diffusivity, evaluated);
-          evaluated = product.reductions.consensus(evaluated);
-        }
+        evaluated = exchange_effective_thermal_ghosts(
+            product.candidate_thermal_halo, state_stage, product.boundary,
+            pressure_energy_candidate_thermal_conductivity,
+            pressure_energy_candidate_enthalpy_diffusivity, evaluated,
+            product.esf.enabled() || product.transport.kernel() == TransportKernel::coast_native_air);
+        evaluated = product.reductions.consensus(evaluated);
         if (!evaluated)
           return Status{evaluated.code,
                         kProductPressureEnergy + 209U};
 
         candidate_timer.phase(4U);
+        if (evaluated)
+          evaluated = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+              product.boundary, product.thermodynamics, product.transport,
+              artifacts.pressure_reference, as_const(pressure_energy_candidate_pressure),
+              {{}, {}, {}, {}, {}, pressure_energy_candidate_molecular_viscosity,
+               pressure_energy_candidate_thermal_conductivity,
+               pressure_energy_candidate_enthalpy_diffusivity},
+              pressure_energy_candidate_effective_viscosity);
+        evaluated = product.reductions.consensus(evaluated);
+        if (!evaluated) return evaluated;
         RevisionToken flux_revision = detail::product_mix(
             direction, product_double_bits(alpha));
         flux_revision = detail::product_mix(flux_revision, ordinal + 1U);
@@ -12807,7 +13036,8 @@ Status ProductDriver::Impl::execute_attempt(
                 semantic_enthalpy,
                 {pressure_energy_candidate_species_boundary_aliases.data(),
                  pressure_energy_candidate_species_boundary_aliases.size()},
-                as_const(pressure_energy_candidate_density)}},
+                as_const(pressure_energy_candidate_density),
+                BoundaryThermophysicalClosureKind::physical_inlet_face}},
               &product.candidate_finalizer_state_halo,
               as_const(candidate_flux),
               candidate_final_flux};
@@ -14016,16 +14246,9 @@ Status ProductDriver::Impl::execute_attempt(
         merit = 0.0;
         return loop.replay_valid && detail::product_pressure_coupled_merit(
             loop.replay.sample.global_normalized_continuity,
-            loop.replay.sample.global_normalized_energy, merit);
+            loop.replay.sample.energy_merit_weight *
+                loop.replay.sample.global_normalized_energy, merit);
       };
-  // A transported constant inherits the discrete continuity residual. The
-  // scalar remap needs a roundoff-level mass-pairing closure, independently
-  // of the user-facing flow acceptance ceiling. Do not weaken either gate,
-  // or change the zero-scalar production path.
-  const double coupled_continuity_target = scalar_remap.has_value()
-      ? std::min(product.summary.terminal_continuity_tolerance,
-                 16.0 * std::numeric_limits<double>::epsilon())
-      : product.summary.terminal_continuity_tolerance;
   const auto pressure_energy_components_converged =
       [&](const PressureEnergyCandidateLoopResult& loop) noexcept {
         return loop.replay_valid &&
@@ -14053,7 +14276,8 @@ Status ProductDriver::Impl::execute_attempt(
           forcing.normalized_continuity =
               loop->replay.sample.global_normalized_continuity;
           forcing.normalized_energy =
-              loop->replay.sample.global_normalized_energy;
+              loop->replay.sample.energy_merit_weight *
+                  loop->replay.sample.global_normalized_energy;
           forcing.residual_available = true;
         }
         return detail::product_pressure_inexact_forcing_control(
@@ -14678,6 +14902,8 @@ Status ProductDriver::Impl::execute_attempt(
                       loop.selection.selected_halvings];
         const PressureEnergyGlobalizationSample& replay = loop.replay.sample;
         const bool matching_replay =
+            replay.energy_merit_weight == expected.energy_merit_weight &&
+            replay.energy_merit_weight == energy_merit_weight &&
             replay.alpha == expected.alpha &&
             replay.corrector == expected.corrector &&
             replay.target_time == expected.target_time &&
@@ -14698,6 +14924,7 @@ Status ProductDriver::Impl::execute_attempt(
              loop.replay.alpha_zero_byte_equivalent) &&
             (loop.stationary.valid() ||
              (loop.selection.valid() &&
+              loop.selection.energy_merit_weight == energy_merit_weight &&
               replay.state_provenance ==
                   loop.selection.candidate_state_provenance &&
               replay.mass_flux_provenance ==
@@ -15240,7 +15467,7 @@ Status ProductDriver::Impl::execute_attempt(
       {attempt_pressure_reference, as_const(trial_pressure),
        as_const(trial_enthalpy),
        {species_accepted.data(), species_accepted.size()},
-       as_const(trial_density)}};
+       as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
   PisoIntermediateCertificate intermediate_two;
   if (status) attempt_stage = 51U;
   if (terminal_path_active)
@@ -15321,6 +15548,7 @@ Status ProductDriver::Impl::execute_attempt(
       pressure_energy_loop_merit(candidate_loop_one,
                                  pressure_energy_previous_merit);
   std::uint8_t refinement_iteration = 1U;
+  detail::ProductPressureExtrapolationBackoff refinement_extrapolation;
   while (status && pressure_energy_candidate_scope &&
          !pressure_energy_refinement_converged &&
          refinement_iteration <= kPressureEnergyRefinementCapacity) {
@@ -15403,7 +15631,7 @@ Status ProductDriver::Impl::execute_attempt(
         {attempt_pressure_reference, as_const(trial_pressure),
          as_const(trial_enthalpy),
          {species_accepted.data(), species_accepted.size()},
-         as_const(trial_density)}};
+         as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
     PisoIntermediateCertificate refined_intermediate;
     // Once issued, the authority must be consumed even if the intervening
     // ghost/material refresh fails.  Passing that failure as prerequisite
@@ -15436,7 +15664,7 @@ Status ProductDriver::Impl::execute_attempt(
     const double refinement_extrapolated_alpha =
         pressure_energy_previous_merit_available &&
                 pressure_energy_current_merit_available
-            ? detail::product_pressure_aitken_initial_alpha(
+            ? refinement_extrapolation.propose(
                   pressure_energy_previous_merit,
                   pressure_energy_current_merit,
                   candidate_loop_two.selected_alpha)
@@ -15742,7 +15970,7 @@ Status ProductDriver::Impl::execute_attempt(
       {attempt_pressure_reference, as_const(trial_pressure),
        as_const(trial_enthalpy),
        {species_accepted.data(), species_accepted.size()},
-       as_const(trial_density)}};
+       as_const(trial_density), BoundaryThermophysicalClosureKind::physical_inlet_face}};
   PisoTerminalCertificate terminal;
   FinalForceCertificate force_certificate;
   if (terminal_path_active)
@@ -15854,9 +16082,7 @@ Status ProductDriver::Impl::execute_attempt(
     status = product.turbulence.update(turbulence_input, effective_viscosity,
                                        turbulence_certificate);
   }
-  if (final_rate_path_active &&
-      (product.esf.enabled() ||
-       product.transport.kernel() == TransportKernel::coast_native_air))
+  if (final_rate_path_active)
     status = refresh_live_effective_thermal_ghosts(60U, status);
   else
     status = product.reductions.consensus(status);
@@ -15899,7 +16125,7 @@ Status ProductDriver::Impl::execute_attempt(
     for (std::size_t passive = 0U; passive < passive_trial.size(); ++passive)
       passive_accepted[passive] = as_const(passive_trial[passive]);
     status = resolve_static_boundary_values(
-        communicator, product.boundary, product.boundary_specs,
+        communicator, product.boundary, product.boundary_specs, product.patch_inlets,
         product.geometry, product.patch, product.thermodynamics,
         attempt_pressure_reference, as_const(trial_density),
         as_const(trial_velocity), as_const(trial_enthalpy),
@@ -15943,6 +16169,13 @@ Status ProductDriver::Impl::execute_attempt(
       }
     }
   }
+  status = product.reductions.consensus(status);
+  if (status)
+    status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+        product.boundary, product.thermodynamics, product.transport,
+        attempt_pressure_reference, as_const(trial_pressure),
+        {{}, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity,
+         enthalpy_diffusivity}, effective_viscosity);
   status = product.reductions.consensus(status);
   if (status && product.ibm_rate_donors.has_value()) {
     halo_count = 0U;
@@ -16230,7 +16463,8 @@ Status ProductDriver::Impl::execute_attempt(
         terminal_energy_flux, pressure_energy_activity.cells,
         momentum_low_order_rhs_delta, pressure_energy_e_p,
         time.accepted_step(), balance_history, product.reductions,
-        conservation, pending_balance);
+        conservation, pending_balance,
+        product.ibm_equations ? &*product.ibm_equations : nullptr);
   final_audit_timer.stop();
   if (status) {
     begin_timed_stage(70U);
@@ -16519,6 +16753,7 @@ Status ProductDriver::advance(LocalTimeLimits limits,
       scalar.remap_nanoseconds += implementation_->scalar_remap_nanoseconds;
       scalar.final_species_residual = remap.initial_species_residual;
       scalar.final_remap_residual = remap.residual;
+      scalar.final_remap_convergence_residual = remap.convergence_residual;
       scalar.mass_pairing_residual = remap.mass_pairing_residual;
     }
     const std::uint64_t predictor_calls =
@@ -16864,7 +17099,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
       method_history_signature(
           !product.fields.scalars.empty(), product.reaction.enabled(),
           product.esf.enabled(), product.esf.tcr_history.enabled(),
-          product.spray.enabled())};
+          product.spray.enabled(), !product.patch_inlets.patches.empty())};
   out.cell_records = product.spray.enabled()
                          ? product.spray.history.snapshot()
                          : product.esf.tcr_history.snapshot();

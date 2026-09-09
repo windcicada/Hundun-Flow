@@ -95,8 +95,9 @@ bool finite(Real3 value) noexcept {
 }
 
 bool valid_flow_kind(BoundaryKind kind) noexcept {
-  return kind >= BoundaryKind::velocity_inlet &&
-         kind <= BoundaryKind::periodic;
+  return (kind >= BoundaryKind::velocity_inlet &&
+          kind <= BoundaryKind::periodic) ||
+         kind == BoundaryKind::zero_gradient_mass_outlet;
 }
 
 bool valid_thermal_kind(BoundaryKind kind) noexcept {
@@ -205,7 +206,11 @@ bool flow_wall(BoundaryKind kind) noexcept {
 }
 
 bool pressure_authority(BoundaryKind kind) noexcept {
-  return kind == BoundaryKind::pressure_outlet ||
+  // The mass-balanced Neumann outlet declares the absolute reference scale,
+  // not a pressure Dirichlet ghost. Compressible storage fixes the pressure
+  // level through EOS; no pressure-correction boundary pin is introduced.
+  return kind == BoundaryKind::zero_gradient_mass_outlet ||
+         kind == BoundaryKind::pressure_outlet ||
          kind == BoundaryKind::nscbc_outlet ||
          kind == BoundaryKind::static_state_inlet ||
          kind == BoundaryKind::total_state_inlet;
@@ -453,6 +458,14 @@ Status validate_model(const ValidatedModel& model) noexcept {
          !(outward_component(face, spec.velocity) < 0.0))) {
       return {StatusCode::invalid_plan, kBoundaryClosure};
     }
+    if (spec.flow_kind == BoundaryKind::zero_gradient_mass_outlet &&
+        (spec.allow_backflow || spec.pressure <= 0.0 ||
+         spec.thermal_kind != BoundaryKind::none ||
+         std::any_of(spec.scalars.begin(), spec.scalars.end(),
+             [](const ScalarBoundarySpec& scalar) {
+               return scalar.kind != ScalarBoundaryKind::zero_gradient;
+             })))
+      return {StatusCode::invalid_plan, kBoundaryClosure};
     if ((spec.flow_kind == BoundaryKind::pressure_outlet ||
          spec.flow_kind == BoundaryKind::nscbc_outlet) &&
         spec.pressure <= 0.0) {

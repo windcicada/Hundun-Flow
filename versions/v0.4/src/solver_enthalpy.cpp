@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_flow.hpp"
+#include "hundun/v04_ibm.hpp"
 
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
@@ -1180,6 +1181,12 @@ Status assemble_enthalpy_impl(
   if (!status) {
     return status;
   }
+  if (context.immersed_interface != nullptr) {
+    status = context.immersed_interface->add_source_convection_correction(
+        {IbmInterfaceInletFieldKind::enthalpy, 0U}, plan.convection_,
+        state.enthalpy.trial, 1.0, system.residual, box);
+    if (!status) return status;
+  }
 
   // The frozen model selects temperature conduction or the ESF unity-Lewis
   // total-enthalpy flux. This is an equation choice, not a solver fallback.
@@ -1239,10 +1246,17 @@ Status assemble_enthalpy_impl(
   if (!status) {
     return status;
   }
+  RevisionToken assembled_state =
+      state_revision(state, material, velocity_gradient, contributions);
+  if (context.immersed_interface != nullptr) {
+    assembled_state = context.immersed_interface->constrain_certificate(
+        assembled_state, state.enthalpy.trial.revision,
+        material.enthalpy_diffusivity.revision);
+    if (assembled_state == 0U)
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  }
   certificate = {plan.fingerprint_, context.scope, context.time,
-                 context.geometry, context.face_flux,
-                 state_revision(state, material, velocity_gradient,
-                                contributions),
+                 context.geometry, context.face_flux, assembled_state,
                  context.dt};
   return {};
 }
@@ -1425,6 +1439,14 @@ Status assemble_target_coupled_enthalpy_residual(
   Status status = cartesian_target_convection(
       *plan.kernels_, plan.convection_, context.mass_flux, convection);
   if (!status) return status;
+  // Match the full assembly: a prescribed internal inlet transports h_in,
+  // not a reconstruction through the arbitrary solid-side placeholder.
+  if (context.immersed_interface != nullptr) {
+    status = context.immersed_interface->add_source_convection_correction(
+        {IbmInterfaceInletFieldKind::enthalpy, 0U}, plan.convection_,
+        state.enthalpy.trial, 1.0, residual, box);
+    if (!status) return status;
+  }
 
   const std::array<ConstFieldView, 1U> thermal_reads{
       plan.unity_lewis_total_enthalpy_ ? state.enthalpy.trial

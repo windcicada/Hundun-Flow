@@ -218,14 +218,17 @@ Status TurbulencePlan::compile(MPI_Comm communicator,
   if (spec.kind == TurbulenceKind::wale) {
     subgrid = SubgridKind::wale;
     coefficient = spec.wale_coefficient;
-  } else if (spec.kind == TurbulenceKind::vreman_wall_function) {
+  } else if (spec.kind == TurbulenceKind::vreman_wall_function ||
+             spec.kind == TurbulenceKind::vreman) {
     subgrid = SubgridKind::vreman;
-    wall = WallTreatmentKind::equilibrium_wall_function;
+    if (spec.kind == TurbulenceKind::vreman_wall_function)
+      wall = WallTreatmentKind::equilibrium_wall_function;
     coefficient = spec.vreman_coefficient;
   }
   const bool supported = spec.kind == TurbulenceKind::none ||
                          spec.kind == TurbulenceKind::wale ||
-                         spec.kind == TurbulenceKind::vreman_wall_function;
+                         spec.kind == TurbulenceKind::vreman_wall_function ||
+                         spec.kind == TurbulenceKind::vreman;
   const bool declared = std::binary_search(contributions.declared_fields_.begin(),
                                            contributions.declared_fields_.end(),
                                            effective_viscosity_output);

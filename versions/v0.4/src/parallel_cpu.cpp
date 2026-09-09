@@ -4,6 +4,7 @@
 #include "hundun/v04_parallel.hpp"
 
 #include <mpi.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
@@ -15,7 +16,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -158,20 +158,38 @@ Status discover_core_numa_nodes(
   try {
     std::vector<std::int32_t> nodes(allowed.size, 0);
     for (std::size_t index = 0; index < allowed.size; ++index) {
-      const std::filesystem::path cpu_root =
-          std::filesystem::path{"/sys/devices/system/cpu"} /
-          ("cpu" + std::to_string(allowed.data[index]));
-      std::error_code error;
+      const std::string cpu_root = "/sys/devices/system/cpu/cpu" +
+          std::to_string(allowed.data[index]);
+      // Some supported libstdc++ directory iterators terminate on bad_alloc
+      // inside their implementation, before this catch can make it collective.
+      // Linux CPU discovery already uses POSIX; directory names need no C++
+      // allocation. Preserve the existing node-zero fallback on sysfs errors.
+      const auto close_directory = [](DIR* directory) noexcept {
+        if (directory != nullptr) ::closedir(directory);
+      };
+      std::unique_ptr<DIR, decltype(close_directory)> directory(
+          ::opendir(cpu_root.c_str()), close_directory);
+      if (!directory) {
+        if (errno == ENOMEM)
+          return {StatusCode::allocation_failure, kCpuAffinity};
+        continue;
+      }
       std::int32_t selected_node = std::numeric_limits<std::int32_t>::max();
-      for (std::filesystem::directory_iterator iterator(cpu_root, error), end;
-           !error && iterator != end; iterator.increment(error)) {
-        const std::string name = iterator->path().filename().string();
+      for (;;) {
+        errno = 0;
+        const dirent* entry = ::readdir(directory.get());
+        if (entry == nullptr) {
+          if (errno == ENOMEM)
+            return {StatusCode::allocation_failure, kCpuAffinity};
+          break;
+        }
+        const std::string_view name{entry->d_name};
         if (name.size() <= 4U || name.compare(0U, 4U, "node") != 0) {
           continue;
         }
         std::int32_t node = -1;
         if (parse_nonnegative_integer(
-                std::string_view{name}.substr(4U), node)) {
+                name.substr(4U), node)) {
           selected_node = std::min(selected_node, node);
         }
       }

@@ -700,6 +700,55 @@ bool test_native_air_near_reference_inverse() {
   return passed;
 }
 
+bool test_seeded_small_enthalpy_response() {
+  ThermophysicalSpec spec = base_spec();
+  spec.species.push_back(varying_species("A", 16.0, 3.5, 1.0e-3));
+  spec.species.push_back(varying_species("B", 28.0, 3.5, 1.0e-3));
+  // A chemically meaningful large reference offset may not turn a small
+  // resolvable h correction into zero temperature/density response. The
+  // pressure-energy caller supplies its current T as the next inversion hint.
+  spec.species[0U].nasa7_low[5U] -= 10000.0;
+  spec.species[0U].nasa7_high[5U] -= 10000.0;
+  const std::array<TransportedScalarSpec, 1U> catalog{{
+      {"A", TransportedScalarRole::species}}};
+  const std::array<double, 1U> y{{0.98}};
+  ThermodynamicsPlan plan;
+  bool passed = expect(static_cast<bool>(ThermodynamicsPlan::compile(
+      spec, {catalog.data(), catalog.size()}, plan)),
+      "large-formation-enthalpy response plan compiles");
+  constexpr double temperature = 245.0, pressure = 80000.0;
+  double h{}, cp{}, gas{};
+  passed &= expect(static_cast<bool>(plan.mixture_enthalpy(
+      temperature, {y.data(), y.size()}, h, cp, gas)),
+      "small-response forward state evaluates");
+  ThermoState base;
+  passed &= expect(static_cast<bool>(plan.evaluate(
+      pressure, h, {y.data(), y.size()}, {}, base, temperature)),
+      "small-response base inverse evaluates");
+  for (double requested : {-2.0e-6, -5.0e-7, 5.0e-7, 2.0e-6}) {
+    const double target = h + requested, delta = target - h;
+    ThermoState shifted;
+    ThermoInversionDiagnostic diagnostic;
+    const Status status = plan.evaluate(pressure, target,
+        {y.data(), y.size()}, {}, shifted, base.temperature, &diagnostic);
+    const double actual_dt = shifted.temperature - base.temperature;
+    const double expected_dt = delta / cp;
+    const double actual_drho = shifted.rho - base.rho;
+    const double expected_drho = delta * base.drho_dh_pY;
+    const bool responds = status &&
+        std::abs(actual_dt - expected_dt) < 0.005 * std::abs(expected_dt) &&
+        std::abs(actual_drho - expected_drho) < 0.005 * std::abs(expected_drho);
+    if (!responds)
+      std::cerr << "seeded_response dh=" << delta << " dT=" << actual_dt
+                << " expected_dT=" << expected_dt << " drho=" << actual_drho
+                << " expected_drho=" << expected_drho << " iters="
+                << diagnostic.iterations << '\n';
+    passed &= expect(responds,
+        "seeded NASA inverse retains its analytic small-h temperature/density response");
+  }
+  return passed;
+}
+
 bool test_nasa7_inversion_and_validation() {
   ThermophysicalSpec spec = base_spec();
   spec.species.push_back(varying_species("A", 24.0, 3.2, 4.0e-4));
@@ -1120,6 +1169,7 @@ int main() {
   bool passed = test_constant_cp_path();
   passed &= test_conserved_enthalpy_bounds();
   passed &= test_nasa7_inversion_and_validation();
+  passed &= test_seeded_small_enthalpy_response();
   passed &= test_native_air_near_reference_inverse();
   passed &= test_thermophysical_text_contract();
   if (passed) {

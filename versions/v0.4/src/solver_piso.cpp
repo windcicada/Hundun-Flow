@@ -409,6 +409,7 @@ bool supported_frozen_open_boundary(const BoundaryPlan& boundary) noexcept {
       case BoundaryKind::velocity_inlet:
       case BoundaryKind::mass_flow_inlet:
       case BoundaryKind::pressure_outlet:
+      case BoundaryKind::zero_gradient_mass_outlet:
       case BoundaryKind::no_slip_wall:
       case BoundaryKind::moving_wall:
       case BoundaryKind::slip:
@@ -471,6 +472,7 @@ bool thermophysical_boundary_tokens(
     const BoundaryThermophysicalGhostUse& use, ConstFieldView density,
     PlanFingerprint expected_thermodynamics,
     PlanFingerprint expected_transport,
+    bool physical_inlet_material,
     ThermophysicalBoundaryTokens& tokens) noexcept {
   tokens = {};
   if (!context.valid() || context.numeric_boundary != boundary.revision() ||
@@ -512,6 +514,8 @@ bool thermophysical_boundary_tokens(
     return true;
   }
   const BoundaryThermophysicalGhostBinding& binding = use.binding;
+  if ((binding.closure_kind==BoundaryThermophysicalClosureKind::physical_inlet_face)!=physical_inlet_material)
+    return false;
   if (use.certificate.thermodynamics() != expected_thermodynamics ||
       use.certificate.transport() != expected_transport ||
       !same_field_identity(binding.density, density) ||
@@ -1833,6 +1837,9 @@ struct PressureVelocityCoupler::Impl {
   std::uint8_t candidate_pressure_correction_donor_reach{};
   PlanFingerprint candidate_pressure_correction_donor_fingerprint{};
   PressureCorrectionInput pressure_input{};
+  // Candidate boundary closure is also used at corrector 1; pressure_input
+  // below is deliberately reserved for the terminal corrector-2 audit.
+  PressureCorrectionInput candidate_mass_input{};
   PressureCorrectionCertificate pressure_correction{};
   SealedPressureCorrectionAuthority sealed{};
   PredecessorPressureApplication predecessor_c1{};
@@ -2443,7 +2450,7 @@ Status PressureVelocityCoupler::bind(
   for (std::size_t f = 0U; f < 6U; ++f) {
     const BoundaryFacePlan* face = nullptr;
     if (services.boundary->face(static_cast<CartesianFace>(f), face) && face &&
-        !face->periodic && face->flow_kind == BoundaryKind::pressure_outlet)
+        !face->periodic && is_candidate_transport_outlet(face->flow_kind))
       candidate->has_pressure_outlet_boundary = true;
   }
   candidate->thermodynamics_plan = services.thermodynamics;
@@ -2560,6 +2567,7 @@ Status PressureVelocityCoupler::refresh_impl(
   impl.current_pressure_perturbation = {};
   impl.current_pressure_perturbation_numeric_fingerprint = 0U;
   impl.current_pressure_work = {};
+  impl.candidate_mass_input = {};
   impl.current_thermophysical_context = {};
   impl.current_pressure_reference = {};
   impl.current_absolute_pressure_reference = 0.0;
@@ -2789,6 +2797,7 @@ Status PressureVelocityCoupler::refresh_impl(
           *impl.boundary, thermophysical_context,
           input.thermophysical_boundary, as_const(input.density),
           impl.thermodynamics, impl.transport,
+          impl.kernels->physical_inlet_material_enabled(),
           thermophysical_boundary);
   const bool closed_reference =
       impl.pressure_reference_kind == PressureReferenceKind::closed_mass;
@@ -3073,6 +3082,7 @@ Status PressureVelocityCoupler::refresh_impl(
           *impl.boundary, thermophysical_context,
           input.thermophysical_boundary, as_const(density_with_ghosts),
           impl.thermodynamics, impl.transport,
+          impl.kernels->physical_inlet_material_enabled(),
           revalidated_thermophysical_boundary) ||
       revalidated_thermophysical_boundary.semantics !=
           thermophysical_boundary.semantics ||
@@ -3176,6 +3186,17 @@ Status PressureVelocityCoupler::refresh_impl(
               fixed_flux =
                   rule.kind ==
                   PressureCorrectionFaceKind::homogeneous_neumann;
+              if (fixed_flux) {
+                const BoundaryFacePlan* plan = nullptr;
+                status = impl.boundary->face(cartesian_face(axis, rule.high), plan);
+                if (!status || plan == nullptr) {
+                  status = {StatusCode::invalid_plan, kPisoPressureBoundary};
+                  break;
+                }
+                // Neumann pressure does not prescribe mass flux at this
+                // explicitly adjustable outlet. Retain its momentum predictor.
+                fixed_flux = plan->flow_kind != BoundaryKind::zero_gradient_mass_outlet;
+              }
             }
             if (fixed_flux) {
               const double paired =
@@ -3905,6 +3926,7 @@ Status PressureVelocityCoupler::assemble_pressure_system(
   Impl& impl = *implementation_;
   impl.sealed = {};
   impl.current_pressure_work = {};
+  impl.candidate_mass_input = {};
   const PressureCorrectionBoundaryCertificate& boundary =
       impl.pressure_boundary.certificate();
   if (!impl.pressure_boundary.current() ||
@@ -3939,6 +3961,7 @@ Status PressureVelocityCoupler::assemble_pressure_system(
   impl.current_mass_source = input.mass_source;
   impl.current_pressure_reference = input.pressure_reference;
   impl.current_pressure_work = candidate;
+  impl.candidate_mass_input = input;
   if (candidate.corrector == 2U) {
     impl.pressure_input = input;
     impl.pressure_correction = candidate;
@@ -4487,6 +4510,47 @@ Status PressureVelocityCoupler::stage_frozen_momentum_velocity_impl(
   return {};
 }
 
+Status PressureVelocityCoupler::candidate_local_mass_storage(
+    const PisoFrozenMomentumStageAuthority& authority,
+    ConstFieldView density, double& local_rate) const noexcept {
+  local_rate = 0.0;
+  if (implementation_ == nullptr)
+    return {StatusCode::invalid_plan, kPisoCoupler};
+  const Impl& impl = *implementation_;
+  const auto& input = impl.candidate_mass_input;
+  if (!authority.valid() || authority.issuer_ != this ||
+      !same_intermediate_certificate(authority.intermediate_, impl.current) ||
+      !same_pressure_certificate(authority.pressure_, impl.current_pressure_work) ||
+      authority.baseline_ != impl.frozen_candidate_baseline ||
+      !same_bdf_coefficients(input.bdf, impl.frozen_candidate_bdf) ||
+      !detail::valid_cell_view(density, impl.cells, 0U, 1U, 0U) ||
+      !detail::valid_cell_view(input.density_accepted, impl.cells, 0U, 1U, 0U) ||
+      (input.bdf.order == 2U &&
+       !detail::valid_cell_view(input.density_previous, impl.cells, 0U, 1U, 0U)))
+    return {StatusCode::invalid_plan, kPisoCoupler};
+  long double total = 0.0L;
+  std::size_t index = 0U;
+  for (int z = 0; z < impl.cells.z; ++z)
+    for (int y = 0; y < impl.cells.y; ++y)
+      for (int x = 0; x < impl.cells.x; ++x, ++index) {
+        if (impl.continuity_activity.cells.size != 0U &&
+            impl.continuity_activity.cells.data[index] == 0U) continue;
+        const Int3 cell{x, y, z};
+        const double previous = input.bdf.order == 2U
+            ? input.density_previous.unchecked(cell, 0U) : 0.0;
+        const double rate = detail::cell_volume(*impl.kernels, cell) *
+            (input.bdf.a0 * density.unchecked(cell, 0U) +
+             input.bdf.a1 * input.density_accepted.unchecked(cell, 0U) +
+             input.bdf.a2 * previous);
+        if (!std::isfinite(rate))
+          return {StatusCode::numerical_failure, kPisoNumerical};
+        total += rate;
+      }
+  local_rate = static_cast<double>(total);
+  return std::isfinite(local_rate) ? Status{}
+      : Status{StatusCode::numerical_failure, kPisoNumerical};
+}
+
 Status PressureVelocityCoupler::stage_frozen_momentum_flux(
     const PisoFrozenMomentumStageAuthority& authority,
     const PisoFrozenMomentumVelocityStageCertificate& velocity,
@@ -4643,8 +4707,7 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
             if (local && boundary_face == nullptr)
               local = {StatusCode::invalid_plan, kPisoCoupler};
             pressure_outlet =
-                local && boundary_face->flow_kind ==
-                             BoundaryKind::pressure_outlet;
+                local && is_candidate_transport_outlet(boundary_face->flow_kind);
           }
           if (!local) break;
           if (pressure_outlet) {
@@ -4795,8 +4858,7 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
               if (local && boundary_face == nullptr)
                 local = {StatusCode::invalid_plan, kPisoCoupler};
               pressure_outlet =
-                  local && boundary_face->flow_kind ==
-                               BoundaryKind::pressure_outlet;
+                  local && is_candidate_transport_outlet(boundary_face->flow_kind);
             }
             if (!local) break;
             const std::uint64_t offset =
@@ -8512,6 +8574,7 @@ Status PressureVelocityCoupler::audit_pending_final(
           *impl.boundary, thermophysical_context,
           input.thermophysical_boundary, input.density,
           impl.thermodynamics, impl.transport,
+          impl.kernels->physical_inlet_material_enabled(),
           thermophysical_boundary) &&
       (entirely_periodic(*impl.boundary) ||
        same_field_identity(
@@ -8682,6 +8745,13 @@ Status PressureVelocityCoupler::audit_pending_final(
           const double fyp = flux.y.unchecked({ix, iy + 1, iz});
           const double fzm = flux.z.unchecked(cell);
           const double fzp = flux.z.unchecked({ix, iy, iz + 1});
+          const auto fixed_source = [&](CartesianAxis axis, Int3 face,
+                                        double value) noexcept {
+            double expected = 0.0;
+            return impl.immersed_interface != nullptr &&
+                impl.immersed_interface->prescribed_face_flux(axis, face, expected) &&
+                value == expected;
+          };
           const double compressibility =
               closed ? input.drho_dp_h_y.unchecked(cell, 0U) : 0.0;
           double eos_residual = 0.0;
@@ -8718,6 +8788,12 @@ Status PressureVelocityCoupler::audit_pending_final(
               impl.continuity_activity.z_faces
                       .data[face_offset(flux.z.extents,
                                         {ix, iy, iz + 1})] == 0U;
+          const bool source_xm = inactive_xm && fixed_source(CartesianAxis::x, cell, fxm);
+          const bool source_xp = inactive_xp && fixed_source(CartesianAxis::x, {ix + 1, iy, iz}, fxp);
+          const bool source_ym = inactive_ym && fixed_source(CartesianAxis::y, cell, fym);
+          const bool source_yp = inactive_yp && fixed_source(CartesianAxis::y, {ix, iy + 1, iz}, fyp);
+          const bool source_zm = inactive_zm && fixed_source(CartesianAxis::z, cell, fzm);
+          const bool source_zp = inactive_zp && fixed_source(CartesianAxis::z, {ix, iy, iz + 1}, fzp);
           if (!std::isfinite(rho) || !(rho > 0.0) ||
               !std::isfinite(volume) || !(volume > 0.0) ||
               !std::isfinite(fxm) || !std::isfinite(fxp) ||
@@ -8726,28 +8802,27 @@ Status PressureVelocityCoupler::audit_pending_final(
             local = {StatusCode::numerical_failure, kPisoNumerical};
             continue;
           }
-          // The IBM activity authority excludes solid cells and seals every
-          // inactive fluid/solid control face to zero mass flux.  A non-zero
-          // value there is an authority violation, not a flux that may be
-          // silently omitted from the CFL reconstruction.
-          if ((inactive_xm && fxm != 0.0) ||
-              (inactive_xp && fxp != 0.0) ||
-              (inactive_ym && fym != 0.0) ||
-              (inactive_yp && fyp != 0.0) ||
-              (inactive_zm && fzm != 0.0) ||
-              (inactive_zp && fzp != 0.0)) {
+          // A prescribed inlet carries physical mass across a pressure-graph
+          // cut. Only its exact frozen source value may be nonzero there; the
+          // cut remains inactive for pressure correction but counts in CFL.
+          if ((inactive_xm && fxm != 0.0 && !source_xm) ||
+              (inactive_xp && fxp != 0.0 && !source_xp) ||
+              (inactive_ym && fym != 0.0 && !source_ym) ||
+              (inactive_yp && fyp != 0.0 && !source_yp) ||
+              (inactive_zm && fzm != 0.0 && !source_zm) ||
+              (inactive_zp && fzp != 0.0 && !source_zp)) {
             local = {StatusCode::invalid_plan, kPisoCoupler};
             continue;
           }
           const std::array<double, 6U> cell_flux{{
               fxm, fxp, fym, fyp, fzm, fzp}};
           const std::array<std::uint8_t, 6U> cell_active{{
-              static_cast<std::uint8_t>(!inactive_xm),
-              static_cast<std::uint8_t>(!inactive_xp),
-              static_cast<std::uint8_t>(!inactive_ym),
-              static_cast<std::uint8_t>(!inactive_yp),
-              static_cast<std::uint8_t>(!inactive_zm),
-              static_cast<std::uint8_t>(!inactive_zp),
+              static_cast<std::uint8_t>(!inactive_xm || source_xm),
+              static_cast<std::uint8_t>(!inactive_xp || source_xp),
+              static_cast<std::uint8_t>(!inactive_ym || source_ym),
+              static_cast<std::uint8_t>(!inactive_yp || source_yp),
+              static_cast<std::uint8_t>(!inactive_zm || source_zm),
+              static_cast<std::uint8_t>(!inactive_zp || source_zp),
           }};
           detail::CellConvectiveCflResult cell_cfl;
           const detail::CellConvectiveCflStatus cell_cfl_status =
@@ -9494,8 +9569,16 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
     else
       active_faces = activity.z_faces;
     if (active_faces.size != 0U &&
-        active_faces.data[offset(source.extents, face)] == 0U)
-      return 0.0;
+        active_faces.data[offset(source.extents, face)] == 0U) {
+      double expected = 0.0;
+      if (impl.immersed_interface != nullptr)
+        impl.immersed_interface->prescribed_face_flux(axis, face, expected);
+      // Fail the numerical audit on a corrupted predictor instead of silently
+      // repairing it while evaluating convergence. Fixed sources have no
+      // pressure-correction response, irrespective of application_scale.
+      return source.unchecked(face) == expected ? expected :
+          std::numeric_limits<double>::quiet_NaN();
+    }
     return source.unchecked(face) +
            impl.pressure_boundary.mass_flux_response_unchecked(
                correction, axis, face, coefficient.unchecked(face),

@@ -1500,12 +1500,54 @@ bool run_candidate_accounting_certificate(
                 "ladder slots");
 }
 
+bool run_generic_thermal_halo_certificate(int rank) {
+  constexpr double dt = 1.0e-4;
+  bool passed = true;
+  for (bool variable_transport : {false, true}) {
+    auto model = retry_model(dt, dt, 1U, UINT64_C(0x4754323574686572));
+    model.turbulence = TurbulenceKind::none;
+    if (variable_transport) {
+      auto &air = model.thermophysics.species[0U];
+      air.transport_law = TransportLaw::sutherland;
+      air.transport_reference_temperature = 300.0;
+      air.sutherland_temperature = 100.0;
+      air.prandtl = 0.72;
+      air.conductivity = 0.0;
+    }
+    // The global warm perturbation crosses periodic/MPI neighbor slabs.
+    // Both paths use the real driver and identical dt, h, p and velocity.
+    auto harness = make_driver(model, dt, 1.0e4);
+    DriverStepReport report;
+    if (harness.status)
+      harness.status = harness.driver.advance({1, 1, 1, 1, 1}, report);
+    const bool valid = harness.status && report.accepted &&
+                       report.attempts == 1U &&
+                       finite_positive_terminal_state(harness.driver, model,
+                                                      report);
+    if (rank == 0)
+      std::cout << "generic-thermal-halo variable=" << variable_transport
+                << " status=" << unsigned(harness.status.code) << '/'
+                << harness.status.detail << " attempts=" << report.attempts
+                << " energy=" << std::setprecision(17)
+                << report.piso.energy_residual << '\n';
+    passed &= expect(collective(valid), rank,
+                     "generic thermal candidate and live halos advance the "
+                     "same variable-conductivity target without retry");
+  }
+  return passed;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (argc == 2 && std::string(argv[1]) == "--generic-thermal-halo") {
+    const bool passed = run_generic_thermal_halo_certificate(rank);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   bool passed = run_refinement_certificate(rank);
   passed &= run_retry_certificate(rank);
   passed &= run_retry_exhaustion_report(rank);
