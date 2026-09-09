@@ -2144,3 +2144,13 @@ foreach(gtmc_ranks IN ITEMS 1 2 4)
     v04_mpi_unsigned_reduction_${gtmc_ranks} PROPERTIES PROCESSORS ${gtmc_ranks}
     TIMEOUT 90 LABELS "v04_focused")
 endforeach()
+
+add_executable(v04_product_formation_enthalpy_coupling_test integration/product_formation_enthalpy_coupling_test.cpp)
+target_link_libraries(v04_product_formation_enthalpy_coupling_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(gtmc_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_product_formation_coupling_mpi_${gtmc_ranks}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${gtmc_ranks}"
+      "$<TARGET_FILE:v04_product_formation_enthalpy_coupling_test>")
+  set_tests_properties(v04_product_formation_coupling_mpi_${gtmc_ranks}
+    PROPERTIES PROCESSORS ${gtmc_ranks} TIMEOUT 120 LABELS "v04_focused")
+endforeach()

@@ -79,7 +79,7 @@ method_history_signature(bool transported_scalars, bool reacting = false,
     for (char byte : std::string_view(
         ";scalar-paired-mass-remap-v1;composition-picard-v1;mass-roundoff-closure-v1;"
         "passive-envelope-v1;physical-donor-v2;composition-inner-accuracy-v1;"
-        "ibm-scalar-impermeable-flux-v1;species-carried-enthalpy-diffusion-v1")) {
+        "ibm-scalar-impermeable-flux-v1;species-carried-enthalpy-diffusion-v1;target-time-inert-species-v1;isothermal-composition-guess-v1;species-tvd-response-diagonal-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }
@@ -9333,7 +9333,65 @@ Status ProductDriver::Impl::execute_attempt(
             : requested_collectives + effective_collectives;
   }
 
-  // Preserve the exact conservative predictor basis before EOS changes rho
+  const bool target_species_route = product.equations.enthalpy().conservative_total_energy() && !species_trial.empty();
+  // Seed the first uncommitted composition with its target-time equation on
+  // the lagged provisional flux, before the enthalpy/pressure solve freezes
+  // a thermal state. Final acceptance still requires the separately solved
+  // species equation on the certified final flux. This is an initial guess,
+  // not an accepted species/energy update or a replacement for that audit.
+  if(status && scalar_remap.has_value() && target_species_route && scalar_coupling_sweep==1U) {
+    halo_count=0U;
+    append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
+    FieldView seed_mu,seed_effective,seed_diagonal,seed_rhs,seed_residual,seed_coefficient;
+    status=product.layers.runtime_view(FieldLifetime::persistent_workspace,
+        product.fields.molecular_viscosity,seed_mu);
+    if(status) status=product.layers.runtime_view(FieldLifetime::persistent_workspace,
+        product.fields.effective_viscosity,seed_effective);
+    if(status) status=runtime_write_view(product.fields.pressure_energy_c_h,seed_diagonal);
+    if(status) status=runtime_write_view(product.fields.pressure_energy_c_h_row_scale,seed_rhs);
+    if(status) status=runtime_write_view(product.fields.pressure_energy_e_p,seed_residual);
+    if(status) status=runtime_write_view(product.fields.scalar_diffusivity,seed_coefficient);
+    EquationStateView seed_state;
+    seed_state.density=rho_history;
+    seed_state.density.trial=as_const(trial_density);
+    seed_state.independent_species={species_history.data(),species_history.size()};
+    EquationMaterialView seed_material;
+    seed_material.molecular_viscosity=as_const(seed_mu);
+    seed_material.effective_viscosity=as_const(seed_effective);
+    EquationAssemblyContext seed_context;
+    seed_context.dt=step.dt; seed_context.bdf=effective_bdf;
+    seed_context.time=step.generation;
+    seed_context.geometry=product.geometry.topology_revision();
+    seed_context.boundary=product.boundary.revision();
+    seed_context.thermo=product.thermodynamics.fingerprint();
+    seed_context.transport=product.transport.fingerprint();
+    seed_context.contribution_stage=176U;
+    seed_context.scope=EquationAssemblyScope::momentum_predictor;
+    seed_context.mass_flux=as_const(provisional_flux);
+    seed_context.face_flux=provisional_flux.revision;
+    seed_context.provisional_mass_flux=true;
+    seed_context.immersed_interface=product.ibm_equations.has_value() ? &*product.ibm_equations : nullptr;
+    detail::ScalarMassRemap::Report seed_report;
+    status=product.reductions.consensus(status);
+    if(status) status=scalar_remap->solve_target_species(product.equations,
+        seed_state,seed_material,seed_context,{seed_diagonal,seed_rhs,seed_residual},
+        seed_coefficient,{halo_views.data(),halo_count},predictor_input.cell_activity,
+        boundary_values,product.reductions,seed_report);
+    if(status) status=transaction.revise_trial(product.fields.enthalpy);
+    if(status) status=product.layers.view(StateRole::trial,product.fields.enthalpy,trial_enthalpy);
+    for(std::size_t s=0U;s<product.fields.scalars.size() && status;++s)
+      if(product.fields.scalar_roles[s]==TransportedScalarRole::species) {
+        status=transaction.revise_trial(product.fields.scalars[s]);
+        if(status) status=product.layers.view(StateRole::trial,product.fields.scalars[s],halo_views[s]);
+      }
+    if(status) status=scalar_remap->copy_thermophysical_coupling_guess(
+        product.thermodynamics,pressure_reference,as_const(trial_pressure),trial_enthalpy,
+        {halo_views.data(),halo_count},{species_values.data(),species_values.size()},true);
+    restore_scalar_halo_views(product.fields,halo_views,0U,species_trial,passive_trial);
+    status=product.reductions.consensus(status);
+  }
+
+  // Preserve the conservative predictor basis before EOS changes rho
   // and before the momentum predictor overwrites the paired flux replica.
   if (scalar_remap.has_value()) {
     if (status) {
@@ -9350,10 +9408,17 @@ Status ProductDriver::Impl::execute_attempt(
             status = transaction.revise_trial(product.fields.scalars[s]);
             if (status) status = product.layers.view(StateRole::trial,
                 product.fields.scalars[s], halo_views[s]);
-          }
+        }
         if (status) {
-          scalar_remap->copy_solution({halo_views.data(), halo_count},
-                                      TransportedScalarRole::species);
+          if (target_species_route) {
+          status=transaction.revise_trial(product.fields.enthalpy);
+          if(status) status=product.layers.view(StateRole::trial,
+              product.fields.enthalpy,trial_enthalpy);
+          if(status) status=scalar_remap->copy_thermophysical_coupling_guess(
+              product.thermodynamics,pressure_reference,as_const(trial_pressure),
+              trial_enthalpy,{halo_views.data(),halo_count},
+              {species_values.data(),species_values.size()},true);
+          } else scalar_remap->copy_solution({halo_views.data(),halo_count}, TransportedScalarRole::species);
           restore_scalar_halo_views(product.fields, halo_views, 0U,
                                     species_trial, passive_trial);
         }
@@ -16133,7 +16198,34 @@ Status ProductDriver::Impl::execute_attempt(
         product.equations.kernels(), as_const(trial_density),
         as_const(trial_velocity), terminal_energy_flux, {halo_views.data(), halo_count},
         pressure_energy_activity.cells, boundary_values, product.reductions,
-        scalar_remap_report);
+        scalar_remap_report,!target_species_route);
+    if(status && target_species_route) {
+      // These Schur blocks are dead after the terminal p/h audit. The exact
+      // energy residual itself remains untouched for the independent audit.
+      FieldView scalar_diagonal,scalar_rhs,scalar_residual,scalar_coefficient;
+      status=runtime_write_view(product.fields.pressure_energy_c_h,scalar_diagonal);
+      if(status) status=runtime_write_view(product.fields.pressure_energy_c_h_row_scale,scalar_rhs);
+      if(status) status=runtime_write_view(product.fields.pressure_energy_e_p,scalar_residual);
+      if(status) status=runtime_write_view(product.fields.scalar_diffusivity,scalar_coefficient);
+      if(status) status=history(product.fields.rho,equation_state.density);
+      equation_state.independent_species={species_history.data(),species_history.size()};
+      material.molecular_viscosity=as_const(molecular_viscosity);
+      material.effective_viscosity=as_const(effective_viscosity);
+      auto scalar_context=assembly;
+      scalar_context.scope=EquationAssemblyScope::final_conservative;
+      scalar_context.mass_flux=terminal_energy_flux;
+      scalar_context.face_flux=terminal_energy_flux.revision;
+      scalar_context.face_flux_authority=terminal_energy_flux.certificate.authority();
+      scalar_context.face_flux_storage=terminal_energy_flux.certificate.storage();
+      scalar_context.face_flux_revision_domain=terminal_energy_flux.certificate.revision_domain();
+      scalar_context.provisional_mass_flux=false;
+      status=product.reductions.consensus(status);
+      if(status) status=scalar_remap->solve_target_species(product.equations,
+          equation_state,material,scalar_context,
+          {scalar_diagonal,scalar_rhs,scalar_residual},scalar_coefficient,
+          {halo_views.data(),halo_count},pressure_energy_activity.cells,
+          boundary_values,product.reductions,scalar_remap_report);
+    }
     scalar_remap_nanoseconds = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - remap_start).count());
@@ -16142,8 +16234,9 @@ Status ProductDriver::Impl::execute_attempt(
     // coupling iterate; advance() repeats at the SAME time/dt with the new
     // composition guess. This is not a time-controller retry or a commit.
     if (status && scalar_remap_report.initial_species_residual >
-                      detail::ScalarMassRemap::composition_tolerance)
+                      detail::ScalarMassRemap::composition_tolerance) {
       status = {StatusCode::rejected_step, detail::ScalarMassRemap::kRecouple};
+    }
     if (status) {
       // A changed passive field also needs a new revision: later rate/ghost
       // certificates must not describe the pre-remap interior.

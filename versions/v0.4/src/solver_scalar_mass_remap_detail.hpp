@@ -4,6 +4,8 @@
 #pragma once
 
 #include "hundun/v04_flow.hpp"
+#include "hundun/v04_ibm.hpp"
+#include "solver_species_guess_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_mass_source_detail.hpp"
 #include "solver_scalar_boundary_detail.hpp"
@@ -17,12 +19,13 @@
 
 namespace hundun::v04::detail {
 
-// Conservative transport of the mass correction, not a cellwise density
+// Passive transport uses a conservative mass correction, not a cellwise density
 // rescaling. The predictor's *actual paired* flux includes its BDF/EX weights
 // and any common conservative limiter. For dm_f=(phi_final-phi_star)/a0:
 //   M_final q + sum_f dm_f q_upwind = (Mq)_star.
-// The same operator transports every species, including the implicit balance
-// species. Its row sum is M_star to the continuity residual. Positive masses
+// The legacy standalone remap can also transport species; ProductDriver uses
+// solve_target_species so species and energy share their target-time method.
+// The remap row sum is M_star to the continuity residual. Positive masses
 // therefore give an M-matrix and preserve the predictor's bounds. Donor order
 // applies only to the flux correction (O(dt^2) in a smooth BDF2 step), not to
 // the configured predictor convection scheme.
@@ -31,6 +34,7 @@ class ScalarMassRemap {
   static constexpr std::uint32_t kInvalid = 10214U;
   static constexpr std::uint32_t kNonconverged = 10215U;
   static constexpr std::uint32_t kRecouple = 10216U;
+  static constexpr std::uint32_t kTargetNonconverged = 10217U;
   static constexpr unsigned maximum_coupling_sweeps = 16U;
   static constexpr double tolerance =
       32.0 * std::numeric_limits<double>::epsilon();
@@ -98,6 +102,12 @@ class ScalarMassRemap {
     views_.resize(fields.size);
     halo_specs_.resize(fields.size);
     roles_.assign(roles.data, roles.data + roles.size);
+    if (std::find(roles_.begin(), roles_.end(), TransportedScalarRole::species) != roles_.end()) {
+      for(std::size_t s=0U;s<roles_.size();++s)
+        if(roles_[s]==TransportedScalarRole::species) species_indices_.push_back(s);
+      target_species_history_.resize(species_indices_.size());
+      target_species_diffusivity_.resize(species_indices_.size());
+    }
     const auto passive_count = static_cast<std::size_t>(std::count(
         roles_.begin(), roles_.end(), TransportedScalarRole::passive_scalar));
     intervals_.resize(passive_count);
@@ -144,6 +154,7 @@ class ScalarMassRemap {
       else bytes += count * sizeof(Element);
     };
     add(mass_); add(quantity_); add(next_); add(storage_);
+    add(species_indices_); add(target_species_history_); add(target_species_diffusivity_);
     for (const auto& values : storage_) add(values);
     add(views_); add(halo_specs_); add(roles_); add(intervals_);
     add(bounds_local_); add(bounds_global_);
@@ -276,7 +287,8 @@ class ScalarMassRemap {
                ConstFieldView velocity, ConstFaceFluxView flux, Span<const FieldView> scalars,
                Span<const std::uint8_t> activity,
                BoundaryResolvedValues boundary_values,
-               ReductionEngine& reductions, Report& report) noexcept {
+               ReductionEngine& reductions, Report& report,
+               bool include_species=true) noexcept {
     report = {};
     Status local;
     if (boundary_ == nullptr || scalars.size != views_.size() ||
@@ -353,6 +365,10 @@ class ScalarMassRemap {
                       (mass + mass_[i]));
             for (std::size_t s = 0U; s < views_.size(); ++s) {
               const double q = views_[s].unchecked(c, 0U);
+              if(!include_species && roles_[s]==TransportedScalarRole::species) {
+                next_[s*count_+i]=q;
+                continue;
+              }
               long double rhs = quantity_[s * count_ + i];
               for (std::size_t f = 0U; f < 6U; ++f)
                 if (outward[f] < 0.0)
@@ -384,13 +400,15 @@ class ScalarMassRemap {
               if (active) {
                 maximum[0U] = std::max(maximum[0U], norm);
                 maximum[3U] = std::max(maximum[3U], convergence_norm);
-                if (roles_[s] == TransportedScalarRole::species)
+                if (roles_[s] == TransportedScalarRole::species) {
                   // Composition coupling is normalized by mixture mass,
                   // i.e. absolute mass-fraction error, including trace species.
                   // The inner remap solve still uses each equation's relative
                   // residual; no inventory is clipped or renormalized.
-                  maximum[1U] = std::max(maximum[1U],
-                      static_cast<double>(std::abs(residual)/(mass+mass_[i])));
+                  const double composition_error =
+                      static_cast<double>(std::abs(residual)/(mass+mass_[i]));
+                  maximum[1U] = std::max(maximum[1U], composition_error);
+                }
               }
             }
           }
@@ -412,6 +430,188 @@ class ScalarMassRemap {
       }
     }
     return {StatusCode::rejected_step, kNonconverged};
+  }
+
+  // The thermodynamic species must close the same target-time BDF convection
+  // and diffusion equations as h. The BDF/EX predictor is an initial guess,
+  // not a different final species equation. Passives retain the paired remap.
+  // Reuses the owned scalar views/halo and caller-provided dead Schur scratch;
+  // no hot allocation or independently published face flux is introduced.
+  Status solve_target_species(const EquationPlanSet& equations,
+      EquationStateView state, EquationMaterialView material,
+      EquationAssemblyContext context, EquationSystemView scratch,
+      FieldView diffusivity, Span<const FieldView> input,
+      Span<const std::uint8_t> activity, BoundaryResolvedValues boundary_values,
+      ReductionEngine& reductions, Report& report) noexcept {
+    if(species_indices_.empty()) return {};
+    Status local;
+    const auto& kernels=equations.kernels();
+    const auto& species=equations.species();
+    if(species.size()!=species_indices_.size() ||
+        state.independent_species.size!=species.size() ||
+        state.independent_species.data==nullptr || input.size!=views_.size() ||
+        input.data==nullptr || !valid_cell_view(as_const(diffusivity),cells_,0U,1U,1U) ||
+        !valid_cell_view(material.molecular_viscosity,cells_,0U,1U,1U) ||
+        !valid_cell_view(material.effective_viscosity,cells_,0U,1U,1U) ||
+        (activity.size!=0U && (activity.size!=count_ || activity.data==nullptr)))
+      local={StatusCode::invalid_plan,kInvalid};
+    for(std::size_t s=0U;s<species.size() && local;++s) {
+      const auto slot=species_indices_[s];
+      if(!valid_cell_view(as_const(input.data[slot]),cells_,0U,1U,0U) ||
+          input.data[slot].field!=views_[slot].field) {
+        local={StatusCode::invalid_plan,kInvalid}; break;
+      }
+      target_species_history_[s]=state.independent_species.data[s];
+      for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x)
+        views_[slot].unchecked({x,y,z},0U)=input.data[slot].unchecked({x,y,z},0U);
+      // One coefficient workspace is evaluated for one equation at a time.
+      target_species_diffusivity_[s]=as_const(diffusivity);
+    }
+    auto status=reductions.consensus(local);
+    if(!status) return status;
+    state.independent_species={target_species_history_.data(),target_species_history_.size()};
+    material.scalar_mass_diffusivity={target_species_diffusivity_.data(),target_species_diffusivity_.size()};
+    // The passive remap has already consumed the paired predictor flux.
+    // Its private face storage is now dead until the next capture, and may
+    // hold the scalar assembler's positive diffusion coefficients. No final
+    // or pending physical face-flux storage is overwritten.
+    scratch.x_coefficient=predictor_flux_.x;
+    scratch.y_coefficient=predictor_flux_.y;
+    scratch.z_coefficient=predictor_flux_.z;
+    const std::array<ConstFaceFieldView,3U> flux{context.mass_flux.x,context.mass_flux.y,context.mass_flux.z};
+    const unsigned passive_iterations=report.iterations;
+    for(unsigned iteration=0U;iteration<128U;++iteration) {
+      for(auto& v:views_) ++v.revision;
+      HaloTicket ticket;
+      status=halo_.begin(176U,{views_.data(),views_.size()},{},ticket);
+      if(status) status=halo_.finish(ticket,{views_.data(),views_.size()});
+      if(status) status=apply_boundary_ghosts(BoundaryStage::scalar,*boundary_,
+          {views_.data(),views_.size()},boundary_values);
+      status=reductions.consensus(status);
+      if(!status) return status;
+      for(std::size_t s=0U;s<species.size();++s)
+        target_species_history_[s].trial=as_const(views_[species_indices_[s]]);
+      double maximum[3]{};
+      for(std::size_t s=0U;s<species.size() && local;++s) {
+        const auto slot=species_indices_[s];
+        const auto& spec=*species.spec(s);
+        // Same molecular/turbulent Schmidt coefficient as the persisted
+        // physical species rate. Only face slabs are stencil consumers.
+        for(int z=-1;z<=cells_.z && local;++z)
+          for(int y=-1;y<=cells_.y && local;++y)
+            for(int x=-1;x<=cells_.x;++x) {
+              if((x<0 || x>=cells_.x)+(y<0 || y>=cells_.y)+(z<0 || z>=cells_.z)>1) continue;
+              const Int3 c{x,y,z};
+              const double mu=material.molecular_viscosity.unchecked(c,0U);
+              double mut=material.effective_viscosity.unchecked(c,0U)-mu;
+              if(mut<0.0 && mut>-1e-12*std::max(1.0,mu)) mut=0.0;
+              const double gamma=mu/spec.molecular_schmidt+mut/spec.turbulent_schmidt;
+              if(!std::isfinite(gamma) || gamma<=0.0 || mu<0.0 || mut<0.0) {
+                local={StatusCode::rejected_step,kInvalid}; break;
+              }
+              diffusivity.unchecked(c,0U)=gamma;
+            }
+        if(local) local=assemble_species_coupling_rows(species,s,state,material,context,scratch);
+        std::size_t i=0U;
+        for(int z=0;z<cells_.z && local;++z)
+          for(int y=0;y<cells_.y && local;++y)
+            for(int x=0;x<cells_.x;++x,++i) {
+              const Int3 c{x,y,z}; const double q=views_[slot].unchecked(c,0U);
+              next_[slot*count_+i]=q;
+              if(activity.size!=0U && activity.data[i]==0U) continue;
+              const double residual=scratch.residual.unchecked(c,0U);
+              const double diagonal=species_coupling_search_diagonal(kernels,
+                  species.convection(),context.mass_flux,c,scratch.diagonal.unchecked(c,0U));
+              const long double scale=std::abs(static_cast<long double>(diagonal)*q)+
+                  std::abs(static_cast<long double>(diagonal)*q-residual);
+              const long double floor=0.5L*diagonal*std::numeric_limits<double>::denorm_min();
+              const double norm=scale==0.0L ? 0.0 : static_cast<double>(std::abs(residual)/scale);
+              const double converged=scale==0.0L ? 0.0 : static_cast<double>(std::max(0.0L,std::abs(static_cast<long double>(residual))-floor)/scale);
+              const double mass_scale=context.bdf.a0*
+                  (state.density.trial.unchecked(c,0U)+state.density.accepted.unchecked(c,0U));
+              const double value=static_cast<double>(static_cast<long double>(q)-
+                  static_cast<long double>(residual)/diagonal);
+              if(!std::isfinite(value) || !std::isfinite(norm) || !std::isfinite(diagonal) || diagonal<=0.0 || mass_scale<=0.0) {
+                local={StatusCode::rejected_step,kInvalid}; break;
+              }
+              maximum[0]=std::max(maximum[0],norm);
+              maximum[1]=std::max(maximum[1],std::abs(residual)/mass_scale);
+              maximum[2]=std::max(maximum[2],converged);
+              next_[slot*count_+i]=value;
+            }
+      }
+      double global[3]{};
+      status=reductions.checked_max({maximum,3U},{global,3U},local);
+      if(!status) return status;
+      if(iteration==0U) report.initial_species_residual=global[1];
+      report.iterations=passive_iterations+iteration;
+      report.residual=global[0]; report.convergence_residual=global[2];
+      if(report.convergence_residual<=tolerance) return {};
+      std::size_t i=0U;
+      for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x,++i) {
+        const Int3 c{x,y,z};
+        // Bound only the nonlinear search step. Do not clip/normalize the
+        // physical solution or accept until its unmodified equations close.
+        double theta=1.0; long double sum=0.0L, delta_sum=0.0L;
+        for(const auto slot:species_indices_) {
+          const double q=views_[slot].unchecked(c,0U), delta=next_[slot*count_+i]-q;
+          sum+=q; delta_sum+=delta;
+          if(delta<0.0 && q+delta<0.0) theta=std::min(theta,0.9*q/(-delta));
+          if(delta>0.0 && q+delta>1.0) theta=std::min(theta,0.9*(1.0-q)/delta);
+        }
+        if(delta_sum>0.0L && sum+delta_sum>1.0L)
+          theta=std::min(theta,static_cast<double>(0.9L*(1.0L-sum)/delta_sum));
+        for(const auto slot:species_indices_) {
+          auto& q=views_[slot].unchecked(c,0U);
+          q=theta==1.0 ? next_[slot*count_+i] : q+theta*(next_[slot*count_+i]-q);
+        }
+      }
+    }
+    return {StatusCode::rejected_step,kTargetNonconverged};
+  }
+
+  Status copy_thermophysical_coupling_guess(const ThermodynamicsPlan& thermo,
+      double pressure_reference, ConstFieldView pressure, FieldView enthalpy,
+      Span<const FieldView> target, Span<double> composition,
+      bool use_target_solution=false) const noexcept {
+    if(target.size!=views_.size() || target.data==nullptr ||
+        composition.size!=species_indices_.size() || composition.data==nullptr ||
+        !valid_cell_view(pressure,cells_,0U,1U,0U) ||
+        !valid_cell_view(as_const(enthalpy),cells_,0U,1U,0U))
+      return {StatusCode::invalid_plan,kInvalid};
+    std::size_t i=0U;
+    for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x,++i) {
+      const Int3 c{x,y,z}; bool changed=false;
+      const auto guess=[&](std::size_t slot) noexcept {
+        return use_target_solution ? views_[slot].unchecked(c,0U) : next_[slot*count_+i];
+      };
+      for(std::size_t s=0U;s<species_indices_.size();++s) {
+        const auto slot=species_indices_[s];
+        composition.data[s]=target.data[slot].unchecked(c,0U);
+        changed |= composition.data[s]!=guess(slot);
+      }
+      if(!changed) continue;
+      ThermoState state;
+      auto status=thermo.evaluate_from_reference_pressure(pressure_reference,
+          pressure.unchecked(c,0U),enthalpy.unchecked(c,0U),
+          {composition.data,composition.size},{},state);
+      if(!status) return status;
+      long double change=0.0L;
+      for(std::size_t s=0U;s<species_indices_.size();++s) {
+        double difference{};
+        status=thermo.independent_species_enthalpy_difference(s,state.temperature,difference);
+        if(!status) return status;
+        const auto slot=species_indices_[s];
+        change+=static_cast<long double>(difference)*
+            (static_cast<long double>(guess(slot))-composition.data[s]);
+      }
+      const double next_h=static_cast<double>(static_cast<long double>(enthalpy.unchecked(c,0U))+change);
+      if(!std::isfinite(next_h)) return {StatusCode::rejected_step,kInvalid};
+      enthalpy.unchecked(c,0U)=next_h;
+      for(const auto slot:species_indices_)
+        target.data[slot].unchecked(c,0U)=guess(slot);
+    }
+    return {};
   }
 
   void copy_solution(Span<const FieldView> target,
@@ -440,6 +640,9 @@ class ScalarMassRemap {
   std::vector<FieldView> views_;
   std::vector<HaloFieldSpec> halo_specs_;
   std::vector<TransportedScalarRole> roles_;
+  std::vector<std::size_t> species_indices_;
+  std::vector<PrimitiveHistory> target_species_history_;
+  std::vector<ConstFieldView> target_species_diffusivity_;
   HaloEngine halo_;
   FaceFluxStorage flux_;
   FaceFluxView predictor_flux_{};
