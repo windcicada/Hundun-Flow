@@ -22,6 +22,21 @@
 | passive-envelope / composition-inner-accuracy | v1，仅有标量 | 被动标量范围、组成内迭代精度 |
 | physical-donor | v2，仅有标量 | 物理边界 donor 权威 |
 | ibm-scalar-impermeable-flux | v1，仅有标量 | 二值控制体切面零标量通量 |
+| thermal-inverse-newton-polish | v1 | NASA 可表示邻域内的焓反演修正 |
+| physical-inlet-face-thermophysics / generic-thermal-neighbor-material | v1 | 物理入口面物性、候选状态的邻居热材料 |
+| compatible-viscous-face-heating / paired-physical-viscosity | v1 | 共享黏性面功及配套物理黏度 |
+| h-primary-conservative-total-energy-inert / total-energy-typed-temporal-response | v1 | 惰性单相 rho(h+K)-p 残差及冻结动能时间响应 |
+| actual-face-metric-limiter / stable-tvd-endpoint | v1 | 实际面距离的限制器及活动端点稳定算术 |
+| trace-face-rate-arithmetic / subnormal-face-reconstruction / physical-ibm-species-row | v1 | 微量面率、次正规数重建、IBM 物理组分行 |
+| reference-covariant-enthalpy-convection / reference-covariant-enthalpy-predictor | v1 | 组分参考焓变化下的通量与预测器 |
+| species-carried-enthalpy-diffusion / target-time-inert-species / isothermal-composition-guess / species-tvd-response-diagonal | v1，仅有标量 | 组分携焓、目标时间组分、等温 h/Y 猜测及搜索对角 |
+| finite-rate-conservative-ex2 | v1，反应且非 ESF | 原生有限速率源项 |
+| esf-native-transport-iem-two-half-chemistry-be / esf-mean-reconciliation / esf-shared-gamma-total-h / esf-ibm-neumann-solid-carry | v1，ESF | 原生随机场输运、均值、总焓和 IBM 占位历史 |
+| tcr-accepted-ph-statistics / branch-history-bytes | v1，TCR | 接受态 p/h 统计及分支历史字节 |
+| spray-native-as-tab-be | v2，喷雾 | 原生蒸发、破碎和 BE 子步 |
+| parcel-current-source / parcel-cell-history | v1，喷雾 | 当前 parcel 源及单元历史 |
+| p8-source-before-transport-tcr-chemistry-be | v1，喷雾且 ESF | 源项、输运、TCR/化学顺序 |
+| labelled-mass-inlets / ibm-prescribed-state-convection | v2，patch 入口 | 标签质量入口及 IBM 规定状态对流 |
 
 改变任一组件的离散含义时更新相应组件，而不是替换完整签名为当前 Git SHA。
 容量修复、无效对象保护、初场入口和不改变有效状态算术的观测修改不更改组件。

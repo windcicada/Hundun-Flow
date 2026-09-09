@@ -81,3 +81,14 @@ zero field/flux readback difference. No restart manifest was edited.
 MC 活动端点改用与限制器代数等价的邻居加权表达式，直接和缓存方向导数
 同步更新。公开类型与签名保持一致；方法历史签名增加 `stable-tvd-endpoint-v1`，
 重启输入按新方法重新导入。
+
+
+| 接口／契约 | 适用路径 | 客户端迁移 |
+|---|---|---|
+| `ThermophysicalPredictorInput::temperature_accepted`、`temperature_ghosts.accepted` | 守恒多组分能量预测器的 BE/BDF2 | 传入接受态 T 及匹配的 halo authority 作为热面参考；h 保持能量主变量 |
+| `temperature_previous`、`temperature_ghosts.previous` | 同一路径的 BDF2 额外历史 | 传入前态 T 和匹配时间、边界、字段、存储身份的 halo authority |
+| 压力—能量 typed certificate `v04pee04` | 冻结动能的总能量时间响应 | 通过当前生产者生成完整证书；重新编译证书消费者 |
+| `compile_frozen_limited_convection_branches` / `apply_frozen_limited_convection_branches` | LC2 与 TVD 的缓存方向作用 | 使用通用入口，保持 `FrozenConvectionBranchPlan::tvd_donor` 与编译格式一致；旧 LC2 专用入口继续服务 LC2 |
+
+这些追加字段保留旧 aggregate 的字段顺序；启用相应新方法后，调用方需提供完整
+历史与证书。原生源项路线继续按各自的反应、ESF、TCR 和喷雾签名运行。

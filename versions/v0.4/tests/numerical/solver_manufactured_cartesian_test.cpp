@@ -844,6 +844,41 @@ bool test_tvd_trace_endpoint() {
           as_const(q.view),0U,static_cast<CartesianAxis>(axis),face,sign,value);
       passed &= expect(status && std::abs(value/1e-57-1.0)<=2.0*std::numeric_limits<double>::epsilon(),
           "active MC endpoint retains the neighbor trace value without donor cancellation");
+      FaceFluxStorage flux_storage,frozen_storage,derivative_storage;
+      FaceFluxView flux,frozen_output,derivative_output;
+      auto check=FaceFluxStorage::allocate_workspace(f.patch.cells,1U,flux_storage);
+      if(check) check=FaceFluxStorage::allocate_workspace(f.patch.cells,1U,frozen_storage);
+      if(check) check=FaceFluxStorage::allocate_workspace(f.patch.cells,1U,derivative_storage);
+      if(check) check=flux_storage.workspace_view(0U,61U,flux);
+      if(check) check=frozen_storage.workspace_view(0U,62U,frozen_output);
+      if(check) check=derivative_storage.workspace_view(0U,63U,derivative_output);
+      if(!expect(static_cast<bool>(check),"trace derivative workspaces allocate")) return false;
+      Real3 velocity{}; (axis==0 ? velocity.x : axis==1 ? velocity.y : velocity.z)=sign;
+      fill_constant_velocity_flux(flux,f.geometry,velocity);
+      const FrozenConvectionContext context{UINT64_C(0x928375),601U};
+      constexpr auto policy=FrozenConvectionLinearizationPolicy::semismooth_generalized_zero_slope;
+      FrozenConvectionFaceField frozen;
+      if(check) check=freeze_cartesian_target_convection_faces(f.kernels,ConvectionScheme::tvd2,
+          as_const(flux),as_const(q.view),0U,context,
+          {frozen_output.x,frozen_output.y,frozen_output.z},frozen);
+      FrozenConvectionFaceDirectionalDerivative derivative;
+      if(check) check=differentiate_frozen_cartesian_target_convection_faces(f.kernels,
+          ConvectionScheme::tvd2,as_const(flux),as_const(q.view),0U,context,policy,frozen,
+          as_const(q.view),0U,{derivative_output.x,derivative_output.y,derivative_output.z},derivative);
+      const auto endpoint=[&]() {
+        return (axis==0 ? derivative_output.x : axis==1 ? derivative_output.y : derivative_output.z).unchecked(face);
+      };
+      passed &= expect(check && std::abs(endpoint()/1e-57-1.0)<=2.0*std::numeric_limits<double>::epsilon(),
+          "direct MC endpoint derivative retains the trace neighbor direction");
+      const auto count=[](ConstFaceFieldView v) { return static_cast<std::size_t>(v.extents.x)*v.extents.y*v.extents.z; };
+      std::vector<std::uint16_t> codes(count(frozen.x)+count(frozen.y)+count(frozen.z));
+      FrozenConvectionBranchPlan branches;
+      if(check) check=compile_frozen_limited_convection_branches(f.kernels,ConvectionScheme::tvd2,
+          as_const(flux),as_const(q.view),0U,context,policy,frozen,{{codes.data(),codes.size()}},branches);
+      if(check) check=apply_frozen_limited_convection_branches(f.kernels,branches,as_const(q.view),0U,
+          {derivative_output.x,derivative_output.y,derivative_output.z});
+      passed &= expect(check && branches.tvd_donor && std::abs(endpoint()/1e-57-1.0)<=2.0*std::numeric_limits<double>::epsilon(),
+          "cached MC endpoint derivative retains the trace neighbor direction");
     }
   }
   return passed;
