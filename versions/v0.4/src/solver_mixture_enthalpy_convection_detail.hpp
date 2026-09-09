@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "solver_shared_faces_detail.hpp"
 #include "hundun/v04_flow.hpp"
 #include "hundun/v04_ibm.hpp"
 #include "field_view_interval_detail.hpp"
@@ -150,22 +151,21 @@ class MixtureEnthalpyConvection {
     const std::array<ConstFaceFieldView,3U> faces{flux.x,flux.y,flux.z};
     const Int3 end{box.begin.x+box.cells.x,box.begin.y+box.cells.y,box.begin.z+box.cells.z};
     const auto activity=immersed==nullptr ? Span<const std::uint8_t>{} : immersed->cell_activity();
-    for(int z=box.begin.z;z<end.z;++z) for(int y=box.begin.y;y<end.y;++y) for(int x=box.begin.x;x<end.x;++x) {
-      const Int3 c{x,y,z};
-      const auto index=(static_cast<std::size_t>(z)*plan.cells_.y+y)*plan.cells_.x+x;
-      if(activity.size!=0U && activity.data[index]==0U) continue;
-      long double difference=0.0L;
-      for(unsigned a=0U;a<3U;++a) for(unsigned side=0U;side<2U;++side) {
-        Int3 face=c; (a==0U ? face.x : a==1U ? face.y : face.z)+=side;
-        double delta=0.0;
-        status=face_delta_impl(plan,enthalpy,temperature,species,static_cast<CartesianAxis>(a),face,faces[a].unchecked(face),delta);
-        if(!status) return status;
-        difference+=(side==0U ? -1.0L : 1.0L)*delta;
-      }
-      const double value=rate.unchecked(c,0U)+static_cast<double>(difference/cell_volume(*plan.kernels_,c));
-      if(!std::isfinite(value)) return {StatusCode::numerical_failure,1432U};
-      rate.unchecked(c,0U)=value;
-    }
+    status=shared_cell_faces(plan.cells_,box,activity,
+      [&](CartesianAxis axis,Int3 face,double& delta) {
+        return face_delta_impl(plan,enthalpy,temperature,species,axis,face,
+            faces[static_cast<unsigned>(axis)].unchecked(face),delta);
+      },
+      [&](Int3 c,const std::array<double,6U>& values) {
+        long double difference=0.0L;
+        for(unsigned a=0U;a<3U;++a) for(unsigned side=0U;side<2U;++side)
+          difference+=(side==0U ? -1.0L : 1.0L)*values[2*a+side];
+        const double value=rate.unchecked(c,0U)+static_cast<double>(difference/cell_volume(*plan.kernels_,c));
+        if(!std::isfinite(value)) return Status{StatusCode::numerical_failure,1432U};
+        rate.unchecked(c,0U)=value;
+        return Status{};
+      });
+    if(!status) return status;
     if(immersed!=nullptr) {
       const auto links=immersed->topology_->links();
       for(std::size_t i=0U;i<links.size;++i) {

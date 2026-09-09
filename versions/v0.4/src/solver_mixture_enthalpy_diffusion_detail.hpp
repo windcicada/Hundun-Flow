@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "solver_shared_faces_detail.hpp"
 #include "hundun/v04_flow.hpp"
 #include "hundun/v04_ibm.hpp"
 #include "field_view_interval_detail.hpp"
@@ -139,30 +140,21 @@ class MixtureEnthalpyDiffusion {
                    box.begin.z + box.cells.z};
     const auto region = immersed == nullptr ? Span<const std::uint8_t>{} :
                                              immersed->cell_activity();
-    for (int z = box.begin.z; z < end.z; ++z)
-      for (int y = box.begin.y; y < end.y; ++y)
-        for (int x = box.begin.x; x < end.x; ++x) {
-          const Int3 cell{x, y, z};
-          const auto flat = (static_cast<std::size_t>(z) * cells.y + y) * cells.x + x;
-          if (region.size != 0U && region.data[flat] == 0U) continue;
-          double divergence = 0.0;
-          for (std::size_t a = 0U; a < 3U; ++a) {
-            const auto axis = static_cast<CartesianAxis>(a);
-            Int3 plus = cell;
-            if (a == 0U) ++plus.x;
-            else if (a == 1U) ++plus.y;
-            else ++plus.z;
-            double minus_flux = 0.0, plus_flux = 0.0;
-            status = face_flux(plan, state, material, axis, cell, minus_flux);
-            if (status) status = face_flux(plan, state, material, axis, plus, plus_flux);
-            if (!status) return status;
-            divergence += plus_flux - minus_flux;
-          }
-          const double value = rate.unchecked(cell, 0U) +
-                               divergence / cell_volume(*plan.kernels_, cell);
-          if (!std::isfinite(value)) return {StatusCode::numerical_failure, 1432U};
-          rate.unchecked(cell, 0U) = value;
-        }
+    status = shared_cell_faces(cells, box, region,
+      [&](CartesianAxis axis, Int3 face, double& value) {
+        return face_flux(plan, state, material, axis, face, value);
+      },
+      [&](Int3 cell, const std::array<double, 6U>& values) {
+        double divergence = 0.0;
+        for (unsigned a = 0U; a < 3U; ++a)
+          divergence += values[2*a+1] - values[2*a];
+        const double value = rate.unchecked(cell, 0U) +
+                             divergence / cell_volume(*plan.kernels_, cell);
+        if (!std::isfinite(value)) return Status{StatusCode::numerical_failure, 1432U};
+        rate.unchecked(cell, 0U) = value;
+        return Status{};
+      });
+    if (!status) return status;
     if (immersed != nullptr) {
       // Match correct_impermeable_scalar_diffusion: remove exactly the
       // Cartesian cut-face contribution. Prescribed internal inlets also

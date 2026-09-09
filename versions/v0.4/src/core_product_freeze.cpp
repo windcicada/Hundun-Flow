@@ -8722,12 +8722,16 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) status = exchange(product.stage_halos[0U], 10U, halo_count);
   if (product.esf.enabled() && !product.spray.enabled() &&
       product.ibm_equations) {
+    // The structured halo also carries T for the energy history. ESF's
+    // remote-donor plan is the h/scalars/stochastic-fields/transport prefix,
+    // exactly as registered at freeze time.
     status = product.reductions.consensus(
         status ? product.esf.preflight_immersed_exchange(
-                     {halo_views.data(), halo_count})
+                     {halo_views.data(), accepted_temperature_slot})
                : status);
     if (status)
-      status = product.esf.exchange_immersed({halo_views.data(), halo_count});
+      status = product.esf.exchange_immersed(
+          {halo_views.data(), accepted_temperature_slot});
   }
   if (status)
     status = resolve_static_boundary_values(

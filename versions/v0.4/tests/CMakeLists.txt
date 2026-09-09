@@ -2156,3 +2156,8 @@ foreach(gtmc_ranks IN ITEMS 1 2 4)
   set_tests_properties(v04_product_formation_coupling_mpi_${gtmc_ranks}
     PROPERTIES PROCESSORS ${gtmc_ranks} TIMEOUT 120 LABELS "v04_focused")
 endforeach()
+
+add_executable(v04_solver_shared_faces_test unit/solver_shared_faces_test.cpp)
+target_link_libraries(v04_solver_shared_faces_test PRIVATE hundun_v04_core MPI::MPI_C)
+add_test(NAME v04_solver_shared_faces COMMAND v04_solver_shared_faces_test)
+set_tests_properties(v04_solver_shared_faces PROPERTIES TIMEOUT 15 LABELS "v04_focused")
