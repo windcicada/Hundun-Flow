@@ -2372,7 +2372,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         "momentum_x_l1_N,momentum_y_l1_N,momentum_z_l1_N,"
         "continuity_signed_kg_s,energy_signed_W,energy_l1_W,"
         "total_equation_defect_W,mass_outflow_kg_s,enthalpy_outflow_W,"
-        "kinetic_energy_outflow_W,conductive_heat_input_W,viscous_work_input_W,"
+        "kinetic_energy_outflow_W,conductive_heat_input_W,species_enthalpy_diffusion_input_W,viscous_work_input_W,"
         "mass_bdf_rate_kg_s,total_energy_bdf_rate_W,mass_balance_defect_kg_s,"
         "total_energy_balance_defect_W,cumulative_mass_defect_kg,"
         "cumulative_energy_defect_J,normalization_valid,U_rms_m_s,"
@@ -2780,7 +2780,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
           << equation.total_equation_defect << ',' << balance.mass_outflow
           << ',' << balance.enthalpy_outflow << ','
           << balance.kinetic_energy_outflow << ','
-          << balance.conductive_heat_input << ',' << balance.viscous_work_input
+          << balance.conductive_heat_input << ',' << balance.species_enthalpy_diffusion_input
+          << ',' << balance.viscous_work_input
           << ',' << balance.mass_bdf_rate << ',' << balance.total_energy_bdf_rate
           << ',' << balance.mass_balance_defect << ','
           << balance.total_energy_balance_defect << ','

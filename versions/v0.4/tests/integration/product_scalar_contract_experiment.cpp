@@ -36,6 +36,7 @@ bool capacity_probe = false;
 bool capacity_ranges_probe = false;
 bool signed_probe = false;
 bool observe_cost = false;
+bool isothermal_contact = false;
 double signed_shift = 0.0;
 int rank = 0;
 bool all_pass(bool local) {
@@ -322,6 +323,156 @@ Result run(bool species, bool uniform, double dt) {
   result.constant=result.maximum_constant_error<1e-12;
   return result;
 }
+// Equal cp/MW removes physical compressibility/mixing-temperature effects.
+// Only species enthalpy integration constants change. The two independent
+// waves in the three-species variant are not affine copies: a nonlinear
+// limiter cannot commute with their enthalpy-weighted sum. The real Driver
+// must preserve uniform p/T/U as the composition advects and diffuses; closed
+// species and total-energy inventories are separate snapshot-based oracles.
+bool isothermal_contact_contract() {
+  constexpr double dt=1e-3, temperature=295.0, speed=0.5;
+  bool passed=true;
+  for(unsigned mixture=0U;mixture<3U;++mixture) for(const double formation : {0.0,-4e6,-12e6}) {
+    const bool multiple=mixture!=0U, different_cp=mixture==2U;
+    auto m=model(true,dt);
+    m.solver.coupling=CouplingKind::piso;
+    m.schemes.enthalpy=m.schemes.species=ConvectionScheme::tvd2;
+    const auto name=m.thermophysics.species[1].stable_name;
+    m.thermophysics.species[1]=m.thermophysics.species[0];
+    m.thermophysics.species[1].stable_name=name;
+    auto& a=m.thermophysics.species[0];
+    const double gas=kUniversalGasConstant/a.molecular_weight;
+    a.nasa7_low[5]=a.nasa7_high[5]=formation/gas;
+    const double cp=3.5*gas, density=pressure/(gas*temperature);
+    const double cp_b=different_cp ? 4.1*gas : cp;
+    const double cp_c=different_cp ? 5.0*gas : cp;
+    const double formation_b=multiple ? -2e6 : 0.0;
+    if(multiple) {
+      auto dependent=m.thermophysics.species[1];
+      dependent.stable_name="C";
+      if(different_cp) {
+        dependent.nasa7_low[0]=dependent.nasa7_high[0]=5.0;
+        m.thermophysics.species[1].nasa7_low[0]=m.thermophysics.species[1].nasa7_high[0]=4.1;
+      }
+      m.thermophysics.species[1].nasa7_low[5]=formation_b/gas;
+      m.thermophysics.species[1].nasa7_high[5]=formation_b/gas;
+      m.thermophysics.species.push_back(dependent);
+      m.transported_scalars.push_back({"B",TransportedScalarRole::species,1.0,1.0});
+    }
+    ThermodynamicsPlan thermo;
+    auto status=ThermodynamicsPlan::compile(m.thermophysics,
+        {m.transported_scalars.data(),m.transported_scalars.size()},thermo);
+    CompiledCasePlan plan; ProductDriver driver; RestartExpected expected;
+    if(status) status=ProductCompiler::compile(MPI_COMM_WORLD,m,{},plan);
+    if(status) status=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),driver);
+    if(status) status=driver.restart_expected(expected);
+    if(!all_pass(static_cast<bool>(status))) return false;
+    auto seed=image(expected,true,false,dt);
+    const auto n=seed.patch.cells;
+    const auto fraction=[&](int x) {
+      return 0.2+0.05*std::sin(2.0*std::acos(-1.0)*(x+0.5)/cells.x);
+    };
+    unsigned species_slot=0U;
+    for(auto& field:seed.fields) {
+      for(int z=0;z<n.z;++z) for(int y=0;y<n.y;++y) for(int x=0;x<n.x;++x) {
+        const auto i=static_cast<std::size_t>((z*n.y+y)*n.x+x)*field.components;
+        const double q=fraction(x+seed.patch.begin.x);
+        const double qb=0.3+0.08*std::cos(2.0*std::acos(-1.0)*(x+seed.patch.begin.x+0.5)/cells.x);
+        if(field.role==RestartFieldRole::velocity) {
+          field.values[i]=speed; field.values[i+1]=field.values[i+2]=0.0;
+        } else if(field.role==RestartFieldRole::enthalpy)
+          field.values[i]=(cp_c+(cp-cp_c)*q+(cp_b-cp_c)*qb)*temperature+formation*q+formation_b*qb;
+        else if(field.role==RestartFieldRole::pressure_perturbation) field.values[i]=0.0;
+        else if(field.role==RestartFieldRole::pressure_absolute) field.values[i]=pressure;
+        else if(field.role==RestartFieldRole::independent_species) field.values[i]=species_slot==0U ? q : qb;
+        else if(field.role==RestartFieldRole::transported_scalar) field.values[i]=0.2;
+      }
+      if(field.role==RestartFieldRole::independent_species) ++species_slot;
+    }
+    for(int axis=0;axis<3;++axis) {
+      auto ext=n; (axis==0 ? ext.x : axis==1 ? ext.y : ext.z)++;
+      std::size_t i=0;
+      for(int z=0;z<ext.z;++z) for(int y=0;y<ext.y;++y) for(int x=0;x<ext.x;++x)
+        seed.final_mass_flux[axis][i++]=axis==0 ? density*speed*
+            width(1,y+seed.patch.begin.y)*width(2,z+seed.patch.begin.z) : 0.0;
+    }
+    status=driver.initialize_restart(seed);
+    if(!all_pass(static_cast<bool>(status))) return false;
+    std::array<long double,4U> initial_inventory{};
+    bool valid=true;
+    for(unsigned step=0;step<=3U && valid;++step) {
+      DriverStepReport report;
+      if(step!=0U) status=driver.advance({dt,dt,dt,dt,dt},report);
+      if(!all_pass(status && (step==0U || (report.accepted && report.attempts==1U &&
+          report.effective_bdf.order==(step==1U ? 1U : 2U))))) {
+        if(rank==0) std::cout<<"ISOTHERMAL_CONTACT multiple="<<multiple<<" different_cp="<<different_cp<<" formation="<<formation<<" step="<<step
+            <<" status="<<unsigned(status.code)<<'/'<<status.detail
+            <<" stage="<<report.failed_stage<<" sweeps="<<report.scalar_transport.coupling_sweeps
+            <<" species_residual="<<report.scalar_transport.final_species_residual
+            <<" E="<<report.piso.energy_residual<<" C="<<report.piso.continuity_residual<<'\n';
+        passed=false; break;
+      }
+      RestartSnapshot snap;
+      status=driver.committed_restart_snapshot(snap);
+      ConstFieldView h{},p{},u{},species{},species_b{};
+      species_slot=0U;
+      if(status) for(std::size_t f=0;f<snap.fields.size;++f) {
+        const auto& field=snap.fields.data[f];
+        if(field.role==RestartFieldRole::enthalpy) h=field.values;
+        if(field.role==RestartFieldRole::pressure_perturbation) p=field.values;
+        if(field.role==RestartFieldRole::velocity) u=field.values;
+        if(field.role==RestartFieldRole::independent_species)
+          (species_slot++==0U ? species : species_b)=field.values;
+      }
+      if(!all_pass(status && h.base && p.base && u.base && species.base && (!multiple || species_b.base))) return false;
+      double errors[3]{}; std::array<long double,4U> inventory{}, global{};
+      for(int z=0;z<n.z;++z) for(int y=0;y<n.y;++y) for(int x=0;x<n.x;++x) {
+        const Int3 c{x,y,z}; const double q=species.unchecked(c,0U);
+        const double qb=multiple ? species_b.unchecked(c,0U) : 0.0;
+        const double absolute=snap.pressure_reference+p.unchecked(c,0U);
+        const double specific=h.unchecked(c,0U);
+        // Independent analytic EOS, not the Driver's reported rho or energy.
+        const double cp_mix=cp_c+(cp-cp_c)*q+(cp_b-cp_c)*qb;
+        const double t=(specific-formation*q-formation_b*qb)/cp_mix, rho=absolute/(gas*t);
+        double kinetic=0.0;
+        for(unsigned a=0;a<3U;++a) {
+          const double velocity=u.unchecked(c,a);
+          kinetic+=0.5*velocity*velocity;
+          errors[2]=std::max(errors[2],std::abs(velocity-(a==0U ? speed : 0.0)));
+        }
+        const double volume=width(0,x+seed.patch.begin.x)*width(1,y+seed.patch.begin.y)*
+                            width(2,z+seed.patch.begin.z);
+        valid &= std::isfinite(t) && t>0.0 && std::isfinite(rho) && rho>0.0 && q>=0.0 && qb>=0.0 && q+qb<=1.0;
+        errors[0]=std::max(errors[0],std::abs(t-temperature));
+        errors[1]=std::max(errors[1],std::abs(absolute-pressure));
+        inventory[0]+=static_cast<long double>(rho)*volume;
+        inventory[1]+=static_cast<long double>(rho)*q*volume;
+        inventory[2]+=static_cast<long double>(rho)*qb*volume;
+        inventory[3]+=static_cast<long double>(volume)*(rho*(specific+kinetic)-absolute);
+      }
+      double maximum[3]{};
+      MPI_Allreduce(errors,maximum,3,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+      MPI_Allreduce(inventory.data(),global.data(),4,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+      valid=all_pass(valid);
+      if(step==0U) initial_inventory=global;
+      const double mass_error=std::abs(static_cast<double>((global[0]-initial_inventory[0])/initial_inventory[0]));
+      double species_error=std::abs(static_cast<double>((global[1]-initial_inventory[1])/initial_inventory[1]));
+      if(multiple) species_error=std::max(species_error,
+          std::abs(static_cast<double>((global[2]-initial_inventory[2])/initial_inventory[2])));
+      const double energy_error=std::abs(static_cast<double>(global[3]-initial_inventory[3]));
+      const bool okay=valid && maximum[0]<1e-8 && maximum[1]<1e-6 && maximum[2]<1e-8 &&
+          mass_error<1e-12 && species_error<1e-12 && energy_error<1e-6;
+      passed &= okay;
+      if(rank==0 && step!=0U) std::cout<<std::setprecision(17)
+          <<"ISOTHERMAL_CONTACT multiple="<<multiple<<" different_cp="<<different_cp<<" formation="<<formation<<" step="<<step
+          <<" dT="<<maximum[0]<<" dp="<<maximum[1]<<" dU="<<maximum[2]
+          <<" mass="<<mass_error<<" species="<<species_error<<" energy_J="<<energy_error
+          <<" sweeps="<<report.scalar_transport.coupling_sweeps<<" passed="<<okay<<'\n';
+    }
+  }
+  return all_pass(passed);
+}
+
 double rms(const std::vector<double>& a,const std::vector<double>& b) {
   if (!all_pass(a.size()==b.size() && !a.empty())) return std::numeric_limits<double>::quiet_NaN();
   long double sum=0;
@@ -406,7 +557,10 @@ bool open_budget(bool species, bool reverse) {
       const bool dirichlet=reverse ? side==1 : side==0;
       const double predictor_face=dirichlet ? target : before.scalar[cell];
       const double correction_face=dirichlet && delta<0.0 ? target : after.scalar[cell];
-      transport+=old_phi[side][f]*predictor_face+delta*correction_face;
+      // Species uses its target-time boundary budget; passives still use
+      // the EX predictor plus paired donor remap. Do not reuse solver rates.
+      transport+=species ? phi*(dirichlet ? target : after.scalar[cell])
+          : old_phi[side][f]*predictor_face+delta*correction_face;
       if(dirichlet) {
         MolecularTransportState material;
         // A fixed physical inlet now supplies its own molecular face state.
@@ -414,11 +568,12 @@ bool open_budget(bool species, bool reverse) {
         // contract. Keep the same conservation threshold and independent
         // analytic flux oracle; do not read the solver's computed flux here.
         const bool physical_inlet=!reverse && side==0;
-        const double composition=physical_inlet ? target : before.scalar[cell];
+        const double boundary_owner=species ? after.scalar[cell] : before.scalar[cell];
+        const double composition=physical_inlet ? target : boundary_owner;
         const double temperature=physical_inlet ? 320.0 : initial(patch.begin.x+x,species,false).temperature;
         if(!transport_plan.evaluate(temperature,
             species ? Span<const double>{&composition,1U} : Span<const double>{},material)) { valid=false; continue; }
-        diffusion+=2*material.viscosity*(target-before.scalar[cell])/width(0,patch.begin.x+x)*
+        diffusion+=2*material.viscosity*(target-boundary_owner)/width(0,patch.begin.x+x)*
             width(1,patch.begin.y+y)*width(2,patch.begin.z+z);
         if(delta<0.0) inward_correction+=std::abs(delta);
       }
@@ -800,9 +955,14 @@ int main(int argc,char** argv) {
     else if (std::strcmp(argv[i],"--capacity-ranges")==0) capacity_ranges_probe=true;
     else if (std::strcmp(argv[i],"--signed")==0) signed_probe=true;
     else if (std::strcmp(argv[i],"--observe-cost")==0) observe_cost=true;
+    else if (std::strcmp(argv[i],"--isothermal-contact")==0) isothermal_contact=true;
     else { MPI_Finalize(); return 2; }
   }
   bool passed=true;
+  if(isothermal_contact) {
+    passed=isothermal_contact_contract();
+    MPI_Finalize(); return passed ? 0 : 1;
+  }
   if (signed_probe) {
     if (near_pure || immersed || coupling_probe || open_probe || restart_probe || capacity_probe || capacity_ranges_probe) {
       MPI_Finalize(); return 2;
