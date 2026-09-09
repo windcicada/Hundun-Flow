@@ -3,6 +3,7 @@
 
 #include "hundun/v04_flow.hpp"
 #include "../../src/solver_species_guess_detail.hpp"
+#include "../support/ibm_force_fixture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -248,7 +249,7 @@ struct FinalFluxFixture {
 
 bool make_linear_final_flux(const CartesianKernelPlan& kernels, Int3 cells,
                             FinalFluxFixture& fixture,
-                            ConstFaceFluxView& committed) {
+                            ConstFaceFluxView& committed, bool stationary = false) {
   FieldRegistry registry;
   FieldSchema schema;
   if (!registry.declare_field("flux_dependency", 1U, 0U,
@@ -292,7 +293,7 @@ bool make_linear_final_flux(const CartesianKernelPlan& kernels, Int3 cells,
         const Int3 cell{i, j, k};
         rho.view.unchecked(cell, 0U) = 1.0;
         velocity.view.unchecked(cell, 0U) =
-            (static_cast<double>(i) + 0.5) * spacing;
+            stationary ? 0.0 : (static_cast<double>(i) + 0.5) * spacing;
         velocity.view.unchecked(cell, 1U) = 0.0;
         velocity.view.unchecked(cell, 2U) = 0.0;
       }
@@ -310,6 +311,105 @@ bool make_linear_final_flux(const CartesianKernelPlan& kernels, Int3 cells,
                                                                   Status{})) &&
          static_cast<bool>(fixture.writer.committed(fixture.storage,
                                                      committed));
+}
+
+bool test_ibm_species_matrix(bool passive = false) {
+  constexpr int n=16;
+  ProductionFixture fixture;
+  if (!expect(make_production_fixture(n,fixture), "IBM species equation fixture compiles")) return false;
+  auto triangles=test::force_cube();
+  const auto move=[](Real3 p) {return Real3{0.5+0.4*p.x,0.5+0.4*p.y,0.5+0.4*p.z};};
+  for(auto& t:triangles) t={move(t.a),move(t.b),move(t.c)};
+  StlScanPlan scan; ImmersedSurfacePlan surface; EBTopology topology;
+  BoundaryStencilPlan stencils; ImmersedPlanLimits limits;
+  limits.stencil.policy=IbmReconstructionPolicy::adaptive_order;
+  IbmEquationInterfacePlan ibm;
+  auto status=StlScanCompiler::compile_triangles(fixture.geometry,fixture.patch,
+      {triangles.data(),triangles.size()},CartesianAxis::y,test::kForceScanBudget,scan);
+  if(status) status=ImmersedSurfaceCompiler::compile(scan,surface);
+  if(status) status=EBTopologyCompiler::compile(MPI_COMM_SELF,fixture.geometry,fixture.patch,
+      scan,surface,ImmersedFluidSide::outside,limits,topology);
+  if(status) status=BoundaryStencilCompiler::compile(MPI_COMM_SELF,fixture.geometry,
+      fixture.patch,surface,topology,limits,stencils);
+  if(status) status=IbmEquationInterfacePlan::compile(fixture.equations.kernels(),topology,
+      stencils,topology.interface_metric(),ibm);
+  if(!expect(bool(status),"IBM scalar topology compiles")) return false;
+  const auto cells=fixture.patch.cells;
+  auto rho=make_field(kDensity,cells,1U,2U,501U);
+  auto q=make_field(passive ? kPassive : kSpecies,cells,1U,2U,502U);
+  auto gamma=make_field(25U,cells,1U,2U,503U);
+  auto diagonal=make_field(30U,cells,1U,0U,504U);
+  auto rhs=make_field(31U,cells,1U,0U,505U);
+  auto residual=make_field(32U,cells,1U,0U,506U);
+  fill_field(rho,1.0); fill_field(q,0.25); fill_field(gamma,1.0);
+  for(int z=0;z<n;++z) for(int y=0;y<n;++y) for(int x=0;x<n;++x)
+    if(topology.region().data[x+n*(y+n*z)]==0U) q.view.unchecked({x,y,z},0U)=0.75;
+  FaceFluxStorage flux_storage; FaceFluxView flux;
+  status=FaceFluxStorage::allocate_workspace(cells,1U,flux_storage);
+  if(status) status=flux_storage.workspace_view(0U,11U,flux);
+  if(!expect(bool(status),"IBM scalar zero flux allocates")) return false;
+  for(auto face : {flux.x,flux.y,flux.z})
+    for(int z=0;z<face.extents.z;++z) for(int y=0;y<face.extents.y;++y)
+      for(int x=0;x<face.extents.x;++x) face.unchecked({x,y,z})=0.0;
+  const PrimitiveHistory q_history{as_const(q.view),as_const(q.view),as_const(q.view)};
+  const auto d=as_const(gamma.view);
+  EquationStateView state;
+  state.density={as_const(rho.view),as_const(rho.view),as_const(rho.view)};
+  state.independent_species={&q_history,1U};
+  EquationMaterialView material; material.scalar_mass_diffusivity={&d,1U};
+  EquationAssemblyContext context;
+  context.dt=0.1; context.bdf={10.0,-10.0,0.0,1U}; context.time=701U;
+  context.geometry=fixture.geometry.topology_revision(); context.boundary=fixture.boundary.revision();
+  context.thermo=fixture.thermodynamics.fingerprint(); context.transport=fixture.transport.fingerprint();
+  context.contribution_stage=1U; context.scope=EquationAssemblyScope::momentum_predictor;
+  context.mass_flux=as_const(flux); context.face_flux=flux.revision; context.provisional_mass_flux=true;
+  context.immersed_interface=&ibm;
+  auto ax=make_face_field(CartesianAxis::x,cells,601U);
+  auto ay=make_face_field(CartesianAxis::y,cells,602U);
+  auto az=make_face_field(CartesianAxis::z,cells,603U);
+  EquationSystemView system{diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view};
+  FinalFluxFixture final_flux;
+  ConstFaceFluxView committed;
+  const std::array diffusivities{d,d};
+  EquationAssemblyCertificate certificate;
+  if(passive) {
+    if(!make_linear_final_flux(fixture.equations.kernels(),cells,final_flux,committed,true)) return false;
+    context.scope=EquationAssemblyScope::final_conservative;
+    context.mass_flux=committed; context.face_flux=committed.revision;
+    context.face_flux_authority=committed.certificate.authority();
+    context.face_flux_storage=committed.certificate.storage();
+    context.face_flux_revision_domain=committed.certificate.revision_domain();
+    context.provisional_mass_flux=false;
+    state.passive_scalars={&q_history,1U};
+    material.scalar_mass_diffusivity={diffusivities.data(),diffusivities.size()};
+    status=assemble_scalar(fixture.equations.scalars(),0U,state,material,{},context,system,certificate);
+  } else {
+    status=detail::assemble_species_coupling_rows(fixture.equations.species(),0U,state,material,context,system);
+  }
+  if(!status) std::cerr<<"IBM rows status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';
+  if(!expect(bool(status),"IBM production species rows assemble")) return false;
+  const auto region=topology.region();
+  const auto fluid=[&](Int3 c) {return c.x<0 || c.y<0 || c.z<0 || c.x>=n || c.y>=n || c.z>=n ||
+      region.data[c.x+n*(c.y+n*c.z)]!=0U;};
+  double error=0.0, solid_residual=0.0, cut_coefficient=0.0;
+  for(int z=0;z<n;++z) for(int y=0;y<n;++y) for(int x=0;x<n;++x) {
+    const Int3 c{x,y,z}; unsigned neighbors=0U;
+    for(int a=0;a<3;++a) for(int sign : {-1,1}) {
+      Int3 neighbor=c; (a==0 ? neighbor.x : a==1 ? neighbor.y : neighbor.z)+=sign;
+      neighbors+=fluid(neighbor);
+      if(!fluid(c) || !fluid(neighbor)) {
+        const auto face=a==0 ? ax.view : a==1 ? ay.view : az.view;
+        cut_coefficient=std::max(cut_coefficient,std::abs(face.unchecked(sign>0 ? neighbor : c)));
+      }
+    }
+    const double expected=fluid(c) ? (10.0+neighbors*n*n)*(passive ? 1.0/(n*n*n) : 1.0) : 1.0;
+    error=std::max(error,std::abs(diagonal.view.unchecked(c,0U)-expected));
+    solid_residual=std::max(solid_residual,std::abs(residual.view.unchecked(c,0U)));
+  }
+  std::cerr<<"IBM "<<(passive ? "passive" : "species")<<" matrix diagonal_error="<<error<<" cut_coefficient="<<cut_coefficient
+           <<" solid_residual="<<solid_residual<<'\n';
+  return expect(error<1e-11 && cut_coefficient==0.0 && solid_residual==0.0,
+      "species matrix excludes solid edges and constrains solid corrections");
 }
 
 bool test_independent_species_closure() {
@@ -860,6 +960,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   bool passed = test_independent_species_closure();
+  passed &= test_ibm_species_matrix();
+  passed &= test_ibm_species_matrix(true);
   passed &= test_composition_dependent_production_eos();
   passed &= test_scalar_catalog_contract();
   passed &= test_scalar_mass_diffusivity_oracle_and_atomicity();

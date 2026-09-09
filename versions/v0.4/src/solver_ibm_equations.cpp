@@ -874,6 +874,18 @@ Status IbmEquationInterfacePlan::compile_sources(
   candidate.independent_species_count_ = independent_species_count;
   candidate.inlet_state_bound_ = inlet_state_bound;
   try {
+    const Int3 cells=kernels.cells();
+    const auto region=topology.region();
+    candidate.scalar_blocked_faces_.resize(region.size);
+    for(std::size_t i=0U;i<region.size;++i)
+      candidate.scalar_blocked_faces_[i]=region.data[i]==0U ? 63U : 0U;
+    const auto scalar_links=topology.links();
+    for(std::size_t l=0U;l<scalar_links.size;++l) {
+      const auto& link=scalar_links.data[l];
+      const Int3 c=link.fluid_local_index;
+      const auto i=std::size_t(c.x)+std::size_t(cells.x)*(std::size_t(c.y)+std::size_t(cells.y)*c.z);
+      candidate.scalar_blocked_faces_[i] |= std::uint8_t(1U << unsigned(link.direction));
+    }
     const Span<const BoundaryStencilLink> links = boundary.links();
     const Span<const QuadraticAffineRow> rows =
         boundary.reconstruction().rows();
@@ -2354,6 +2366,58 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
       for (std::int32_t x = 0; x < cells.x; ++x, ++flat)
         if (region.data[flat] == static_cast<std::uint8_t>(RegionFlag::solid))
           rate.unchecked({x, y, z}, 0U) = 0.0;
+  return {};
+}
+
+double detail::IbmScalarTransport::diffusion_diagonal(
+    const IbmEquationInterfacePlan& plan,ConstFieldView gamma,Int3 cell) noexcept {
+  const auto& kernels=*plan.kernels_;
+  const Int3 n=kernels.cells();
+  const auto i=std::size_t(cell.x)+std::size_t(n.x)*(std::size_t(cell.y)+std::size_t(n.y)*cell.z);
+  const auto blocked=plan.scalar_blocked_faces_[i];
+  if(blocked==0U) return detail::diffusion_diagonal(kernels,gamma,cell);
+  double sum=0.0;
+  for(unsigned d=0U;d<6U;++d) {
+    if((blocked & (1U << d))!=0U) continue;
+    const auto axis=static_cast<CartesianAxis>(d/2U);
+    Int3 face=cell;
+    if(d%2U) (axis==CartesianAxis::x ? face.x : axis==CartesianAxis::y ? face.y : face.z)++;
+    sum+=detail::positive_transmissibility(kernels,gamma,axis,face);
+  }
+  return sum;
+}
+
+Status detail::IbmScalarTransport::constrain_rows(
+    const IbmEquationInterfacePlan& plan,ConstFieldView q,KernelBox box,
+    EquationSystemView system) noexcept {
+  const auto bound=validate_bound(plan,plan.kernels_,plan.topology_,plan.boundary_,plan.metric_);
+  if(!bound) return bound;
+  const Int3 cells=plan.kernels_->cells();
+  if(!detail::valid_kernel_box(box,cells) || !detail::valid_cell_view(q,cells,0U,1U,0U) ||
+      !detail::valid_cell_view(system.diagonal,cells,0U,1U) ||
+      !detail::valid_cell_view(system.rhs,cells,0U,1U) ||
+      !detail::valid_cell_view(system.residual,cells,0U,1U))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  const auto region=plan.topology_->region();
+  const std::array<FaceFieldView,3U> faces{system.x_coefficient,system.y_coefficient,system.z_coefficient};
+  for(int z=box.begin.z;z<box.begin.z+box.cells.z;++z)
+    for(int y=box.begin.y;y<box.begin.y+box.cells.y;++y)
+      for(int x=box.begin.x;x<box.begin.x+box.cells.x;++x) {
+        const Int3 c{x,y,z};
+        const auto i=std::size_t(x)+std::size_t(cells.x)*(std::size_t(y)+std::size_t(cells.y)*z);
+        if(region.data[i]==0U) {
+          system.diagonal.unchecked(c,0U)=1.0;
+          system.rhs.unchecked(c,0U)=q.unchecked(c,0U);
+          system.residual.unchecked(c,0U)=0.0;
+        }
+        const auto blocked=plan.scalar_blocked_faces_[i];
+        for(unsigned d=0U;d<6U;++d) {
+          if((blocked & (1U<<d))==0U || faces[d/2U].base==nullptr) continue;
+          Int3 face=c;
+          if(d%2U) (d/2U==0U ? face.x : d/2U==1U ? face.y : face.z)++;
+          faces[d/2U].unchecked(face)=0.0;
+        }
+      }
   return {};
 }
 

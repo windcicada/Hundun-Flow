@@ -840,6 +840,7 @@ class IbmEquationInterfacePlan {
   const BoundaryStencilPlan* boundary_{};
   const IbmInterfaceMetricPlan* metric_{};
   std::vector<WallLinearization> wall_linearization_;
+  std::vector<std::uint8_t> scalar_blocked_faces_;
   std::vector<PrescribedInterfaceFlux> prescribed_interface_fluxes_;
   std::vector<FrozenConvectionFixedFace> prescribed_source_faces_;
   std::vector<double> prescribed_independent_species_;

@@ -1430,8 +1430,12 @@ Status project_constant(Implementation& implementation, std::size_t level,
   const double mean = total[0] / total[1];
   for (std::int32_t k = 0; k < field.interior.z; ++k)
     for (std::int32_t j = 0; j < field.interior.y; ++j)
-      for (std::int32_t i = 0; i < field.interior.x; ++i)
-        field.unchecked({i, j, k}, 0U) -= mean;
+      for (std::int32_t i = 0; i < field.interior.x; ++i) {
+        const auto index = std::size_t(i) + std::size_t(cells.x) *
+            (std::size_t(j) + std::size_t(cells.y) * k);
+        field.unchecked({i, j, k}, 0U) = volumes[index] > 0.0
+            ? field.unchecked({i, j, k}, 0U) - mean : 0.0;
+      }
   return {};
 }
 
@@ -1472,6 +1476,12 @@ void copy_finest_coefficients(const Implementation& implementation,
                 static_cast<std::size_t>(global.y)] *
             implementation.spec.geometry->z().widths().data[
                 static_cast<std::size_t>(global.z)];
+        // Solid identity rows constrain a correction to zero. Their unit
+        // diagonal is not a physical reaction to aggregate into fluid rows.
+        // Fluid volume carries that distinction through every coarse level.
+        if (implementation.spec.activity.cells.size != 0U &&
+            implementation.spec.activity.cells.data[flat(cells, cell)] == 0U)
+          volumes[flat(cells, cell)] = 0.0;
       }
     }
   }
@@ -1838,6 +1848,7 @@ Status build_coarse_coefficients(Implementation& implementation,
     status = aggregate_tensor_channel(
         implementation, fine, coarse, -1, 1,
         [&](Int3 cell) noexcept {
+          if (fv[flat(fs, cell)] == 0.0) return 0.0;
           const double faces = fx[face_flat(fxe, cell)] +
                                fx[face_flat(fxe, {cell.x + 1, cell.y,
                                                   cell.z})] +
@@ -1878,7 +1889,8 @@ Status build_coarse_coefficients(Implementation& implementation,
                        cy[face_flat(cye, {i, j + 1, k})] +
                        cz[face_flat(cze, cell)] +
                        cz[face_flat(cze, {i, j, k + 1})];
-          if (!(cv[index] > 0.0) || !std::isfinite(cv[index]) ||
+          if (cv[index] == 0.0) cd[index] = 1.0;
+          if (cv[index] < 0.0 || !std::isfinite(cv[index]) ||
               !(cd[index] > 0.0) || !std::isfinite(cd[index])) {
             local = {StatusCode::numerical_failure, kMgCoefficient};
           }
@@ -1912,6 +1924,7 @@ Status validate_certified_hierarchy(const Implementation& implementation,
     const double* const x = detail::block(base, level.x_offset);
     const double* const y = detail::block(base, level.y_offset);
     const double* const z = detail::block(base, level.z_offset);
+    const double* const volumes = detail::block(base, level.volume_offset);
     for (std::int32_t k = 0; k < cells.z; ++k) {
       for (std::int32_t j = 0; j < cells.y; ++j) {
         for (std::int32_t i = 0; i < cells.x; ++i) {
@@ -1924,10 +1937,7 @@ Status validate_certified_hierarchy(const Implementation& implementation,
               y[face_flat(ye, {i, j + 1, k})] +
               z[face_flat(ze, cell)] +
               z[face_flat(ze, {i, j, k + 1})];
-          const bool inactive =
-              level_index == 0U &&
-              implementation.spec.activity.cells.size != 0U &&
-              implementation.spec.activity.cells.data[index] == 0U;
+          const bool inactive = volumes[index] == 0.0;
           if (!std::isfinite(diagonal[index]) ||
               !(diagonal[index] > 0.0) || !std::isfinite(faces) ||
               faces < 0.0) {
@@ -3811,9 +3821,15 @@ Status prolongate_add(Implementation& implementation,
   const bool periodic_y = boundary.y_min == MgBoundaryKind::periodic;
   const bool periodic_z = boundary.z_min == MgBoundaryKind::periodic;
   const Int3 fs = fine.view.local_shape;
+  const double* const fluid_volumes = detail::block(
+      implementation.hierarchy_storage.data(), fine.volume_offset);
   for (std::int32_t k = 0; k < fs.z; ++k)
     for (std::int32_t j = 0; j < fs.y; ++j)
       for (std::int32_t i = 0; i < fs.x; ++i) {
+        if (fluid_volumes[flat(fs, {i,j,k})] == 0.0) {
+          fx.unchecked({i,j,k}, 0U) = 0.0;
+          continue;
+        }
         const Int3 fg{fine.patch.begin.x + i, fine.patch.begin.y + j,
                       fine.patch.begin.z + k};
         const auto interpolation = [](std::int32_t fine_global,

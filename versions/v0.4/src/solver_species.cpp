@@ -346,6 +346,9 @@ Status assemble_transport(
           }
         }
         const double diffusion_diagonal =
+            context.immersed_interface != nullptr
+            ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
+            :
             positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, cell) +
             positive_transmissibility(kernels, diffusivity,
@@ -362,7 +365,7 @@ Status assemble_transport(
             !finite_positive(rho_previous) || !std::isfinite(q_trial) ||
             !std::isfinite(q_accepted) || !std::isfinite(q_previous) ||
             !std::isfinite(explicit_source) || !std::isfinite(implicit_sink) ||
-            implicit_sink < 0.0 || !finite_positive(diffusion_diagonal)) {
+            implicit_sink < 0.0 || !std::isfinite(diffusion_diagonal) || diffusion_diagonal < 0.0) {
           return {StatusCode::numerical_failure, kScalarNumerical};
         }
         const double volume = detail::cell_volume(kernels, cell);
@@ -440,6 +443,9 @@ Status assemble_transport(
             context.bdf.a2 * rho_previous * q_previous;
         const double volume = detail::cell_volume(kernels, cell);
         const double diffusion_diagonal =
+            context.immersed_interface != nullptr
+            ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
+            :
             positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, cell) +
             positive_transmissibility(kernels, diffusivity,
@@ -463,7 +469,7 @@ Status assemble_transport(
             !std::isfinite(rho_previous) || !std::isfinite(q_trial) ||
             !std::isfinite(q_accepted) || !std::isfinite(q_previous) ||
             !std::isfinite(explicit_source) || !std::isfinite(implicit_sink) ||
-            implicit_sink < 0.0 || !finite_positive(diffusion_diagonal) ||
+            implicit_sink < 0.0 || !std::isfinite(diffusion_diagonal) || diffusion_diagonal < 0.0 ||
             !finite_positive(diagonal) ||
             !std::isfinite(non_diffusive)) {
           return {StatusCode::numerical_failure, kScalarNumerical};
@@ -480,7 +486,7 @@ Status assemble_transport(
   if (!evaluated) {
     return evaluated;
   }
-  if(context.immersed_interface!=nullptr && inlet_field!=nullptr) {
+  if(context.immersed_interface!=nullptr) {
     evaluated=detail::IbmScalarTransport::diffusion(*context.immersed_interface,
         scalar.trial,diffusivity,box,system.residual);
     if(!evaluated) return evaluated;
@@ -524,7 +530,10 @@ Status assemble_transport(
 
   RevisionToken assembled_state =
       scalar_state_revision(state, scalar, diffusivity, contributions);
-  if (context.immersed_interface != nullptr && inlet_field != nullptr) {
+  if (context.immersed_interface != nullptr) {
+    evaluated=detail::IbmScalarTransport::constrain_rows(
+        *context.immersed_interface,scalar.trial,box,system);
+    if(!evaluated) return evaluated;
     assembled_state = context.immersed_interface->constrain_certificate(
         assembled_state, scalar.trial.revision, diffusivity.revision);
     if (assembled_state == 0U)

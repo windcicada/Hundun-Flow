@@ -7,6 +7,7 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_equation_detail.hpp"
 #include "solver_conservative_energy_detail.hpp"
+#include "solver_ibm_scalar_transport_detail.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -2482,14 +2483,15 @@ Status PressureEnergyEnthalpyOperator::bind(
        valid_compiled_enthalpy_workspace(binding.workspace.compiled, cells));
   const IbmEquationInterfacePlan* inlet_sources =
       inlet_source_interface(binding);
-  const bool inlet_source_binding_valid =
-      inlet_sources == nullptr ||
-      (inlet_sources->fingerprint() != 0U &&
-       inlet_source_activity_matches(*inlet_sources, binding.activity));
+  const bool immersed_binding_valid =
+      binding.immersed_interface == nullptr ||
+      (binding.immersed_interface->fingerprint() != 0U &&
+       inlet_source_activity_matches(*binding.immersed_interface,
+                                      binding.activity));
   if (!pointers_valid || !geometry_valid || !boundary_valid ||
       !semantics_valid || !services_valid || !halo_valid || !cell_views_valid ||
       !face_views_valid || !compiled_views_valid ||
-      !inlet_source_binding_valid) {
+      !immersed_binding_valid) {
     return {StatusCode::invalid_plan, kPressureEnergyEnthalpyBinding};
   }
   if (inlet_sources != nullptr) {
@@ -2597,15 +2599,16 @@ Status PressureEnergyEnthalpyOperator::bind(
         binding.density_enthalpy_derivative.unchecked(cell, 0U);
     const double cp = binding.heat_capacity.unchecked(cell, 0U);
     const double volume = detail::cell_volume(*binding.kernels, cell);
-    const double proxy_diagonal = detail::diffusion_diagonal(
-        *binding.kernels, binding.enthalpy_diffusivity, cell);
+    const double proxy_diagonal = binding.immersed_interface != nullptr
+        ? detail::IbmScalarTransport::diffusion_diagonal(*binding.immersed_interface, binding.enthalpy_diffusivity, cell)
+        : detail::diffusion_diagonal(*binding.kernels, binding.enthalpy_diffusivity, cell);
     const double local = diagonal - proxy_diagonal +
                          binding.authority.bdf.a0 * volume * enthalpy * rho_h;
     if (!std::isfinite(diagonal) || !(diagonal > 0.0) ||
         !std::isfinite(enthalpy) || !std::isfinite(rho_h) || !(rho_h < 0.0) ||
         !std::isfinite(cp) || !(cp > 0.0) || !std::isfinite(volume) ||
         !(volume > 0.0) || !std::isfinite(proxy_diagonal) ||
-        !(proxy_diagonal > 0.0) || !std::isfinite(local)) {
+        proxy_diagonal < 0.0 || !std::isfinite(local)) {
       admissible = false;
     }
   });
@@ -2683,8 +2686,9 @@ Status PressureEnergyEnthalpyOperator::bind(
         const double rho_h =
             binding.density_enthalpy_derivative.unchecked(cell, 0U);
         const double volume = detail::cell_volume(*binding.kernels, cell);
-        const double proxy_diagonal = detail::diffusion_diagonal(
-            *binding.kernels, binding.enthalpy_diffusivity, cell);
+        const double proxy_diagonal = binding.immersed_interface != nullptr
+            ? detail::IbmScalarTransport::diffusion_diagonal(*binding.immersed_interface, binding.enthalpy_diffusivity, cell)
+            : detail::diffusion_diagonal(*binding.kernels, binding.enthalpy_diffusivity, cell);
         local = diagonal - proxy_diagonal +
                 binding.authority.bdf.a0 * volume * enthalpy * rho_h;
       }
@@ -2719,7 +2723,7 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.geometry_ = binding.geometry;
   candidate.kernels_ = binding.kernels;
   candidate.boundary_ = binding.boundary;
-  candidate.immersed_interface_ = inlet_sources;
+  candidate.immersed_interface_ = binding.immersed_interface;
   candidate.patch_ = binding.patch;
   candidate.convection_ = binding.convection;
   candidate.services_ = binding.services;
@@ -2895,8 +2899,9 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
       const double rho_h =
           density_enthalpy_derivative_.unchecked(cell, 0U);
       const double volume = detail::cell_volume(*kernels_, cell);
-      const double proxy_diagonal =
-          detail::diffusion_diagonal(*kernels_, enthalpy_diffusivity_, cell);
+      const double proxy_diagonal = immersed_interface_ != nullptr
+          ? detail::IbmScalarTransport::diffusion_diagonal(*immersed_interface_, enthalpy_diffusivity_, cell)
+          : detail::diffusion_diagonal(*kernels_, enthalpy_diffusivity_, cell);
       expected = diagonal - proxy_diagonal +
                  certificate_.authority.bdf.a0 * volume * enthalpy * rho_h;
     }
@@ -3293,8 +3298,9 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
         certificate_.compiled_factored_apply
             ? compiled_local_diagonal_.unchecked(cell, 0U)
             : assembled_diagonal_.unchecked(cell, 0U) -
-                  detail::diffusion_diagonal(*kernels_,
-                                             enthalpy_diffusivity_, cell) +
+                  (immersed_interface_ != nullptr
+                      ? detail::IbmScalarTransport::diffusion_diagonal(*immersed_interface_, enthalpy_diffusivity_, cell)
+                      : detail::diffusion_diagonal(*kernels_, enthalpy_diffusivity_, cell)) +
                   certificate_.authority.bdf.a0 *
                       detail::cell_volume(*kernels_, cell) *
                       (target_enthalpy_.unchecked(cell, 0U) +

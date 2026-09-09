@@ -3,6 +3,7 @@
 
 #include "hundun/v04_flow.hpp"
 #include "hundun/v04_ibm.hpp"
+#include "solver_ibm_scalar_transport_detail.hpp"
 
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
@@ -956,7 +957,10 @@ void form_enthalpy_linear_terms(
     EnthalpyCellTerms& terms) noexcept {
   const double volume = detail::cell_volume(kernels, cell);
   terms.diffusion_diagonal =
-      detail::diffusion_diagonal(kernels, material.enthalpy_diffusivity, cell);
+      context.immersed_interface != nullptr
+          ? detail::IbmScalarTransport::diffusion_diagonal(
+                *context.immersed_interface,material.enthalpy_diffusivity,cell)
+          : detail::diffusion_diagonal(kernels, material.enthalpy_diffusivity, cell);
   terms.diagonal = (context.bdf.a0 * rho + terms.sink) * volume +
                    terms.diffusion_diagonal;
 }
@@ -1112,7 +1116,7 @@ Status combine_enthalpy_cell_system(
   if (!std::isfinite(candidate.residual) ||
       !std::isfinite(candidate.diagonal) || candidate.diagonal <= 0.0 ||
       !std::isfinite(terms.diffusion_diagonal) ||
-      terms.diffusion_diagonal <= 0.0 || !std::isfinite(candidate.rhs)) {
+      terms.diffusion_diagonal < 0.0 || !std::isfinite(candidate.rhs)) {
     return {StatusCode::numerical_failure, kEnthalpyNumerical};
   }
   system = candidate;
@@ -1342,6 +1346,9 @@ Status assemble_enthalpy_impl(
   if (context.wall_treatment != nullptr)
     assembled_state = hash_mix(assembled_state, context.wall_treatment->fingerprint());
   if (context.immersed_interface != nullptr) {
+    status=detail::IbmScalarTransport::constrain_rows(
+        *context.immersed_interface,state.enthalpy.trial,box,system);
+    if(!status) return status;
     assembled_state = context.immersed_interface->constrain_certificate(
         assembled_state, state.enthalpy.trial.revision,
         material.enthalpy_diffusivity.revision);
@@ -1594,6 +1601,12 @@ Status assemble_target_coupled_enthalpy_residual(
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < end.x; ++x) {
         const Int3 cell{x, y, z};
+        if (context.immersed_interface != nullptr) {
+          const auto activity=context.immersed_interface->cell_activity();
+          const auto n=plan.cells_;
+          const auto i=std::size_t(x)+std::size_t(n.x)*(std::size_t(y)+std::size_t(n.y)*z);
+          if(activity.data[i]==0U) { residual.unchecked(cell,0U)=0.0; continue; }
+        }
         const double rho = state.density.trial.unchecked(cell, 0U);
         EnthalpyCellTerms terms;
         terms.pressure_work = workspace.pressure_work.unchecked(cell, 0U);

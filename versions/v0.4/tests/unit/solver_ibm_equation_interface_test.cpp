@@ -922,6 +922,24 @@ bool test_prescribed_interface_mass_flux() {
         equations.enthalpy(), state, material, as_const(grad.view), context,
         replay.view, {pressure_work.view, viscous_work.view, conduction.view}, replay_energy);
     passed &= expect(full_status && replay_status, "both source-bearing energy paths assemble");
+    double matrix_error=0.0, blocked_coefficient=0.0;
+    const auto scalar_region=fixture.topology.region();
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+      const Int3 c{x,y,z};
+      if(scalar_region.data[flat(cells,c)]==0U) {
+        matrix_error=std::max(matrix_error,std::abs(e_diagonal.view.unchecked(c,0U)-1.0));
+        matrix_error=std::max(matrix_error,std::abs(e_rhs.view.unchecked(c,0U)-h.view.unchecked(c,0U)));
+        matrix_error=std::max(matrix_error,std::abs(e_residual.view.unchecked(c,0U)));
+      }
+    }
+    for(std::size_t l=0;l<fixture.topology.links().size;++l) {
+      const auto& cut=fixture.topology.links().data[l];
+      const auto axis=face_axis(cut.direction);
+      const auto face=axis==0U ? ax.view : axis==1U ? ay.view : az.view;
+      blocked_coefficient=std::max(blocked_coefficient,std::abs(face.unchecked(face_index(cut))));
+    }
+    passed &= expect(matrix_error==0.0 && blocked_coefficient==0.0,
+        "enthalpy assembly freezes solid corrections and clears every solid edge");
     const Int3 source_cell = source_link.fluid_local_index;
     const double full_value = e_residual.view.unchecked(source_cell,0U);
     const double replay_value = replay.view.unchecked(source_cell,0U);

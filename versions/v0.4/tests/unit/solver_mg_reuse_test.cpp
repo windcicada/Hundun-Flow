@@ -333,6 +333,84 @@ struct Fixture {
   }
 };
 
+bool test_ibm_coarse_rows_exclude_solid_identity() {
+  Fixture fixture;
+  if (!expect(fixture.create(uniform_mesh()), "IBM hierarchy fixture compiles"))
+    return false;
+  const Int3 n = fixture.patch.cells;
+  const auto index = [](Int3 shape, Int3 c) {
+    return std::size_t(c.x) + std::size_t(shape.x) *
+        (std::size_t(c.y) + std::size_t(shape.y) * c.z);
+  };
+  std::vector<std::uint8_t> active(std::size_t(n.x) * n.y * n.z, 1U);
+  active[index(n, {1, 1, 1})] = 0U;
+  // Also include a complete solid aggregate, whose identity must remain
+  // local to that level rather than becoming a reaction at the next level.
+  for (int z = 2; z < 4; ++z) for (int y = 2; y < 4; ++y)
+    for (int x = 2; x < 4; ++x) active[index(n, {x,y,z})] = 0U;
+  std::array<std::vector<std::uint8_t>, 3U> faces;
+  const auto is_fluid = [&](Int3 c) {
+    return c.x < 0 || c.y < 0 || c.z < 0 ||
+        c.x >= n.x || c.y >= n.y || c.z >= n.z || active[index(n,c)] != 0U;
+  };
+  const std::array<OwnedFace*,3U> coefficients{&fixture.x,&fixture.y,&fixture.z};
+  constexpr double scale = 1e-9;
+  for (int a = 0; a < 3; ++a) {
+    const auto ext = coefficients[a]->view.extents;
+    faces[a].assign(coefficients[a]->storage.size(), 1U);
+    std::fill(coefficients[a]->storage.begin(), coefficients[a]->storage.end(), scale);
+    for (int z=0;z<ext.z;++z) for(int y=0;y<ext.y;++y) for(int x=0;x<ext.x;++x) {
+      Int3 left{x,y,z}; (a==0 ? left.x : a==1 ? left.y : left.z)--;
+      faces[a][index(ext,{x,y,z})] = is_fluid(left) && is_fluid({x,y,z});
+    }
+  }
+  for(int z=0;z<n.z;++z) for(int y=0;y<n.y;++y) for(int x=0;x<n.x;++x)
+    fixture.diagonal.view.unchecked({x,y,z},0U) = 7.0 * scale;
+  fixture.spec.activity = {{active.data(),active.size()},
+      {faces[0].data(),faces[0].size()}, {faces[1].data(),faces[1].size()},
+      {faces[2].data(),faces[2].size()}, 991U, 992U};
+  NativeCartesianMgPlan plan;
+  if (!expect(static_cast<bool>(NativeCartesianMgPlan::compile(fixture.spec,
+          fixture.services,fixture.coefficients(),plan)), "masked hierarchy compiles"))
+    return false;
+  bool passed = true;
+  Int3 widths{1,1,1};
+  Int3 previous_shape=n;
+  for (std::size_t level=1;level<fixture.workspace_requirements.level_count;++level) {
+    const auto shape=fixture.workspace_requirements.levels[level].patch.cells;
+    if (shape.x!=previous_shape.x) widths.x*=2;
+    if (shape.y!=previous_shape.y) widths.y*=2;
+    if (shape.z!=previous_shape.z) widths.z*=2;
+    previous_shape=shape;
+    for(int z=0;z<shape.z;++z) for(int y=0;y<shape.y;++y) for(int x=0;x<shape.x;++x) {
+      unsigned fluid=0U, external=0U;
+      for(int k=z*widths.z;k<std::min((z+1)*widths.z,n.z);++k)
+        for(int j=y*widths.y;j<std::min((y+1)*widths.y,n.y);++j)
+          for(int i=x*widths.x;i<std::min((x+1)*widths.x,n.x);++i) {
+            if (!active[index(n,{i,j,k})]) continue;
+            ++fluid;
+            for(int a=0;a<3;++a) for(int sign : {-1,1}) {
+              Int3 neighbour{i,j,k};
+              auto& v=a==0 ? neighbour.x : a==1 ? neighbour.y : neighbour.z;
+              v+=sign;
+              const int parent=a==0 ? x : a==1 ? y : z;
+              const int width=a==0 ? widths.x : a==1 ? widths.y : widths.z;
+              const int extent=a==0 ? n.x : a==1 ? n.y : n.z;
+              if ((v<parent*width || v>=std::min((parent+1)*width,extent)) && is_fluid(neighbour)) ++external;
+            }
+          }
+      const double expected=fluid==0U ? 1.0 : (fluid+external)*scale;
+      const double actual=detail::mg_level_diagonal_for_test(plan,level,index(shape,{x,y,z}));
+      if (std::abs(actual-expected)>1e-14*std::max(scale,expected)) {
+        std::cerr << "IBM coarse row level=" << level << " fluid=" << fluid
+                  << " expected=" << expected << " actual=" << actual << '\n';
+        passed=false;
+      }
+    }
+  }
+  return expect(passed, "coarse physical rows contain only fluid reaction and open-face coefficients");
+}
+
 bool test_coarsening_selection() {
   Fixture isotropic;
   bool passed = expect(isotropic.create(uniform_mesh()),
@@ -808,6 +886,7 @@ bool test_numeric_counter_overflow_is_atomic() {
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
+  passed &= test_ibm_coarse_rows_exclude_solid_identity();
   passed &= test_coarsening_selection();
   passed &= test_reuse_policy_and_hot_lifetime();
   passed &= test_level_halo_pointer_table_is_plan_owned();
