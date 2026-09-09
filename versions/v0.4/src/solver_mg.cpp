@@ -3314,6 +3314,11 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
   const Int3 ye{cells.x, cells.y + 1, cells.z};
   const Int3 ze{cells.x, cells.y, cells.z + 1};
   const MgBoundarySet boundary = implementation.spec.boundaries;
+  // Views keep the same payload throughout a sweep. Refresh the const view
+  // after Halo publishes its revision, outside the per-cell Thomas loop.
+  ConstFieldView read_x;
+  const FieldView dprime = implementation.services.workspace->level(
+      level_index, MgWorkspaceSlot::residual);
   const auto solve_one = [&](std::int32_t fixed_a,
                              std::int32_t fixed_b) noexcept {
     auto cell_at = [&](std::int32_t along) noexcept {
@@ -3341,31 +3346,31 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
       double value = rhs.unchecked(c, 0U);
       if (axis != CartesianAxis::x) {
         value += xf[face_flat(xe, c)] *
-                 level_neighbor(as_const(x), level.patch,
+                 level_neighbor(read_x, level.patch,
                                 level.view.global_shape, c, CartesianAxis::x,
                                 -1, boundary.x_min, boundary.x_max);
         value += xf[face_flat(xe, {c.x + 1, c.y, c.z})] *
-                 level_neighbor(as_const(x), level.patch,
+                 level_neighbor(read_x, level.patch,
                                 level.view.global_shape, c, CartesianAxis::x,
                                 1, boundary.x_min, boundary.x_max);
       }
       if (axis != CartesianAxis::y) {
         value += yf[face_flat(ye, c)] *
-                 level_neighbor(as_const(x), level.patch,
+                 level_neighbor(read_x, level.patch,
                                 level.view.global_shape, c, CartesianAxis::y,
                                 -1, boundary.y_min, boundary.y_max);
         value += yf[face_flat(ye, {c.x, c.y + 1, c.z})] *
-                 level_neighbor(as_const(x), level.patch,
+                 level_neighbor(read_x, level.patch,
                                 level.view.global_shape, c, CartesianAxis::y,
                                 1, boundary.y_min, boundary.y_max);
       }
       if (axis != CartesianAxis::z) {
         value += zf[face_flat(ze, c)] *
-                 level_neighbor(as_const(x), level.patch,
+                 level_neighbor(read_x, level.patch,
                                 level.view.global_shape, c, CartesianAxis::z,
                                 -1, boundary.z_min, boundary.z_max);
         value += zf[face_flat(ze, {c.x, c.y, c.z + 1})] *
-                 level_neighbor(as_const(x), level.patch,
+                 level_neighbor(read_x, level.patch,
                                 level.view.global_shape, c, CartesianAxis::z,
                                 1, boundary.z_min, boundary.z_max);
       }
@@ -3373,8 +3378,6 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
     };
     // Thomas forward pass. temporary stores c-prime while residual stores
     // d-prime; both arrays are persistent MG workspace slots.
-    FieldView dprime = implementation.services.workspace->level(
-        level_index, MgWorkspaceSlot::residual);
     for (std::int32_t n = 0; n < extent; ++n) {
       const Int3 c = cell_at(n);
       double a = n == 0 ? 0.0 : -low_face(c);
@@ -3383,7 +3386,7 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
       double d = transverse_rhs(c);
       if (n == 0) {
         d += low_face(c) * level_neighbor(
-                                    as_const(x), level.patch,
+                                    read_x, level.patch,
                                     level.view.global_shape, c, axis, -1,
                                     axis == CartesianAxis::x
                                         ? boundary.x_min
@@ -3398,7 +3401,7 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
       }
       if (n + 1 == extent) {
         d += high_face(c) * level_neighbor(
-                                     as_const(x), level.patch,
+                                     read_x, level.patch,
                                      level.view.global_shape, c, axis, 1,
                                      axis == CartesianAxis::x
                                          ? boundary.x_min
@@ -3440,6 +3443,7 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
     Status status = exchange_solution(implementation, level_index, x,
                                       stage++);
     if (!status) return status;
+    read_x = as_const(x);
     bool okay = true;
     const std::int32_t a_extent = axis == CartesianAxis::x ? cells.y : cells.x;
     const std::int32_t b_extent = axis == CartesianAxis::z ? cells.y : cells.z;
@@ -3578,6 +3582,7 @@ Status restrict_residual(Implementation& implementation,
   const bool my = (mask & detail::kMgAxisY) != 0U;
   const bool mz = (mask & detail::kMgAxisZ) != 0U;
   const Int3 cs = coarse.view.local_shape;
+  const ConstFieldView fine_residual = as_const(fr);
   for (std::int32_t ck = 0; ck < cs.z; ++ck) {
     for (std::int32_t cj = 0; cj < cs.y; ++cj) {
       for (std::int32_t ci = 0; ci < cs.x; ++ci) {
@@ -3598,7 +3603,7 @@ Status restrict_residual(Implementation& implementation,
               const Int3 local{fg.x - fine.patch.begin.x,
                                fg.y - fine.patch.begin.y,
                                fg.z - fine.patch.begin.z};
-              residual_sum += ghost_or_local(as_const(fr), local);
+              residual_sum += ghost_or_local(fine_residual, local);
             }
         // Pressure/momentum coefficients and right-hand sides are stored as
         // finite-volume integrated equations.  The coarse conservative row

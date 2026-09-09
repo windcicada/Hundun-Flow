@@ -240,28 +240,34 @@ inline auto reconstructed_face(const CartesianKernelPlan& plan,
 
   const double face_coordinate =
       detail::metric_face<Uniform>(plan, Axis, normal);
-  const Scalar q_left_left =
-      field.unchecked(offset_axis<Axis>(left, -1), component_id);
-  const Scalar q_right_right =
-      field.unchecked(offset_axis<Axis>(right, 1), component_id);
-  const auto left_slope=evaluate_limited_slope_values<Uniform,Axis>(
-      plan,normal-1,q_left_left,q_left,q_right);
-  const auto right_slope=evaluate_limited_slope_values<Uniform,Axis>(
-      plan,normal,q_left,q_right,q_right_right);
-  const Scalar left_reconstructed=limited_face_value(q_left,q_right,left_slope.value,
-      left_slope.branch,LimitedSlopeBranch::right_delta,
-      face_coordinate-detail::metric_centre<Uniform>(plan,Axis,normal-1),plan.limiter());
-  const Scalar right_reconstructed=limited_face_value(q_right,q_left,right_slope.value,
-      right_slope.branch,LimitedSlopeBranch::left_delta,
-      face_coordinate-detail::metric_centre<Uniform>(plan,Axis,normal),plan.limiter());
+  const auto reconstruct_left = [&]() noexcept {
+    const auto slope = evaluate_limited_slope_values<Uniform, Axis>(
+        plan, normal - 1,
+        field.unchecked(offset_axis<Axis>(left, -1), component_id),
+        q_left, q_right);
+    return limited_face_value(q_left, q_right, slope.value, slope.branch,
+        LimitedSlopeBranch::right_delta,
+        face_coordinate - detail::metric_centre<Uniform>(plan, Axis, normal - 1),
+        plan.limiter());
+  };
+  const auto reconstruct_right = [&]() noexcept {
+    const auto slope = evaluate_limited_slope_values<Uniform, Axis>(
+        plan, normal, q_left, q_right,
+        field.unchecked(offset_axis<Axis>(right, 1), component_id));
+    return limited_face_value(q_right, q_left, slope.value, slope.branch,
+        LimitedSlopeBranch::left_delta,
+        face_coordinate - detail::metric_centre<Uniform>(plan, Axis, normal),
+        plan.limiter());
+  };
   if constexpr (Scheme == ConvectionScheme::tvd2) {
     // The metric limiter guarantees this envelope in exact arithmetic.
     // Keep a trace component nonnegative when the endpoint subtraction
     // rounds by one ulp. This bounds the face reconstruction, never a state.
-    return std::clamp(mass_rate >= 0.0 ? left_reconstructed : right_reconstructed,
+    // TVD uses one donor. Form only that donor's slope and face value.
+    return std::clamp(mass_rate >= 0.0 ? reconstruct_left() : reconstruct_right(),
                       std::min(q_left, q_right), std::max(q_left, q_right));
   }
-  return 0.5 * (left_reconstructed + right_reconstructed);
+  return 0.5 * (reconstruct_left() + reconstruct_right());
 }
 
 // Widen only subnormal input stencils. The very same reconstruction/limiter
@@ -311,17 +317,22 @@ inline FaceBranchSelection select_face_branches(
   const Int3 right = face;
   const double q_left = target.unchecked(left, component);
   const double q_right = target.unchecked(right, component);
-  const LimitedSlopeEvaluation left_slope =
-      evaluate_limited_slope_values<Uniform, Axis>(
+  const auto evaluate_left = [&]() noexcept {
+    return evaluate_limited_slope_values<Uniform, Axis>(
           plan, normal - 1,
           target.unchecked(offset_axis<Axis>(left, -1), component), q_left,
           q_right);
-  const LimitedSlopeEvaluation right_slope =
-      evaluate_limited_slope_values<Uniform, Axis>(
+  };
+  const auto evaluate_right = [&]() noexcept {
+    return evaluate_limited_slope_values<Uniform, Axis>(
           plan, normal, q_left, q_right,
           target.unchecked(offset_axis<Axis>(right, 1), component));
+  };
+  LimitedSlopeEvaluation left_slope{}, right_slope{};
   if constexpr (Scheme == ConvectionScheme::tvd2) {
     const bool left_donor = mass_rate >= 0.0;
+    if (left_donor) left_slope = evaluate_left();
+    else right_slope = evaluate_right();
     LimitedSlopeBranch selected =
         left_donor ? left_slope.branch : right_slope.branch;
     const double raw = left_donor
@@ -340,6 +351,8 @@ inline FaceBranchSelection select_face_branches(
     return {left_slope, right_slope, code,
             selected != LimitedSlopeBranch::nondifferentiable};
   }
+  left_slope = evaluate_left();
+  right_slope = evaluate_right();
   const std::uint64_t code =
       UINT64_C(0x200) |
       static_cast<std::uint8_t>(left_slope.branch) |
@@ -426,25 +439,31 @@ inline DirectionalFaceEvaluation reconstructed_face_direction(
   }
   const double face_coordinate =
       detail::metric_face<Uniform>(plan, Axis, normal);
-  const double left_slope = directional_limited_slope_values<Uniform, Axis>(
-      plan, normal - 1,
-      variation.unchecked(offset_axis<Axis>(left, -1), variation_component),
-      v_left, v_right, selection.left.branch);
-  const double right_slope = directional_limited_slope_values<Uniform, Axis>(
-      plan, normal, v_left, v_right,
-      variation.unchecked(offset_axis<Axis>(right, 1), variation_component),
-      selection.right.branch);
-  const double left_reconstructed=limited_face_value(v_left,v_right,left_slope,
-      selection.left.branch,LimitedSlopeBranch::right_delta,
-      face_coordinate-detail::metric_centre<Uniform>(plan,Axis,normal-1),plan.limiter());
-  const double right_reconstructed=limited_face_value(v_right,v_left,right_slope,
-      selection.right.branch,LimitedSlopeBranch::left_delta,
-      face_coordinate-detail::metric_centre<Uniform>(plan,Axis,normal),plan.limiter());
+  const auto reconstruct_left = [&]() noexcept {
+    const double slope = directional_limited_slope_values<Uniform, Axis>(
+        plan, normal - 1,
+        variation.unchecked(offset_axis<Axis>(left, -1), variation_component),
+        v_left, v_right, selection.left.branch);
+    return limited_face_value(v_left, v_right, slope, selection.left.branch,
+        LimitedSlopeBranch::right_delta,
+        face_coordinate - detail::metric_centre<Uniform>(plan, Axis, normal - 1),
+        plan.limiter());
+  };
+  const auto reconstruct_right = [&]() noexcept {
+    const double slope = directional_limited_slope_values<Uniform, Axis>(
+        plan, normal, v_left, v_right,
+        variation.unchecked(offset_axis<Axis>(right, 1), variation_component),
+        selection.right.branch);
+    return limited_face_value(v_right, v_left, slope, selection.right.branch,
+        LimitedSlopeBranch::left_delta,
+        face_coordinate - detail::metric_centre<Uniform>(plan, Axis, normal),
+        plan.limiter());
+  };
   if constexpr (Scheme == ConvectionScheme::tvd2) {
-    return {mass_rate >= 0.0 ? left_reconstructed : right_reconstructed,
+    return {mass_rate >= 0.0 ? reconstruct_left() : reconstruct_right(),
             selection.code, true, false};
   }
-  return {0.5 * (left_reconstructed + right_reconstructed), selection.code,
+  return {0.5 * (reconstruct_left() + reconstruct_right()), selection.code,
           true, false};
 }
 

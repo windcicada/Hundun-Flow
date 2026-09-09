@@ -3289,6 +3289,10 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
 
   const ConstFieldView direction = as_const(input);
   const ConstFieldView delta_t = as_const(delta_temperature);
+  const std::array<ConstFaceFieldView, 3U> directional_faces{
+      as_const(workspace_.directional_enthalpy.x),
+      as_const(workspace_.directional_enthalpy.y),
+      as_const(workspace_.directional_enthalpy.z)};
   const auto evaluate = [&](Int3 cell) noexcept {
     if (activity_.cells.size != 0U &&
         activity_.cells.data[cell_offset(cells, cell)] == 0U) {
@@ -3322,9 +3326,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
       const ConstFaceFieldView flux =
           select_face(target_flux_.x, target_flux_.y, target_flux_.z, axis);
       const ConstFaceFieldView face_direction =
-          select_face(as_const(workspace_.directional_enthalpy.x),
-                      as_const(workspace_.directional_enthalpy.y),
-                      as_const(workspace_.directional_enthalpy.z), axis);
+          directional_faces[static_cast<std::size_t>(axis)];
       if (active_face(activity_, axis, cells, plus))
         value += flux.unchecked(plus) * face_direction.unchecked(plus);
       if (active_face(activity_, axis, cells, cell))

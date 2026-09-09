@@ -74,11 +74,37 @@ inline Status cartesian_viscous_heating(const CartesianKernelPlan& kernels,
       const Int3 face = viscous_offset(cell, a, side);
       const Int3 left = viscous_offset(face, a, -1);
       const auto normal = a == 0U ? face.x : (a == 1U ? face.y : face.z);
+      // All three traction components share these face quantities. Keep the
+      // scalar traction formula and component accumulation order unchanged.
+      const bool uniform = kernels.geometry_kind() == GeometryKind::uniform;
+      const double ml = viscosity.unchecked(left, 0U);
+      const double mr = viscosity.unchecked(face, 0U);
+      const double weight =
+          ml >= 0.0 && mr >= 0.0 && (ml == 0.0 || mr == 0.0)
+              ? 0.0 : positive_transmissibility(kernels, viscosity, axis, face);
+      const double mu_face = uniform
+          ? metric_interpolate_material_face<true>(kernels, a, normal, ml, mr)
+          : metric_interpolate_material_face<false>(kernels, a, normal, ml, mr);
+      const auto face_gradient = [&](std::uint8_t c) noexcept {
+        return uniform
+            ? metric_interpolate_face<true>(kernels, a, normal,
+                  gradient.unchecked(left, c), gradient.unchecked(face, c))
+            : metric_interpolate_face<false>(kernels, a, normal,
+                  gradient.unchecked(left, c), gradient.unchecked(face, c));
+      };
+      const double divergence =
+          face_gradient(0U) + face_gradient(4U) + face_gradient(8U);
+      const double area = face_area(kernels, axis, face);
       for (std::uint8_t c = 0U; c < 3U; ++c) {
         const double face_velocity = interpolate_face(kernels, axis, normal,
             velocity.unchecked(left, c), velocity.unchecked(face, c));
-        const double traction = viscous_face_traction_area(
-            kernels, velocity, gradient, viscosity, axis, face, c);
+        const double transpose =
+            face_gradient(static_cast<std::uint8_t>(3U * a + c));
+        const double cross =
+            mu_face * (transpose - (a == c ? (2.0 / 3.0) * divergence : 0.0));
+        const double traction =
+            weight * (velocity.unchecked(face, c) - velocity.unchecked(left, c)) +
+            cross * area;
         integral += (side == 1 ? 1.0 : -1.0) *
                     (face_velocity - (total_energy_work ? 0.0 :
                                          velocity.unchecked(cell, c))) * traction;
