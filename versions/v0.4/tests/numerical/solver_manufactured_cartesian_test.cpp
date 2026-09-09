@@ -826,6 +826,29 @@ bool test_subnormal_convection_reconstruction() {
   return passed;
 }
 
+bool test_tvd_trace_endpoint() {
+  bool passed=true;
+  for(bool stretched:{false,true}) {
+    KernelFixture f;
+    if(!expect(make_fixture(12,stretched,f,ConvectionScheme::tvd2),"trace endpoint fixture compiles")) return false;
+    auto q=make_field(98U,f.patch.cells,1U,2U,909U);
+    for(int axis=0;axis<3;++axis) for(int sign:{-1,1}) {
+      for(int z=-2;z<14;++z) for(int y=-2;y<14;++y) for(int x=-2;x<14;++x) {
+        const int normal=axis==0 ? x : axis==1 ? y : z;
+        const int distance=sign>0 ? normal-5 : 4-normal;
+        q.view.unchecked({x,y,z},0U)=distance<0 ? 1e-49 : distance==0 ? 1e-53 : distance==1 ? 1e-57 : 0.0;
+      }
+      Int3 face{6,6,6}; (axis==0 ? face.x : axis==1 ? face.y : face.z)=sign>0 ? 6 : 4;
+      double value{};
+      const auto status=reconstruct_cartesian_convection_face(f.kernels,ConvectionScheme::tvd2,
+          as_const(q.view),0U,static_cast<CartesianAxis>(axis),face,sign,value);
+      passed &= expect(status && std::abs(value/1e-57-1.0)<=2.0*std::numeric_limits<double>::epsilon(),
+          "active MC endpoint retains the neighbor trace value without donor cancellation");
+    }
+  }
+  return passed;
+}
+
 bool test_tvd_stretched_face_envelope() {
   bool passed=true;
   for(int axis=0;axis<3;++axis) {
@@ -958,6 +981,7 @@ int main(int argc, char** argv) {
       ConvectionScheme::tvd2, "TVD rejects a one-ghost transported field");
   passed &= test_stretched_affine_and_harmonic_mutation();
   passed &= test_tvd_stretched_face_envelope();
+  passed &= test_tvd_trace_endpoint();
   passed &= test_trace_transport_rescaling();
   passed &= test_subnormal_convection_reconstruction();
   passed &= test_tvd_search_diagonal_response();

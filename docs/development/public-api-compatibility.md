@@ -75,3 +75,9 @@ bind the new arithmetic; create development V1 starts with the matching importer
 or use an explicitly supported recovery policy. The original GTMC V1 source
 was retained, and the mainline importer regenerated a matching V1 start with
 zero field/flux readback difference. No restart manifest was edited.
+
+### GTMC TVD 端点算术
+
+MC 活动端点改用与限制器代数等价的邻居加权表达式，直接和缓存方向导数
+同步更新。公开类型与签名保持一致；方法历史签名增加 `stable-tvd-endpoint-v1`，
+重启输入按新方法重新导入。

@@ -71,7 +71,7 @@ method_history_signature(bool transported_scalars, bool reacting = false,
       "thermal-inverse-representable-v1;thermal-inverse-newton-polish-v1;stationary-ibm-placeholder-v1;"
       "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
       "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2;"
-      "physical-inlet-face-thermophysics-v1;generic-thermal-neighbor-material-v1;compatible-viscous-face-heating-v1;paired-physical-viscosity-v1;h-primary-conservative-total-energy-inert-v1;total-energy-typed-temporal-response-v1;actual-face-metric-limiter-v1;trace-face-rate-arithmetic-v1;reference-covariant-enthalpy-convection-v1;reference-covariant-enthalpy-predictor-v1;subnormal-face-reconstruction-v1;physical-ibm-species-row-v1")) {
+      "physical-inlet-face-thermophysics-v1;generic-thermal-neighbor-material-v1;compatible-viscous-face-heating-v1;paired-physical-viscosity-v1;h-primary-conservative-total-energy-inert-v1;total-energy-typed-temporal-response-v1;actual-face-metric-limiter-v1;trace-face-rate-arithmetic-v1;reference-covariant-enthalpy-convection-v1;reference-covariant-enthalpy-predictor-v1;subnormal-face-reconstruction-v1;stable-tvd-endpoint-v1;physical-ibm-species-row-v1")) {
     hash ^= static_cast<unsigned char>(byte);
     hash *= UINT64_C(1099511628211);
   }
