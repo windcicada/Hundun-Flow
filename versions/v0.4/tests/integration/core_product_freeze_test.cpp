@@ -631,7 +631,7 @@ bool test_live_thermal_halo_resource_contract() {
   std::size_t candidate_finalizer_bytes = 0U;
   std::size_t force_bytes = 0U;
   const bool sized =
-      detail::product_halo_bytes(cells, 2U, 1U, thermal_bytes) &&
+      detail::product_halo_bytes(cells, 13U, 1U, thermal_bytes) &&
       detail::product_halo_bytes(cells, 6U, 2U, turbulence_bytes) &&
       detail::product_halo_bytes(cells, 8U, 2U, pressure_bytes) &&
       detail::product_halo_bytes(cells, 1U, 1U,

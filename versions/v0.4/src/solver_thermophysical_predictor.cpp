@@ -9,6 +9,8 @@
 #include "solver_mass_source_detail.hpp"
 #include "solver_scalar_boundary_detail.hpp"
 #include "solver_thermophysical_predictor_detail.hpp"
+#include "solver_mixture_enthalpy_convection_detail.hpp"
+#include "solver_ibm_scalar_transport_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -226,9 +228,11 @@ std::uint64_t predictor_state_hash(
   }
   mix_view(input.density_accepted);
   mix_view(input.enthalpy_accepted);
+  if(input.temperature_accepted.base!=nullptr) mix_view(input.temperature_accepted);
   if (input.bdf.order == 2U) {
     mix_view(input.density_previous);
     mix_view(input.enthalpy_previous);
+    if(input.temperature_previous.base!=nullptr) mix_view(input.temperature_previous);
   }
   for (std::size_t i = 0U; i < input.species_accepted.size; ++i) {
     mix_view(input.species_accepted.data[i]);
@@ -671,6 +675,16 @@ Status ThermophysicalPredictorPlan::predict(
              : false)) {
       reject_plan();
     }
+  }
+
+  if(local && mixture_enthalpy_!=nullptr) {
+    const auto authority=input.temperature_ghosts;
+    if(!ghost_authority_matches(authority.accepted,input.temperature_accepted,
+        input.geometry,input.boundary,1U) ||
+        authority.accepted.exchange_plan!=exchange_plan ||
+        (second_order && (!ghost_authority_matches(authority.previous,input.temperature_previous,
+            input.geometry,input.boundary,1U) || authority.previous.exchange_plan!=exchange_plan)))
+      reject_plan();
   }
 
   ThermophysicalPredictorCertificate high_certificate;
@@ -1326,6 +1340,10 @@ Status ThermophysicalPredictorPlan::predict(
         break;
       }
     }
+    if(mixture_enthalpy_!=nullptr &&
+        (output_aliases_input(candidate,input.temperature_accepted) ||
+         (second_order && output_aliases_input(candidate,input.temperature_previous))))
+      local={StatusCode::invalid_plan,kPredictorPlan};
     for (std::size_t index = 0U; index < species_count && local; ++index) {
       if (detail::field_views_overlap(
               as_const(candidate),
@@ -3155,6 +3173,12 @@ Status ThermophysicalPredictorPlan::predict_high_local(
              post.passive_ghosts.size) {
     return {StatusCode::invalid_plan, kPredictorPlan};
   }
+  if(mixture_enthalpy_!=nullptr &&
+      (!detail::MixtureEnthalpyConvection::valid_temperature(*mixture_enthalpy_,input.temperature_accepted) ||
+       (second_order && !detail::MixtureEnthalpyConvection::valid_temperature(*mixture_enthalpy_,input.temperature_previous)) ||
+       !detail::finite_face_neighbour_slabs(input.temperature_accepted,{{0,0,0},cells_},0U,1U) ||
+       (second_order && !detail::finite_face_neighbour_slabs(input.temperature_previous,{{0,0,0},cells_},0U,1U))))
+    return {StatusCode::invalid_plan,kPredictorPlan};
 
   for (std::size_t i = 0U; i < species_.size(); ++i) {
     const PredictorRateHistory rate =
@@ -3322,6 +3346,9 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         aliases_any_output(input.enthalpy_nonadvective_rhs.previous)))) {
     return {StatusCode::invalid_plan, kPredictorPlan};
   }
+  if(mixture_enthalpy_!=nullptr && (aliases_any_output(input.temperature_accepted) ||
+      (second_order && aliases_any_output(input.temperature_previous))))
+    return {StatusCode::invalid_plan,kPredictorPlan};
   for (std::size_t i = 0U; i < species_.size(); ++i) {
     if (source_aliases_output(input.species_nonadvective_rhs.data[i].current) ||
         aliases_any_output(input.species_accepted.data[i]) ||
@@ -3681,10 +3708,20 @@ Status ThermophysicalPredictorPlan::predict_high_local(
       return status;
     }
     if (immersed_interface != nullptr && inlet_field != nullptr) {
-      status = immersed_interface->add_source_convection_correction(
+      status = inlet_field->kind==IbmInterfaceInletFieldKind::independent_species
+          ? detail::IbmScalarTransport::convection(*immersed_interface,
+              inlet_field->component,convection,accepted,input.mass_flux_accepted,
+              box,output.accepted_advection_workspace)
+          : immersed_interface->add_source_convection_correction(
           *inlet_field, convection, accepted, 1.0,
           output.accepted_advection_workspace, box);
       if (!status) return status;
+    }
+    if(mixture_enthalpy_!=nullptr && field_kind==ThermophysicalPredictorFailureField::enthalpy) {
+      status=detail::MixtureEnthalpyConvection::add_predictor_correction(
+          *mixture_enthalpy_,accepted,input.temperature_accepted,input.species_accepted,
+          input.mass_flux_accepted,immersed_interface,box,output.accepted_advection_workspace);
+      if(!status) return status;
     }
     if (second_order) {
       const std::array<ConstFieldView, 1U> previous_reads{previous};
@@ -3709,10 +3746,20 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         return status;
       }
       if (immersed_interface != nullptr && inlet_field != nullptr) {
-        status = immersed_interface->add_source_convection_correction(
+        status = inlet_field->kind==IbmInterfaceInletFieldKind::independent_species
+            ? detail::IbmScalarTransport::convection(*immersed_interface,
+                inlet_field->component,convection,previous,input.mass_flux_previous,
+                box,output.previous_advection_workspace)
+            : immersed_interface->add_source_convection_correction(
             *inlet_field, convection, previous, 1.0,
             output.previous_advection_workspace, box);
         if (!status) return status;
+      }
+      if(mixture_enthalpy_!=nullptr && field_kind==ThermophysicalPredictorFailureField::enthalpy) {
+        status=detail::MixtureEnthalpyConvection::add_predictor_correction(
+            *mixture_enthalpy_,previous,input.temperature_previous,input.species_previous,
+            input.mass_flux_previous,immersed_interface,box,output.previous_advection_workspace);
+        if(!status) return status;
       }
     }
 

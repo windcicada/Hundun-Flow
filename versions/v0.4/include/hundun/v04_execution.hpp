@@ -555,8 +555,9 @@ enum class FrozenConvectionLinearizationPolicy : std::uint8_t {
 };
 
 // Opaque, cold-compiled limiter authority for repeated directional actions.
-// Each uint16 entry encodes the exact left/right limited-central branch and a
-// semismooth-generalized bit.  It is metadata, not a transported FP32 field;
+// Each uint16 entry encodes the exact limited-central left/right branches or
+// TVD donor/branch and a semismooth-generalized bit. It is metadata, not a
+// transported FP32 field;
 // all numerical values and arithmetic remain FP64.
 struct FrozenConvectionBranchOutput {
   Span<std::uint16_t> values{};
@@ -574,6 +575,8 @@ struct FrozenConvectionBranchPlan {
       FrozenConvectionLinearizationPolicy::classical_active_branch};
   std::uint64_t generalized_face_count{};
   bool classical_everywhere{};
+  // False preserves the legacy LC2 aggregate; true certifies a TVD donor.
+  bool tvd_donor{};
 
   bool valid() const noexcept {
     return values.data != nullptr && values.size != 0U && cells.x > 0 &&
@@ -588,9 +591,31 @@ struct FrozenConvectionBranchPlan {
   }
 };
 
-// limited_central2-only optimized route.  Other schemes retain the generic
-// derivative path.  Compilation bitwise-checks the frozen nonlinear face field
-// before publishing any branch byte.
+// Optimized LC2/TVD2 route. Compilation bitwise-checks the frozen nonlinear
+// face field before publishing any branch byte. Central2 retains its generic
+// derivative path. The explicit LC2 entry points below remain compatible.
+Status compile_frozen_limited_convection_branches(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView target_flux, ConstFieldView target,
+    std::uint8_t target_component, FrozenConvectionContext context,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen,
+    FrozenConvectionBranchOutput output,
+    FrozenConvectionBranchPlan& branches) noexcept;
+
+Status validate_frozen_limited_convection_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    const FrozenConvectionFaceField& frozen,
+    const FrozenConvectionBranchPlan& branches) noexcept;
+
+Status apply_frozen_limited_convection_branches(
+    const CartesianKernelPlan& plan,
+    const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
+    std::uint8_t variation_component,
+    FrozenConvectionFaceOutput output) noexcept;
+
 Status compile_frozen_limited_central2_branches(
     const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
     ConstFieldView target, std::uint8_t target_component,

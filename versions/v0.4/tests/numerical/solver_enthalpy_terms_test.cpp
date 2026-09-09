@@ -834,10 +834,18 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
   reset_fields();
   const std::array<double, 9U> gradient_values{
       1.0, 2.0, 0.0, -3.0, 4.0, 0.0, 0.0, 0.0, -2.0};
-  for (std::int32_t k = 0; k < cells.z; ++k) {
-    for (std::int32_t j = 0; j < cells.y; ++j) {
-      for (std::int32_t i = 0; i < cells.x; ++i) {
+  // Supply a realizable affine velocity as well as its gradient: compatible
+  // heating takes its normal traction from the actual momentum face stencil.
+  for (std::int32_t k = -1; k < cells.z + 1; ++k) {
+    for (std::int32_t j = -1; j < cells.y + 1; ++j) {
+      for (std::int32_t i = -1; i < cells.x + 1; ++i) {
         mu.view.unchecked({i, j, k}, 0U) = viscosity;
+        const std::array<double, 3U> position{
+            (i + 0.5) * spacing, (j + 0.5) * spacing, (k + 0.5) * spacing};
+        for (std::uint8_t component = 0U; component < 3U; ++component)
+          for (std::uint8_t axis = 0U; axis < 3U; ++axis)
+            velocity.view.unchecked({i, j, k}, component) +=
+                gradient_values[3U * component + axis] * position[axis];
         for (std::uint8_t component = 0U; component < 9U; ++component) {
           gradients.view.unchecked({i, j, k}, component) =
               gradient_values[component];

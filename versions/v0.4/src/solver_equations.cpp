@@ -124,6 +124,8 @@ PlanFingerprint compute_semantic_fingerprint(
   hash = hash_mix(hash, limiter_policy);
   if (spec.physical_inlet_material)
     hash=hash_mix(hash,UINT64_C(0x494e4c4554464331));
+  if (spec.conservative_total_energy)
+    hash=hash_mix(hash,UINT64_C(0x544f54414c453031));
   hash = hash_mix(hash, static_cast<std::uint8_t>(geometry.kind()));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().x));
   hash = hash_mix(hash, static_cast<std::uint32_t>(geometry.global_cells().y));
@@ -512,6 +514,9 @@ void EquationPlanSet::reset() noexcept {
   momentum_.contributions_.clear();
   momentum_.fingerprint_ = 0U;
   enthalpy_.kernels_ = nullptr;
+  enthalpy_.thermodynamics_ = ThermodynamicsPlan{};
+  enthalpy_.species_specs_.clear();
+  enthalpy_.conservative_total_energy_ = false;
   enthalpy_.contributions_.clear();
   enthalpy_.fingerprint_ = 0U;
   species_.kernels_ = nullptr;
@@ -528,6 +533,7 @@ void EquationPlanSet::reset() noexcept {
   scalars_.fingerprint_ = 0U;
   pressure_reference_ = {};
   thermophysical_predictor_.kernels_ = nullptr;
+  thermophysical_predictor_.mixture_enthalpy_ = nullptr;
   thermophysical_predictor_.cells_ = {};
   thermophysical_predictor_.patch_begin_ = {};
   thermophysical_predictor_.density_ = 0U;
@@ -573,6 +579,9 @@ void EquationPlanSet::rebind() noexcept {
   scalars_.kernels_ = kernels;
   pressure_reference_.kernels_ = kernels;
   thermophysical_predictor_.kernels_ = kernels;
+  thermophysical_predictor_.mixture_enthalpy_ =
+      enthalpy_.conservative_total_energy_ && !enthalpy_.species_specs_.empty()
+          ? &enthalpy_ : nullptr;
 }
 
 void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
@@ -601,6 +610,8 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
   enthalpy_.cells_ = other.enthalpy_.cells_;
   enthalpy_.unity_lewis_total_enthalpy_ =
       other.enthalpy_.unity_lewis_total_enthalpy_;
+  enthalpy_.thermodynamics_ = std::move(other.enthalpy_.thermodynamics_);
+  enthalpy_.species_specs_ = std::move(other.enthalpy_.species_specs_);
   enthalpy_.density_ = other.enthalpy_.density_;
   enthalpy_.velocity_ = other.enthalpy_.velocity_;
   enthalpy_.pressure_ = other.enthalpy_.pressure_;
@@ -608,6 +619,9 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
   enthalpy_.temperature_ = other.enthalpy_.temperature_;
   enthalpy_.velocity_gradient_ = other.enthalpy_.velocity_gradient_;
   enthalpy_.convection_ = other.enthalpy_.convection_;
+  enthalpy_.kinetic_convection_ = other.enthalpy_.kinetic_convection_;
+  enthalpy_.species_convection_ = other.enthalpy_.species_convection_;
+  enthalpy_.conservative_total_energy_ = other.enthalpy_.conservative_total_energy_;
   enthalpy_.convection_reach_ = other.enthalpy_.convection_reach_;
   enthalpy_.contributions_ = std::move(other.enthalpy_.contributions_);
   enthalpy_.geometry_revision_ = other.enthalpy_.geometry_revision_;
@@ -846,6 +860,10 @@ Status EquationPlanSet::compile(
     candidate.enthalpy_.cells_ = patch.cells;
     candidate.enthalpy_.unity_lewis_total_enthalpy_ =
         spec.unity_lewis_total_enthalpy;
+    candidate.enthalpy_.thermodynamics_ = thermodynamics;
+    for (std::size_t index = 0U; index < spec.scalars.size; ++index)
+      if (spec.scalars.data[index].role == TransportedScalarRole::species)
+        candidate.enthalpy_.species_specs_.push_back(spec.scalars.data[index]);
     candidate.enthalpy_.density_ = spec.density;
     candidate.enthalpy_.velocity_ = spec.velocity;
     candidate.enthalpy_.pressure_ = spec.pressure_perturbation;
@@ -853,6 +871,9 @@ Status EquationPlanSet::compile(
     candidate.enthalpy_.temperature_ = spec.temperature;
     candidate.enthalpy_.velocity_gradient_ = spec.velocity_gradient;
     candidate.enthalpy_.convection_ = schemes.enthalpy();
+    candidate.enthalpy_.kinetic_convection_ = schemes.momentum();
+    candidate.enthalpy_.species_convection_ = schemes.species();
+    candidate.enthalpy_.conservative_total_energy_ = spec.conservative_total_energy;
     candidate.enthalpy_.convection_reach_ =
         convection_reach(schemes.enthalpy());
     candidate.enthalpy_.geometry_revision_ = geometry.topology_revision();
@@ -943,7 +964,10 @@ Status EquationPlanSet::compile(
     candidate.thermophysical_predictor_.enthalpy_reach_ =
         convection_reach(schemes.enthalpy());
     candidate.thermophysical_predictor_.species_reach_ =
-        convection_reach(schemes.species());
+        spec.conservative_total_energy
+            ? std::max(convection_reach(schemes.species()),
+                       convection_reach(schemes.enthalpy()))
+            : convection_reach(schemes.species());
     candidate.thermophysical_predictor_.passive_scalar_reach_ =
         convection_reach(schemes.passive_scalar());
     candidate.thermophysical_predictor_.boundary_ = &boundary;

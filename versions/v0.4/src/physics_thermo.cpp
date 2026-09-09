@@ -542,6 +542,29 @@ Status ThermodynamicsPlan::mixture_enthalpy(
   return {};
 }
 
+Status ThermodynamicsPlan::independent_species_enthalpy_difference(
+    std::size_t independent_index, double temperature,
+    double& difference) const noexcept {
+  if (fingerprint_ == 0U || independent_index >= independent_to_species_.size())
+    return {StatusCode::invalid_plan, kThermoSpeciesBounds};
+  if (!finite(temperature) || temperature < minimum_temperature_ ||
+      temperature > maximum_temperature_)
+    return {StatusCode::numerical_failure, kThermoRange};
+  const auto enthalpy = [&](std::size_t species) noexcept {
+    const bool low = temperature <= temperature_switch_[species];
+    std::array<double, 7U> coefficients{};
+    for (std::size_t index = 0U; index < coefficients.size(); ++index)
+      coefficients[index] = (low ? nasa_low_[index] : nasa_high_[index])[species];
+    return species_h(universal_gas_constant_, temperature,
+                     inverse_molecular_weight_[species], coefficients);
+  };
+  const double value = enthalpy(independent_to_species_[independent_index]) -
+                       enthalpy(dependent_species_);
+  if (!finite(value)) return {StatusCode::numerical_failure, kThermoRange};
+  difference = value;
+  return {};
+}
+
 double ThermodynamicsPlan::enthalpy_evaluation_error(
     double temperature, Span<const double> fractions,
     double dependent) const noexcept {

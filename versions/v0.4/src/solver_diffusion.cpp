@@ -17,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <type_traits>
+#include "solver_conservative_energy_detail.hpp"
 
 namespace hundun::v04 {
 namespace {
@@ -76,12 +77,34 @@ inline std::int32_t axis_index(Int3 value) noexcept {
   }
 }
 
-inline double minmod(double left, double right) noexcept {
+template<class Scalar>
+inline Scalar minmod(Scalar left, Scalar right) noexcept {
   if (left == 0.0 || right == 0.0 ||
       std::signbit(left) != std::signbit(right)) {
     return 0.0;
   }
   return std::copysign(std::min(std::abs(left), std::abs(right)), left);
+}
+
+// Keep ordinary binary64 arithmetic unchanged. A representable rate density
+// must not be lost when a face integral underflows before division by the
+// small cell volume. Reaccumulate only that exceptional product range.
+inline double transport_product_sum_rate(const std::array<double,6U>& a,
+    const std::array<double,6U>& b, double inverse_volume) noexcept {
+  std::array<double,6U> product{};
+  bool underflow=false;
+  for(std::size_t i=0U;i<6U;++i) {
+    product[i]=a[i]*b[i];
+    underflow |= a[i]!=0.0 && b[i]!=0.0 &&
+        std::abs(product[i])<std::numeric_limits<double>::min();
+  }
+  const double raw=product[0]-product[1]+product[2]-product[3]+product[4]-product[5];
+  if(!underflow) return raw*inverse_volume;
+  const long double precise=static_cast<long double>(a[0])*b[0]-
+      static_cast<long double>(a[1])*b[1]+static_cast<long double>(a[2])*b[2]-
+      static_cast<long double>(a[3])*b[3]+static_cast<long double>(a[4])*b[4]-
+      static_cast<long double>(a[5])*b[5];
+  return static_cast<double>(precise*inverse_volume);
 }
 
 enum class LimitedSlopeBranch : std::uint8_t {
@@ -92,23 +115,26 @@ enum class LimitedSlopeBranch : std::uint8_t {
   nondifferentiable = 5U
 };
 
-struct LimitedSlopeEvaluation {
-  double value{};
+template<class Scalar>
+struct LimitedSlopeEvaluationValue {
+  Scalar value{};
   LimitedSlopeBranch branch{LimitedSlopeBranch::nondifferentiable};
 };
+using LimitedSlopeEvaluation=LimitedSlopeEvaluationValue<double>;
 
-bool branch_tie(double left, double right) noexcept {
-  const double scale = std::max(std::abs(left), std::abs(right));
+template<class Scalar>
+bool branch_tie(Scalar left, Scalar right) noexcept {
+  const Scalar scale = std::max(std::abs(left), std::abs(right));
   return left == right ||
          (scale > 0.0 &&
           std::abs(left - right) <=
               64.0 * std::numeric_limits<double>::epsilon() * scale);
 }
 
-template <bool Uniform, std::size_t Axis>
-inline LimitedSlopeEvaluation evaluate_limited_slope_values(
-    const CartesianKernelPlan& plan, std::int32_t normal, double q_minus,
-    double q_centre, double q_plus) noexcept {
+template <bool Uniform, std::size_t Axis, class Scalar>
+inline LimitedSlopeEvaluationValue<Scalar> evaluate_limited_slope_values(
+    const CartesianKernelPlan& plan, std::int32_t normal, Scalar q_minus,
+    Scalar q_centre, Scalar q_plus) noexcept {
   const double centre_coordinate =
       detail::metric_centre<Uniform>(plan, Axis, normal);
   const double left_distance =
@@ -117,13 +143,22 @@ inline LimitedSlopeEvaluation evaluate_limited_slope_values(
   const double right_distance =
       detail::metric_centre<Uniform>(plan, Axis, normal + 1) -
       centre_coordinate;
-  const double delta_left = (q_centre - q_minus) / left_distance;
-  const double delta_right = (q_plus - q_centre) / right_distance;
-  const double centred =
+  const Scalar delta_left = (q_centre - q_minus) / left_distance;
+  const Scalar delta_right = (q_plus - q_centre) / right_distance;
+  const Scalar centred =
       (right_distance * delta_left + left_distance * delta_right) /
       (left_distance + right_distance);
-  const double monotone = minmod(2.0 * delta_left, 2.0 * delta_right);
-  LimitedSlopeEvaluation result{
+  // The MC endpoint bounds are distances to the actual donor-cell faces.
+  // 2*centre-gradient is equivalent only on a uniform mesh; on a wide cell
+  // beside a narrow one it can extrapolate past a nonnegative neighbour.
+  const Scalar left_bound = Uniform ? 2.0 * delta_left :
+      (q_centre - q_minus) /
+          (centre_coordinate - detail::metric_face<Uniform>(plan, Axis, normal));
+  const Scalar right_bound = Uniform ? 2.0 * delta_right :
+      (q_plus - q_centre) /
+          (detail::metric_face<Uniform>(plan, Axis, normal + 1) - centre_coordinate);
+  const Scalar monotone = minmod(left_bound, right_bound);
+  LimitedSlopeEvaluationValue<Scalar> result{
       plan.limiter() * minmod(centred, monotone),
       LimitedSlopeBranch::nondifferentiable};
   if (!std::isfinite(result.value) || !std::isfinite(delta_left) ||
@@ -142,8 +177,8 @@ inline LimitedSlopeEvaluation evaluate_limited_slope_values(
     result.branch = LimitedSlopeBranch::zero;
     return result;
   }
-  const double centred_magnitude = std::abs(centred);
-  const double monotone_magnitude = std::abs(monotone);
+  const Scalar centred_magnitude = std::abs(centred);
+  const Scalar monotone_magnitude = std::abs(monotone);
   if (branch_tie(centred_magnitude, monotone_magnitude)) {
     return result;
   }
@@ -151,8 +186,8 @@ inline LimitedSlopeEvaluation evaluate_limited_slope_values(
     result.branch = LimitedSlopeBranch::centred;
     return result;
   }
-  const double left_magnitude = std::abs(delta_left);
-  const double right_magnitude = std::abs(delta_right);
+  const Scalar left_magnitude = std::abs(left_bound);
+  const Scalar right_magnitude = std::abs(right_bound);
   if (branch_tie(left_magnitude, right_magnitude)) {
     return result;
   }
@@ -162,25 +197,30 @@ inline LimitedSlopeEvaluation evaluate_limited_slope_values(
   return result;
 }
 
-template <bool Uniform, std::size_t Axis>
-inline double limited_slope_values(const CartesianKernelPlan& plan,
-                                   std::int32_t normal, double q_minus,
-                                   double q_centre, double q_plus) noexcept {
+template <bool Uniform, std::size_t Axis, class Scalar>
+inline Scalar limited_slope_values(const CartesianKernelPlan& plan,
+                                   std::int32_t normal, Scalar q_minus,
+                                   Scalar q_centre, Scalar q_plus) noexcept {
   return evaluate_limited_slope_values<Uniform, Axis>(
              plan, normal, q_minus, q_centre, q_plus)
       .value;
 }
 
-template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme>
-inline double reconstructed_face(const CartesianKernelPlan& plan,
-                                 ConstFieldView field,
+template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme, class Field>
+inline auto reconstructed_face(const CartesianKernelPlan& plan,
+                                 Field field,
                                  std::uint8_t component_id, Int3 face,
-                                 double mass_rate) noexcept {
+                                 double mass_rate, bool* trace=nullptr) noexcept {
+  using Scalar=std::decay_t<decltype(field.unchecked(face,component_id))>;
   const std::int32_t normal = axis_index<Axis>(face);
   const Int3 left = offset_axis<Axis>(face, -1);
   const Int3 right = face;
-  const double q_left = field.unchecked(left, component_id);
-  const double q_right = field.unchecked(right, component_id);
+  const Scalar q_left = field.unchecked(left, component_id);
+  const Scalar q_right = field.unchecked(right, component_id);
+  if(trace!=nullptr &&
+      ((q_left!=0.0 && std::abs(q_left)<std::numeric_limits<double>::min()) ||
+       (q_right!=0.0 && std::abs(q_right)<std::numeric_limits<double>::min())))
+    *trace=true;
   if constexpr (Scheme == ConvectionScheme::central2) {
     return detail::metric_interpolate_face<Uniform>(
         plan, Axis, normal, q_left, q_right);
@@ -188,24 +228,56 @@ inline double reconstructed_face(const CartesianKernelPlan& plan,
 
   const double face_coordinate =
       detail::metric_face<Uniform>(plan, Axis, normal);
-  const double q_left_left =
+  const Scalar q_left_left =
       field.unchecked(offset_axis<Axis>(left, -1), component_id);
-  const double q_right_right =
+  const Scalar q_right_right =
       field.unchecked(offset_axis<Axis>(right, 1), component_id);
-  const double left_reconstructed =
+  const Scalar left_reconstructed =
       q_left + limited_slope_values<Uniform, Axis>(
                    plan, normal - 1, q_left_left, q_left, q_right) *
                    (face_coordinate -
                     detail::metric_centre<Uniform>(plan, Axis, normal - 1));
-  const double right_reconstructed =
+  const Scalar right_reconstructed =
       q_right + limited_slope_values<Uniform, Axis>(
                     plan, normal, q_left, q_right, q_right_right) *
           (face_coordinate -
            detail::metric_centre<Uniform>(plan, Axis, normal));
   if constexpr (Scheme == ConvectionScheme::tvd2) {
-    return mass_rate >= 0.0 ? left_reconstructed : right_reconstructed;
+    // The metric limiter guarantees this envelope in exact arithmetic.
+    // Keep a trace component nonnegative when the endpoint subtraction
+    // rounds by one ulp. This bounds the face reconstruction, never a state.
+    return std::clamp(mass_rate >= 0.0 ? left_reconstructed : right_reconstructed,
+                      std::min(q_left, q_right), std::max(q_left, q_right));
   }
   return 0.5 * (left_reconstructed + right_reconstructed);
+}
+
+// Widen only subnormal input stencils. The very same reconstruction/limiter
+// templates then retain fractional input ulps until rate-density rounding.
+// Cell fields, their binary64 storage and all normal-range arithmetic stay
+// unchanged. Widening only the later phi*q product would already be too late.
+struct ExtendedScalarView {
+  ConstFieldView field;
+  long double unchecked(Int3 c,std::uint8_t component) const noexcept {
+    return field.unchecked(c,component);
+  }
+};
+
+template<bool Uniform,ConvectionScheme Scheme>
+double extended_convection_rate(const CartesianKernelPlan& plan,
+    ConstFieldView field,std::uint8_t component,Int3 cell,
+    const std::array<double,6U>& rate,double inverse_volume) noexcept {
+  const ExtendedScalarView extended{field};
+  const auto face=[&](auto axis,Int3 index,double mass) {
+    return reconstructed_face<Uniform,decltype(axis)::value,Scheme>(plan,extended,component,index,mass);
+  };
+  const long double sum=static_cast<long double>(rate[0])*face(std::integral_constant<std::size_t,0U>{},{cell.x+1,cell.y,cell.z},rate[0])-
+      static_cast<long double>(rate[1])*face(std::integral_constant<std::size_t,0U>{},cell,rate[1])+
+      static_cast<long double>(rate[2])*face(std::integral_constant<std::size_t,1U>{},{cell.x,cell.y+1,cell.z},rate[2])-
+      static_cast<long double>(rate[3])*face(std::integral_constant<std::size_t,1U>{},cell,rate[3])+
+      static_cast<long double>(rate[4])*face(std::integral_constant<std::size_t,2U>{},{cell.x,cell.y,cell.z+1},rate[4])-
+      static_cast<long double>(rate[5])*face(std::integral_constant<std::size_t,2U>{},cell,rate[5]);
+  return static_cast<double>(sum*inverse_volume);
 }
 
 struct FaceBranchSelection {
@@ -238,8 +310,17 @@ inline FaceBranchSelection select_face_branches(
           target.unchecked(offset_axis<Axis>(right, 1), component));
   if constexpr (Scheme == ConvectionScheme::tvd2) {
     const bool left_donor = mass_rate >= 0.0;
-    const LimitedSlopeBranch selected =
+    LimitedSlopeBranch selected =
         left_donor ? left_slope.branch : right_slope.branch;
+    const double raw = left_donor
+        ? q_left + left_slope.value *
+            (detail::metric_face<Uniform>(plan, Axis, normal) -
+             detail::metric_centre<Uniform>(plan, Axis, normal - 1))
+        : q_right + right_slope.value *
+            (detail::metric_face<Uniform>(plan, Axis, normal) -
+             detail::metric_centre<Uniform>(plan, Axis, normal));
+    if (raw < std::min(q_left, q_right) || raw > std::max(q_left, q_right))
+      selected = LimitedSlopeBranch::nondifferentiable;
     const std::uint64_t code =
         UINT64_C(0x300) |
         (left_donor ? UINT64_C(0x80) : UINT64_C(0x40)) |
@@ -281,9 +362,13 @@ inline double directional_limited_slope_values(
              (right_distance * delta_left + left_distance * delta_right) /
              (left_distance + right_distance);
     case LimitedSlopeBranch::left_delta:
-      return plan.limiter() * 2.0 * delta_left;
+      return plan.limiter() * (Uniform ? 2.0 * delta_left :
+          (q_centre - q_minus) /
+              (centre_coordinate - detail::metric_face<Uniform>(plan, Axis, normal)));
     case LimitedSlopeBranch::right_delta:
-      return plan.limiter() * 2.0 * delta_right;
+      return plan.limiter() * (Uniform ? 2.0 * delta_right :
+          (q_plus - q_centre) /
+              (detail::metric_face<Uniform>(plan, Axis, normal + 1) - centre_coordinate));
     case LimitedSlopeBranch::nondifferentiable:
       break;
   }
@@ -934,7 +1019,7 @@ std::size_t compiled_branch_offset(Int3 cells, Int3 face) noexcept {
                   static_cast<std::size_t>(face.z));
 }
 
-template <bool Uniform, std::size_t Axis, bool Commit>
+template <bool Uniform, std::size_t Axis, bool Commit, ConvectionScheme Scheme>
 void compile_limited_branch_axis(
     const CartesianKernelPlan& plan, ConstFaceFluxView flux,
     ConstFieldView target, std::uint8_t target_component,
@@ -965,12 +1050,10 @@ void compile_limited_branch_axis(
           continue;
         }
         const double target_value =
-            reconstructed_face<Uniform, Axis,
-                               ConvectionScheme::limited_central2>(
+            reconstructed_face<Uniform, Axis, Scheme>(
                 plan, target, target_component, face, rate);
         const FaceBranchSelection selection =
-            select_face_branches<Uniform, Axis,
-                                 ConvectionScheme::limited_central2>(
+            select_face_branches<Uniform, Axis, Scheme>(
                 plan, target, target_component, face, rate);
         const bool generalized = !selection.differentiable;
         if (!std::isfinite(target_value)) {
@@ -1014,28 +1097,45 @@ void compile_limited_branch_axis(
   }
 }
 
-template <bool Uniform, bool Commit>
-void compile_limited_branch_faces(
+template <bool Uniform, bool Commit, ConvectionScheme Scheme>
+void compile_limited_branch_faces_for_scheme(
     const CartesianKernelPlan& plan, ConstFaceFluxView flux,
     ConstFieldView target, std::uint8_t target_component,
     FrozenConvectionLinearizationPolicy policy,
     const FrozenConvectionFaceField& frozen,
     std::uint16_t* output_values,
     DirectionalPreflightState& state) noexcept {
-  compile_limited_branch_axis<Uniform, 0U, Commit>(
+  compile_limited_branch_axis<Uniform, 0U, Commit, Scheme>(
       plan, flux, target, target_component, policy, frozen.x,
       frozen.fixed_faces, output_values, state);
   if (state.result == DirectionalPreflight::success)
-    compile_limited_branch_axis<Uniform, 1U, Commit>(
+    compile_limited_branch_axis<Uniform, 1U, Commit, Scheme>(
         plan, flux, target, target_component, policy, frozen.y,
         frozen.fixed_faces, output_values, state);
   if (state.result == DirectionalPreflight::success)
-    compile_limited_branch_axis<Uniform, 2U, Commit>(
+    compile_limited_branch_axis<Uniform, 2U, Commit, Scheme>(
         plan, flux, target, target_component, policy, frozen.z,
         frozen.fixed_faces, output_values, state);
 }
 
-template <bool Uniform, std::size_t Axis>
+template <bool Uniform, bool Commit>
+void compile_limited_branch_faces(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView flux, ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen, std::uint16_t* output_values,
+    DirectionalPreflightState& state) noexcept {
+  if (scheme == ConvectionScheme::tvd2)
+    compile_limited_branch_faces_for_scheme<Uniform, Commit,
+                                            ConvectionScheme::tvd2>(
+        plan, flux, target, target_component, policy, frozen, output_values, state);
+  else
+    compile_limited_branch_faces_for_scheme<Uniform, Commit,
+                                            ConvectionScheme::limited_central2>(
+        plan, flux, target, target_component, policy, frozen, output_values, state);
+}
+
+template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme>
 bool apply_limited_branch_axis(
     const CartesianKernelPlan& plan,
     const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
@@ -1055,6 +1155,41 @@ bool apply_limited_branch_axis(
             encoded & static_cast<std::uint16_t>(~kCompiledBranchGeneralized);
         const bool generalized =
             (encoded & kCompiledBranchGeneralized) != 0U;
+        if constexpr (Scheme == ConvectionScheme::tvd2) {
+          const auto slope_branch = static_cast<LimitedSlopeBranch>(
+              branch_code & UINT16_C(0x0f));
+          const auto donor_code = branch_code & UINT16_C(0x00f0);
+          if ((branch_code & UINT16_C(0xff00)) != UINT16_C(0x0300) ||
+              (donor_code != UINT16_C(0x0080) &&
+               donor_code != UINT16_C(0x0040)) ||
+              slope_branch < LimitedSlopeBranch::zero ||
+              slope_branch > LimitedSlopeBranch::nondifferentiable ||
+              generalized !=
+                  (slope_branch == LimitedSlopeBranch::nondifferentiable))
+            return false;
+          const bool left_donor = donor_code == UINT16_C(0x0080);
+          const Int3 donor = left_donor ? offset_axis<Axis>(face, -1) : face;
+          double value = variation.unchecked(donor, variation_component);
+          if (generalized) {
+            if (branches.policy != FrozenConvectionLinearizationPolicy::
+                                       semismooth_generalized_zero_slope)
+              return false;
+          } else {
+            const std::int32_t normal = axis_index<Axis>(donor);
+            const double slope = directional_limited_slope_values<Uniform, Axis>(
+                plan, normal,
+                variation.unchecked(offset_axis<Axis>(donor, -1), variation_component),
+                value,
+                variation.unchecked(offset_axis<Axis>(donor, 1), variation_component),
+                slope_branch);
+            value = value + slope *
+                (detail::metric_face<Uniform>(plan, Axis, axis_index<Axis>(face)) -
+                 detail::metric_centre<Uniform>(plan, Axis, normal));
+          }
+          if (!std::isfinite(value)) return false;
+          output.unchecked(face) = value;
+          continue;
+        }
         const LimitedSlopeBranch left_branch =
             static_cast<LimitedSlopeBranch>(branch_code & UINT16_C(0x0f));
         const LimitedSlopeBranch right_branch = static_cast<LimitedSlopeBranch>(
@@ -1125,7 +1260,7 @@ bool apply_limited_branch_axis(
   return true;
 }
 
-template <bool Uniform, std::size_t Axis>
+template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme>
 bool verify_limited_branch_axis(
     const CartesianKernelPlan& plan, ConstFaceFluxView flux,
     ConstFieldView target, std::uint8_t target_component,
@@ -1150,8 +1285,7 @@ bool verify_limited_branch_axis(
         if (encoded == kCompiledBranchFixed) return false;
         const double rate = face_rate<Axis>(flux, face);
         const FaceBranchSelection selection =
-            select_face_branches<Uniform, Axis,
-                                 ConvectionScheme::limited_central2>(
+            select_face_branches<Uniform, Axis, Scheme>(
                 plan, target, target_component, face, rate);
         const bool generalized = !selection.differentiable;
         if (generalized &&
@@ -1169,6 +1303,38 @@ bool verify_limited_branch_axis(
     }
   }
   return true;
+}
+
+template <bool Uniform, ConvectionScheme Scheme>
+bool verify_limited_branch_faces(
+    const CartesianKernelPlan& plan, ConstFaceFluxView flux,
+    ConstFieldView target, std::uint8_t target_component,
+    const FrozenConvectionFaceField& frozen,
+    const FrozenConvectionBranchPlan& branches) noexcept {
+  std::size_t next_fixed = 0U;
+  return verify_limited_branch_axis<Uniform, 0U, Scheme>(
+             plan, flux, target, target_component, branches.policy, branches,
+             frozen.x, frozen.fixed_faces, next_fixed) &&
+         verify_limited_branch_axis<Uniform, 1U, Scheme>(
+             plan, flux, target, target_component, branches.policy, branches,
+             frozen.y, frozen.fixed_faces, next_fixed) &&
+         verify_limited_branch_axis<Uniform, 2U, Scheme>(
+             plan, flux, target, target_component, branches.policy, branches,
+             frozen.z, frozen.fixed_faces, next_fixed) &&
+         next_fixed == frozen.fixed_faces.size;
+}
+
+template <bool Uniform, ConvectionScheme Scheme>
+bool apply_limited_branch_faces(
+    const CartesianKernelPlan& plan,
+    const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
+    std::uint8_t variation_component, FrozenConvectionFaceOutput output) noexcept {
+  return apply_limited_branch_axis<Uniform, 0U, Scheme>(
+             plan, branches, variation, variation_component, output.x) &&
+         apply_limited_branch_axis<Uniform, 1U, Scheme>(
+             plan, branches, variation, variation_component, output.y) &&
+         apply_limited_branch_axis<Uniform, 2U, Scheme>(
+             plan, branches, variation, variation_component, output.z);
 }
 
 template <bool Uniform, std::size_t Axis>
@@ -1278,26 +1444,30 @@ Status convection_kernel(const CartesianKernelPlan& plan,
             const Int3 xp{x + 1, y, z};
             const Int3 yp{x, y + 1, z};
             const Int3 zp{x, y, z + 1};
-            const double raw =
-                mxp[selected] * reconstructed_face<Uniform, 0U, Scheme>(
+            bool trace=false;
+            const std::array<double,6U> face_value{
+                reconstructed_face<Uniform, 0U, Scheme>(
                                     plan, transported, read_component, xp,
-                                    mxp[selected]) -
-                mxm[selected] * reconstructed_face<Uniform, 0U, Scheme>(
+                                    mxp[selected],&trace),
+                reconstructed_face<Uniform, 0U, Scheme>(
                                     plan, transported, read_component, cell,
-                                    mxm[selected]) +
-                myp[selected] * reconstructed_face<Uniform, 1U, Scheme>(
+                                    mxm[selected],&trace),
+                reconstructed_face<Uniform, 1U, Scheme>(
                                     plan, transported, read_component, yp,
-                                    myp[selected]) -
-                mym[selected] * reconstructed_face<Uniform, 1U, Scheme>(
+                                    myp[selected],&trace),
+                reconstructed_face<Uniform, 1U, Scheme>(
                                     plan, transported, read_component, cell,
-                                    mym[selected]) +
-                mzp[selected] * reconstructed_face<Uniform, 2U, Scheme>(
+                                    mym[selected],&trace),
+                reconstructed_face<Uniform, 2U, Scheme>(
                                     plan, transported, read_component, zp,
-                                    mzp[selected]) -
-                mzm[selected] * reconstructed_face<Uniform, 2U, Scheme>(
+                                    mzp[selected],&trace),
+                reconstructed_face<Uniform, 2U, Scheme>(
                                     plan, transported, read_component, cell,
-                                    mzm[selected]);
-            const double value = raw * inverse_volume[selected];
+                                    mzm[selected],&trace)};
+            const std::array<double,6U> rate{mxp[selected],mxm[selected],myp[selected],mym[selected],mzp[selected],mzm[selected]};
+            const double value=trace
+                ? extended_convection_rate<Uniform,Scheme>(plan,transported,read_component,cell,rate,inverse_volume[selected])
+                : transport_product_sum_rate(rate,face_value,inverse_volume[selected]);
             if (!std::isfinite(value)) {
               return {StatusCode::numerical_failure, kTransportNumerical};
             }
@@ -1383,26 +1553,22 @@ Status diffusion_kernel(const CartesianKernelPlan& plan,
             const std::int32_t x = x_begin + lane;
             const Int3 cell{x, y, z};
             const double q = transported.unchecked(cell, read_component);
-            const double raw =
-                txp[selected] *
+            const std::array<double,6U> jump{
                     (transported.unchecked({x + 1, y, z}, read_component) -
-                     q) -
-                txm[selected] *
+                     q),
                     (q - transported.unchecked({x - 1, y, z},
-                                               read_component)) +
-                typ[selected] *
+                                               read_component)),
                     (transported.unchecked({x, y + 1, z}, read_component) -
-                     q) -
-                tym[selected] *
+                     q),
                     (q - transported.unchecked({x, y - 1, z},
-                                               read_component)) +
-                tzp[selected] *
+                                               read_component)),
                     (transported.unchecked({x, y, z + 1}, read_component) -
-                     q) -
-                tzm[selected] *
+                     q),
                     (q - transported.unchecked({x, y, z - 1},
-                                               read_component));
-            const double value = raw * inverse_volume[selected];
+                                               read_component))};
+            const double value=transport_product_sum_rate(
+                {txp[selected],txm[selected],typ[selected],tym[selected],tzp[selected],tzm[selected]},
+                jump,inverse_volume[selected]);
             if (!std::isfinite(value)) {
               return {StatusCode::numerical_failure, kTransportNumerical};
             }
@@ -1434,6 +1600,8 @@ Status dispatch_convection_geometry(const CartesianKernelPlan& plan,
 
 struct PointDiagnosticAccumulator {
   double convection_integral{};
+  long double precise_convection_integral{};
+  bool underflow{};
   double mass_integral{};
   double maximum_violation{};
   double envelope_scale{1.0};
@@ -1451,8 +1619,12 @@ Status accumulate_diagnostic_face(const CartesianKernelPlan& plan,
                                   double sign,
                                   PointDiagnosticAccumulator& out) noexcept {
   const double rate = face_rate<Axis>(flux, face);
+  bool trace=false;
   const double value = reconstructed_face<Uniform, Axis, Scheme>(
-      plan, transported, component, face, rate);
+      plan, transported, component, face, rate,&trace);
+  const long double precise=trace
+      ? reconstructed_face<Uniform,Axis,Scheme>(plan,ExtendedScalarView{transported},component,face,rate)
+      : static_cast<long double>(value);
   const Int3 left = offset_axis<Axis>(face, -1);
   const double left_value = transported.unchecked(left, component);
   const double right_value = transported.unchecked(face, component);
@@ -1466,6 +1638,9 @@ Status accumulate_diagnostic_face(const CartesianKernelPlan& plan,
     return {StatusCode::numerical_failure, kTransportNumerical};
   }
   out.convection_integral += sign * rate * value;
+  out.precise_convection_integral += sign * static_cast<long double>(rate) * precise;
+  out.underflow |= trace || (rate!=0.0 && value!=0.0 &&
+      std::abs(rate*value)<std::numeric_limits<double>::min());
   out.mass_integral += sign * rate;
   out.envelope_scale =
       std::max({out.envelope_scale, std::abs(value),
@@ -1512,7 +1687,9 @@ Status diagnose_convection_geometry(const CartesianKernelPlan& plan,
   const double inverse_volume =
       detail::metric_inverse_volume<Uniform>(plan, cell);
   ConvectionPointDiagnostic candidate;
-  candidate.divergence = accumulated.convection_integral * inverse_volume;
+  candidate.divergence = accumulated.underflow
+      ? static_cast<double>(accumulated.precise_convection_integral*inverse_volume)
+      : accumulated.convection_integral * inverse_volume;
   candidate.mass_divergence = accumulated.mass_integral * inverse_volume;
   candidate.maximum_face_envelope_violation =
       accumulated.maximum_violation;
@@ -1893,8 +2070,9 @@ Status differentiate_frozen_cartesian_target_convection_faces(
   return {};
 }
 
-Status compile_frozen_limited_central2_branches(
-    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+Status compile_frozen_limited_convection_branches(
+    const CartesianKernelPlan& plan, ConvectionScheme scheme,
+    ConstFaceFluxView target_flux,
     ConstFieldView target, std::uint8_t target_component,
     FrozenConvectionContext context,
     FrozenConvectionLinearizationPolicy policy,
@@ -1906,7 +2084,8 @@ Status compile_frozen_limited_central2_branches(
   const ConstFaceFieldView flux_faces[]{target_flux.x, target_flux.y,
                                        target_flux.z};
   const ConstFaceFieldView frozen_faces[]{frozen.x, frozen.y, frozen.z};
-  if (plan.fingerprint() == 0U || !valid_linearization_policy(policy) ||
+  if ((scheme != ConvectionScheme::limited_central2 &&
+       scheme != ConvectionScheme::tvd2) || plan.fingerprint() == 0U || !valid_linearization_policy(policy) ||
       context.collective_semantics == 0U || context.closure == 0U ||
       !detail::valid_cell_view(target, cells, target_component, 1U, 2U) ||
       !detail::valid_flux_view(target_flux, cells, target_flux.revision) ||
@@ -1931,7 +2110,7 @@ Status compile_frozen_limited_central2_branches(
   const std::array<ConstFaceFieldView, 3U> frozen_output_faces{
       frozen.x, frozen.y, frozen.z};
   expected_frozen_identities(
-      plan, ConvectionScheme::limited_central2, target_flux, target,
+      plan, scheme, target_flux, target,
       target_component, context, frozen_output_faces, frozen.fixed_faces,
       frozen.fixed_face_authority, frozen_reconstruction, frozen_revision,
       frozen_local);
@@ -1949,11 +2128,11 @@ Status compile_frozen_limited_central2_branches(
   preflight.branch_hash = hash_mix(preflight.branch_hash, frozen_revision);
   if (plan.geometry_kind() == GeometryKind::uniform) {
     compile_limited_branch_faces<true, false>(
-        plan, target_flux, target, target_component, policy, frozen, nullptr,
+        plan, scheme, target_flux, target, target_component, policy, frozen, nullptr,
         preflight);
   } else {
     compile_limited_branch_faces<false, false>(
-        plan, target_flux, target, target_component, policy, frozen, nullptr,
+        plan, scheme, target_flux, target, target_component, policy, frozen, nullptr,
         preflight);
   }
   if (preflight.result == DirectionalPreflight::success &&
@@ -1972,11 +2151,11 @@ Status compile_frozen_limited_central2_branches(
   commit.branch_hash = hash_mix(commit.branch_hash, frozen_revision);
   if (plan.geometry_kind() == GeometryKind::uniform) {
     compile_limited_branch_faces<true, true>(
-        plan, target_flux, target, target_component, policy, frozen,
+        plan, scheme, target_flux, target, target_component, policy, frozen,
         output.values.data, commit);
   } else {
     compile_limited_branch_faces<false, true>(
-        plan, target_flux, target, target_component, policy, frozen,
+        plan, scheme, target_flux, target, target_component, policy, frozen,
         output.values.data, commit);
   }
   if (commit.result == DirectionalPreflight::success &&
@@ -2022,19 +2201,22 @@ Status compile_frozen_limited_central2_branches(
       local,
       policy,
       preflight.generalized_face_count,
-      preflight.generalized_face_count == 0U};
+      preflight.generalized_face_count == 0U,
+      scheme == ConvectionScheme::tvd2};
   if (!candidate.valid())
     return {StatusCode::invalid_plan, kTransportKernel};
   branches = candidate;
   return {};
 }
 
-Status validate_frozen_limited_central2_branches(
+Status validate_frozen_limited_convection_branches(
     const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
     ConstFieldView target, std::uint8_t target_component,
     FrozenConvectionContext context,
     const FrozenConvectionFaceField& frozen,
     const FrozenConvectionBranchPlan& branches) noexcept {
+  const ConvectionScheme scheme = branches.tvd_donor
+      ? ConvectionScheme::tvd2 : ConvectionScheme::limited_central2;
   const Int3 cells = plan.cells();
   if (!branches.valid() || !same_shape(branches.cells, cells) ||
       branches.kernels != plan.fingerprint() ||
@@ -2052,7 +2234,7 @@ Status validate_frozen_limited_central2_branches(
   const std::array<ConstFaceFieldView, 3U> frozen_output_faces{
       frozen.x, frozen.y, frozen.z};
   expected_frozen_identities(
-      plan, ConvectionScheme::limited_central2, target_flux, target,
+      plan, scheme, target_flux, target,
       target_component, context, frozen_output_faces, frozen.fixed_faces,
       frozen.fixed_face_authority, frozen_reconstruction, frozen_revision,
       frozen_local);
@@ -2069,11 +2251,11 @@ Status validate_frozen_limited_central2_branches(
   preflight.branch_hash = hash_mix(preflight.branch_hash, frozen_revision);
   if (plan.geometry_kind() == GeometryKind::uniform) {
     compile_limited_branch_faces<true, false>(
-        plan, target_flux, target, target_component, branches.policy, frozen,
+        plan, scheme, target_flux, target, target_component, branches.policy, frozen,
         nullptr, preflight);
   } else {
     compile_limited_branch_faces<false, false>(
-        plan, target_flux, target, target_component, branches.policy, frozen,
+        plan, scheme, target_flux, target, target_component, branches.policy, frozen,
         nullptr, preflight);
   }
   if (preflight.result == DirectionalPreflight::success &&
@@ -2121,36 +2303,24 @@ Status validate_frozen_limited_central2_branches(
                             branches.classical_everywhere;
   if (!identity)
     return {StatusCode::invalid_plan, kTransportKernel};
-  std::size_t next_fixed = 0U;
-  const bool verified =
-      plan.geometry_kind() == GeometryKind::uniform
-          ? verify_limited_branch_axis<true, 0U>(
-                plan, target_flux, target, target_component, branches.policy,
-                branches, frozen.x, frozen.fixed_faces, next_fixed) &&
-                verify_limited_branch_axis<true, 1U>(
-                    plan, target_flux, target, target_component,
-                    branches.policy, branches, frozen.y, frozen.fixed_faces,
-                    next_fixed) &&
-                verify_limited_branch_axis<true, 2U>(
-                    plan, target_flux, target, target_component,
-                    branches.policy, branches, frozen.z, frozen.fixed_faces,
-                    next_fixed)
-          : verify_limited_branch_axis<false, 0U>(
-                plan, target_flux, target, target_component, branches.policy,
-                branches, frozen.x, frozen.fixed_faces, next_fixed) &&
-                verify_limited_branch_axis<false, 1U>(
-                    plan, target_flux, target, target_component,
-                    branches.policy, branches, frozen.y, frozen.fixed_faces,
-                    next_fixed) &&
-                verify_limited_branch_axis<false, 2U>(
-                    plan, target_flux, target, target_component,
-                    branches.policy, branches, frozen.z, frozen.fixed_faces,
-                    next_fixed);
-  return verified && next_fixed == frozen.fixed_faces.size ? Status{}
+  const bool uniform = plan.geometry_kind() == GeometryKind::uniform;
+  const bool tvd = branches.tvd_donor;
+  const bool verified = tvd
+      ? (uniform
+          ? verify_limited_branch_faces<true, ConvectionScheme::tvd2>(
+                plan, target_flux, target, target_component, frozen, branches)
+          : verify_limited_branch_faces<false, ConvectionScheme::tvd2>(
+                plan, target_flux, target, target_component, frozen, branches))
+      : (uniform
+          ? verify_limited_branch_faces<true, ConvectionScheme::limited_central2>(
+                plan, target_flux, target, target_component, frozen, branches)
+          : verify_limited_branch_faces<false, ConvectionScheme::limited_central2>(
+                plan, target_flux, target, target_component, frozen, branches));
+  return verified ? Status{}
                   : Status{StatusCode::invalid_plan, kTransportKernel};
 }
 
-Status apply_frozen_limited_central2_branches(
+Status apply_frozen_limited_convection_branches(
     const CartesianKernelPlan& plan,
     const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
     std::uint8_t variation_component,
@@ -2173,22 +2343,57 @@ Status apply_frozen_limited_central2_branches(
       !valid_frozen_output(output.z, CartesianAxis::z, cells) || aliases) {
     return {StatusCode::invalid_plan, kTransportKernel};
   }
-  const bool finite =
-      plan.geometry_kind() == GeometryKind::uniform
-          ? apply_limited_branch_axis<true, 0U>(
-                plan, branches, variation, variation_component, output.x) &&
-                apply_limited_branch_axis<true, 1U>(
-                    plan, branches, variation, variation_component, output.y) &&
-                apply_limited_branch_axis<true, 2U>(
-                    plan, branches, variation, variation_component, output.z)
-          : apply_limited_branch_axis<false, 0U>(
-                plan, branches, variation, variation_component, output.x) &&
-                apply_limited_branch_axis<false, 1U>(
-                    plan, branches, variation, variation_component, output.y) &&
-                apply_limited_branch_axis<false, 2U>(
-                    plan, branches, variation, variation_component, output.z);
+  const bool uniform = plan.geometry_kind() == GeometryKind::uniform;
+  const bool tvd = branches.tvd_donor;
+  const bool finite = tvd
+      ? (uniform
+          ? apply_limited_branch_faces<true, ConvectionScheme::tvd2>(
+                plan, branches, variation, variation_component, output)
+          : apply_limited_branch_faces<false, ConvectionScheme::tvd2>(
+                plan, branches, variation, variation_component, output))
+      : (uniform
+          ? apply_limited_branch_faces<true, ConvectionScheme::limited_central2>(
+                plan, branches, variation, variation_component, output)
+          : apply_limited_branch_faces<false, ConvectionScheme::limited_central2>(
+                plan, branches, variation, variation_component, output));
   return finite ? Status{}
                 : Status{StatusCode::numerical_failure, kTransportNumerical};
+}
+
+Status compile_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    FrozenConvectionLinearizationPolicy policy,
+    const FrozenConvectionFaceField& frozen,
+    FrozenConvectionBranchOutput output,
+    FrozenConvectionBranchPlan& branches) noexcept {
+  return compile_frozen_limited_convection_branches(
+      plan, ConvectionScheme::limited_central2, target_flux, target,
+      target_component, context, policy, frozen, output, branches);
+}
+
+Status validate_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan, ConstFaceFluxView target_flux,
+    ConstFieldView target, std::uint8_t target_component,
+    FrozenConvectionContext context,
+    const FrozenConvectionFaceField& frozen,
+    const FrozenConvectionBranchPlan& branches) noexcept {
+  if (branches.tvd_donor)
+    return {StatusCode::invalid_plan, kTransportKernel};
+  return validate_frozen_limited_convection_branches(
+      plan, target_flux, target, target_component, context, frozen, branches);
+}
+
+Status apply_frozen_limited_central2_branches(
+    const CartesianKernelPlan& plan,
+    const FrozenConvectionBranchPlan& branches, ConstFieldView variation,
+    std::uint8_t variation_component,
+    FrozenConvectionFaceOutput output) noexcept {
+  if (branches.tvd_donor)
+    return {StatusCode::invalid_plan, kTransportKernel};
+  return apply_frozen_limited_convection_branches(
+      plan, branches, variation, variation_component, output);
 }
 
 Status cartesian_provisional_convection(
@@ -2232,6 +2437,109 @@ Status cartesian_convection(const CartesianKernelPlan& plan,
     return {StatusCode::invalid_plan, kTransportKernel};
   }
   return cartesian_provisional_convection(plan, scheme, flux, invocation);
+}
+
+double detail::kinetic_convection_face(const CartesianKernelPlan& plan,
+    ConvectionScheme scheme, ConstFieldView velocity, CartesianAxis axis,
+    Int3 face, double mass_rate) noexcept {
+  struct KineticField {
+    ConstFieldView velocity;
+    double unchecked(Int3 c, std::uint8_t) const noexcept {
+      return detail::kinetic_energy(velocity,c);
+    }
+  };
+  const auto metric=[&](auto uniform) noexcept {
+    const auto direction=[&](auto axis_tag) noexcept {
+      const auto reconstruct=[&](auto scheme_tag) noexcept {
+        return reconstructed_face<decltype(uniform)::value,
+            decltype(axis_tag)::value,decltype(scheme_tag)::value>(
+                plan,KineticField{velocity},0U,face,mass_rate);
+      };
+      switch(scheme) {
+        case ConvectionScheme::central2:
+          return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::central2>{});
+        case ConvectionScheme::limited_central2:
+          return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::limited_central2>{});
+        case ConvectionScheme::tvd2:
+          return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::tvd2>{});
+      }
+      return std::numeric_limits<double>::quiet_NaN();
+    };
+    switch(axis) {
+      case CartesianAxis::x: return direction(std::integral_constant<std::size_t,0U>{});
+      case CartesianAxis::y: return direction(std::integral_constant<std::size_t,1U>{});
+      case CartesianAxis::z: return direction(std::integral_constant<std::size_t,2U>{});
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  return plan.geometry_kind()==GeometryKind::uniform ? metric(std::true_type{}) :
+                                                      metric(std::false_type{});
+}
+
+long double detail::precise_scalar_convection_face(const CartesianKernelPlan& plan,
+    ConvectionScheme scheme, ConstFieldView scalar, CartesianAxis axis,
+    Int3 face, double mass_rate) noexcept {
+  const auto metric=[&](auto uniform) noexcept {
+    const auto direction=[&](auto axis_tag) noexcept {
+      const auto reconstruct=[&](auto scheme_tag) noexcept -> long double {
+        bool trace=false;
+        const double ordinary=reconstructed_face<decltype(uniform)::value,
+            decltype(axis_tag)::value,decltype(scheme_tag)::value>(
+                plan,scalar,0U,face,mass_rate,&trace);
+        return trace ? reconstructed_face<decltype(uniform)::value,
+            decltype(axis_tag)::value,decltype(scheme_tag)::value>(
+                plan,ExtendedScalarView{scalar},0U,face,mass_rate) : ordinary;
+      };
+      switch(scheme) {
+        case ConvectionScheme::central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::central2>{});
+        case ConvectionScheme::limited_central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::limited_central2>{});
+        case ConvectionScheme::tvd2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::tvd2>{});
+      }
+      return std::numeric_limits<long double>::quiet_NaN();
+    };
+    switch(axis) {
+      case CartesianAxis::x: return direction(std::integral_constant<std::size_t,0U>{});
+      case CartesianAxis::y: return direction(std::integral_constant<std::size_t,1U>{});
+      case CartesianAxis::z: return direction(std::integral_constant<std::size_t,2U>{});
+    }
+    return std::numeric_limits<long double>::quiet_NaN();
+  };
+  return plan.geometry_kind()==GeometryKind::uniform ? metric(std::true_type{}) : metric(std::false_type{});
+}
+
+double detail::sampled_convection_face(const CartesianKernelPlan& plan,
+    ConvectionScheme scheme, const std::array<double,4U>& samples,
+    CartesianAxis axis, Int3 face, double mass_rate) noexcept {
+  struct SampleField {
+    const std::array<double,4U>& values; CartesianAxis axis; int begin;
+    double unchecked(Int3 c,std::uint8_t) const noexcept {
+      const int normal=axis==CartesianAxis::x ? c.x : axis==CartesianAxis::y ? c.y : c.z;
+      return values[static_cast<std::size_t>(normal-begin)];
+    }
+  };
+  const int normal=axis==CartesianAxis::x ? face.x : axis==CartesianAxis::y ? face.y : face.z;
+  const SampleField field{samples,axis,normal-2};
+  const auto metric=[&](auto uniform) noexcept {
+    const auto direction=[&](auto axis_tag) noexcept {
+      const auto reconstruct=[&](auto scheme_tag) noexcept {
+        return reconstructed_face<decltype(uniform)::value,
+            decltype(axis_tag)::value,decltype(scheme_tag)::value>(plan,field,0U,face,mass_rate);
+      };
+      switch(scheme) {
+        case ConvectionScheme::central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::central2>{});
+        case ConvectionScheme::limited_central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::limited_central2>{});
+        case ConvectionScheme::tvd2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::tvd2>{});
+      }
+      return std::numeric_limits<double>::quiet_NaN();
+    };
+    switch(axis) {
+      case CartesianAxis::x: return direction(std::integral_constant<std::size_t,0U>{});
+      case CartesianAxis::y: return direction(std::integral_constant<std::size_t,1U>{});
+      case CartesianAxis::z: return direction(std::integral_constant<std::size_t,2U>{});
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  return plan.geometry_kind()==GeometryKind::uniform ? metric(std::true_type{}) : metric(std::false_type{});
 }
 
 Status reconstruct_cartesian_convection_face(

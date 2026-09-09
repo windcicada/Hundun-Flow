@@ -3,6 +3,7 @@
 
 #include "hundun/v04_boundary.hpp"
 #include "hundun/v04_execution.hpp"
+#include "../../src/solver_species_guess_detail.hpp"
 
 #include <mpi.h>
 
@@ -431,7 +432,7 @@ bool run_manufactured(std::int32_t n, bool stretched, Errors& errors) {
       });
   errors.convection = l2_error(
       as_const(convection.view), 0U, fixture.geometry, fixture.patch,
-      [](double x, double y, double z) {
+      [transport_velocity](double x, double y, double z) {
         const Real3 gradient_value = q_gradient(x, y, z);
         return transport_velocity.x * gradient_value.x +
                transport_velocity.y * gradient_value.y +
@@ -700,6 +701,168 @@ bool test_stretched_affine_and_harmonic_mutation() {
   return passed;
 }
 
+bool test_trace_transport_rescaling() {
+  KernelFixture f;
+  if(!expect(make_fixture(8,false,f,ConvectionScheme::tvd2),"trace transport fixture compiles")) return false;
+  const auto cells=f.patch.cells;
+  auto q=make_field(93U,cells,2U,2U,904U);
+  auto gamma=make_field(94U,cells,1U,1U,905U);
+  auto result=make_field(95U,cells,2U,0U,906U);
+  constexpr double scale=1e-310;
+  fill_cells(q.view,f.geometry,f.patch,2U,[](FieldView out,Int3 c,double x,double y,double z) {
+    const double value=q_value(x,y,z);
+    out.unchecked(c,0U)=value; out.unchecked(c,1U)=scale*value;
+  });
+  std::fill(gamma.allocation.begin(),gamma.allocation.end(),1e-8);
+  FaceFluxStorage storage; FaceFluxView flux;
+  if(!expect(FaceFluxStorage::allocate_workspace(cells,1U,storage) &&
+      storage.workspace_view(0U,52U,flux),"trace flux arena allocates")) return false;
+  fill_constant_velocity_flux(flux,f.geometry,{1e-6,-0.4e-6,0.25e-6});
+  const std::array<ConstFieldView,1U> reads{as_const(q.view)};
+  const std::array<FieldView,1U> writes{result.view};
+  KernelInvocation call{{reads.data(),1U},{writes.data(),1U},{{0,0,0},cells},0U,0U,2U,flux.revision,nullptr};
+  const auto accurate=[&]() {
+    bool okay=true;
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+      const Int3 c{x,y,z};
+      const long double reference=static_cast<long double>(scale)*result.view.unchecked(c,0U);
+      const long double error=std::abs(static_cast<long double>(result.view.unchecked(c,1U))-reference);
+      const long double floor=2.0L*std::numeric_limits<double>::denorm_min()+
+          16.0L*std::numeric_limits<double>::epsilon()*std::abs(reference);
+      okay &= error<=floor;
+    }
+    return okay;
+  };
+  bool passed=true;
+  for(auto scheme:{ConvectionScheme::central2,ConvectionScheme::limited_central2,ConvectionScheme::tvd2}) {
+    const auto status=cartesian_provisional_convection(f.kernels,scheme,as_const(flux),call);
+    passed &= expect(status && accurate(),"convection rate survives trace face-integral underflow before volume division");
+  }
+  call.required_face_flux_revision=0U;
+  const auto status=cartesian_diffusion(f.kernels,as_const(gamma.view),call);
+  passed &= expect(status && accurate(),"diffusion rate survives trace face-integral underflow before volume division");
+  return passed;
+}
+
+bool test_tvd_search_diagonal_response() {
+  KernelFixture f;
+  if(!expect(make_fixture(8,false,f,ConvectionScheme::tvd2),"TVD response fixture compiles")) return false;
+  const auto cells=f.patch.cells; const Int3 cell{3,3,3};
+  auto q=make_field(98U,cells,1U,2U,909U);
+  auto result=make_field(99U,cells,1U,0U,910U);
+  FaceFluxStorage storage; FaceFluxView flux;
+  if(!expect(FaceFluxStorage::allocate_workspace(cells,1U,storage) &&
+      storage.workspace_view(0U,54U,flux),"TVD response flux allocates")) return false;
+  const std::array<ConstFieldView,1U> reads{as_const(q.view)};
+  const std::array<FieldView,1U> writes{result.view};
+  const KernelInvocation call{{reads.data(),1U},{writes.data(),1U},{cell,{1,1,1}},0U,0U,1U,flux.revision,nullptr};
+  bool passed=true;
+  for(int axis=0;axis<3;++axis) for(int sign:{-1,1})
+    for(double unit:{1.0,std::numeric_limits<double>::denorm_min()}) {
+      Real3 velocity{}; (axis==0 ? velocity.x : axis==1 ? velocity.y : velocity.z)=sign*1000.0;
+      fill_constant_velocity_flux(flux,f.geometry,velocity);
+      const auto evaluate=[&](double centre,double& rate) {
+        fill_cells(q.view,f.geometry,f.patch,2U,[&](FieldView out,Int3 c,double,double,double) {
+          const int coordinate=axis==0 ? c.x : axis==1 ? c.y : c.z;
+          out.unchecked(c,0U)=sign*(coordinate-3)<0 ? 0.0 : coordinate==3 ? centre : 1000.0*unit;
+        });
+        const auto status=cartesian_provisional_convection(f.kernels,ConvectionScheme::tvd2,as_const(flux),call);
+        rate=result.view.unchecked(cell,0U); return static_cast<bool>(status);
+      };
+      double lower=0.0,upper=0.0;
+      const bool status=evaluate(0.0,lower) && evaluate(unit,upper);
+      constexpr double temporal_diagonal=1e7;
+      const long double response=temporal_diagonal+
+          (static_cast<long double>(upper)-lower)/unit;
+      const double diagonal=detail::species_coupling_search_diagonal(f.kernels,
+          ConvectionScheme::tvd2,as_const(flux),cell,temporal_diagonal);
+      const bool okay=status && response<=diagonal*(1.0+32.0*std::numeric_limits<double>::epsilon());
+      if(!okay) std::cerr<<"TVD local response="<<response<<" search diagonal="<<diagonal
+          <<" axis="<<axis<<" sign="<<sign<<" unit="<<unit<<'\n';
+      passed &= expect(okay,"nonlinear search diagonal covers the actual TVD one-sided cell response, including representable trace steps");
+    }
+  return passed;
+}
+
+bool test_subnormal_convection_reconstruction() {
+  bool passed=true;
+  for(bool stretched_mesh:{false,true}) {
+    KernelFixture f;
+    if(!expect(make_fixture(8,stretched_mesh,f,ConvectionScheme::tvd2),
+        "subnormal reconstruction fixture compiles")) return false;
+    const auto cells=f.patch.cells;
+    auto q=make_field(96U,cells,2U,2U,907U);
+    auto result=make_field(97U,cells,2U,0U,908U);
+    constexpr double scale=std::numeric_limits<double>::denorm_min();
+    fill_cells(q.view,f.geometry,f.patch,2U,[](FieldView out,Int3 c,double,double,double) {
+      constexpr double wave[]{0.0,1.0,2.0,3.0,7.0,2.0,1.0,0.0};
+      const auto sample=[](int i) { return (i%8+8)%8; };
+      const double value=wave[sample(c.x)]+2.0*wave[sample(c.y)]+wave[sample(c.z)];
+      // Integer multiples make BOTH input fields exactly representable.
+      out.unchecked(c,0U)=value; out.unchecked(c,1U)=scale*value;
+    });
+    FaceFluxStorage storage; FaceFluxView flux;
+    if(!expect(FaceFluxStorage::allocate_workspace(cells,1U,storage) &&
+        storage.workspace_view(0U,53U,flux),"subnormal face arena allocates")) return false;
+    fill_constant_velocity_flux(flux,f.geometry,{1000.0,-400.0,250.0});
+    const std::array<ConstFieldView,1U> reads{as_const(q.view)};
+    const std::array<FieldView,1U> writes{result.view};
+    const KernelInvocation call{{reads.data(),1U},{writes.data(),1U},{{0,0,0},cells},0U,0U,2U,flux.revision,nullptr};
+    for(auto scheme:{ConvectionScheme::central2,ConvectionScheme::limited_central2,ConvectionScheme::tvd2}) {
+      const auto status=cartesian_provisional_convection(f.kernels,scheme,as_const(flux),call);
+      bool okay=static_cast<bool>(status); long double maximum_error=0.0L;
+      for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+        const Int3 c{x,y,z};
+        const long double reference=static_cast<long double>(scale)*result.view.unchecked(c,0U);
+        const long double error=std::abs(static_cast<long double>(result.view.unchecked(c,1U))-reference);
+        maximum_error=std::max(maximum_error,error/scale);
+        okay &= error<=2.0L*scale+32.0L*std::numeric_limits<double>::epsilon()*std::abs(reference);
+      }
+      if(!okay) std::cerr<<"subnormal convection stretched="<<stretched_mesh
+          <<" scheme="<<unsigned(scheme)<<" max_error_in_min_subnormals="<<maximum_error<<'\n';
+      passed &= expect(okay,"face reconstruction survives scalar-unit rescaling until the final rate is rounded");
+    }
+  }
+  return passed;
+}
+
+bool test_tvd_stretched_face_envelope() {
+  bool passed=true;
+  for(int axis=0;axis<3;++axis) {
+    auto mesh=mesh_spec(8,false);
+    mesh.kind=GeometryKind::coast_runtime_axes_v1;
+    mesh.axes_file="in-memory-tvd-envelope";
+    for(int a=0;a<3;++a) for(int i=0;i<=8;++i) {
+      const double nonuniform[]{0.0,0.05,0.1,0.3,0.5,0.7,0.8,0.9,1.0};
+      mesh.coast_runtime_faces[a].push_back(static_cast<double>(
+          static_cast<float>(a==axis ? nonuniform[i] : i/8.0)));
+    }
+    KernelFixture f; FieldRegistry registry; TimeSchemePlan time;
+    auto status=CartesianGeometryCompiler::compile(MPI_COMM_SELF,mesh,{},f.geometry,f.patch);
+    if(status) status=BoundaryCompiler::compile(MPI_COMM_SELF,
+        periodic_model(mesh,ConvectionScheme::tvd2),f.geometry,f.patch,
+        registry,f.boundary,f.schemes,time);
+    if(status) status=CartesianKernelPlan::compile(f.schemes,f.geometry,f.patch,f.boundary,f.kernels);
+    if(!expect(static_cast<bool>(status),"nonuniform TVD envelope fixture compiles")) return false;
+    auto q=make_field(92U,f.patch.cells,1U,2U,903U);
+    for(double scale:{1e-3,1e-180}) for(int sign:{-1,1}) {
+      for(int z=-2;z<10;++z) for(int y=-2;y<10;++y) for(int x=-2;x<10;++x) {
+        const int normal=axis==0 ? x : axis==1 ? y : z;
+        q.view.unchecked({x,y,z},0U)=sign<0
+            ? (normal<2 ? 0.0 : normal==2 ? scale : 100.0*scale)
+            : (normal>4 ? 0.0 : normal==4 ? scale : 100.0*scale);
+      }
+      Int3 face{3,3,3}; (axis==0 ? face.x : axis==1 ? face.y : face.z)=sign<0 ? 2 : 5;
+      double value=0.0;
+      status=reconstruct_cartesian_convection_face(f.kernels,ConvectionScheme::tvd2,
+          as_const(q.view),0U,static_cast<CartesianAxis>(axis),face,sign,value);
+      passed &= expect(status && value>=0.0 && value<=scale,
+          "TVD actual-face limiter preserves a nonnegative donor envelope, including trace species");
+    }
+  }
+  return passed;
+}
+
 bool test_kernel_plan_owns_and_rebinds_metrics() {
   CartesianKernelPlan plan;
   bool passed = expect(make_detached_stretched_plan(plan),
@@ -794,6 +957,10 @@ int main(int argc, char** argv) {
   passed &= test_noncentral_rejects_one_ghost(
       ConvectionScheme::tvd2, "TVD rejects a one-ghost transported field");
   passed &= test_stretched_affine_and_harmonic_mutation();
+  passed &= test_tvd_stretched_face_envelope();
+  passed &= test_trace_transport_rescaling();
+  passed &= test_subnormal_convection_reconstruction();
+  passed &= test_tvd_search_diagonal_response();
   passed &= test_kernel_plan_owns_and_rebinds_metrics();
   MPI_Finalize();
   if (!passed) {

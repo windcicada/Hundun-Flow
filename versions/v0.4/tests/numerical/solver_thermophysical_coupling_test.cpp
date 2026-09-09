@@ -116,7 +116,7 @@ SpeciesThermophysicalSpec species_spec(std::string_view name,
   return species;
 }
 
-ThermophysicalSpec thermophysical_spec() {
+ThermophysicalSpec thermophysical_spec(bool formation_enthalpy = false) {
   ThermophysicalSpec spec;
   spec.data_file = "analytic.d";
   spec.minimum_temperature = 200.0;
@@ -128,6 +128,14 @@ ThermophysicalSpec thermophysical_spec() {
   spec.maximum_closed_mass_relative_step = 0.2;
   spec.species.push_back(species_spec("species_a", 28.0));
   spec.species.push_back(species_spec("species_b", 32.0));
+  if (formation_enthalpy) {
+    spec.species[0U].nasa7_low[5U] = -12000.0;
+    // Continuous h/cp but a different high-temperature polynomial, so the face test
+    // must actually evaluate the correct NASA branch rather than endpoints.
+    spec.species[0U].nasa7_high[0U] = 3.4;
+    spec.species[0U].nasa7_high[1U] = 1.0e-4;
+    spec.species[0U].nasa7_high[5U] = -11950.0;
+  }
   return spec;
 }
 
@@ -146,7 +154,7 @@ struct Fixture {
 bool make_fixture(std::int32_t n, PressureReferenceKind pressure_reference,
                   Fixture &out, bool stretched = false,
                   PlanFingerprint source_identity = 0U,
-                  bool unity_lewis = false) {
+                  bool unity_lewis = false, bool formation_enthalpy = false) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -198,7 +206,7 @@ bool make_fixture(std::int32_t n, PressureReferenceKind pressure_reference,
     return false;
   }
 
-  const ThermophysicalSpec thermophysics = thermophysical_spec();
+  const ThermophysicalSpec thermophysics = thermophysical_spec(formation_enthalpy);
   if (!ThermodynamicsPlan::compile(
           thermophysics,
           {model.transported_scalars.data(), model.transported_scalars.size()},
@@ -1000,11 +1008,11 @@ bool test_bdf2_predictor_and_mutations(bool source_enabled = false) {
   return passed;
 }
 
-bool test_nonadvective_rate_path(bool unity_lewis = false) {
+bool test_nonadvective_rate_path(bool unity_lewis = false, bool formation_enthalpy = false) {
   Fixture fixture;
   constexpr std::int32_t n = 4;
   bool passed = expect(make_fixture(n, PressureReferenceKind::closed_mass,
-                                    fixture, false, 0U, unity_lewis),
+                                    fixture, false, 0U, unity_lewis, formation_enthalpy),
                        "nonadvective-rate fixture compiles");
   if (!passed) return false;
   const Int3 cells = fixture.patch.cells;
@@ -1043,7 +1051,7 @@ bool test_nonadvective_rate_path(bool unity_lewis = false) {
   OwnedField molecular = make_field(60U, cells, 1U, 8019U);
   OwnedField effective = make_field(kEffectiveViscosity, cells, 1U, 8020U);
   OwnedField conductivity = make_field(61U, cells, 1U, 8021U);
-  OwnedField gradient = make_components(kVelocityGradient, 9U, 0U, 8022U);
+  OwnedField gradient = make_components(kVelocityGradient, 9U, 1U, 8022U);
   OwnedField gamma = make_field(66U, cells, 1U, 8027U);
   fill(gamma, 0.007);
   OwnedField enthalpy_rate = make_field(62U, cells, 0U, 8023U);
@@ -1214,6 +1222,96 @@ bool test_nonadvective_rate_path(bool unity_lewis = false) {
           conduction_certificate.state == marker.state &&
           conduction_certificate.rates == marker.rates,
       "rate workspace/output alias rejects without replacing certificate");
+
+  // G29 regression: isothermal nonreacting species mixing must transport
+  // the enthalpy carried by the same diffusing species. A pure Fourier term
+  // is zero here, but is not the complete mixture-enthalpy diffusion rate.
+  fill(temperature, 300.0);
+  double h_a = 0.0, h_b = 0.0, cp = 0.0, gas = 0.0;
+  const std::array<double, 1U> pure_a{1.0}, pure_b{0.0};
+  passed &= expect(fixture.thermodynamics.mixture_enthalpy(
+                       300.0, {pure_a.data(), 1U}, h_a, cp, gas) &&
+                   fixture.thermodynamics.mixture_enthalpy(
+                       300.0, {pure_b.data(), 1U}, h_b, cp, gas),
+                   "isothermal species enthalpies available");
+  for (std::int32_t z = -2; z < cells.z + 2; ++z)
+    for (std::int32_t y = -2; y < cells.y + 2; ++y)
+      for (std::int32_t x = -2; x < cells.x + 2; ++x) {
+        const Int3 cell{x, y, z};
+        const std::array<double, 1U> fraction{
+            x == 1 && y == 1 && z == 1 ? 0.3 : 0.2};
+        double h = 0.0;
+        if (!fixture.thermodynamics.mixture_enthalpy(
+                300.0, {fraction.data(), 1U}, h, cp, gas)) return false;
+        for (auto* f : {&species, &species_n, &species_nm1})
+          f->view.unchecked(cell, 0U) = fraction[0];
+        for (auto* f : {&enthalpy, &enthalpy_n, &enthalpy_nm1})
+          f->view.unchecked(cell, 0U) = h;
+        for (auto* f : {&rho, &rho_n, &rho_nm1})
+          f->view.unchecked(cell, 0U) = 101325.0 / (gas * 300.0);
+      }
+  ++temperature.view.revision;
+  input.state.temperature.trial = as_const(temperature.view);
+  ThermophysicalRateCertificate mixing_certificate;
+  status = evaluate_thermophysical_rates(fixture.equations, input, output, mixing_certificate);
+  const Int3 mixed{1, 1, 1};
+  const double expected_mixing = (h_a - h_b) * species_rate.view.unchecked(mixed, 0U);
+  const double actual_mixing = enthalpy_rate.view.unchecked(mixed, 0U);
+  if (!close(actual_mixing, expected_mixing))
+    std::cerr << "G29_ISOTHERMAL_MIXING actual_h_rate=" << actual_mixing
+              << " expected_species_carried_h_rate=" << expected_mixing << '\n';
+  passed &= expect(status && mixing_certificate.valid() && std::abs(expected_mixing) > 1.0 &&
+                   close(actual_mixing, expected_mixing),
+                   "isothermal species diffusion carries mixture enthalpy without spurious heating or cooling");
+
+  const double volume = 1.0 / (n * n * n);
+  const auto integrated_heat = [&]() {
+    long double total = 0.0;
+    for (int z = 0; z < n; ++z)
+      for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x)
+          total += enthalpy_rate.view.unchecked({x, y, z}, 0U) * volume;
+    return static_cast<double>(total);
+  };
+  passed &= expect(close(integrated_heat(), 0.0),
+                   "isothermal species-carried enthalpy flux cancels pairwise");
+  temperature.view.unchecked(mixed, 0U) = 1800.0;
+  ++temperature.view.revision;
+  input.state.temperature.trial = as_const(temperature.view);
+  status = evaluate_thermophysical_rates(fixture.equations, input, output, mixing_certificate);
+  // Six equal faces at T_face=1050 K: includes the high NASA branch and
+  // uses independent pure-mixture calls as the enthalpy oracle.
+  passed &= expect(fixture.thermodynamics.mixture_enthalpy(
+                       1050.0, {pure_a.data(), 1U}, h_a, cp, gas) &&
+                   fixture.thermodynamics.mixture_enthalpy(
+                       1050.0, {pure_b.data(), 1U}, h_b, cp, gas),
+                   "variable-temperature face enthalpy oracle evaluates");
+  // The unity-Lewis route transports h directly; this probe changes only T.
+  const double expected_variable = unity_lewis ? expected_mixing : 6.0 * n * n *
+      (0.026 * (300.0 - 1800.0) + (h_a - h_b) * 2.4e-5 * (0.2 - 0.3));
+  passed &= expect(status && close(enthalpy_rate.view.unchecked(mixed, 0U), expected_variable) &&
+                   close(integrated_heat(), 0.0),
+                   "variable-temperature species enthalpy flux is conservative and branch-correct");
+
+  // Independent G29 viscous regression: central cell gradients annihilate
+  // an alternating shear mode, but the real momentum face Laplacian still
+  // removes kinetic energy. That energy must appear as mixture enthalpy.
+  fill(temperature, 300.0);
+  fill(species, 0.2);
+  fill(gradient, 0.0);
+  for (int z = -2; z < n + 2; ++z)
+    for (int y = -2; y < n + 2; ++y)
+      for (int x = -2; x < n + 2; ++x)
+        velocity.view.unchecked({x, y, z}, 1U) = x % 2 == 0 ? 1.0 : -1.0;
+  ++velocity.view.revision;
+  input.state.velocity.trial = as_const(velocity.view);
+  status = evaluate_thermophysical_rates(fixture.equations, input, output, mixing_certificate);
+  const double expected_viscous = 4.0 * 2.4e-5 * n * n;
+  if (!close(integrated_heat(), expected_viscous))
+    std::cerr << "G29_VISCOUS_BALANCE actual_heat=" << integrated_heat()
+              << " kinetic_energy_loss=" << expected_viscous << '\n';
+  passed &= expect(status && close(integrated_heat(), expected_viscous),
+                   "discrete viscous kinetic-energy loss becomes enthalpy, including unresolved shear modes");
   return passed;
 }
 
@@ -1229,6 +1327,7 @@ int main(int argc, char** argv) {
   const bool mms_passed = test_predictor_mms_orders();
   const bool rates_passed =
       test_nonadvective_rate_path() && test_nonadvective_rate_path(true);
+  const bool formation_rates_passed = test_nonadvective_rate_path(false,true);
   MPI_Finalize();
-  return passed && mms_passed && rates_passed ? 0 : 1;
+  return passed && mms_passed && rates_passed && formation_rates_passed ? 0 : 1;
 }

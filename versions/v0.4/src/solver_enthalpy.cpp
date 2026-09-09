@@ -7,6 +7,10 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_conservative_energy_detail.hpp"
+#include "solver_mixture_enthalpy_diffusion_detail.hpp"
+#include "solver_mixture_enthalpy_convection_detail.hpp"
+#include "solver_viscous_detail.hpp"
 
 #include <array>
 #include <cmath>
@@ -71,7 +75,20 @@ RevisionToken state_revision(
   std::memcpy(&pressure_bits, &state.previous_pressure_reference,
               sizeof(pressure_bits));
   hash = hash_mix(hash, pressure_bits);
-  const ConstFieldView material_fields[]{material.thermal_conductivity,
+  for (std::size_t s = 0U; s < state.independent_species.size; ++s) {
+    const auto field = state.independent_species.data[s].trial;
+    hash = hash_mix(hash, field.revision);
+    hash = hash_mix(hash, field.storage_identity);
+    hash = hash_mix(hash, field.revision_domain);
+  }
+  for (std::size_t s = 0U; s < material.scalar_mass_diffusivity.size; ++s) {
+    const auto field = material.scalar_mass_diffusivity.data[s];
+    hash = hash_mix(hash, field.revision);
+    hash = hash_mix(hash, field.storage_identity);
+    hash = hash_mix(hash, field.revision_domain);
+  }
+  const ConstFieldView material_fields[]{material.molecular_viscosity,
+                                         material.thermal_conductivity,
                                          material.effective_viscosity,
                                          material.enthalpy_diffusivity,
                                          velocity_gradient};
@@ -949,7 +966,8 @@ Status evaluate_enthalpy_cell_terms(
     const EquationMaterialView& material, ConstFieldView velocity_gradient,
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, Int3 cell,
-    bool validate_individual_sinks, EnthalpyCellTerms& terms) noexcept {
+    bool validate_individual_sinks, EnthalpyCellTerms& terms,
+    bool conservative_total_energy) noexcept {
   const double rho = state.density.trial.unchecked(cell, 0U);
   const double rho_n = state.density.accepted.unchecked(cell, 0U);
   const double rho_nm1 = state.density.previous.unchecked(cell, 0U);
@@ -972,12 +990,7 @@ Status evaluate_enthalpy_cell_terms(
     return {StatusCode::numerical_failure, kEnthalpyNumerical};
   }
 
-  VelocityGradient local_gradient;
-  for (std::uint8_t component = 0U; component < 9U; ++component) {
-    local_gradient.value[component] =
-        velocity_gradient.unchecked(cell, component);
-  }
-  const PressureWorkPoint work{
+  PressureWorkPoint work{
       state.pressure_reference +
           state.pressure_perturbation.trial.unchecked(cell, 0U),
       state.accepted_pressure_reference +
@@ -997,13 +1010,19 @@ Status evaluate_enthalpy_cell_terms(
        state.velocity.trial.unchecked(cell, 1U),
        state.velocity.trial.unchecked(cell, 2U)},
       0.0};
+  if (conservative_total_energy) work.pressure_gradient = {};
   EnthalpyCellTerms candidate;
   if (!evaluate_pressure_material_derivative(
           context.bdf, work, candidate.pressure_work) ||
-      !newtonian_viscous_dissipation(
-          local_gradient, viscosity, candidate.viscous_dissipation)) {
+      !detail::cartesian_viscous_heating(
+          kernels, state.velocity.trial, velocity_gradient,
+          material.effective_viscosity, cell, candidate.viscous_dissipation,
+          conservative_total_energy)) {
     return {StatusCode::numerical_failure, kEnthalpyNumerical};
   }
+  if (conservative_total_energy)
+    candidate.pressure_work -=
+        detail::kinetic_temporal_density(state, context.bdf, cell);
   for (std::size_t index = 0U; index < contributions.size; ++index) {
     candidate.source += contributions.data[index]
                             .explicit_source_density.unchecked(cell, 0U);
@@ -1028,6 +1047,45 @@ Status evaluate_enthalpy_cell_terms(
   }
   terms = candidate;
   return {};
+}
+
+// Complete the h-primary total-energy flux without a second persistent K
+// field. The same frozen Cartesian reconstruction samples K(U) on demand;
+// prescribed immersed inlets replace that face value by physical K(U_in).
+Status add_kinetic_convection(
+    const EnthalpyEquationPlan& plan, const EquationStateView& state,
+    const CartesianKernelPlan& kernels, const EquationAssemblyContext& context,
+    KernelBox box, FieldView residual) noexcept {
+  if (!plan.conservative_total_energy()) return {};
+  const ConstFaceFieldView fluxes[]{context.mass_flux.x, context.mass_flux.y,
+                                  context.mass_flux.z};
+  const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
+                 box.begin.z + box.cells.z};
+  for (std::int32_t z = box.begin.z; z < end.z; ++z)
+    for (std::int32_t y = box.begin.y; y < end.y; ++y)
+      for (std::int32_t x = box.begin.x; x < end.x; ++x) {
+        const Int3 cell{x, y, z};
+        double integrated = 0.0;
+        for (std::uint8_t a = 0U; a < 3U; ++a) {
+          Int3 upper = cell;
+          (a == 0U ? upper.x : a == 1U ? upper.y : upper.z)++;
+          const auto axis = static_cast<CartesianAxis>(a);
+          const double lo = fluxes[a].unchecked(cell);
+          const double hi = fluxes[a].unchecked(upper);
+          integrated += hi * detail::kinetic_convection_face(
+              kernels, plan.kinetic_convection(), state.velocity.trial,
+              axis, upper, hi) - lo * detail::kinetic_convection_face(
+              kernels, plan.kinetic_convection(), state.velocity.trial,
+              axis, cell, lo);
+        }
+        if (!std::isfinite(integrated))
+          return {StatusCode::numerical_failure, kEnthalpyNumerical};
+        residual.unchecked(cell, 0U) +=
+            integrated / detail::cell_volume(kernels, cell);
+      }
+  return context.immersed_interface == nullptr ? Status{} :
+      context.immersed_interface->add_source_kinetic_convection_correction(
+          plan.kinetic_convection(), state.velocity.trial, 1.0, residual, box);
 }
 
 Status combine_enthalpy_cell_system(
@@ -1084,7 +1142,9 @@ Status assemble_enthalpy_impl(
        context.scope != EquationAssemblyScope::target_coupled) ||
       context.provisional_mass_flux ||
       !compatible_history(state.density, plan.cells_, plan.density_, 1U, 0U) ||
-      !compatible_history(state.velocity, plan.cells_, plan.velocity_, 3U, 1U) ||
+      !compatible_history(state.velocity, plan.cells_, plan.velocity_, 3U,
+          plan.conservative_total_energy_ &&
+              plan.kinetic_convection_ != ConvectionScheme::central2 ? 2U : 1U) ||
       !compatible_history(state.pressure_perturbation, plan.cells_,
                           plan.pressure_, 1U, 1U) ||
       !compatible_history(state.enthalpy, plan.cells_, plan.enthalpy_, 1U,
@@ -1094,15 +1154,19 @@ Status assemble_enthalpy_impl(
       !detail::valid_cell_view(material.thermal_conductivity, plan.cells_, 0U,
                                1U, 1U) ||
       !detail::valid_cell_view(material.effective_viscosity, plan.cells_, 0U,
-                               1U, 0U) ||
+                               1U, 1U) ||
       !detail::valid_cell_view(material.enthalpy_diffusivity, plan.cells_, 0U,
                                1U, 1U) ||
       velocity_gradient.field != plan.velocity_gradient_ ||
-      !detail::valid_cell_view(velocity_gradient, plan.cells_, 0U, 9U, 0U) ||
+      !detail::valid_cell_view(velocity_gradient, plan.cells_, 0U, 9U, 1U) ||
       !valid_contributions(contributions, selected_descriptors,
           context.contribution_stage, plan.cells_)) {
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
+  const Status mixture_status = detail::MixtureEnthalpyDiffusion::validate(plan, state, material);
+  if (!mixture_status) return mixture_status;
+  const Status convection_status = detail::MixtureEnthalpyConvection::validate(plan,state);
+  if (!convection_status) return convection_status;
   bool linear = false;
   const KernelBox box = resolved_box(context.box, plan.cells_);
   if (!valid_flux_context(*plan.kernels_, context, box) ||
@@ -1111,6 +1175,9 @@ Status assemble_enthalpy_impl(
       !detail::finite_face_flux(context.mass_flux, box) ||
       !detail::finite_face_neighbour_slabs(
           state.enthalpy.trial, box, 0U, 1U, plan.convection_reach_) ||
+      !detail::finite_face_neighbour_slabs(state.velocity.trial, box, 0U, 3U,
+          plan.conservative_total_energy_ &&
+              plan.kinetic_convection_ != ConvectionScheme::central2 ? 2U : 1U) ||
       !detail::finite_face_neighbour_slabs(
           state.temperature.trial, box, 0U, 1U) ||
       !detail::finite_face_neighbour_slabs(
@@ -1128,12 +1195,19 @@ Status assemble_enthalpy_impl(
       return {StatusCode::invalid_plan, kEnthalpyAssembly};
     }
   }
-  const ConstFieldView material_fields[]{material.thermal_conductivity,
+  for (std::size_t s = 0U; s < state.independent_species.size; ++s)
+    if (output_aliases(state.independent_species.data[s].trial, system))
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  for (std::size_t s = 0U; s < material.scalar_mass_diffusivity.size; ++s)
+    if (output_aliases(material.scalar_mass_diffusivity.data[s], system))
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  const ConstFieldView material_fields[]{material.molecular_viscosity,
+                                         material.thermal_conductivity,
                                          material.effective_viscosity,
                                          material.enthalpy_diffusivity,
                                          velocity_gradient};
   for (ConstFieldView field : material_fields) {
-    if (output_aliases(field, system)) {
+    if (field.base != nullptr && output_aliases(field, system)) {
       return {StatusCode::invalid_plan, kEnthalpyAssembly};
     }
   }
@@ -1155,7 +1229,8 @@ Status assemble_enthalpy_impl(
         EnthalpyCellTerms terms;
         const Status cell_status = evaluate_enthalpy_cell_terms(
             *plan.kernels_, state, material, velocity_gradient,
-            contributions, context, {x, y, z}, false, terms);
+            contributions, context, {x, y, z}, false, terms,
+            plan.conservative_total_energy_);
         if (!cell_status) return cell_status;
       }
     }
@@ -1187,6 +1262,12 @@ Status assemble_enthalpy_impl(
         state.enthalpy.trial, 1.0, system.residual, box);
     if (!status) return status;
   }
+  status = detail::MixtureEnthalpyConvection::add_correction(
+      plan,state,context.mass_flux,context.immersed_interface,box,system.residual);
+  if (!status) return status;
+  status = add_kinetic_convection(plan, state, *plan.kernels_, context,
+                                  box, system.residual);
+  if (!status) return status;
 
   // The frozen model selects temperature conduction or the ESF unity-Lewis
   // total-enthalpy flux. This is an equation choice, not a solver fallback.
@@ -1215,6 +1296,15 @@ Status assemble_enthalpy_impl(
                                    ? material.enthalpy_diffusivity
                                    : material.thermal_conductivity,
                                conduction);
+  if (status)
+    status = detail::MixtureEnthalpyDiffusion::add_rate(
+        plan, state, material, context.immersed_interface, box, system.residual);
+  if (status && context.immersed_interface != nullptr)
+    status = context.immersed_interface->correct_viscous_heating(
+        state.velocity.trial, velocity_gradient, state.density.trial,
+        material.molecular_viscosity, material.effective_viscosity,
+        context.wall_treatment, system.residual, box,
+        plan.conservative_total_energy_);
   if (!status) {
     return status;
   }
@@ -1226,7 +1316,8 @@ Status assemble_enthalpy_impl(
         EnthalpyCellTerms terms;
         Status cell_status = evaluate_enthalpy_cell_terms(
             *plan.kernels_, state, material, velocity_gradient,
-            contributions, context, cell, true, terms);
+            contributions, context, cell, true, terms,
+            plan.conservative_total_energy_);
         EnthalpyCellSystem cell_system;
         if (cell_status)
           cell_status = combine_enthalpy_cell_system(
@@ -1248,6 +1339,8 @@ Status assemble_enthalpy_impl(
   }
   RevisionToken assembled_state =
       state_revision(state, material, velocity_gradient, contributions);
+  if (context.wall_treatment != nullptr)
+    assembled_state = hash_mix(assembled_state, context.wall_treatment->fingerprint());
   if (context.immersed_interface != nullptr) {
     assembled_state = context.immersed_interface->constrain_certificate(
         assembled_state, state.enthalpy.trial.revision,
@@ -1333,7 +1426,8 @@ Status assemble_target_coupled_enthalpy_residual(
       !detail::full_equation_box(box, plan.cells_) ||
       !compatible_history(state.density, plan.cells_, plan.density_, 1U, 0U) ||
       !compatible_history(state.velocity, plan.cells_, plan.velocity_, 3U,
-                          1U) ||
+          plan.conservative_total_energy_ &&
+              plan.kinetic_convection_ != ConvectionScheme::central2 ? 2U : 1U) ||
       !compatible_history(state.pressure_perturbation, plan.cells_,
                           plan.pressure_, 1U, 1U) ||
       !compatible_history(state.enthalpy, plan.cells_, plan.enthalpy_, 1U,
@@ -1343,15 +1437,18 @@ Status assemble_target_coupled_enthalpy_residual(
       !detail::valid_cell_view(material.thermal_conductivity, plan.cells_, 0U,
                                1U, 1U) ||
       !detail::valid_cell_view(material.effective_viscosity, plan.cells_, 0U,
-                               1U, 0U) ||
+                               1U, 1U) ||
       !detail::valid_cell_view(material.enthalpy_diffusivity, plan.cells_, 0U,
                                1U, 1U) ||
       velocity_gradient.field != plan.velocity_gradient_ ||
-      !detail::valid_cell_view(velocity_gradient, plan.cells_, 0U, 9U, 0U) ||
+      !detail::valid_cell_view(velocity_gradient, plan.cells_, 0U, 9U, 1U) ||
       !valid_flux_context(*plan.kernels_, context, box) ||
       !detail::finite_face_flux(context.mass_flux, box) ||
       !detail::finite_face_neighbour_slabs(
           state.enthalpy.trial, box, 0U, 1U, plan.convection_reach_) ||
+      !detail::finite_face_neighbour_slabs(state.velocity.trial, box, 0U, 3U,
+          plan.conservative_total_energy_ &&
+              plan.kinetic_convection_ != ConvectionScheme::central2 ? 2U : 1U) ||
       !detail::finite_face_neighbour_slabs(state.temperature.trial, box, 0U,
                                            1U) ||
       !detail::finite_face_neighbour_slabs(
@@ -1364,6 +1461,10 @@ Status assemble_target_coupled_enthalpy_residual(
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
 
+  const Status mixture_status = detail::MixtureEnthalpyDiffusion::validate(plan, state, material);
+  if (!mixture_status) return mixture_status;
+  const Status convection_status = detail::MixtureEnthalpyConvection::validate(plan,state);
+  if (!convection_status) return convection_status;
   const std::array<FieldView, 4U> outputs{
       residual, workspace.pressure_work, workspace.viscous_dissipation,
       workspace.diffusion};
@@ -1396,12 +1497,19 @@ Status assemble_target_coupled_enthalpy_residual(
       return {StatusCode::invalid_plan, kEnthalpyAssembly};
     }
   }
-  const ConstFieldView material_fields[]{material.thermal_conductivity,
+  for (std::size_t s = 0U; s < state.independent_species.size; ++s)
+    if (aliases_output(state.independent_species.data[s].trial))
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  for (std::size_t s = 0U; s < material.scalar_mass_diffusivity.size; ++s)
+    if (aliases_output(material.scalar_mass_diffusivity.data[s]))
+      return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  const ConstFieldView material_fields[]{material.molecular_viscosity,
+                                         material.thermal_conductivity,
                                          material.effective_viscosity,
                                          material.enthalpy_diffusivity,
                                          velocity_gradient};
   for (ConstFieldView field : material_fields) {
-    if (aliases_output(field)) {
+    if (field.base != nullptr && aliases_output(field)) {
       return {StatusCode::invalid_plan, kEnthalpyAssembly};
     }
   }
@@ -1421,7 +1529,7 @@ Status assemble_target_coupled_enthalpy_residual(
         EnthalpyCellTerms terms;
         const Status cell_status = evaluate_enthalpy_cell_terms(
             *plan.kernels_, state, material, velocity_gradient, contributions,
-            context, cell, false, terms);
+            context, cell, false, terms, plan.conservative_total_energy_);
         if (!cell_status) return cell_status;
         workspace.pressure_work.unchecked(cell, 0U) = terms.pressure_work;
         workspace.viscous_dissipation.unchecked(cell, 0U) =
@@ -1447,6 +1555,12 @@ Status assemble_target_coupled_enthalpy_residual(
         state.enthalpy.trial, 1.0, residual, box);
     if (!status) return status;
   }
+  status = detail::MixtureEnthalpyConvection::add_correction(
+      plan,state,context.mass_flux,context.immersed_interface,box,residual);
+  if (!status) return status;
+  status = add_kinetic_convection(plan, state, *plan.kernels_, context,
+                                  box, residual);
+  if (!status) return status;
 
   const std::array<ConstFieldView, 1U> thermal_reads{
       plan.unity_lewis_total_enthalpy_ ? state.enthalpy.trial
@@ -1461,6 +1575,15 @@ Status assemble_target_coupled_enthalpy_residual(
                                    ? material.enthalpy_diffusivity
                                    : material.thermal_conductivity,
                                conduction);
+  if (status)
+    status = detail::MixtureEnthalpyDiffusion::add_rate(
+        plan, state, material, context.immersed_interface, box, workspace.diffusion);
+  if (status && context.immersed_interface != nullptr)
+    status = context.immersed_interface->correct_viscous_heating(
+        state.velocity.trial, velocity_gradient, state.density.trial,
+        material.molecular_viscosity, material.effective_viscosity,
+        context.wall_treatment, workspace.diffusion, box,
+        plan.conservative_total_energy_);
   if (!status) return status;
 
   // residual already owns the convection term.  Complete it in place from
@@ -1495,14 +1618,12 @@ Status assemble_target_coupled_enthalpy_residual(
       }
     }
   }
-  certificate = {
-      plan.fingerprint_,
-      context.scope,
-      context.time,
-      context.geometry,
-      context.face_flux,
-      state_revision(state, material, velocity_gradient, contributions),
-      context.dt};
+  RevisionToken assembled_state = state_revision(state, material, velocity_gradient, contributions);
+  if (context.wall_treatment != nullptr)
+    assembled_state = hash_mix(assembled_state, context.wall_treatment->fingerprint());
+  certificate = {plan.fingerprint_, context.scope, context.time,
+                 context.geometry, context.face_flux, assembled_state,
+                 context.dt};
   return {};
 }
 

@@ -5,6 +5,9 @@
 
 #include "hundun/v04_app.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_mixture_enthalpy_diffusion_detail.hpp"
+#include "solver_mixture_enthalpy_convection_detail.hpp"
+#include "solver_viscous_detail.hpp"
 
 namespace hundun::v04::detail {
 
@@ -157,6 +160,7 @@ inline Status collect_terminal_equations(
 }
 
 inline Status collect_boundary_balance(
+    const EnthalpyEquationPlan& enthalpy_plan,
     const CartesianKernelPlan& kernels, const SchemePlan& schemes,
     const BoundaryPlan& boundary, const EquationStateView& state,
     const EquationMaterialView& material, ConstFieldView gradient,
@@ -171,6 +175,7 @@ inline Status collect_boundary_balance(
   const Int3 cells = kernels.cells();
   const std::int32_t reach = kernels.reach();
   Status local;
+  local = MixtureEnthalpyDiffusion::validate(enthalpy_plan, state, material);
   if (!valid_cell_view(as_const(kinetic), cells, 0U, 1U, kernels.reach()) ||
       !valid_cell_view(state.velocity.trial, cells, 0U, 3U, kernels.reach()))
     local = {StatusCode::invalid_plan, 10212U};
@@ -193,7 +198,7 @@ inline Status collect_boundary_balance(
         }
         kinetic.unchecked(cell, 0U) = value;
       }
-  std::array<long double, 11U> sum{};
+  std::array<long double, 12U> sum{};
   const KernelBox box{{0, 0, 0}, cells};
   const auto convection = [&](ConstFieldView field, ConvectionScheme scheme,
                               IbmInterfaceInletFieldKind inlet_field) {
@@ -210,6 +215,8 @@ inline Status collect_boundary_balance(
   };
   if (local) local = convection(state.enthalpy.trial, schemes.enthalpy(),
                                 IbmInterfaceInletFieldKind::enthalpy);
+  if (local) local = MixtureEnthalpyConvection::add_correction(
+      enthalpy_plan,state,flux,immersed_interface,box,scratch);
   if (local)
     for (std::int32_t z = 0; z < cells.z; ++z)
       for (std::int32_t y = 0; y < cells.y; ++y)
@@ -305,42 +312,36 @@ inline Status collect_boundary_balance(
                 kernels, material.thermal_conductivity, axis, face) *
                 (state.temperature.trial.unchecked(face, 0U) -
                  state.temperature.trial.unchecked(left, 0U));
-            const double mu = kernels.physical_inlet_material(axis_index,normal)
-                ? material.effective_viscosity.unchecked(high ? face : left,0U)
-                : interpolate(material.effective_viscosity, 0U);
-            const double normal_weight = positive_transmissibility(
-                kernels, material.effective_viscosity, axis, face);
-            const double div = interpolate(gradient, 0U) +
-                               interpolate(gradient, 4U) +
-                               interpolate(gradient, 8U);
+            double species_heat = 0.0;
+            if (local)
+              local = MixtureEnthalpyDiffusion::face_flux(
+                  enthalpy_plan, state, material, axis, face, species_heat);
+            sum[11U] += sign * species_heat;
             for (std::uint8_t c = 0U; c < 3U; ++c) {
-              const double traction_area = normal_weight *
-                  (state.velocity.trial.unchecked(face, c) -
-                   state.velocity.trial.unchecked(left, c)) +
-                  mu * face_area(kernels, axis, face) *
-                  (interpolate(gradient, 3U * axis_index + c) -
-                   (axis_index == c ? (2.0 / 3.0) * div : 0.0));
+              const double traction_area = viscous_face_traction_area(
+                  kernels, state.velocity.trial, gradient,
+                  material.effective_viscosity, axis, face, c);
               sum[10U] += sign * interpolate(state.velocity.trial, c) *
                           traction_area;
             }
           }
     }
   }
-  std::array<double, 11U> values{}, global{};
+  std::array<double, 12U> values{}, global{};
   for (std::size_t i = 0U; i < sum.size(); ++i)
     values[i] = static_cast<double>(sum[i]);
   Status status = reductions.checked_sum(
       {values.data(), 8U}, {global.data(), 8U}, local);
   if (status)
     status = reductions.checked_sum(
-        {values.data() + 8U, 3U}, {global.data() + 8U, 3U}, {});
+        {values.data() + 8U, 4U}, {global.data() + 8U, 4U}, {});
   if (!status) return status;
   const long double mass = history.valid ? history.mass : global[1U];
   const long double previous_mass = history.valid ? history.previous_mass : global[2U];
   const long double energy = history.valid ? history.energy : global[4U];
   const long double previous_energy = history.valid ? history.previous_energy : global[5U];
   const long double energy_out = static_cast<long double>(global[7U]) +
-                                global[8U] - global[9U] - global[10U];
+                                global[8U] - global[9U] - global[10U] - global[11U];
   ProductBoundaryBalanceHistory next;
   next.valid = true;
   next.epoch_start_step = history.valid ? history.epoch_start_step : accepted_step;
@@ -354,6 +355,7 @@ inline Status collect_boundary_balance(
   report.enthalpy_outflow = global[7U];
   report.kinetic_energy_outflow = global[8U];
   report.conductive_heat_input = global[9U];
+  report.species_enthalpy_diffusion_input = global[11U];
   report.viscous_work_input = global[10U];
   report.mass_bdf_rate = static_cast<double>(
       static_cast<long double>(bdf.a0) * global[0U] +

@@ -903,11 +903,7 @@ bool run_localized_immersed_compile_only(int rank, bool inject_bind_failure) {
 }
 
 bool valid_momentum_solve(
-    const MomentumPredictorSolveReport& report,
-    const std::array<std::uint32_t, 3U>& iterations,
-    const std::array<std::uint64_t, 3U>& operator_applies,
-    const std::array<std::uint64_t, 3U>& preconditioner_applies,
-    const std::array<std::uint64_t, 3U>& reduction_calls) {
+    const MomentumPredictorSolveReport& report) {
   if (report.solve_calls != 3U) return false;
   for (std::size_t component = 0U; component < report.components.size();
        ++component) {
@@ -915,15 +911,23 @@ bool valid_momentum_solve(
     const bool accepted =
         solve.termination == LinearTermination::converged ||
         solve.termination == LinearTermination::zero_rhs;
+    const double epsilon = std::numeric_limits<double>::epsilon();
+    const double tolerance = std::max(64.0*epsilon,
+        512.0*epsilon*solve.initial_true_residual);
+    // Total energy couples h to K(U), including a pure gas. Assert the new
+    // strict inner accuracy and resource relationships, not the old one/two
+    // iteration snapshot of a 1e-4 relative momentum solve.
     if (!solve.status || !accepted ||
-        solve.iterations != iterations[component] ||
-        solve.operator_applies != operator_applies[component] ||
-        solve.preconditioner_applies !=
-            preconditioner_applies[component] ||
-        solve.reduction_calls != reduction_calls[component] ||
+        solve.iterations > 64U ||
+        (solve.termination == LinearTermination::zero_rhs
+             ? solve.iterations != 0U || solve.operator_applies != 0U
+             : solve.operator_applies < solve.iterations + 1U) ||
+        solve.preconditioner_applies != solve.iterations ||
+        solve.reduction_calls < 2U*solve.iterations + 1U ||
         !std::isfinite(solve.initial_true_residual) ||
         !std::isfinite(solve.final_true_residual) ||
         solve.final_true_residual > solve.initial_true_residual ||
+        solve.final_true_residual > tolerance ||
         solve.recycle_offered_directions != 0U ||
         solve.recycle_retained_directions != 0U ||
         solve.recycle_operator_applies != 0U ||
@@ -1179,7 +1183,8 @@ bool run_implicit_enthalpy_product(int rank) {
   return passed;
 }
 
-bool run_pressure_energy_candidate_globalization_red(int rank) {
+bool run_pressure_energy_candidate_globalization_red(int rank,
+    bool replay_before_rejection = false) {
   int size = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   // Keep one global physical fixture while changing only the decomposition.
@@ -1189,9 +1194,13 @@ bool run_pressure_energy_candidate_globalization_red(int rank) {
   // Keep the RED at the first target time.  A rejected full correction cannot
   // be hidden by the normal retry chain because half dt is below the compiled
   // minimum.
-  model.time.initial_dt = 0.006;
-  model.time.minimum_dt = 0.006;
-  model.time.maximum_dt = 0.006;
+  // Total energy changes the original static-h trajectory: dt=.006 reaches
+  // the 200 K edge already in C1; dt=.003 exercises accepted backtracking
+  // replays before the C2 refinement cap. Neither may publish a time step.
+  const double target_dt = replay_before_rejection ? 0.003 : 0.006;
+  model.time.initial_dt = target_dt;
+  model.time.minimum_dt = target_dt;
+  model.time.maximum_dt = target_dt;
   model.time.maximum_growth = 1.0;
   model.time.maximum_retries = 1U;
   CompiledCasePlan plan;
@@ -1209,8 +1218,8 @@ bool run_pressure_energy_candidate_globalization_red(int rank) {
     image.plan = expected.plan;
     image.schema = expected.schema;
     image.geometry = expected.geometry;
-    image.time = 0.006;
-    image.dt = 0.006;
+    image.time = target_dt;
+    image.dt = target_dt;
     image.pressure_reference = 101325.0;
     image.step = 1U;
     image.controller_state = 1U;
@@ -1481,53 +1490,60 @@ bool run_pressure_energy_candidate_globalization_red(int rank) {
        index < reported_sample_count;
        ++index)
     first_admissible_is_first &= !diagnostic.samples[index].admissible;
-  const bool passed =
+  bool all_thermally_inadmissible = reported_sample_count ==
+      detail::kPressureEnergyCandidateGlobalizationSampleCapacity;
+  for (std::size_t index = 0U; index < reported_sample_count; ++index)
+    all_thermally_inadmissible &=
+        !diagnostic.samples[index].admissible &&
+        !diagnostic.samples[index].state_and_flux_finite &&
+        diagnostic.samples[index].first_failure_reason ==
+            detail::PressureEnergyCandidateFailureReason::thermodynamic_evaluation;
+  const bool stage_contract = replay_before_rejection
+      ? status.detail == 10210U && step.failed_stage == 54U &&
+        diagnostic.corrector == 2U && diagnostic.selection_valid &&
+        diagnostic.replay_valid && smaller_admissible &&
+        first_admissible_valid && first_admissible_is_first &&
+        diagnostic.first_admissible_sample > 0U &&
+        admissible_strict_merit_decrease &&
+        diagnostic.selected_alpha > 0.0 && diagnostic.selected_alpha < 1.0 &&
+        diagnostic.selected_state_provenance != 0U &&
+        diagnostic.selected_mass_flux_provenance != 0U &&
+        full.first_failing_global_cell == std::numeric_limits<std::uint64_t>::max() &&
+        full.first_failure_reason ==
+            detail::PressureEnergyCandidateFailureReason::production_candidate_evaluation &&
+        diagnostic.corrector_one_selected_alpha > 0.0 &&
+        diagnostic.corrector_one_selected_alpha < 1.0 &&
+        std::hypot(diagnostic.corrector_one_selected_normalized_continuity,
+                   diagnostic.corrector_one_selected_normalized_energy) <
+            std::hypot(diagnostic.corrector_one_baseline_normalized_continuity,
+                       diagnostic.corrector_one_baseline_normalized_energy) &&
+        diagnostic.corrector_two_linear_predicted_normalized_continuity < 1.0e-8 &&
+        diagnostic.corrector_two_linear_predicted_normalized_energy < 1.0e-7
+      : status.detail == 5792U && step.failed_stage == 44U &&
+        diagnostic.corrector == 1U && !diagnostic.selection_valid &&
+        !diagnostic.replay_valid && all_thermally_inadmissible &&
+        !first_admissible_valid && full.first_failing_global_cell == 0U &&
+        diagnostic.selected_alpha == 0.0 &&
+        diagnostic.selected_normalized_continuity == 0.0 &&
+        diagnostic.selected_normalized_energy == 0.0 &&
+        diagnostic.selected_state_provenance == 0U &&
+        diagnostic.selected_mass_flux_provenance == 0U;
+  const bool passed = stage_contract &&
       !status && status.code == StatusCode::rejected_step && !step.accepted &&
-      status.detail == 5792U && step.failed_stage == 53U &&
       step.attempts == 1U && observed && diagnostic.valid &&
-      diagnostic.production_candidate_loop && !diagnostic.selection_valid &&
-      !diagnostic.replay_valid && !diagnostic.committed &&
+      diagnostic.production_candidate_loop && !diagnostic.committed &&
       diagnostic_identical && committed_rollback_exact &&
       diagnostic.attempted_step == 2U && diagnostic.generation != 0U &&
-      diagnostic.attempt == 0U && diagnostic.corrector == 2U &&
-      diagnostic.sample_count ==
-          detail::kPressureEnergyCandidateGlobalizationSampleCapacity &&
+      diagnostic.attempt == 0U &&
       alpha_sequence && full.alpha == 1.0 && !full.admissible &&
       !full.state_and_flux_finite &&
-      full.first_failing_global_cell ==
-          std::numeric_limits<std::uint64_t>::max() &&
-      full.first_failure_reason ==
-          detail::PressureEnergyCandidateFailureReason::
-              production_candidate_evaluation &&
       std::isfinite(diagnostic.maximum_absolute_pressure_correction) &&
       diagnostic.maximum_absolute_pressure_correction > 0.0 &&
       std::isfinite(diagnostic.maximum_absolute_enthalpy_correction) &&
       diagnostic.maximum_absolute_enthalpy_correction > 0.0 &&
-      smaller_admissible &&
-      diagnostic.first_admissible_sample > 0U &&
-      first_admissible_valid &&
-      first_admissible_is_first &&
-      diagnostic.samples[diagnostic.first_admissible_sample].admissible &&
-      !admissible_strict_merit_decrease &&
-      diagnostic.selected_alpha == 0.0 &&
-      diagnostic.selected_normalized_continuity == 0.0 &&
-      diagnostic.selected_normalized_energy == 0.0 &&
-      diagnostic.selected_state_provenance == 0U &&
-      diagnostic.selected_mass_flux_provenance == 0U &&
-      diagnostic.corrector_one_selected_alpha > 0.0 &&
-      diagnostic.corrector_one_selected_alpha < 1.0 &&
-      diagnostic.corrector_one_selected_normalized_energy <
-          diagnostic.corrector_one_baseline_normalized_energy &&
-      std::hypot(diagnostic.corrector_one_selected_normalized_continuity,
-                 diagnostic.corrector_one_selected_normalized_energy) <
-          std::hypot(diagnostic.corrector_one_baseline_normalized_continuity,
-                     diagnostic.corrector_one_baseline_normalized_energy) &&
       diagnostic.corrector_one_linear_predicted_normalized_continuity <
           1.0e-8 &&
       diagnostic.corrector_one_linear_predicted_normalized_energy < 1.0e-7 &&
-      diagnostic.corrector_two_linear_predicted_normalized_continuity <
-          1.0e-8 &&
-      diagnostic.corrector_two_linear_predicted_normalized_energy < 1.0e-7 &&
       diagnostic.alpha_zero_velocity_bitwise_equal &&
       diagnostic.alpha_zero_density_bitwise_equal &&
       diagnostic.alpha_zero_temperature_bitwise_equal &&
@@ -2180,12 +2196,8 @@ bool run_mass_flow_product(int rank) {
       second.momentum_predictor_limiter.theta > 0.0 &&
       second.momentum_predictor_limiter.theta < 1.0;
   const bool momentum_role =
-      valid_momentum_solve(first.momentum_predictor_solve,
-                           {1U, 0U, 0U}, {3U, 0U, 0U},
-                           {1U, 0U, 0U}, {7U, 1U, 1U}) &&
-      valid_momentum_solve(second.momentum_predictor_solve,
-                           {2U, 0U, 0U}, {4U, 1U, 1U},
-                           {2U, 0U, 0U}, {8U, 4U, 4U});
+      valid_momentum_solve(first.momentum_predictor_solve) &&
+      valid_momentum_solve(second.momentum_predictor_solve);
   const bool final_flux_role =
       restart.final_mass_flux.certificate.valid() &&
       restart.final_mass_flux.revision == second.piso.final_flux_revision;
@@ -3645,7 +3657,7 @@ bool run_simple_immersed_refinement(int rank) {
                                       ? PressureEnergyJacobianScope::
                                             ibm_double_diagonal_quasi_newton
                                       : PressureEnergyJacobianScope::
-                                            ibm_cartesian_spatial_quasi_newton) &&
+                                            total_energy_spatial_quasi_newton) &&
                   iteration.baseline.corrector == expected_corrector &&
                   iteration.selected.corrector == expected_corrector &&
                   iteration.baseline.target_time ==
@@ -3839,8 +3851,11 @@ int main(int argc, char** argv) {
   }
   if (argc == 2 &&
       std::strcmp(argv[1], "--candidate-globalization-red-only") == 0) {
-    const bool passed = collective(
+    bool passed = collective(
         run_pressure_energy_candidate_globalization_red(rank),
+        MPI_COMM_WORLD);
+    passed &= collective(
+        run_pressure_energy_candidate_globalization_red(rank, true),
         MPI_COMM_WORLD);
     MPI_Finalize();
     return passed ? 0 : 1;

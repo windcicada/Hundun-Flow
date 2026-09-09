@@ -1928,6 +1928,50 @@ bool test_frozen_target_convection_directional_derivative(
                          allocations == 0U,
                      "frozen target branch differentiates allocation-free");
 
+    if (scheme != ConvectionScheme::central2) {
+      const std::uint64_t generic_checksum = face_checksum(derivative_faces);
+      const auto count = [](ConstFaceFieldView face) {
+        return static_cast<std::size_t>(face.extents.x) * face.extents.y *
+               face.extents.z;
+      };
+      std::vector<std::uint16_t> encoded(
+          count(frozen.x) + count(frozen.y) + count(frozen.z), 0U);
+      FrozenConvectionBranchPlan branches;
+      Status compiled, validated, applied;
+      {
+        allocation_observer::Guard guard;
+        compiled = compile_frozen_limited_convection_branches(
+            plan, scheme, target_flux, as_const(target.view), 0U, context,
+            FrozenConvectionLinearizationPolicy::classical_active_branch,
+            frozen, {{encoded.data(), encoded.size()}}, branches);
+        validated = validate_frozen_limited_convection_branches(
+            plan, target_flux, as_const(target.view), 0U, context, frozen,
+            branches);
+        applied = apply_frozen_limited_convection_branches(
+            plan, branches, as_const(variation.view), 0U,
+            {derivative_faces.x, derivative_faces.y, derivative_faces.z});
+        allocations = allocation_observer::count.load(std::memory_order_relaxed);
+      }
+      passed &= expect(compiled && validated && applied && allocations == 0U &&
+                           branches.tvd_donor == (scheme == ConvectionScheme::tvd2) &&
+                           branches.branch_authority == derivative.branch_authority &&
+                           branches.reconstruction == derivative.reconstruction &&
+                           face_checksum(derivative_faces) == generic_checksum,
+                       "LC2/TVD2 cached branches preserve every directional bit");
+      auto wrong_scheme = branches;
+      wrong_scheme.tvd_donor = !wrong_scheme.tvd_donor;
+      passed &= expect(!validate_frozen_limited_convection_branches(
+                           plan, target_flux, as_const(target.view), 0U,
+                           context, frozen, wrong_scheme),
+                       "compiled limiter authority rejects scheme mutation");
+      if (scheme == ConvectionScheme::tvd2)
+        passed &= expect(!apply_frozen_limited_central2_branches(
+                             plan, branches, as_const(variation.view), 0U,
+                             {derivative_faces.x, derivative_faces.y,
+                              derivative_faces.z}),
+                         "legacy LC2 entry point rejects a TVD branch plan");
+    }
+
     FrozenConvectionFaceField plus_frozen;
     FrozenConvectionFaceField minus_frozen;
     passed &= expect(
@@ -2811,6 +2855,8 @@ int main(int argc, char** argv) {
                                                    raw_flux);
     passed &= test_frozen_target_convection_directional_derivative(
         fixture.kernels, as_const(raw_flux));
+    passed &= test_frozen_target_convection_directional_derivative(
+        stretched_fixture.kernels, as_const(raw_flux));
     passed &= test_frozen_direction_analytic_branches(fixture.kernels);
     passed &= test_constant_semismooth_and_zero_limiter(
         fixture.kernels, zero_limiter_fixture.kernels);

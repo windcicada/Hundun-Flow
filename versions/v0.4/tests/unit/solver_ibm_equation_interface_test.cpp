@@ -4,6 +4,8 @@
 #include "../support/ibm_force_fixture.hpp"
 #include "../support/product_fixture.hpp"
 #include "../support/turbulence_fixture.hpp"
+#include "../../src/solver_ibm_scalar_transport_detail.hpp"
+#include "../../src/solver_equation_detail.hpp"
 
 #include <mpi.h>
 
@@ -96,6 +98,100 @@ bool positive_face(ImmersedFaceDirection direction) {
   return direction == ImmersedFaceDirection::x_positive ||
          direction == ImmersedFaceDirection::y_positive ||
          direction == ImmersedFaceDirection::z_positive;
+}
+
+bool test_small_species_interface_transport() {
+  constexpr int n=16; IbmForceFixture fixture;
+  if(!expect(fixture.initialize(MPI_COMM_SELF,n),"small-species IBM fixture compiles")) return false;
+  auto model=product_model({n,n,n}); model.mesh=force_mesh(n);
+  model.schemes.species=ConvectionScheme::tvd2;
+  FieldRegistry registry; BoundaryPlan boundary; SchemePlan schemes; TimeSchemePlan time;
+  CartesianKernelPlan kernels;
+  auto status=BoundaryCompiler::compile(MPI_COMM_SELF,model,fixture.geometry,fixture.patch,
+      registry,boundary,schemes,time);
+  if(status) status=CartesianKernelPlan::compile(schemes,fixture.geometry,fixture.patch,boundary,kernels);
+  if(!expect(status,"small-species Cartesian kernel compiles")) return false;
+  const auto links=fixture.topology.links(); std::size_t source=links.size;
+  for(std::size_t i=0U;i<links.size;++i)
+    if(links.data[i].direction==ImmersedFaceDirection::y_negative) { source=i; break; }
+  if(!expect(source<links.size,"small-species fixture has an inlet link")) return false;
+  const std::array<double,1U> inlet_y{0.0};
+  const std::array<IbmInterfaceInletState,1U> inlet{{
+      {links.data[source].global_link,0.125,{0.0,1.0,0.0},450000.0,{inlet_y.data(),1U}}}};
+  IbmEquationInterfacePlan interface;
+  status=IbmEquationInterfacePlan::compile(kernels,fixture.topology,fixture.boundary,
+      fixture.topology.interface_metric(),{inlet.data(),1U},1U,interface);
+  const auto cells=fixture.patch.cells; const auto c=links.data[source].fluid_local_index;
+  FaceFluxStorage storage; FaceFluxView flux;
+  if(status) status=FaceFluxStorage::allocate_workspace(cells,1U,storage);
+  if(status) status=storage.workspace_view(0U,91U,flux);
+  if(!expect(status,"small-species source/flux compile")) return false;
+  for(auto f:{flux.x,flux.y,flux.z}) for(int z=0;z<f.extents.z;++z)
+    for(int y=0;y<f.extents.y;++y) for(int x=0;x<f.extents.x;++x) f.unchecked({x,y,z})=0.0;
+  status=interface.constrain_interface_flux(flux);
+  bool outlet=false; Int3 outlet_neighbour{},outlet_face{}; CartesianAxis outlet_axis{};
+  for(unsigned a=0U;a<3U && !outlet;++a) for(int sign:{-1,1}) {
+    Int3 neighbour=c; (a==0U ? neighbour.x : a==1U ? neighbour.y : neighbour.z)+=sign;
+    if(neighbour.x<0 || neighbour.x>=cells.x || neighbour.y<0 || neighbour.y>=cells.y || neighbour.z<0 || neighbour.z>=cells.z) continue;
+    if(!fixture.topology.is_fluid_global({neighbour.x+fixture.patch.begin.x,
+        neighbour.y+fixture.patch.begin.y,neighbour.z+fixture.patch.begin.z})) continue;
+    const Int3 face=sign>0 ? neighbour : c;
+    (a==0U ? flux.x : a==1U ? flux.y : flux.z).unchecked(face)=sign*1e-5;
+    outlet_neighbour=neighbour; outlet_face=face; outlet_axis=static_cast<CartesianAxis>(a);
+    outlet=true; break;
+  }
+  if(!expect(status && outlet,"small-species row has a physical fluid outlet")) return false;
+  auto q=make_force_field(91U,cells,1U,2U,801U,901U);
+  auto gamma=make_force_field(92U,cells,1U,1U,802U,902U);
+  auto rate=make_force_field(93U,cells,1U,0U,803U,903U);
+  constexpr double fluid_q=1e-10;
+  std::fill(gamma.storage.begin(),gamma.storage.end(),0.0134);
+  const std::array<ConstFieldView,1U> reads{as_const(q.view)};
+  const std::array<FieldView,1U> writes{rate.view};
+  const KernelBox box{{0,0,0},cells};
+  KernelInvocation call{{reads.data(),1U},{writes.data(),1U},box,0U,0U,1U,flux.revision,nullptr};
+  const auto region=fixture.topology.region(); bool passed=true;
+  const double volume=fixture.geometry.axis(CartesianAxis::x).widths().data[c.x]*
+      fixture.geometry.axis(CartesianAxis::y).widths().data[c.y]*
+      fixture.geometry.axis(CartesianAxis::z).widths().data[c.z];
+  const double expected=1e-5*fluid_q/volume;
+  for(double placeholder:{0.0,0.731}) {
+    std::fill(q.storage.begin(),q.storage.end(),fluid_q);
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x)
+      if(region.data[flat(cells,{x,y,z})]==static_cast<std::uint8_t>(RegionFlag::solid))
+        q.view.unchecked({x,y,z},0U)=placeholder;
+    call.required_face_flux_revision=flux.revision;
+    status=cartesian_provisional_convection(kernels,ConvectionScheme::tvd2,as_const(flux),call);
+    if(status) status=detail::IbmScalarTransport::convection(interface,0U,ConvectionScheme::tvd2,
+        as_const(q.view),as_const(flux),box,rate.view);
+    const double actual=rate.view.unchecked(c,0U);
+    if(!status || std::abs(actual-expected)>64.0*std::numeric_limits<double>::epsilon()*expected)
+      std::cerr<<"IBM small-species convection placeholder="<<placeholder<<" actual="<<actual<<" expected="<<expected<<'\n';
+    passed &= expect(status && std::abs(actual-expected)<=64.0*std::numeric_limits<double>::epsilon()*expected,
+        "physical inlet scalar rate does not lose a small fluid flux by cancelling a large solid-placeholder flux");
+    call.required_face_flux_revision=0U;
+    status=cartesian_diffusion(kernels,as_const(gamma.view),call);
+    if(status) status=detail::IbmScalarTransport::diffusion(interface,as_const(q.view),as_const(gamma.view),box,rate.view);
+    double error=0.0;
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x)
+      if(region.data[flat(cells,{x,y,z})]==static_cast<std::uint8_t>(RegionFlag::fluid))
+        error=std::max(error,std::abs(rate.view.unchecked({x,y,z},0U)));
+    if(error>64.0*std::numeric_limits<double>::epsilon()*fluid_q)
+      std::cerr<<"IBM small-species diffusion placeholder="<<placeholder<<" error="<<error<<'\n';
+    passed &= expect(status && error<=64.0*std::numeric_limits<double>::epsilon()*fluid_q,
+        "uniform fluid scalar has zero impermeable diffusion independently of solid placeholder magnitude");
+    q.view.unchecked(outlet_neighbour,0U)=1.125*fluid_q;
+    const double expected_diffusion=detail::positive_transmissibility(kernels,as_const(gamma.view),
+        outlet_axis,outlet_face)*(q.view.unchecked(outlet_neighbour,0U)-fluid_q)/volume;
+    status=cartesian_diffusion(kernels,as_const(gamma.view),call);
+    if(status) status=detail::IbmScalarTransport::diffusion(interface,as_const(q.view),as_const(gamma.view),box,rate.view);
+    const double actual_diffusion=rate.view.unchecked(c,0U);
+    if(!status || std::abs(actual_diffusion-expected_diffusion)>64.0*std::numeric_limits<double>::epsilon()*expected_diffusion)
+      std::cerr<<"IBM small-species diffusion placeholder="<<placeholder<<" actual="<<actual_diffusion<<" expected="<<expected_diffusion<<'\n';
+    passed &= expect(status && std::abs(actual_diffusion-expected_diffusion)<=64.0*std::numeric_limits<double>::epsilon()*expected_diffusion,
+        "small physical fluid-fluid diffusion survives an unrelated impermeable cut face");
+  }
+  return passed;
 }
 
 bool test_prescribed_interface_mass_flux() {
@@ -218,6 +314,94 @@ bool test_prescribed_interface_mass_flux() {
                        as_const(inlet_velocity.view), as_const(inlet_mu.view),
                        inlet_work) && std::abs(inlet_work - expected_work) < 1.0e-10,
                    "linear normal inlet stress has matching signed energy work");
+  // Changing a sealed link into a prescribed-velocity inlet changes the
+  // local kinetic work and heating by precisely the physical inlet work.
+  // Nonconstant viscosity exercises the actual positive quadratic donors.
+  IbmEquationInterfacePlan sealed_interface;
+  passed &= expect(IbmEquationInterfacePlan::compile(
+                       kernels, fixture.topology, fixture.boundary,
+                       fixture.topology.interface_metric(), {},
+                       prescribed_species.size(), sealed_interface),
+                   "sealed comparison interface compiles");
+  ForceOwnedField work_gradient = make_force_field(46U, cells, 9U, 1U, 526U, 626U);
+  ForceOwnedField work_pressure = make_force_field(47U, cells, 1U, reach, 527U, 627U);
+  ForceOwnedField work_density = make_force_field(48U, cells, 1U, 0U, 528U, 628U);
+  std::fill(work_gradient.storage.begin(), work_gradient.storage.end(), 0.0);
+  std::fill(work_pressure.storage.begin(), work_pressure.storage.end(), 0.0);
+  std::fill(work_density.storage.begin(), work_density.storage.end(), 1.2);
+  for (int z = -reach; z < cells.z + reach; ++z)
+    for (int y = -reach; y < cells.y + reach; ++y)
+      for (int x = -reach; x < cells.x + reach; ++x)
+        inlet_mu.view.unchecked({x, y, z}, 0U) =
+            mu_inlet * (1.0 + 0.2 * (x + reach) / (cells.x + 2.0 * reach));
+  std::array<ForceOwnedField, 2U> work_diagonal, work_rhs, work_residual, work_heat;
+  for (std::size_t mode = 0U; mode < 2U; ++mode) {
+    const auto identity = static_cast<StorageIdentity>(530U + 4U * mode);
+    work_diagonal[mode] = make_force_field(49U, cells, 3U, 0U, identity, identity + 100U);
+    work_rhs[mode] = make_force_field(50U, cells, 3U, 0U, identity + 1U, identity + 101U);
+    work_residual[mode] = make_force_field(51U, cells, 3U, 0U, identity + 2U, identity + 102U);
+    work_heat[mode] = make_force_field(52U, cells, 1U, 0U, identity + 3U, identity + 103U);
+    std::fill(work_diagonal[mode].storage.begin(), work_diagonal[mode].storage.end(), 100.0);
+    std::fill(work_rhs[mode].storage.begin(), work_rhs[mode].storage.end(), 0.0);
+    std::fill(work_residual[mode].storage.begin(), work_residual[mode].storage.end(), 0.0);
+    std::fill(work_heat[mode].storage.begin(), work_heat[mode].storage.end(), 0.0);
+    const auto& selected = mode == 0U ? sealed_interface : interface;
+    passed &= expect(selected.constrain_momentum(
+                         as_const(inlet_velocity.view), as_const(work_gradient.view),
+                         as_const(work_pressure.view), as_const(work_density.view),
+                         as_const(inlet_mu.view), as_const(inlet_mu.view), nullptr,
+                         {work_diagonal[mode].view, work_rhs[mode].view, work_residual[mode].view}),
+                     "inlet work comparison assembles the real momentum correction");
+    passed &= expect(selected.correct_viscous_heating(
+                         as_const(inlet_velocity.view), as_const(work_gradient.view),
+                         as_const(work_density.view), as_const(inlet_mu.view),
+                         as_const(inlet_mu.view), nullptr, work_heat[mode].view),
+                     "inlet work comparison assembles compatible heating");
+  }
+  long double measured_inlet_work = 0.0L;
+  const double work_volume = std::pow(fixture.geometry.x().uniform_width(), 3);
+  const auto work_regions = fixture.topology.region();
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x) {
+        const Int3 cell{x, y, z};
+        if (work_regions.data[flat(cells, cell)] != static_cast<std::uint8_t>(RegionFlag::fluid)) continue;
+        measured_inlet_work += work_volume *
+            (work_heat[1].view.unchecked(cell, 0U) - work_heat[0].view.unchecked(cell, 0U));
+        for (std::uint8_t c = 0U; c < 3U; ++c)
+          measured_inlet_work -= inlet_velocity.view.unchecked(cell, c) *
+              (work_residual[1].view.unchecked(cell, c) - work_residual[0].view.unchecked(cell, c));
+      }
+  passed &= expect(interface.inlet_viscous_work_input(
+                       as_const(inlet_velocity.view), as_const(inlet_mu.view), inlet_work) &&
+                       std::abs(measured_inlet_work - inlet_work) < 2.0e-11L &&
+                       std::abs(inlet_work) > 1.0e-7,
+                   "inlet heating plus kinetic change closes nonzero boundary work with variable viscosity");
+  // The conservative-total-energy route contains boundary work directly;
+  // unlike static-h heating, no cell-velocity momentum work is subtracted.
+  for (std::size_t mode = 0U; mode < 2U; ++mode) {
+    std::fill(work_heat[mode].storage.begin(), work_heat[mode].storage.end(), 0.0);
+    const auto& selected = mode == 0U ? sealed_interface : interface;
+    passed &= expect(selected.correct_viscous_heating(
+        as_const(inlet_velocity.view), as_const(work_gradient.view),
+        as_const(work_density.view), as_const(inlet_mu.view),
+        as_const(inlet_mu.view), nullptr, work_heat[mode].view, {}, true),
+        "total-energy mode replaces cut-face viscous work");
+  }
+  long double measured_total_work = 0.0L;
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x) {
+        const Int3 cell{x, y, z};
+        if (work_regions.data[flat(cells, cell)] !=
+            static_cast<std::uint8_t>(RegionFlag::fluid)) continue;
+        measured_total_work += work_volume *
+            (work_heat[1].view.unchecked(cell, 0U) -
+             work_heat[0].view.unchecked(cell, 0U));
+      }
+  passed &= expect(std::abs(measured_total_work - inlet_work) < 2.0e-11L,
+      "conservative energy has exactly the physical inlet boundary work");
+  std::fill(inlet_mu.storage.begin(), inlet_mu.storage.end(), mu_inlet);
   ForceOwnedField inlet_temperature = make_force_field(
       44U, cells, 1U, fixture.boundary.maximum_halo_reach(), 524U, 624U);
   ForceOwnedField inlet_heat_rate =
@@ -363,6 +547,36 @@ bool test_prescribed_interface_mass_flux() {
                                                0U) == expected,
                      "high-order correction replaces exactly one face value");
   }
+  ForceOwnedField kinetic_velocity =
+      make_force_field(61U, cells, 3U, 2U, 5501U, 5601U);
+  ForceOwnedField kinetic_scalar =
+      make_force_field(62U, cells, 1U, 2U, 5502U, 5602U);
+  for (int z = -2; z < cells.z + 2; ++z)
+    for (int y = -2; y < cells.y + 2; ++y)
+      for (int x = -2; x < cells.x + 2; ++x) {
+        const Int3 cell{x, y, z};
+        double kinetic = 0.0;
+        for (std::uint8_t c = 0U; c < 3U; ++c) {
+          const double speed = std::sin(0.3*x + 0.7*y - 0.2*z + c);
+          kinetic_velocity.view.unchecked(cell, c) = speed;
+          kinetic += 0.5*speed*speed;
+        }
+        kinetic_scalar.view.unchecked(cell, 0U) = kinetic;
+      }
+  for (ConvectionScheme scheme : schemes_to_test) {
+    std::fill(correction.storage.begin(), correction.storage.end(), 7.0);
+    double ordinary = 0.0;
+    passed &= expect(reconstruct_cartesian_convection_face(kernels, scheme,
+        as_const(kinetic_scalar.view), 0U, source_axis, face_index(source_link),
+        prescribed_phi, ordinary), "independent stored-K reconstruction");
+    passed &= expect(interface.add_source_kinetic_convection_correction(
+        scheme, as_const(kinetic_velocity.view), 1.0, correction.view),
+        "kinetic source correction samples U without a stored K field");
+    const double expected = 7.0 + divergence_sign*prescribed_phi*
+        (prescribed_kinetic - ordinary)/volume;
+    passed &= expect(correction.view.unchecked(source_link.fluid_local_index,
+        0U) == expected, "on-demand K uses exactly the stored-K face arithmetic");
+  }
   std::fill(correction.storage.begin(), correction.storage.end(), 7.0);
   const double ordinary_upwind =
       transported.view.unchecked(source_link.solid_local_index, 0U);
@@ -460,6 +674,36 @@ bool test_prescribed_interface_mass_flux() {
                                    frozen_z.values.size();
   std::vector<std::uint16_t> branch_storage(branch_count);
   FrozenConvectionBranchPlan branches;
+  for (ConvectionScheme scheme : {ConvectionScheme::limited_central2,
+                                  ConvectionScheme::tvd2}) {
+    passed &= expect(interface.freeze_source_convection_faces(
+                         {IbmInterfaceInletFieldKind::enthalpy, 0U}, scheme,
+                         as_const(flux), as_const(transported.view), 0U,
+                         frozen_context, frozen_output, frozen) &&
+                         compile_frozen_limited_convection_branches(
+                             kernels, scheme, as_const(flux),
+                             as_const(transported.view), 0U, frozen_context,
+                             FrozenConvectionLinearizationPolicy::
+                                 semismooth_generalized_zero_slope,
+                             frozen,
+                             {{branch_storage.data(), branch_storage.size()}},
+                             branches) &&
+                         validate_frozen_limited_convection_branches(
+                             kernels, as_const(flux), as_const(transported.view),
+                             0U, frozen_context, frozen, branches) &&
+                         apply_frozen_limited_convection_branches(
+                             kernels, branches, as_const(transported.view), 0U,
+                             directional_output) &&
+                         directional_source_value() == 0.0 &&
+                         !std::signbit(directional_source_value()),
+                     "LC2/TVD2 cache preserves prescribed inlet derivative +0");
+  }
+  passed &= expect(interface.freeze_source_convection_faces(
+                       {IbmInterfaceInletFieldKind::enthalpy, 0U},
+                       ConvectionScheme::limited_central2, as_const(flux),
+                       as_const(transported.view), 0U, frozen_context,
+                       frozen_output, frozen),
+                   "legacy LC2 entry point keeps its original scheme");
   passed &= expect(compile_frozen_limited_central2_branches(
                        kernels, as_const(flux), as_const(transported.view), 0U,
                        frozen_context,
@@ -679,15 +923,30 @@ bool test_prescribed_interface_mass_flux() {
         replay.view, {pressure_work.view, viscous_work.view, conduction.view}, replay_energy);
     passed &= expect(full_status && replay_status, "both source-bearing energy paths assemble");
     const Int3 source_cell = source_link.fluid_local_index;
-    const double expected_energy = -prescribed_phi * sources[0].enthalpy;
     const double full_value = e_residual.view.unchecked(source_cell,0U);
     const double replay_value = replay.view.unchecked(source_cell,0U);
-    if (std::abs(full_value-replay_value) > 1e-12)
-      std::cerr << "source energy full=" << full_value << " replay=" << replay_value
-                << " expected=" << expected_energy << '\n';
-    passed &= expect(std::abs(full_value-expected_energy) < 1e-12 &&
-        std::abs(replay_value-full_value) < 1e-12 && e_residual.storage == replay.storage,
+    passed &= expect(std::abs(replay_value-full_value) < 1e-12 &&
+                         e_residual.storage == replay.storage,
         "full and candidate energy residuals use the same prescribed inlet enthalpy");
+    // The moving inlet also performs nonzero viscous work/heating. Isolate
+    // its enthalpy transport by changing only h_in, not by omitting that heat.
+    auto zero_h_sources = sources;
+    zero_h_sources[0].enthalpy = 0.0;
+    IbmEquationInterfacePlan zero_h_interface;
+    passed &= expect(IbmEquationInterfacePlan::compile(
+                         kernels, fixture.topology, fixture.boundary,
+                         fixture.topology.interface_metric(),
+                         {zero_h_sources.data(), zero_h_sources.size()},
+                         prescribed_species.size(), zero_h_interface),
+                     "enthalpy-only inlet mutation compiles");
+    context.immersed_interface = &zero_h_interface;
+    passed &= expect(assemble_target_coupled_enthalpy_residual(
+                         equations.enthalpy(), state, material, as_const(grad.view), context,
+                         replay.view, {pressure_work.view, viscous_work.view, conduction.view}, replay_energy),
+                     "enthalpy-only inlet mutation replays");
+    passed &= expect(std::abs(full_value - replay.view.unchecked(source_cell, 0U) +
+                                 prescribed_phi * sources[0].enthalpy) < 1e-12,
+                     "fixed inlet transports exactly phi*h_in independently of viscous work");
   }
   return passed;
 }
@@ -1117,6 +1376,10 @@ bool run() {
   std::vector<double> expected_diagonal = initial_diagonal;
   std::vector<double> expected_residual = initial_residual;
   std::vector<double> expected_rhs = initial_rhs;
+  ForceOwnedField viscous_heating =
+      make_force_field(29U, cells, 1U, 0U, 30U, 120U);
+  std::fill(viscous_heating.storage.begin(), viscous_heating.storage.end(), 0.0);
+  std::vector<double> expected_viscous_heating(viscous_heating.storage.size(), 0.0);
   const double transmissibility = mu * width;
   double cartesian_traction_mutation_gap = 0.0;
   for (std::size_t index = 0U; index < rows.size; ++index) {
@@ -1246,6 +1509,14 @@ bool run() {
           mu * (physical.physical_quadrature_area *
                     normal_derivative[component] +
                 (1.0 / 3.0) * normal_stress);
+      const double u_owner = velocity.view.unchecked(link.fluid_local_index, component);
+      const double u_face = 0.5 * (velocity.view.unchecked(left, component) +
+                                   velocity.view.unchecked(face, component));
+      // Stationary wall: actual traction removes U_cell*desired kinetic
+      // work. Replace the deleted Cartesian face's product-rule heating.
+      expected_viscous_heating[flat(cells, link.fluid_local_index)] +=
+          (u_owner * desired + (u_face - u_owner) * regular) /
+          (width * width * width);
       const double cartesian_desired =
           mu * link.cartesian_control_face_area *
           (normal_derivative[component] +
@@ -1312,6 +1583,17 @@ bool run() {
   passed &= expect(
       cartesian_traction_mutation_gap > 1.0e-6,
       "mutation feeding Cartesian control area to physical traction fails");
+  passed &= expect(interface.correct_viscous_heating(
+                       as_const(velocity.view), as_const(gradient.view),
+                       as_const(density.view), as_const(molecular.view),
+                       as_const(viscosity.view), nullptr, viscous_heating.view),
+                   "IBM compatible viscous heating applies");
+  double maximum_heating_error = 0.0;
+  for (std::size_t index = 0U; index < expected_viscous_heating.size(); ++index)
+    maximum_heating_error = std::max(maximum_heating_error,
+        std::abs(viscous_heating.storage[index] - expected_viscous_heating[index]));
+  passed &= expect(maximum_heating_error < 1.0e-8,
+                   "IBM heating matches independent physical-traction and deleted-face work oracle");
 
   TurbulenceFixture wall_fixture;
   passed &= expect(wall_fixture.initialize(TurbulencePlanSpec{}),
@@ -1355,6 +1637,42 @@ bool run() {
   passed &= expect(wall_diagonal_change > 1.0e-8,
                    "wall-law replacement removes the Cartesian solid-face "
                    "diagonal");
+  const auto resolved_heating = viscous_heating.storage;
+  std::fill(viscous_heating.storage.begin(), viscous_heating.storage.end(), 0.0);
+  passed &= expect(interface.correct_viscous_heating(
+                       as_const(velocity.view), as_const(gradient.view),
+                       as_const(density.view), as_const(molecular.view),
+                       as_const(viscosity.view), &wall_fixture.plan, viscous_heating.view),
+                   "wall-law heating consumes the momentum traction authority");
+  double wall_work_error = 0.0;
+  for (std::int32_t z = 0; z < cells.z; ++z)
+    for (std::int32_t y = 0; y < cells.y; ++y)
+      for (std::int32_t x = 0; x < cells.x; ++x) {
+        const Int3 cell{x, y, z};
+        if (region.data[flat(cells, cell)] != static_cast<std::uint8_t>(RegionFlag::fluid)) continue;
+        double work_change = 0.0;
+        for (std::uint8_t c = 0U; c < 3U; ++c)
+          work_change += velocity.view.unchecked(cell, c) *
+              (wall_residual.view.unchecked(cell, c) - residual.view.unchecked(cell, c));
+        wall_work_error = std::max(wall_work_error, std::abs(
+            (viscous_heating.view.unchecked(cell, 0U) - resolved_heating[flat(cells, cell)]) *
+                width * width * width - work_change));
+      }
+  passed &= expect(wall_work_error < 2.0e-11,
+                   "wall-law change in heating equals change in removed kinetic work cell by cell");
+  std::fill(viscous_heating.storage.begin(), viscous_heating.storage.end(), 0.0);
+  passed &= expect(interface.correct_viscous_heating(
+      as_const(velocity.view), as_const(gradient.view), as_const(density.view),
+      as_const(molecular.view), as_const(viscosity.view), nullptr,
+      viscous_heating.view, {}, true), "resolved stationary-wall total work");
+  const auto resolved_total_work = viscous_heating.storage;
+  std::fill(viscous_heating.storage.begin(), viscous_heating.storage.end(), 0.0);
+  passed &= expect(interface.correct_viscous_heating(
+      as_const(velocity.view), as_const(gradient.view), as_const(density.view),
+      as_const(molecular.view), as_const(viscosity.view), &wall_fixture.plan,
+      viscous_heating.view, {}, true), "wall-law stationary-wall total work");
+  passed &= expect(viscous_heating.storage == resolved_total_work,
+      "stationary wall does no total-energy work for either traction model");
 
   ForceOwnedField transported =
       make_force_field(16U, cells, 1U, ghosts, 17U, 107U);
@@ -1572,8 +1890,8 @@ bool run() {
     auto rho = make_force_field(spec.density, cells, 1U, ghosts, 2013U, 3013U);
     auto u = make_force_field(spec.velocity, cells, 3U, ghosts, 2014U, 3014U);
     auto p = make_force_field(spec.pressure_perturbation, cells, 1U, ghosts, 2015U, 3015U);
-    auto grad = make_force_field(spec.velocity_gradient, cells, 9U, 0U, 2016U, 3016U);
-    auto mu = make_force_field(spec.effective_viscosity, cells, 1U, 1U, 2017U, 3017U);
+    auto grad = make_force_field(spec.velocity_gradient, cells, 9U, 1U, 2016U, 3016U);
+    auto mu = make_force_field(spec.effective_viscosity, cells, 1U, ghosts, 2017U, 3017U);
     auto lambda = make_force_field(64U, cells, 1U, 1U, 2018U, 3018U);
     auto rhs = make_force_field(65U, cells, 1U, 0U, 2019U, 3019U);
     auto scratch = make_force_field(66U, cells, 1U, 0U, 2020U, 3020U);
@@ -1728,7 +2046,8 @@ bool run() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
-  const bool passed = test_prescribed_interface_mass_flux() && run();
+  const bool passed = test_small_species_interface_transport() &&
+                      test_prescribed_interface_mass_flux() && run();
   MPI_Finalize();
   return passed ? 0 : 1;
 }

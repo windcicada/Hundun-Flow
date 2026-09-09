@@ -2128,3 +2128,19 @@ foreach(coupled_case IN LISTS coupled_cli_cases)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/integration/coupled_restart_cli_test.cmake")
   set_tests_properties(v04_coupled_restart_cli_${coupled_case} PROPERTIES TIMEOUT 60 PROCESSORS 4)
 endforeach()
+
+add_executable(v04_product_total_energy_conservation_test integration/product_total_energy_conservation_test.cpp)
+target_link_libraries(v04_product_total_energy_conservation_test PRIVATE hundun_v04_core MPI::MPI_C)
+add_executable(v04_mpi_unsigned_reduction_contract_test mpi/mpi_unsigned_reduction_contract_test.cpp)
+target_link_libraries(v04_mpi_unsigned_reduction_contract_test PRIVATE MPI::MPI_C)
+foreach(gtmc_ranks IN ITEMS 1 2 4)
+  add_test(NAME v04_product_total_energy_mpi_${gtmc_ranks}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${gtmc_ranks}"
+      "$<TARGET_FILE:v04_product_total_energy_conservation_test>")
+  add_test(NAME v04_mpi_unsigned_reduction_${gtmc_ranks}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${gtmc_ranks}"
+      "$<TARGET_FILE:v04_mpi_unsigned_reduction_contract_test>")
+  set_tests_properties(v04_product_total_energy_mpi_${gtmc_ranks}
+    v04_mpi_unsigned_reduction_${gtmc_ranks} PROPERTIES PROCESSORS ${gtmc_ranks}
+    TIMEOUT 90 LABELS "v04_focused")
+endforeach()

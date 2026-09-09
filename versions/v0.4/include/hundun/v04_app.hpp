@@ -494,6 +494,7 @@ struct DriverConservationReport {
   double enthalpy_outflow{};             // W
   double kinetic_energy_outflow{};       // W
   double conductive_heat_input{};        // W, physical boundary faces
+  double species_enthalpy_diffusion_input{};  // W, species-carried boundary heat
   double viscous_work_input{};           // W, including prescribed IBM inlets
   double mass_bdf_rate{};                // kg/s
   double total_energy_bdf_rate{};        // W

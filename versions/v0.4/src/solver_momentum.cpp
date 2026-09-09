@@ -7,6 +7,7 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_viscous_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -260,42 +261,8 @@ double face_cross_traction(const CartesianKernelPlan& kernels,
                            ConstFieldView viscosity, std::size_t axis,
                            Int3 face,
                            std::uint8_t momentum_component) noexcept {
-  const Int3 left = axis_offset(face, axis, -1);
-  const double mu_face =
-      kernels.geometry_kind() == GeometryKind::uniform
-          ? detail::metric_interpolate_material_face<true>(
-                kernels, axis,
-                axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
-                viscosity.unchecked(left, 0U),
-                viscosity.unchecked(face, 0U))
-          : detail::metric_interpolate_material_face<false>(
-                kernels, axis,
-                axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
-                viscosity.unchecked(left, 0U),
-                viscosity.unchecked(face, 0U));
-  const auto interpolate_gradient = [&](std::uint8_t component) noexcept {
-    return kernels.geometry_kind() == GeometryKind::uniform
-               ? detail::metric_interpolate_face<true>(
-                     kernels, axis,
-                     axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
-                     gradient.unchecked(left, component),
-                     gradient.unchecked(face, component))
-               : detail::metric_interpolate_face<false>(
-                     kernels, axis,
-                     axis == 0U ? face.x : (axis == 1U ? face.y : face.z),
-                     gradient.unchecked(left, component),
-                     gradient.unchecked(face, component));
-  };
-  const double divergence = interpolate_gradient(0U) +
-                            interpolate_gradient(4U) +
-                            interpolate_gradient(8U);
-  // G(component, derivative) is stored at 3*component+derivative.
-  const double transpose = interpolate_gradient(
-      static_cast<std::uint8_t>(3U * axis + momentum_component));
-  return mu_face *
-         (transpose - (axis == momentum_component
-                           ? (2.0 / 3.0) * divergence
-                           : 0.0));
+  return detail::viscous_cross_traction(kernels, gradient, viscosity, axis,
+                                         face, momentum_component);
 }
 
 double cross_stress_cell_integral(const CartesianKernelPlan& kernels,
@@ -2277,9 +2244,10 @@ Status solve_momentum_predictor(
   const std::uint32_t restart =
       std::min<std::uint32_t>(12U, requirements.maximum_restart);
   // A mixture fixed point cannot converge below the inner momentum solve's
-  // truncation noise. Keep the ordinary flow predictor policy; a coupled
-  // composition solve needs a near-roundoff inner equation before certifying
-  // its conservative inventory. This tightens, never relaxes, flow acceptance.
+  // truncation noise. The same tight policy is needed when total energy
+  // contains K(U): a loose momentum warm-start changes h through kinetic
+  // energy, even for a pure gas or a passive scalar. The standalone ordinary
+  // predictor retains its original policy. No iteration cap is increased.
   const double epsilon=std::numeric_limits<double>::epsilon();
   const LinearSolveControl control{
       require_composition_accuracy ? 64.0*epsilon : 1.0e-10,

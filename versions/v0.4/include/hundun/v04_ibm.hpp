@@ -16,6 +16,8 @@
 
 namespace hundun::v04 {
 
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class IbmScalarTransport; }
+
 class IbmPhysicalBoundaryFluxAuthority;
 class ImportedIbmCompiler;
 class BoundaryStencilPlan;
@@ -723,6 +725,11 @@ class IbmEquationInterfacePlan {
   Status add_source_first_order_upwind_correction(
       IbmInterfaceInletField field, ConstFieldView transported, double scale,
       FieldView output, KernelBox box = {}) const noexcept;
+  // K is sampled directly from the three-component U stencil; no persisted
+  // kinetic-energy field or second reconstruction implementation is needed.
+  Status add_source_kinetic_convection_correction(
+      ConvectionScheme scheme, ConstFieldView velocity, double scale,
+      FieldView output, KernelBox box = {}) const noexcept;
   bool has_inlet_sources() const noexcept {
     return inlet_state_bound_ && !prescribed_interface_fluxes_.empty();
   }
@@ -751,6 +758,18 @@ class IbmEquationInterfacePlan {
   Status correct_velocity_gradient(ConstFieldView velocity,
                                    FieldView velocity_gradient,
                                    Real3 wall_velocity = {}) const noexcept;
+  // Add the sparse cut-face difference to Cartesian compatible viscous
+  // heating [W/m^3], using exactly the traction in constrain_momentum.
+  // total_energy_work selects div(U_face dot tau) instead of internal
+  // heating: a stationary wall contributes zero physical boundary work.
+  Status correct_viscous_heating(ConstFieldView velocity,
+                                 ConstFieldView velocity_gradient,
+                                 ConstFieldView density,
+                                 ConstFieldView molecular_viscosity,
+                                 ConstFieldView effective_viscosity,
+                                 const TurbulencePlan* wall_treatment,
+                                 FieldView rate, KernelBox box = {},
+                                 bool total_energy_work = false) const noexcept;
   // All three diffusion corrections require rate storage to be disjoint
   // from transported and diffusivity, including partial/ghost overlap.
   // The two read-only inputs may share storage.
@@ -773,12 +792,27 @@ class IbmEquationInterfacePlan {
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 
  private:
+  friend class detail::MixtureEnthalpyDiffusion;
+  friend class detail::MixtureEnthalpyConvection;
+  friend class detail::IbmScalarTransport;
   friend class IbmPhysicalBoundaryFluxAuthority;
   struct WallLinearization {
     double distance{};
     double gradient_majorant{};
     double solid_pressure_derivative_weight{};
   };
+  struct ViscousBoundaryTraction {
+    std::array<double, 3U> residual{};
+    Real3 boundary_velocity{};
+    double viscosity{};
+    double wall_drag_coefficient{};
+    bool equilibrium_wall{};
+  };
+  Status viscous_boundary_traction(
+      std::size_t row_index, ConstFieldView velocity, ConstFieldView density,
+      ConstFieldView molecular_viscosity, ConstFieldView effective_viscosity,
+      const TurbulencePlan* wall_treatment,
+      ViscousBoundaryTraction& out) const noexcept;
   struct PrescribedInterfaceFlux {
     std::uint32_t topology_link{};
     double face_mass_flux{};
@@ -800,7 +834,7 @@ class IbmEquationInterfacePlan {
   Status add_source_convection_correction_impl(
       IbmInterfaceInletField field, const ConvectionScheme* scheme,
       ConstFieldView transported, double scale, FieldView output,
-      KernelBox box) const noexcept;
+      KernelBox box, bool kinetic_from_velocity = false) const noexcept;
   const CartesianKernelPlan* kernels_{};
   const EBTopology* topology_{};
   const BoundaryStencilPlan* boundary_{};

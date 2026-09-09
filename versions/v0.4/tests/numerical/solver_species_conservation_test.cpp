@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_flow.hpp"
+#include "../../src/solver_species_guess_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -776,6 +777,22 @@ bool test_production_species_and_passive_assembly() {
                        rejected.plan == passive_certificate.plan,
                    "provisional final flux rejects atomically");
 
+  context.scope=EquationAssemblyScope::momentum_predictor;
+  rejected=species_certificate;
+  passed &= expect(assemble_species(fixture.equations.species(),0U,state,
+      material,{},context,system,rejected).code==StatusCode::invalid_plan &&
+      output_is(diagonal,rhs,residual,91.0) && faces_are(ax,ay,az,91.0) &&
+      rejected.plan==species_certificate.plan,
+      "public species assembly does not promote a provisional guess");
+  for(const auto face:{provisional.x,provisional.y,provisional.z})
+    for(int z=0;z<face.extents.z;++z) for(int y=0;y<face.extents.y;++y)
+      for(int x=0;x<face.extents.x;++x) face.unchecked({x,y,z})=0.0;
+  EquationAssemblyCertificate guess_certificate;
+  passed &= expect(static_cast<bool>(detail::assemble_species_guess(
+      fixture.equations.species(),0U,state,material,context,system,guess_certificate)) &&
+      guess_certificate.valid() && guess_certificate.scope==EquationAssemblyScope::momentum_predictor,
+      "private species seed assembles without final conservation authority");
+
   reset_outputs();
   rejected = species_certificate;
   context.face_flux = committed.revision;
@@ -784,6 +801,30 @@ bool test_production_species_and_passive_assembly() {
   context.face_flux_revision_domain = committed.certificate.revision_domain();
   context.mass_flux = committed;
   context.provisional_mass_flux = false;
+  context.scope=EquationAssemblyScope::final_conservative;
+  passed &= expect(detail::assemble_species_guess(fixture.equations.species(),
+      0U,state,material,context,system,rejected).code==StatusCode::invalid_plan &&
+      output_is(diagonal,rhs,residual,91.0) && faces_are(ax,ay,az,91.0) &&
+      rejected.plan==species_certificate.plan,
+      "private species seed cannot impersonate the final assembler");
+  passed &= expect(static_cast<bool>(detail::assemble_species_coupling_rows(
+      fixture.equations.species(),0U,state,material,context,system)),
+      "private density rows require and accept real final-flux authority");
+  for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+    const Int3 cell{x,y,z};
+    const double coordinate=(x+0.5)*dx;
+    passed &= expect(close(residual.view.unchecked(cell,0U),0.20+0.20*coordinate) &&
+        close(diagonal.view.unchecked(cell,0U),10.0+6.0*6.0*dx/volume),
+        "private density row has the same physical equation and diagonal before volume scaling");
+  }
+  reset_outputs();
+  const auto saved_scope=context.scope;
+  context.scope=EquationAssemblyScope::target_coupled;
+  passed &= expect(detail::assemble_species_coupling_rows(fixture.equations.species(),
+      0U,state,material,context,system).code==StatusCode::invalid_plan &&
+      output_is(diagonal,rhs,residual,91.0),
+      "private density rows cannot bypass final authority through target scope");
+  context.scope=saved_scope;
   species.view.unchecked({1, 1, 1}, 0U) = 1.01;
   passed &= expect(assemble_species(fixture.equations.species(), 0U, state,
                                     material, {}, context, system, rejected)

@@ -109,8 +109,6 @@ struct ThermoInversionDiagnostic {
 class ThermodynamicsPlan {
  public:
   ThermodynamicsPlan() noexcept = default;
-  ThermodynamicsPlan(const ThermodynamicsPlan&) = delete;
-  ThermodynamicsPlan& operator=(const ThermodynamicsPlan&) = delete;
   ThermodynamicsPlan(ThermodynamicsPlan&&) noexcept = default;
   ThermodynamicsPlan& operator=(ThermodynamicsPlan&&) noexcept = default;
 
@@ -170,6 +168,12 @@ class ThermodynamicsPlan {
   Status independent_species_enthalpy_bounds(std::size_t independent_index,
                                              double& at_minimum,
                                              double& at_maximum) const noexcept;
+  // Absolute species enthalpy difference at one common face temperature.
+  // With J_dep = -sum(J_ind), this is the coefficient of each independent
+  // species flux in the conservative mixture-enthalpy diffusion flux.
+  Status independent_species_enthalpy_difference(
+      std::size_t independent_index, double temperature,
+      double& difference) const noexcept;
 
   std::size_t species_count() const noexcept {
     return inverse_molecular_weight_.size();
@@ -190,6 +194,11 @@ class ThermodynamicsPlan {
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 
  private:
+  friend class EquationPlanSet;
+  // Equation compilation takes an owned cold copy; the public plan remains
+  // move-only. No equation hot path borrows the compiler's thermo lifetime.
+  ThermodynamicsPlan(const ThermodynamicsPlan&) = default;
+  ThermodynamicsPlan& operator=(const ThermodynamicsPlan&) = default;
   friend class TransportPlan;
   friend class ClosedMassPlan;
   Status evaluate_thermal_impl(

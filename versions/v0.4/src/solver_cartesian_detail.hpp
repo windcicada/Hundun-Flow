@@ -181,11 +181,11 @@ inline DerivativeWeights metric_derivative_weights(
           left / (right * total)};
 }
 
-template <bool Uniform>
-inline double metric_interpolate_face(const CartesianKernelPlan& plan,
+template <bool Uniform, class Scalar>
+inline Scalar metric_interpolate_face(const CartesianKernelPlan& plan,
                                       std::size_t axis,
-                                      std::int32_t local_face, double left,
-                                      double right) noexcept {
+                                      std::int32_t local_face, Scalar left,
+                                      Scalar right) noexcept {
   if constexpr (Uniform) {
     return 0.5 * (left + right);
   }

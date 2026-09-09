@@ -6,6 +6,9 @@
 
 #include "mesh_focus_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_viscous_detail.hpp"
+#include "solver_conservative_energy_detail.hpp"
+#include "solver_ibm_scalar_transport_detail.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -243,6 +246,41 @@ Status validate_bound(const IbmEquationInterfacePlan& plan,
                  metric != nullptr && metric->fingerprint() != 0U
              ? Status{}
              : Status{StatusCode::invalid_plan, kIbmEquationApply};
+}
+
+// Topology builders order links by fluid cell, then direction. Verify that
+// invariant while visiting each boundary row once; no hot-path allocation.
+template<class Evaluate>
+Status replace_cut_scalar_rows(Span<const ImmersedLink> links, Int3 cells,
+    KernelBox box, FieldView rate, Evaluate evaluate) noexcept {
+  for(bool write : {false,true}) {
+    std::size_t begin=0U,previous=0U; bool first=true;
+    while(begin<links.size) {
+      const Int3 c=links.data[begin].fluid_local_index;
+      if(c.x<0 || c.x>=cells.x || c.y<0 || c.y>=cells.y || c.z<0 || c.z>=cells.z)
+        return {StatusCode::invalid_plan,kIbmEquationApply};
+      const std::size_t flat=std::size_t(c.x)+std::size_t(cells.x)*(std::size_t(c.y)+std::size_t(cells.y)*c.z);
+      if(!first && flat<=previous) return {StatusCode::invalid_plan,kIbmEquationApply};
+      first=false; previous=flat;
+      std::array<std::size_t,6U> cut; cut.fill(links.size);
+      std::size_t end=begin;
+      while(end<links.size && same_index(links.data[end].fluid_local_index,c)) {
+        const auto direction=static_cast<std::size_t>(links.data[end].direction);
+        if(direction>=cut.size() || cut[direction]!=links.size)
+          return {StatusCode::invalid_plan,kIbmEquationApply};
+        cut[direction]=end++;
+      }
+      if(c.x>=box.begin.x && c.x<box.begin.x+box.cells.x &&
+         c.y>=box.begin.y && c.y<box.begin.y+box.cells.y &&
+         c.z>=box.begin.z && c.z<box.begin.z+box.cells.z) {
+        double value=0.0; const Status status=evaluate(c,cut,value);
+        if(!status) return status;
+        if(write) rate.unchecked(c,0U)=value;
+      }
+      begin=end;
+    }
+  }
+  return {};
 }
 
 }  // namespace
@@ -1463,7 +1501,7 @@ Status IbmEquationInterfacePlan::add_source_first_order_upwind_correction(
 Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
     IbmInterfaceInletField field, const ConvectionScheme* scheme,
     ConstFieldView transported, double scale, FieldView output,
-    KernelBox box) const noexcept {
+    KernelBox box, bool kinetic_from_velocity) const noexcept {
   const Status bound =
       validate_bound(*this, kernels_, topology_, boundary_, metric_);
   if (!bound) return bound;
@@ -1484,7 +1522,8 @@ Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
   const std::uint8_t output_component = transported_component;
   const std::uint8_t required_ghost_width =
       scheme == nullptr || *scheme == ConvectionScheme::central2 ? 1U : 2U;
-  if (!detail::valid_cell_view(transported, cells, transported_component, 1U,
+  if (!detail::valid_cell_view(transported, cells, transported_component,
+                               kinetic_from_velocity ? 3U : 1U,
                                required_ghost_width) ||
       !detail::valid_cell_view(output, cells, output_component, 1U) ||
       detail::field_views_overlap(transported, output))
@@ -1548,7 +1587,11 @@ Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
     if (!prescribed_value(source, prescribed))
       return {StatusCode::invalid_plan, kIbmEquationApply};
     double ordinary = 0.0;
-    if (scheme == nullptr) {
+    if (kinetic_from_velocity) {
+      const InterfaceFace face = interface_face(link);
+      ordinary = detail::kinetic_convection_face(*kernels_, *scheme,
+          transported, face.axis, face.index, source.face_mass_flux);
+    } else if (scheme == nullptr) {
       ordinary = transported.unchecked(link.solid_local_index,
                                        transported_component);
     } else {
@@ -1678,6 +1721,138 @@ IbmEquationInterfacePlan::inlet_for_link(
              ? &*found : nullptr;
 }
 
+// Shared resolved/wall-law traction for momentum, boundary work and heating.
+Status IbmEquationInterfacePlan::viscous_boundary_traction(
+    std::size_t index, ConstFieldView velocity, ConstFieldView density,
+    ConstFieldView molecular_viscosity, ConstFieldView effective_viscosity,
+    const TurbulencePlan* wall_treatment,
+    ViscousBoundaryTraction& out) const noexcept {
+  const auto rows = boundary_->links();
+  const auto links = topology_->links();
+  const auto physical_links = metric_->links();
+  if (index >= rows.size || index >= wall_linearization_.size() ||
+      rows.data[index].topology_link >= links.size ||
+      physical_links.size != links.size)
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  const auto& row = rows.data[index];
+  const auto& link = links.data[row.topology_link];
+  const auto& physical = physical_links.data[row.topology_link];
+  const auto cell = link.fluid_local_index;
+  const auto linearization = wall_linearization_[index];
+  const double area = physical.physical_quadrature_area;
+  double wall_viscosity = 0.0;
+  Status status = evaluate_positive_bounded_quadratic_row(
+      boundary_->reconstruction(), row.wall_value_row,
+      effective_viscosity, 0U, wall_viscosity);
+  if (!status || !std::isfinite(wall_viscosity) || wall_viscosity <= 0.0 ||
+      !std::isfinite(area) || area <= 0.0)
+    return status ? Status{StatusCode::numerical_failure, kIbmEquationNumerical} : status;
+  double normal_derivative[3]{};
+  const auto* inlet = inlet_for_link(row.topology_link);
+  const Real3 boundary_velocity = inlet != nullptr ? inlet->velocity : Real3{};
+  const double boundary_components[3]{boundary_velocity.x,
+                                      boundary_velocity.y,
+                                      boundary_velocity.z};
+  for (std::uint8_t component = 0U; component < 3U; ++component) {
+    status = evaluate_quadratic_row(
+        boundary_->reconstruction(), row.wall_normal_gradient_row,
+        velocity, component, boundary_components[component], 0.0,
+        normal_derivative[component]);
+    if (!status || !std::isfinite(normal_derivative[component]))
+      return status ? Status{StatusCode::numerical_failure,
+                             kIbmEquationNumerical}
+                    : status;
+  }
+  const double normal_components[3]{link.solid_to_fluid_normal.x,
+                                    link.solid_to_fluid_normal.y,
+                                    link.solid_to_fluid_normal.z};
+  double desired[3]{};
+  for (std::uint8_t component = 0U; component < 3U; ++component) {
+    double normal_stress = 0.0;
+    for (std::uint8_t derivative = 0U; derivative < 3U; ++derivative)
+      normal_stress +=
+          physical.normal_second_moment[3U * component + derivative] *
+          normal_derivative[derivative];
+    desired[component] =
+        wall_viscosity *
+        (area * normal_derivative[component] +
+         (1.0 / 3.0) * normal_stress);
+  }
+  bool equilibrium_wall = false;
+  double wall_drag_coefficient = 0.0;
+  if (inlet == nullptr && wall_treatment != nullptr &&
+      wall_treatment->wall_treatment() ==
+          WallTreatmentKind::equilibrium_wall_function) {
+    WallFunctionSample sample;
+    sample.surface = WallSurfaceKind::immersed;
+    sample.solid_to_fluid_normal = link.solid_to_fluid_normal;
+    sample.wall_distance = linearization.distance;
+    sample.fluid_velocity = {velocity.unchecked(cell, 0U),
+                             velocity.unchecked(cell, 1U),
+                             velocity.unchecked(cell, 2U)};
+    sample.wall_velocity = {};
+    sample.density = density.unchecked(cell, 0U);
+    sample.molecular_viscosity =
+        molecular_viscosity.unchecked(cell, 0U);
+    // Momentum only consumes shear. Finite neutral thermal/scalar values
+    // satisfy the shared wall-law sample contract without creating a
+    // second transport closure here.
+    sample.heat_capacity = 1.0;
+    sample.molecular_conductivity = 0.0;
+    sample.fluid_temperature = 1.0;
+    sample.wall_temperature = 1.0;
+    sample.molecular_mass_diffusivity = 0.0;
+    sample.fluid_scalar = 0.0;
+    sample.wall_scalar = 0.0;
+    WallFunctionResult wall;
+    status = wall_treatment->evaluate_wall_function(sample, wall);
+    if (!status) return status;
+    const double normal_speed =
+        sample.fluid_velocity.x * normal_components[0U] +
+        sample.fluid_velocity.y * normal_components[1U] +
+        sample.fluid_velocity.z * normal_components[2U];
+    const double tangential_x =
+        sample.fluid_velocity.x - normal_speed * normal_components[0U];
+    const double tangential_y =
+        sample.fluid_velocity.y - normal_speed * normal_components[1U];
+    const double tangential_z =
+        sample.fluid_velocity.z - normal_speed * normal_components[2U];
+    const double tangential_speed = std::sqrt(
+        tangential_x * tangential_x + tangential_y * tangential_y +
+        tangential_z * tangential_z);
+    wall_drag_coefficient =
+        tangential_speed > 0.0
+            ? sample.density * wall.friction_velocity *
+                  wall.friction_velocity * area / tangential_speed
+            : 0.0;
+    if (!std::isfinite(wall_drag_coefficient) ||
+        wall_drag_coefficient < 0.0)
+      return {StatusCode::numerical_failure, kIbmEquationNumerical};
+    equilibrium_wall = true;
+    const double resolved_normal = desired[0U] * normal_components[0U] +
+                                   desired[1U] * normal_components[1U] +
+                                   desired[2U] * normal_components[2U];
+    desired[0U] = resolved_normal * normal_components[0U] -
+                  wall.shear_on_fluid.x * area;
+    desired[1U] = resolved_normal * normal_components[1U] -
+                  wall.shear_on_fluid.y * area;
+    desired[2U] = resolved_normal * normal_components[2U] -
+                  wall.shear_on_fluid.z * area;
+  }
+  ViscousBoundaryTraction value;
+  for (std::size_t c = 0U; c < 3U; ++c) {
+    if (!std::isfinite(desired[c]))
+      return {StatusCode::numerical_failure, kIbmEquationNumerical};
+    value.residual[c] = desired[c];
+  }
+  value.boundary_velocity = boundary_velocity;
+  value.viscosity = wall_viscosity;
+  value.wall_drag_coefficient = wall_drag_coefficient;
+  value.equilibrium_wall = equilibrium_wall;
+  out = value;
+  return {};
+}
+
 Status IbmEquationInterfacePlan::constrain_momentum(
     ConstFieldView velocity, ConstFieldView velocity_gradient,
     ConstFieldView pressure_perturbation, ConstFieldView density,
@@ -1719,10 +1894,10 @@ Status IbmEquationInterfacePlan::constrain_momentum(
     const InterfaceFace face = interface_face(link);
     const double transmissibility = detail::positive_transmissibility(
         *kernels_, effective_viscosity, face.axis, face.index);
-    double wall_viscosity = 0.0;
-    status = evaluate_positive_bounded_quadratic_row(
-        boundary_->reconstruction(), row.wall_value_row,
-        effective_viscosity, 0U, wall_viscosity);
+    ViscousBoundaryTraction traction;
+    status = viscous_boundary_traction(index, velocity, density,
+        molecular_viscosity, effective_viscosity, wall_treatment, traction);
+    const double wall_viscosity = traction.viscosity;
     const double area = physical.physical_quadrature_area;
     const Int3 cell = link.fluid_local_index;
     const WallLinearization linearization = wall_linearization_[index];
@@ -1756,102 +1931,15 @@ Status IbmEquationInterfacePlan::constrain_momentum(
     if (!std::isfinite(resolved_wall_transmissibility) ||
         resolved_wall_transmissibility <= 0.0)
       return {StatusCode::numerical_failure, kIbmEquationNumerical};
-    double normal_derivative[3]{};
-    const auto* inlet = inlet_for_link(row.topology_link);
-    const Real3 boundary_velocity = inlet != nullptr ? inlet->velocity : Real3{};
-    const double boundary_components[3]{boundary_velocity.x,
-                                        boundary_velocity.y,
-                                        boundary_velocity.z};
-    for (std::uint8_t component = 0U; component < 3U; ++component) {
-      status = evaluate_quadratic_row(
-          boundary_->reconstruction(), row.wall_normal_gradient_row,
-          velocity, component, boundary_components[component], 0.0,
-          normal_derivative[component]);
-      if (!status || !std::isfinite(normal_derivative[component]))
-        return status ? Status{StatusCode::numerical_failure,
-                               kIbmEquationNumerical}
-                      : status;
-    }
     const double normal_components[3]{link.solid_to_fluid_normal.x,
                                       link.solid_to_fluid_normal.y,
                                       link.solid_to_fluid_normal.z};
-    const double normal_l1 =
-        std::abs(normal_components[0U]) +
-        std::abs(normal_components[1U]) +
-        std::abs(normal_components[2U]);
-    double desired[3]{};
-    for (std::uint8_t component = 0U; component < 3U; ++component) {
-      double normal_stress = 0.0;
-      for (std::uint8_t derivative = 0U; derivative < 3U; ++derivative)
-        normal_stress +=
-            physical.normal_second_moment[3U * component + derivative] *
-            normal_derivative[derivative];
-      desired[component] =
-          wall_viscosity *
-          (area * normal_derivative[component] +
-           (1.0 / 3.0) * normal_stress);
-    }
-    bool equilibrium_wall = false;
-    double wall_drag_coefficient = 0.0;
-    if (inlet == nullptr && wall_treatment != nullptr &&
-        wall_treatment->wall_treatment() ==
-            WallTreatmentKind::equilibrium_wall_function) {
-      WallFunctionSample sample;
-      sample.surface = WallSurfaceKind::immersed;
-      sample.solid_to_fluid_normal = link.solid_to_fluid_normal;
-      sample.wall_distance = linearization.distance;
-      sample.fluid_velocity = {velocity.unchecked(cell, 0U),
-                               velocity.unchecked(cell, 1U),
-                               velocity.unchecked(cell, 2U)};
-      sample.wall_velocity = {};
-      sample.density = density.unchecked(cell, 0U);
-      sample.molecular_viscosity =
-          molecular_viscosity.unchecked(cell, 0U);
-      // Momentum only consumes shear. Finite neutral thermal/scalar values
-      // satisfy the shared wall-law sample contract without creating a
-      // second transport closure here.
-      sample.heat_capacity = 1.0;
-      sample.molecular_conductivity = 0.0;
-      sample.fluid_temperature = 1.0;
-      sample.wall_temperature = 1.0;
-      sample.molecular_mass_diffusivity = 0.0;
-      sample.fluid_scalar = 0.0;
-      sample.wall_scalar = 0.0;
-      WallFunctionResult wall;
-      status = wall_treatment->evaluate_wall_function(sample, wall);
-      if (!status) return status;
-      const double normal_speed =
-          sample.fluid_velocity.x * normal_components[0U] +
-          sample.fluid_velocity.y * normal_components[1U] +
-          sample.fluid_velocity.z * normal_components[2U];
-      const double tangential_x =
-          sample.fluid_velocity.x - normal_speed * normal_components[0U];
-      const double tangential_y =
-          sample.fluid_velocity.y - normal_speed * normal_components[1U];
-      const double tangential_z =
-          sample.fluid_velocity.z - normal_speed * normal_components[2U];
-      const double tangential_speed = std::sqrt(
-          tangential_x * tangential_x + tangential_y * tangential_y +
-          tangential_z * tangential_z);
-      wall_drag_coefficient =
-          tangential_speed > 0.0
-              ? sample.density * wall.friction_velocity *
-                    wall.friction_velocity * area / tangential_speed
-              : 0.0;
-      if (!std::isfinite(wall_drag_coefficient) ||
-          wall_drag_coefficient < 0.0)
-        return {StatusCode::numerical_failure, kIbmEquationNumerical};
-      equilibrium_wall = true;
-      const double resolved_normal = desired[0U] * normal_components[0U] +
-                                     desired[1U] * normal_components[1U] +
-                                     desired[2U] * normal_components[2U];
-      desired[0U] = resolved_normal * normal_components[0U] -
-                    wall.shear_on_fluid.x * area;
-      desired[1U] = resolved_normal * normal_components[1U] -
-                    wall.shear_on_fluid.y * area;
-      desired[2U] = resolved_normal * normal_components[2U] -
-                    wall.shear_on_fluid.z * area;
-    }
+    const double normal_l1 = std::abs(normal_components[0U]) +
+                             std::abs(normal_components[1U]) +
+                             std::abs(normal_components[2U]);
+    const auto& desired = traction.residual;
+    const bool equilibrium_wall = traction.equilibrium_wall;
+    const double wall_drag_coefficient = traction.wall_drag_coefficient;
     for (std::uint8_t component = 0U; component < 3U; ++component) {
       const double fluid =
           velocity.unchecked(link.fluid_local_index, component);
@@ -2097,6 +2185,74 @@ Status IbmEquationInterfacePlan::correct_velocity_gradient(
   return {};
 }
 
+Status IbmEquationInterfacePlan::add_source_kinetic_convection_correction(
+    ConvectionScheme scheme, ConstFieldView velocity, double scale,
+    FieldView output, KernelBox box) const noexcept {
+  return add_source_convection_correction_impl(
+      {IbmInterfaceInletFieldKind::kinetic_energy,0U}, &scheme, velocity,
+      scale, output, box, true);
+}
+
+Status IbmEquationInterfacePlan::correct_viscous_heating(
+    ConstFieldView velocity, ConstFieldView velocity_gradient,
+    ConstFieldView density, ConstFieldView molecular_viscosity,
+    ConstFieldView effective_viscosity, const TurbulencePlan* wall_treatment,
+    FieldView rate, KernelBox box, bool total_energy_work) const noexcept {
+  Status status = validate_bound(*this, kernels_, topology_, boundary_, metric_);
+  if (!status) return status;
+  const auto cells = kernels_->cells();
+  if (box.cells.x == 0 && box.cells.y == 0 && box.cells.z == 0) box = {{0,0,0}, cells};
+  if (!detail::valid_kernel_box(box, cells) ||
+      !detail::valid_cell_view(velocity, cells, 0U, 3U, boundary_->maximum_halo_reach()) ||
+      !detail::valid_cell_view(velocity_gradient, cells, 0U, 9U, 1U) ||
+      !detail::valid_cell_view(density, cells, 0U, 1U, 0U) ||
+      !detail::valid_cell_view(molecular_viscosity, cells, 0U, 1U, 0U) ||
+      !detail::valid_cell_view(effective_viscosity, cells, 0U, 1U, boundary_->maximum_halo_reach()) ||
+      !detail::valid_cell_view(rate, cells, 0U, 1U))
+    return {StatusCode::invalid_plan, kIbmEquationApply};
+  for (auto input : {velocity, velocity_gradient, density, molecular_viscosity, effective_viscosity})
+    if (detail::field_views_overlap(input, as_const(rate)))
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+  const auto rows = boundary_->links();
+  const auto links = topology_->links();
+  for (std::size_t index = 0U; index < rows.size; ++index) {
+    if (rows.data[index].topology_link >= links.size)
+      return {StatusCode::invalid_plan, kIbmEquationApply};
+    const auto& link = links.data[rows.data[index].topology_link];
+    const auto cell = link.fluid_local_index;
+    if (cell.x < box.begin.x || cell.x >= box.begin.x + box.cells.x ||
+        cell.y < box.begin.y || cell.y >= box.begin.y + box.cells.y ||
+        cell.z < box.begin.z || cell.z >= box.begin.z + box.cells.z) continue;
+    ViscousBoundaryTraction traction;
+    status = viscous_boundary_traction(index, velocity, density, molecular_viscosity,
+                                       effective_viscosity, wall_treatment, traction);
+    if (!status) return status;
+    const auto face = interface_face(link);
+    const auto left = offset(face.index, face.axis, -1);
+    const double boundary_u[3]{traction.boundary_velocity.x,
+                               traction.boundary_velocity.y,
+                               traction.boundary_velocity.z};
+    double correction = 0.0;
+    for (std::uint8_t c = 0U; c < 3U; ++c) {
+      const double u = total_energy_work ? 0.0 : velocity.unchecked(cell, c);
+      const double u_face = detail::interpolate_face(*kernels_, face.axis,
+          normal_index(face.index, face.axis), velocity.unchecked(left, c),
+          velocity.unchecked(face.index, c));
+      const double cartesian = detail::viscous_face_traction_area(
+          *kernels_, velocity, velocity_gradient, effective_viscosity, face.axis, face.index, c);
+      // desired is an outward residual (-force on fluid). The physical
+      // interface work is U_boundary dot force, zero at a stationary wall.
+      correction += (u - boundary_u[c]) * traction.residual[c] -
+          (positive_face(link.direction) ? 1.0 : -1.0) * (u_face - u) * cartesian;
+    }
+    const double value = rate.unchecked(cell, 0U) +
+                         correction / detail::cell_volume(*kernels_, cell);
+    if (!std::isfinite(value)) return {StatusCode::numerical_failure, kIbmEquationNumerical};
+    rate.unchecked(cell, 0U) = value;
+  }
+  return {};
+}
+
 Status IbmEquationInterfacePlan::inlet_viscous_work_input(
     ConstFieldView velocity, ConstFieldView effective_viscosity,
     double& input) const noexcept {
@@ -2118,25 +2274,15 @@ Status IbmEquationInterfacePlan::inlet_viscous_work_input(
     const auto& row = rows.data[index];
     const auto* inlet = inlet_for_link(row.topology_link);
     if (inlet == nullptr) continue;
-    const auto& physical = metric_->links().data[row.topology_link];
     const double u[3]{inlet->velocity.x, inlet->velocity.y, inlet->velocity.z};
-    double mu = 0.0, derivative[3]{};
-    status = evaluate_positive_bounded_quadratic_row(
-        boundary_->reconstruction(), row.wall_value_row,
-        effective_viscosity, 0U, mu);
-    for (std::uint8_t c = 0U; c < 3U && status; ++c)
-      status = evaluate_quadratic_row(
-          boundary_->reconstruction(), row.wall_normal_gradient_row,
-          velocity, c, u[c], 0.0, derivative[c]);
+    ViscousBoundaryTraction traction;
+    status = viscous_boundary_traction(index, velocity, {}, {}, effective_viscosity,
+                                       nullptr, traction);
     if (!status) return status;
     for (std::uint8_t c = 0U; c < 3U; ++c) {
-      double normal_stress = 0.0;
-      for (std::uint8_t d = 0U; d < 3U; ++d)
-        normal_stress += physical.normal_second_moment[3U * c + d] * derivative[d];
       // constrain_momentum inserts positive outward viscous residual;
       // physical traction/work into the fluid has the opposite sign.
-      work -= u[c] * mu * (physical.physical_quadrature_area * derivative[c] +
-                           (1.0 / 3.0) * normal_stress);
+      work -= u[c] * traction.residual[c];
     }
   }
   if (!std::isfinite(static_cast<double>(work)))
@@ -2211,6 +2357,92 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
   return {};
 }
 
+Status detail::IbmScalarTransport::convection(const IbmEquationInterfacePlan& plan,
+    std::size_t species,ConvectionScheme scheme,ConstFieldView q,
+    ConstFaceFluxView flux,KernelBox box,FieldView rate) noexcept {
+  Status status=validate_bound(plan,plan.kernels_,plan.topology_,plan.boundary_,plan.metric_);
+  if(!status) return status;
+  const auto& kernels=*plan.kernels_; const Int3 cells=kernels.cells();
+  if(!detail::valid_kernel_box(box,cells) ||
+     static_cast<unsigned>(scheme)>static_cast<unsigned>(ConvectionScheme::tvd2) ||
+     !detail::valid_cell_view(q,cells,0U,1U,scheme==ConvectionScheme::central2 ? 1U : 2U) ||
+     !detail::valid_cell_view(rate,cells,0U,1U) || detail::field_views_overlap(q,rate) ||
+     detail::cell_face_views_overlap(rate,flux.x) ||
+     detail::cell_face_views_overlap(rate,flux.y) ||
+     detail::cell_face_views_overlap(rate,flux.z))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  status=plan.validate_interface_flux(flux);
+  if(!status) return status;
+  if(!plan.prescribed_interface_fluxes_.empty() &&
+     (!plan.inlet_state_bound_ || species>=plan.independent_species_count_))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  const auto links=plan.topology_->links();
+  const auto physical_row=[&](Int3 c,const std::array<std::size_t,6U>& cut,double& value) noexcept -> Status {
+    long double sum=0.0L;
+    for(std::size_t d=0U;d<6U;++d) {
+      const auto axis=static_cast<CartesianAxis>(d/2U); const bool positive=d%2U!=0U;
+      Int3 face=c;
+      if(positive) (axis==CartesianAxis::x ? face.x : axis==CartesianAxis::y ? face.y : face.z)++;
+      const double mass=detail::select(flux,axis).unchecked(face);
+      if(mass==0.0) continue;
+      long double face_q=0.0L;
+      if(cut[d]<links.size) {
+        const auto* source=plan.inlet_for_link(static_cast<std::uint32_t>(cut[d]));
+        if(source==nullptr || !source->has_inlet_state ||
+           source->independent_species_begin>=plan.prescribed_independent_species_.size() ||
+           species>=plan.prescribed_independent_species_.size()-source->independent_species_begin)
+          return {StatusCode::invalid_plan,kIbmEquationApply};
+        face_q=plan.prescribed_independent_species_[source->independent_species_begin+species];
+      } else {
+        face_q=detail::precise_scalar_convection_face(kernels,scheme,q,axis,face,mass);
+      }
+      sum+=(positive ? 1.0L : -1.0L)*mass*face_q;
+    }
+    value=static_cast<double>(sum/detail::cell_volume(kernels,c));
+    return std::isfinite(value) ? Status{} : Status{StatusCode::numerical_failure,kIbmEquationNumerical};
+  };
+  return replace_cut_scalar_rows(links,cells,box,rate,physical_row);
+}
+
+Status detail::IbmScalarTransport::diffusion(const IbmEquationInterfacePlan& plan,
+    ConstFieldView q,ConstFieldView gamma,KernelBox box,FieldView rate) noexcept {
+  Status status=validate_bound(plan,plan.kernels_,plan.topology_,plan.boundary_,plan.metric_);
+  if(!status) return status;
+  const auto& kernels=*plan.kernels_; const Int3 cells=kernels.cells();
+  if(!detail::valid_kernel_box(box,cells) || !detail::valid_cell_view(q,cells,0U,1U,1U) ||
+     !detail::valid_cell_view(gamma,cells,0U,1U,1U) || !detail::valid_cell_view(rate,cells,0U,1U) ||
+     detail::field_views_overlap(q,rate) || detail::field_views_overlap(gamma,rate))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  const auto links=plan.topology_->links();
+  const auto physical_row=[&](Int3 c,const std::array<std::size_t,6U>& cut,double& value) noexcept -> Status {
+    long double sum=0.0L;
+    for(std::size_t d=0U;d<6U;++d) {
+      if(cut[d]<links.size) continue; // No solid placeholder enters this equation.
+      const auto axis=static_cast<CartesianAxis>(d/2U); const bool positive=d%2U!=0U;
+      Int3 neighbour=c;
+      (axis==CartesianAxis::x ? neighbour.x : axis==CartesianAxis::y ? neighbour.y : neighbour.z)+=positive ? 1 : -1;
+      const Int3 face=positive ? neighbour : c;
+      const double transmissibility=detail::positive_transmissibility(kernels,gamma,axis,face);
+      const double jump=q.unchecked(neighbour,0U)-q.unchecked(c,0U);
+      if(!std::isfinite(transmissibility) || transmissibility<=0.0 || !std::isfinite(jump))
+        return {StatusCode::numerical_failure,kIbmEquationNumerical};
+      sum+=static_cast<long double>(transmissibility)*jump;
+    }
+    value=static_cast<double>(sum/detail::cell_volume(kernels,c));
+    return std::isfinite(value) ? Status{} : Status{StatusCode::numerical_failure,kIbmEquationNumerical};
+  };
+  status=replace_cut_scalar_rows(links,cells,box,rate,physical_row);
+  if(!status) return status;
+  const auto region=plan.topology_->region();
+  for(int z=box.begin.z;z<box.begin.z+box.cells.z;++z)
+    for(int y=box.begin.y;y<box.begin.y+box.cells.y;++y)
+      for(int x=box.begin.x;x<box.begin.x+box.cells.x;++x) {
+        const std::size_t flat=std::size_t(x)+std::size_t(cells.x)*(std::size_t(y)+std::size_t(cells.y)*z);
+        if(region.data[flat]==static_cast<std::uint8_t>(RegionFlag::solid)) rate.unchecked({x,y,z},0U)=0.0;
+      }
+  return {};
+}
+
 Status IbmEquationInterfacePlan::correct_impermeable_scalar_diffusion(
     ConstFieldView transported, ConstFieldView diffusivity,
     FieldView rate) const noexcept {
@@ -2232,9 +2464,13 @@ Status IbmEquationInterfacePlan::correct_impermeable_scalar_diffusion(
     const double volume = detail::cell_volume(*kernels_, link.fluid_local_index);
     // Remove exactly the cut-face term included by cartesian_diffusion.
     // Fluid-fluid face pairs are untouched and cancel in the global ledger.
-    const double correction = transmissibility *
+    const double jump =
         (transported.unchecked(link.fluid_local_index, 0U) -
-         transported.unchecked(link.solid_local_index, 0U)) / volume;
+         transported.unchecked(link.solid_local_index, 0U));
+    const double product=transmissibility*jump;
+    const double correction = jump!=0.0 && std::abs(product)<std::numeric_limits<double>::min()
+        ? static_cast<double>(static_cast<long double>(transmissibility)*jump*(1.0/volume))
+        : product/volume;
     const double value = rate.unchecked(link.fluid_local_index, 0U) + correction;
     if (!std::isfinite(transmissibility) || transmissibility <= 0.0 ||
         !std::isfinite(volume) || volume <= 0.0 || !std::isfinite(value))

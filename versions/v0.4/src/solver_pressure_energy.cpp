@@ -6,6 +6,7 @@
 
 #include "field_view_interval_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_conservative_energy_detail.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -36,7 +37,7 @@ constexpr std::uint64_t kPressureEnergyDiagonalSchema =
 constexpr std::uint64_t kPressureEnergyPressureFluxSchema =
     UINT64_C(0x7630347065666c78);
 constexpr std::uint64_t kPressureEnergyEnthalpySchema =
-    UINT64_C(0x7630347065653033); // v04pee03: fixed IBM inlet derivative.
+    UINT64_C(0x7630347065653034); // v04pee04: typed frozen kinetic response.
 // "v04pegl2": the joint Euclidean merit is a different policy from the
 // original componentwise L-infinity globalization and must sign a distinct
 // provenance lineage.
@@ -481,6 +482,7 @@ PlanFingerprint enthalpy_collective_fingerprint(
   std::uint64_t hash = hash_mix(kFnvOffset, kPressureEnergyEnthalpySchema);
   if (binding.unity_lewis_total_enthalpy)
     hash = hash_mix(hash, UINT64_C(0x756e6974794c6531));
+  hash = hash_mix(hash, binding.conservative_total_energy);
   hash = mix_identity(hash, binding.identity);
   hash = hash_mix(hash, static_cast<std::uint8_t>(binding.convection));
   hash =
@@ -788,6 +790,9 @@ PlanFingerprint compiled_enthalpy_local_binding(
     const PressureEnergyEnthalpyBinding& binding,
     const FrozenConvectionBranchPlan& branches) noexcept {
   std::uint64_t hash = hash_mix(kFnvOffset, kPressureEnergyEnthalpySchema);
+  hash = hash_mix(hash, binding.conservative_total_energy);
+  if (binding.conservative_total_energy)
+    hash = mix_local_field(hash, binding.boundary_velocity);
   hash = hash_mix(hash, branches.revision);
   hash = hash_mix(hash, branches.branch_authority);
   hash = hash_mix(hash, branches.local_binding);
@@ -1069,7 +1074,9 @@ bool PressureEnergySchurBlockAuthority::valid() const noexcept {
              ? activity_local_fingerprint_ != 0U &&
                    activity_collective_fingerprint_ != 0U
          : scope_ == PressureEnergySchurBlockScope::
-                         generic_algebraic_quasi_newton;
+                         generic_algebraic_quasi_newton ||
+           scope_ == PressureEnergySchurBlockScope::
+                         total_energy_spatial_quasi_newton;
 }
 
 bool PressureEnergySchurBlockAuthority::matches_operators(
@@ -1091,6 +1098,8 @@ bool PressureEnergySchurBlockAuthority::matches_operators(
   if (scope_ == PressureEnergySchurBlockScope::
                     ibm_cartesian_spatial_quasi_newton ||
       scope_ == PressureEnergySchurBlockScope::
+                    total_energy_spatial_quasi_newton ||
+      scope_ == PressureEnergySchurBlockScope::
                     ibm_double_diagonal_quasi_newton) {
     return energy_pressure == energy_pressure_operator_ &&
            energy_enthalpy == energy_enthalpy_operator_;
@@ -1110,6 +1119,7 @@ Status PressureEnergySchurBlockAuthority::exact_cartesian(
   const bool valid =
       energy_pressure_operator.exact_pressure_work_current() &&
       energy_pressure.valid() && energy_enthalpy.valid() &&
+      !energy_enthalpy.conservative_total_energy &&
       energy_pressure.pressure_work_scope ==
           PressureEnergyPressureWorkScope::exact_cartesian &&
       energy_pressure.full_cartesian_pressure_work &&
@@ -1163,19 +1173,36 @@ Status PressureEnergySchurBlockAuthority::
         const PressureEnergyPressureFluxOperator& energy_pressure_operator,
         const PressureEnergyEnthalpyOperator& energy_enthalpy_operator,
         PressureEnergySchurBlockAuthority& out) noexcept {
+  return spatial_quasi_newton(energy_pressure_operator,
+                              energy_enthalpy_operator, false, out);
+}
+
+Status PressureEnergySchurBlockAuthority::total_energy_spatial_quasi_newton(
+    const PressureEnergyPressureFluxOperator& energy_pressure_operator,
+    const PressureEnergyEnthalpyOperator& energy_enthalpy_operator,
+    PressureEnergySchurBlockAuthority& out) noexcept {
+  return spatial_quasi_newton(energy_pressure_operator,
+                              energy_enthalpy_operator, true, out);
+}
+
+Status PressureEnergySchurBlockAuthority::spatial_quasi_newton(
+    const PressureEnergyPressureFluxOperator& energy_pressure_operator,
+    const PressureEnergyEnthalpyOperator& energy_enthalpy_operator,
+    bool total_energy, PressureEnergySchurBlockAuthority& out) noexcept {
   const PressureEnergyPressureFluxCertificate& energy_pressure =
       energy_pressure_operator.pressure_flux_certificate();
   const PressureEnergyEnthalpyCertificate& energy_enthalpy =
       energy_enthalpy_operator.enthalpy_certificate();
   const bool valid =
       energy_pressure.valid() && energy_enthalpy.valid() &&
+      energy_enthalpy.conservative_total_energy == total_energy &&
       energy_pressure.pressure_work_scope ==
           PressureEnergyPressureWorkScope::flux_only_quasi_newton &&
       energy_pressure.pressure_work_linearization == 0U &&
       !energy_pressure.full_cartesian_pressure_work &&
       energy_pressure.flux_only_quasi_newton &&
-      energy_pressure.activity_local_fingerprint != 0U &&
-      energy_pressure.activity_collective_fingerprint != 0U &&
+      (total_energy || (energy_pressure.activity_local_fingerprint != 0U &&
+                       energy_pressure.activity_collective_fingerprint != 0U)) &&
       energy_pressure.activity_local_fingerprint ==
           energy_enthalpy.activity_local_fingerprint &&
       energy_pressure.activity_collective_fingerprint ==
@@ -1195,7 +1222,8 @@ Status PressureEnergySchurBlockAuthority::
     return {StatusCode::invalid_plan, kPressureEnergySchurBinding};
   }
   PressureEnergySchurBlockAuthority candidate;
-  candidate.scope_ =
+  candidate.scope_ = total_energy ?
+      PressureEnergySchurBlockScope::total_energy_spatial_quasi_newton :
       PressureEnergySchurBlockScope::ibm_cartesian_spatial_quasi_newton;
   candidate.energy_pressure_operator_ = &energy_pressure_operator;
   candidate.energy_enthalpy_operator_ = &energy_enthalpy_operator;
@@ -1207,6 +1235,7 @@ Status PressureEnergySchurBlockAuthority::
       energy_pressure.activity_collective_fingerprint;
   std::uint64_t collective =
       hash_mix(kFnvOffset, UINT64_C(0x69626d737061746c));
+  collective = hash_mix(collective, static_cast<std::uint8_t>(candidate.scope_));
   collective = hash_mix(collective,
                         energy_pressure.linear.collective_fingerprint);
   collective = hash_mix(collective,
@@ -2269,6 +2298,10 @@ Status PressureEnergyEnthalpyOperator::bind_diagonal(
   for (ConstFieldView input : inputs)
     if (!valid_scalar_view(input, cells) || overlaps(input, as_const(workspace)))
       return {StatusCode::invalid_plan, kPressureEnergyDiagonalBinding};
+  if (binding.conservative_total_energy &&
+      (!detail::valid_cell_view(binding.boundary_velocity, cells, 0U, 3U, 0U) ||
+       overlaps(binding.boundary_velocity, as_const(workspace))))
+    return {StatusCode::invalid_plan, kPressureEnergyDiagonalBinding};
   bool finite = true;
   for_each_cell(cells, [&](Int3 cell) {
     if (!active_cell(activity, cells, cell)) {
@@ -2276,7 +2309,9 @@ Status PressureEnergyEnthalpyOperator::bind_diagonal(
       return;
     }
     const double diagonal = binding.assembled_diagonal.unchecked(cell, 0U);
-    const double h = binding.target_enthalpy.unchecked(cell, 0U);
+    const double h = binding.target_enthalpy.unchecked(cell, 0U) +
+        (binding.conservative_total_energy
+             ? detail::kinetic_energy(binding.boundary_velocity, cell) : 0.0);
     const double rho_h = binding.density_enthalpy_derivative.unchecked(cell, 0U);
     const double volume = detail::cell_volume(*binding.kernels, cell);
     // Freeze spatial couplings, not the local EOS in the temporal product.
@@ -2405,6 +2440,8 @@ Status PressureEnergyEnthalpyOperator::bind(
       (binding.boundary_velocity.base == nullptr ||
        (detail::valid_cell_view(binding.boundary_velocity, cells, 0U, 3U, 1U) &&
         binding.boundary_velocity.field == binding.boundary->velocity_field())) &&
+      (!binding.conservative_total_energy ||
+       binding.boundary_velocity.base != nullptr) &&
       valid_scalar_view(binding.assembled_diagonal, cells) &&
       detail::valid_cell_view(binding.target_enthalpy, cells, 0U, 1U, 2U) &&
       binding.target_enthalpy.field == binding.boundary->enthalpy_field() &&
@@ -2440,7 +2477,8 @@ Status PressureEnergyEnthalpyOperator::bind(
       compiled_enthalpy_workspace_present(binding.workspace.compiled);
   const bool compiled_views_valid =
       !compiled_present ||
-      (binding.convection == ConvectionScheme::limited_central2 &&
+      ((binding.convection == ConvectionScheme::limited_central2 ||
+        binding.convection == ConvectionScheme::tvd2) &&
        valid_compiled_enthalpy_workspace(binding.workspace.compiled, cells));
   const IbmEquationInterfacePlan* inlet_sources =
       inlet_source_interface(binding);
@@ -2552,7 +2590,9 @@ Status PressureEnergyEnthalpyOperator::bind(
     }
     ++active_cells;
     const double diagonal = binding.assembled_diagonal.unchecked(cell, 0U);
-    const double enthalpy = binding.target_enthalpy.unchecked(cell, 0U);
+    const double enthalpy = binding.target_enthalpy.unchecked(cell, 0U) +
+        (binding.conservative_total_energy
+             ? detail::kinetic_energy(binding.boundary_velocity, cell) : 0.0);
     const double rho_h =
         binding.density_enthalpy_derivative.unchecked(cell, 0U);
     const double cp = binding.heat_capacity.unchecked(cell, 0U);
@@ -2616,8 +2656,9 @@ Status PressureEnergyEnthalpyOperator::bind(
 
   FrozenConvectionBranchPlan compiled_branches;
   if (compiled_present) {
-    const Status compiled_status = compile_frozen_limited_central2_branches(
-        *binding.kernels, binding.target_flux, binding.target_enthalpy, 0U,
+    const Status compiled_status = compile_frozen_limited_convection_branches(
+        *binding.kernels, binding.convection, binding.target_flux,
+        binding.target_enthalpy, 0U,
         binding.convection_context, binding.linearization_policy,
         binding.frozen_face_enthalpy,
         binding.workspace.compiled.directional_branches, compiled_branches);
@@ -2636,7 +2677,9 @@ Status PressureEnergyEnthalpyOperator::bind(
           binding.activity.cells.data[cell_offset(cells, cell)] != 0U) {
         const double diagonal =
             binding.assembled_diagonal.unchecked(cell, 0U);
-        const double enthalpy = binding.target_enthalpy.unchecked(cell, 0U);
+        const double enthalpy = binding.target_enthalpy.unchecked(cell, 0U) +
+            (binding.conservative_total_energy
+                 ? detail::kinetic_energy(binding.boundary_velocity, cell) : 0.0);
         const double rho_h =
             binding.density_enthalpy_derivative.unchecked(cell, 0U);
         const double volume = detail::cell_volume(*binding.kernels, cell);
@@ -2775,6 +2818,8 @@ Status PressureEnergyEnthalpyOperator::bind(
   candidate.certificate_.inactive_interfaces_zero = true;
   candidate.certificate_.allocation_free_apply = true;
   candidate.certificate_.compiled_factored_apply = compiled_present;
+  candidate.certificate_.conservative_total_energy =
+      binding.conservative_total_energy;
   if (compiled_present) {
     candidate.certificate_.compiled_local_binding =
         compiled_enthalpy_local_binding(binding, compiled_branches);
@@ -2808,6 +2853,8 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
   current_binding.assembled_diagonal = assembled_diagonal_;
   current_binding.target_enthalpy = target_enthalpy_;
   current_binding.boundary_velocity = boundary_velocity_;
+  current_binding.conservative_total_energy =
+      certificate_.conservative_total_energy;
   current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
   current_binding.unity_lewis_total_enthalpy = unity_lewis_total_enthalpy_;
   current_binding.heat_capacity = heat_capacity_;
@@ -2829,7 +2876,7 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
     return {StatusCode::invalid_plan, kPressureEnergyEnthalpyApply};
   }
 
-  Status status = validate_frozen_limited_central2_branches(
+  Status status = validate_frozen_limited_convection_branches(
       *kernels_, target_flux_, target_enthalpy_, 0U, convection_context_,
       frozen_face_enthalpy_, compiled_directional_branches_);
   if (!status) return status;
@@ -2842,7 +2889,9 @@ Status PressureEnergyEnthalpyOperator::validate_compiled_snapshot()
     if (activity_.cells.size == 0U ||
         activity_.cells.data[cell_offset(cells, cell)] != 0U) {
       const double diagonal = assembled_diagonal_.unchecked(cell, 0U);
-      const double enthalpy = target_enthalpy_.unchecked(cell, 0U);
+      const double enthalpy = target_enthalpy_.unchecked(cell, 0U) +
+          (certificate_.conservative_total_energy
+               ? detail::kinetic_energy(boundary_velocity_, cell) : 0.0);
       const double rho_h =
           density_enthalpy_derivative_.unchecked(cell, 0U);
       const double volume = detail::cell_volume(*kernels_, cell);
@@ -3029,6 +3078,8 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
   current_binding.assembled_diagonal = assembled_diagonal_;
   current_binding.target_enthalpy = target_enthalpy_;
   current_binding.boundary_velocity = boundary_velocity_;
+  current_binding.conservative_total_energy =
+      certificate_.conservative_total_energy;
   current_binding.density_enthalpy_derivative = density_enthalpy_derivative_;
   current_binding.unity_lewis_total_enthalpy = unity_lewis_total_enthalpy_;
   current_binding.heat_capacity = heat_capacity_;
@@ -3204,7 +3255,7 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
 
   FrozenConvectionFaceDirectionalDerivative directional;
   if (certificate_.compiled_factored_apply) {
-    status = apply_frozen_limited_central2_branches(
+    status = apply_frozen_limited_convection_branches(
         *kernels_, compiled_directional_branches_, as_const(input), 0U,
         workspace_.directional_enthalpy);
   } else {
@@ -3246,7 +3297,10 @@ Status PressureEnergyEnthalpyOperator::apply_impl(
                                              enthalpy_diffusivity_, cell) +
                   certificate_.authority.bdf.a0 *
                       detail::cell_volume(*kernels_, cell) *
-                      target_enthalpy_.unchecked(cell, 0U) *
+                      (target_enthalpy_.unchecked(cell, 0U) +
+                       (certificate_.conservative_total_energy
+                            ? detail::kinetic_energy(boundary_velocity_, cell)
+                            : 0.0)) *
                       density_enthalpy_derivative_.unchecked(cell, 0U);
     double value = local * direction.unchecked(cell, 0U);
     const double centre_temperature = delta_t.unchecked(cell, 0U);
@@ -3473,8 +3527,10 @@ Status PressureEnergySchurOperator::bind(
       dynamic_cast<const PressureEnergyPressureFluxOperator*>(
           binding.energy_pressure);
   if (typed_energy_pressure != nullptr &&
-      block_authority.scope_ ==
-          PressureEnergySchurBlockScope::exact_cartesian_frozen_spatial) {
+      (block_authority.scope_ ==
+           PressureEnergySchurBlockScope::exact_cartesian_frozen_spatial ||
+       block_authority.scope_ ==
+           PressureEnergySchurBlockScope::total_energy_spatial_quasi_newton)) {
     const auto* typed_continuity =
         dynamic_cast<const PressureLinearOperator*>(
             binding.continuity_pressure);
@@ -3488,10 +3544,13 @@ Status PressureEnergySchurOperator::bind(
       candidate.shared_energy_pressure_ = typed_energy_pressure;
       candidate.certificate_.shared_pressure = shared;
     }
-  } else if (
+  }
+  if (!candidate.certificate_.shared_pressure.available() &&
       typed_energy_pressure != nullptr &&
-      block_authority.scope_ == PressureEnergySchurBlockScope::
-                                      ibm_cartesian_spatial_quasi_newton) {
+      (block_authority.scope_ == PressureEnergySchurBlockScope::
+                                      ibm_cartesian_spatial_quasi_newton ||
+       block_authority.scope_ == PressureEnergySchurBlockScope::
+                                      total_energy_spatial_quasi_newton)) {
     const auto* typed_continuity =
         dynamic_cast<const IbmPressureOperator*>(binding.continuity_pressure);
     PressureEnergySharedPressureCertificate shared;
@@ -3528,6 +3587,11 @@ Status PressureEnergySchurOperator::bind(
                  ibm_cartesian_spatial_quasi_newton) {
     candidate.certificate_.jacobian_scope =
         PressureEnergyJacobianScope::ibm_cartesian_spatial_quasi_newton;
+  } else if (block_authority.scope_ ==
+             PressureEnergySchurBlockScope::
+                 total_energy_spatial_quasi_newton) {
+    candidate.certificate_.jacobian_scope =
+        PressureEnergyJacobianScope::total_energy_spatial_quasi_newton;
   } else if (block_authority.scope_ ==
              PressureEnergySchurBlockScope::
                  ibm_double_diagonal_quasi_newton) {

@@ -7,6 +7,9 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_mixture_enthalpy_diffusion_detail.hpp"
+#include "solver_viscous_detail.hpp"
+#include "solver_ibm_scalar_transport_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -119,6 +122,11 @@ Status evaluate_thermophysical_rates(
   const SpeciesEquationPlan& species_plan = plans.species();
   const ScalarEquationPlan& scalar_plan = plans.scalars();
   const CartesianKernelPlan& kernels = plans.kernels();
+  // Persisted scalar rates have always derived Gamma from the compiled
+  // Schmidt data and current viscosities. A caller's assembly-only coefficient
+  // cache must not give the new enthalpy term a different diffusion authority.
+  EquationMaterialView rate_material = input.material;
+  rate_material.scalar_mass_diffusivity = {};
   const Int3 cells = enthalpy_plan.cells_;
   const std::size_t scalar_count = species_plan.specs_.size() +
                                    scalar_plan.specs_.size();
@@ -140,7 +148,7 @@ Status evaluate_thermophysical_rates(
       !detail::valid_cell_view(output.diffusion_scratch, cells, 0U, 1U) ||
       !detail::valid_cell_view(as_const(output.scalar_diffusivity_workspace),
                                cells, 0U, 1U, 1U) ||
-      !detail::valid_cell_view(input.velocity_gradient, cells, 0U, 9U, 0U) ||
+      !detail::valid_cell_view(input.velocity_gradient, cells, 0U, 9U, 1U) ||
       !detail::valid_cell_view(input.material.molecular_viscosity, cells, 0U,
                                1U, 1U) ||
       !detail::valid_cell_view(input.material.effective_viscosity, cells, 0U,
@@ -344,6 +352,18 @@ Status evaluate_thermophysical_rates(
     if (!status) return status;
   }
 
+  status = detail::MixtureEnthalpyDiffusion::add_rate(
+        enthalpy_plan, input.state, rate_material, input.immersed_interface,
+      box, output.diffusion_scratch);
+  if (!status) return status;
+  if (input.immersed_interface != nullptr) {
+    status = input.immersed_interface->correct_viscous_heating(
+        input.state.velocity.trial, input.velocity_gradient, input.state.density.trial,
+        input.material.molecular_viscosity, input.material.effective_viscosity,
+        input.wall_treatment, output.diffusion_scratch, box);
+    if (!status) return status;
+  }
+
   std::uint64_t state_hash = kFnvOffset;
   const auto mix_view = [&](ConstFieldView view) {
     state_hash = mix(state_hash, view.field);
@@ -387,6 +407,8 @@ Status evaluate_thermophysical_rates(
   state_hash = mix(state_hash, input.contribution_stage);
   if (input.immersed_interface != nullptr)
     state_hash = mix(state_hash, input.immersed_interface->fingerprint());
+  if (input.wall_treatment != nullptr)
+    state_hash = mix(state_hash, input.wall_treatment->fingerprint());
   for (std::size_t index = 0U; index < input.contributions.size; ++index) {
     const EquationContributionView contribution =
         input.contributions.data[index];
@@ -399,11 +421,6 @@ Status evaluate_thermophysical_rates(
     for (std::int32_t y = 0; y < cells.y; ++y) {
       for (std::int32_t x = 0; x < cells.x; ++x) {
         const Int3 cell{x, y, z};
-        VelocityGradient gradient;
-        for (std::uint8_t component = 0U; component < 9U; ++component) {
-          gradient.value[component] =
-              input.velocity_gradient.unchecked(cell, component);
-        }
         // This is a persisted *spatial* rate used by the next predictor.
         // The target-time BDF(p) term is owned exclusively by the coupled
         // BDF(rho*h-p) residual assembled in solver_enthalpy.cpp.  Storing it
@@ -429,10 +446,9 @@ Status evaluate_thermophysical_rates(
             velocity[2U] * pressure_gradient_value[2U];
         double dissipation = 0.0;
         if (!std::isfinite(pressure_work) ||
-            !newtonian_viscous_dissipation(
-                gradient,
-                input.material.effective_viscosity.unchecked(cell, 0U),
-                dissipation)) {
+            !detail::cartesian_viscous_heating(
+                kernels, input.state.velocity.trial, input.velocity_gradient,
+                input.material.effective_viscosity, cell, dissipation)) {
           return {StatusCode::numerical_failure, kRateNumerical};
         }
         double source = 0.0;
@@ -521,7 +537,10 @@ Status evaluate_thermophysical_rates(
         kernels, as_const(output.scalar_diffusivity_workspace), diffusion);
     if (!evaluated) return evaluated;
     if (input.immersed_interface != nullptr) {
-      evaluated = input.immersed_interface->correct_impermeable_scalar_diffusion(
+      evaluated = spec.role==TransportedScalarRole::species
+          ? detail::IbmScalarTransport::diffusion(*input.immersed_interface,
+              scalar,as_const(output.scalar_diffusivity_workspace),box,output.diffusion_scratch)
+          : input.immersed_interface->correct_impermeable_scalar_diffusion(
           scalar, as_const(output.scalar_diffusivity_workspace),
           output.diffusion_scratch);
       if (!evaluated) return evaluated;

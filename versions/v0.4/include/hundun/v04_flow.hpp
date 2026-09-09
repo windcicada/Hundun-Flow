@@ -18,6 +18,8 @@
 
 namespace hundun::v04 {
 
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; }
+
 class IbmEquationInterfacePlan;
 class EBTopology;
 class RemoteDonorExchangePlan;
@@ -65,6 +67,9 @@ struct EquationPlanSpec {
   // ESF common composition/total-enthalpy diffusion, Gamma = lambda_eff/cp.
   bool unity_lewis_total_enthalpy{};
   bool physical_inlet_material{};
+  // Preserve the standalone static-h equation by default. ProductDriver
+  // opts into the total-energy-conservative h-primary residual.
+  bool conservative_total_energy{};
 };
 
 struct EquationCompileDiagnostics {
@@ -617,6 +622,12 @@ struct ThermophysicalPredictorInput {
   Span<const std::uint8_t> cell_activity{};
   ConservativeMassSourceView mass_source{};
   PredictorTransportState post_source_transport{};
+  // Required only by the compiled conservative multicomponent energy route.
+  // Temperature is the accepted thermal face anchor, never an alternative
+  // enthalpy/energy unknown. Its historical halo authority is checked too.
+  ConstFieldView temperature_accepted{};
+  ConstFieldView temperature_previous{};
+  ThermophysicalGhostHistory temperature_ghosts{};
 };
 
 struct ThermophysicalPredictorOutput {
@@ -887,6 +898,7 @@ struct ThermophysicalRateInput {
   StageId contribution_stage{};
   Span<const EquationContributionView> contributions{};
   const IbmEquationInterfacePlan* immersed_interface{};
+  const TurbulencePlan* wall_treatment{};
 };
 
 struct ThermophysicalRateOutput {
@@ -921,6 +933,8 @@ struct PressureReferenceCertificate {
            closure != 0U && time != 0U && pressure_reference != 0U;
   }
 };
+
+class EnthalpyEquationPlan;
 
 class ThermophysicalPredictorPlan {
  public:
@@ -962,6 +976,7 @@ class ThermophysicalPredictorPlan {
       ThermophysicalPredictorCertificate& certificate,
       ThermophysicalPredictorFailure& failure) const noexcept;
   const CartesianKernelPlan* kernels_{};
+  const EnthalpyEquationPlan* mixture_enthalpy_{};
   Int3 cells_{};
   Int3 patch_begin_{};
   FieldId density_{};
@@ -1088,9 +1103,13 @@ class EnthalpyEquationPlan {
 
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
   Int3 cells() const noexcept { return cells_; }
+  bool conservative_total_energy() const noexcept { return conservative_total_energy_; }
+  ConvectionScheme kinetic_convection() const noexcept { return kinetic_convection_; }
 
  private:
   friend class EquationPlanSet;
+  friend class detail::MixtureEnthalpyDiffusion;
+  friend class detail::MixtureEnthalpyConvection;
   friend Status assemble_enthalpy(
       const EnthalpyEquationPlan&, const EquationStateView&,
       const EquationMaterialView&, ConstFieldView,
@@ -1111,6 +1130,8 @@ class EnthalpyEquationPlan {
       const EquationPlanSet&, const ThermophysicalRateInput&,
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;
   const CartesianKernelPlan* kernels_{};
+  ThermodynamicsPlan thermodynamics_;
+  std::vector<ScalarEquationSpec> species_specs_;
   Int3 cells_{};
   bool unity_lewis_total_enthalpy_{};
   FieldId density_{};
@@ -1120,6 +1141,9 @@ class EnthalpyEquationPlan {
   FieldId temperature_{};
   FieldId velocity_gradient_{};
   ConvectionScheme convection_{ConvectionScheme::limited_central2};
+  ConvectionScheme kinetic_convection_{ConvectionScheme::limited_central2};
+  ConvectionScheme species_convection_{ConvectionScheme::tvd2};
+  bool conservative_total_energy_{};
   std::uint8_t convection_reach_{2U};
   std::vector<CompiledContribution> contributions_;
   RevisionToken geometry_revision_{};
@@ -1138,6 +1162,7 @@ class SpeciesEquationPlan {
   SpeciesEquationPlan& operator=(SpeciesEquationPlan&&) = delete;
 
   std::size_t size() const noexcept { return specs_.size(); }
+  ConvectionScheme convection() const noexcept { return convection_; }
   const ScalarEquationSpec* spec(std::size_t index) const noexcept {
     return index < specs_.size() ? &specs_[index] : nullptr;
   }
@@ -1156,6 +1181,16 @@ class SpeciesEquationPlan {
       const EquationMaterialView&, Span<const EquationContributionView>,
       const EquationAssemblyContext&, EquationSystemView,
       EquationAssemblyCertificate&, bool) noexcept;
+  friend Status assemble_species_impl(
+      const SpeciesEquationPlan&, std::size_t, const EquationStateView&,
+      const EquationMaterialView&, Span<const EquationContributionView>,
+      const EquationAssemblyContext&, EquationSystemView,
+      EquationAssemblyCertificate&, bool, bool) noexcept;
+  friend Status assemble_species_impl(
+      const SpeciesEquationPlan&, std::size_t, const EquationStateView&,
+      const EquationMaterialView&, Span<const EquationContributionView>,
+      const EquationAssemblyContext&, EquationSystemView,
+      EquationAssemblyCertificate&, bool, bool, bool) noexcept;
   friend Status evaluate_thermophysical_rates(
       const EquationPlanSet&, const ThermophysicalRateInput&,
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;
@@ -1824,6 +1859,9 @@ struct PressureEnergyEnthalpyBinding {
   ConstFieldView boundary_velocity{};
   // Select div(Gamma grad(dh)) instead of div(lambda grad(dh/cp)).
   bool unity_lewis_total_enthalpy{};
+  // Include frozen K(U)*rho_h in the temporal EOS response, separately
+  // from the ordinary positive assembled h diagonal. Requires velocity.
+  bool conservative_total_energy{};
 };
 
 struct PressureEnergyEnthalpyCertificate {
@@ -1873,6 +1911,7 @@ struct PressureEnergyEnthalpyCertificate {
   bool compiled_factored_apply{};
   RevisionToken compiled_numeric_revision{};
   PlanFingerprint compiled_local_binding{};
+  bool conservative_total_energy{};
 
   bool valid() const noexcept;
 };
@@ -1902,6 +1941,8 @@ class PressureEnergyEnthalpyPreparedEpoch {
 // lambda/cp proxy is removed before the exact temperature-space response is
 // added.  Apply exchanges dh(reach=2) and deltaT(reach=1) together and does
 // not allocate.
+// In conservative-total-energy mode the temporal multiplier is h+K(U),
+// with U frozen; A_h retains its ordinary positive assembly contract.
 class PressureEnergyEnthalpyOperator final : public LinearOperator {
  public:
   PressureEnergyEnthalpyOperator() noexcept = default;
@@ -2005,6 +2046,7 @@ enum class PressureEnergySchurBlockScope : std::uint8_t {
   ibm_cartesian_spatial_quasi_newton,
   ibm_double_diagonal_quasi_newton,
   generic_algebraic_quasi_newton,
+  total_energy_spatial_quasi_newton,
 };
 
 // Typed provenance for the two energy blocks.  Production authorities are
@@ -2021,6 +2063,13 @@ class PressureEnergySchurBlockAuthority {
       const PressureEnergyEnthalpyOperator& energy_enthalpy,
       PressureEnergySchurBlockAuthority& out) noexcept;
   static Status ibm_cartesian_spatial_quasi_newton(
+      const PressureEnergyPressureFluxOperator& energy_pressure,
+      const PressureEnergyEnthalpyOperator& energy_enthalpy,
+      PressureEnergySchurBlockAuthority& out) noexcept;
+  // Frozen h-space blocks for the h-primary conservative total-energy
+  // residual. K/viscous/material responses are lagged: never an exact
+  // Cartesian nonlinear Jacobian, with or without immersed cells.
+  static Status total_energy_spatial_quasi_newton(
       const PressureEnergyPressureFluxOperator& energy_pressure,
       const PressureEnergyEnthalpyOperator& energy_enthalpy,
       PressureEnergySchurBlockAuthority& out) noexcept;
@@ -2041,6 +2090,11 @@ class PressureEnergySchurBlockAuthority {
 
  private:
   friend class PressureEnergySchurOperator;
+
+  static Status spatial_quasi_newton(
+      const PressureEnergyPressureFluxOperator& energy_pressure,
+      const PressureEnergyEnthalpyOperator& energy_enthalpy,
+      bool total_energy, PressureEnergySchurBlockAuthority& out) noexcept;
 
   bool matches_operators(const LinearOperator* energy_pressure,
                          const LinearOperator* energy_enthalpy) const noexcept;
@@ -2170,6 +2224,7 @@ enum class PressureEnergyJacobianScope : std::uint8_t {
   ibm_cartesian_spatial_quasi_newton,
   ibm_double_diagonal_quasi_newton,
   generic_algebraic_quasi_newton,
+  total_energy_spatial_quasi_newton,
 };
 
 struct PressureEnergyJacobianCertificate {
@@ -2226,7 +2281,9 @@ struct PressureEnergyJacobianCertificate {
             jacobian_scope == PressureEnergyJacobianScope::
                                   ibm_double_diagonal_quasi_newton ||
             jacobian_scope == PressureEnergyJacobianScope::
-                                  generic_algebraic_quasi_newton) &&
+                                  generic_algebraic_quasi_newton ||
+            jacobian_scope == PressureEnergyJacobianScope::
+                                  total_energy_spatial_quasi_newton) &&
            exact_algebraic_schur && !full_nonlinear_jacobian &&
            exact_block_equivalent && cell_local_continuity_enthalpy &&
            native_mg_preconditioner_only;
@@ -4480,6 +4537,8 @@ Status limit_momentum_predictor_correction(
     ReductionEngine& reductions,
     MomentumPredictorLimiterReport& report) noexcept;
 
+// require_composition_accuracy also serves the product's conservative
+// total-energy coupling, whose h solution depends on K(U).
 Status solve_momentum_predictor(
     MPI_Comm communicator, const MomentumEquationPlan& plan,
     const BoundaryPlan& boundary,

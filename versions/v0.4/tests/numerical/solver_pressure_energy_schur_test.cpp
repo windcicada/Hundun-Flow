@@ -393,13 +393,16 @@ struct EnthalpySpatialFixture {
 bool make_enthalpy_spatial_fixture(EnthalpySpatialFixture& out,
                                    MPI_Comm communicator = MPI_COMM_SELF,
                                    bool periodic = false,
-                                   bool limited_enthalpy = false) {
+                                   bool limited_enthalpy = false,
+                                   ConvectionScheme limited_scheme =
+                                       ConvectionScheme::limited_central2,
+                                   std::int32_t local_edge = 4) {
   int communicator_size = 0;
   if (MPI_Comm_size(communicator, &communicator_size) != MPI_SUCCESS ||
       communicator_size <= 0) {
     return false;
   }
-  const std::int32_t edge = 4 * communicator_size;
+  const std::int32_t edge = local_edge * communicator_size;
   CartesianMeshSpec mesh;
   mesh.kind = GeometryKind::uniform;
   mesh.lower = {0.0, 0.0, 0.0};
@@ -430,7 +433,7 @@ bool make_enthalpy_spatial_fixture(EnthalpySpatialFixture& out,
     model.boundaries[1U].pressure = 101325.0;
   }
   model.schemes.momentum = ConvectionScheme::central2;
-  model.schemes.enthalpy = limited_enthalpy ? ConvectionScheme::limited_central2
+  model.schemes.enthalpy = limited_enthalpy ? limited_scheme
                                             : ConvectionScheme::central2;
   model.schemes.species = ConvectionScheme::tvd2;
   model.schemes.passive_scalar = ConvectionScheme::central2;
@@ -850,6 +853,28 @@ bool test_enthalpy_diagonal_retains_exact_thermodynamic_time_response() {
       "temporal-corrected diagonal binds and applies without a halo");
   passed &= expect(close(response.view.unchecked({0, 0, 0}, 0U), 2.1),
       "frozen-spatial Eh must not freeze the density in BDF(rho*h-p)");
+  OwnedField velocity = ghosted_components_field(
+      1U, 9770U, 9771U, cells, 1U, 3U, 0.0);
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x)
+        velocity.view.unchecked({x, y, z}, 0U) = 1000.0;
+  binding.conservative_total_energy = true;
+  PressureEnergyDiagonalCertificate missing_velocity;
+  passed &= expect(PressureEnergyEnthalpyOperator::bind_diagonal(
+      binding, workspace.view, operation, missing_velocity).code ==
+      StatusCode::invalid_plan, "total-energy temporal response requires U");
+  binding.boundary_velocity = as_const(velocity.view);
+  ++workspace.view.revision;
+  passed &= expect(static_cast<bool>(
+      PressureEnergyEnthalpyOperator::bind_diagonal(
+          binding, workspace.view, operation, certificate)) &&
+      static_cast<bool>(operation.apply(direction.view, response.view)) &&
+      close(response.view.unchecked({0, 0, 0}, 0U), -7.9) &&
+      assembled.view.unchecked({0, 0, 0}, 0U) == 2.7,
+      "signed K*rho_h is distinct from the positive ordinary A_h buffer");
+  binding.conservative_total_energy = false;
+  binding.boundary_velocity = {};
   // Changing the enthalpy reference leaves T/rho/cp unchanged, but not the
   // derivative of rho*h. NASA tables need not use h=cp*T with zero offset.
   h.view.unchecked({0, 0, 0}, 0U) = 20000.0;
@@ -881,6 +906,82 @@ bool test_enthalpy_diagonal_retains_exact_thermodynamic_time_response() {
       close(response.view.unchecked({0, 0, 0}, 0U), 3.0),
       "inactive IBM enthalpy rows remain identity without reading solid EOS");
   return passed;
+}
+
+bool test_total_energy_spatial_temporal_response() {
+  EnthalpySpatialFixture fixture;
+  if (!make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, true, true))
+    return false;
+  const Int3 cells = fixture.patch.cells;
+  OwnedField diagonal = shaped_field(20U, 9780U, 9781U, cells, 2.012);
+  OwnedField h = ghosted_field(3U, 9782U, 9783U, cells, 2U, 300000.0);
+  OwnedField rho_h = shaped_field(21U, 9784U, 9785U, cells, -1.0/300000.0);
+  OwnedField cp = ghosted_field(22U, 9786U, 9787U, cells, 1U, 1000.0);
+  OwnedField lambda = ghosted_field(23U, 9788U, 9789U, cells, 1U, 2.0);
+  OwnedField proxy = ghosted_field(24U, 9790U, 9791U, cells, 1U, 0.002);
+  OwnedField delta_t = ghosted_field(6U, 9792U, 9793U, cells, 1U);
+  OwnedField u = ghosted_components_field(1U, 9794U, 9795U, cells, 1U, 3U);
+  for (int z=-1; z<=cells.z; ++z)
+    for (int y=-1; y<=cells.y; ++y)
+      for (int x=-1; x<=cells.x; ++x)
+        u.view.unchecked({x,y,z},0U)=1000.0;
+  OwnedFaces phi = face_bundle(cells, 9796U, 9797U, 0.0);
+  const auto flux = flux_view(phi, 9798U);
+  OwnedFaces frozen_store = face_bundle(cells, 9799U, 9800U);
+  OwnedFaces directional = face_bundle(cells, 9801U, 9802U);
+  const FrozenConvectionContext context{9803U,fixture.boundary.revision()};
+  FrozenConvectionFaceField frozen;
+  if (!prepare_frozen_enthalpy(fixture,flux,as_const(h.view),
+      {frozen_store.x,frozen_store.y,frozen_store.z},context,frozen)) return false;
+  PressureEnergyEnthalpyBinding binding;
+  binding.geometry=&fixture.geometry; binding.kernels=&fixture.kernels;
+  binding.boundary=&fixture.boundary; binding.patch=fixture.patch;
+  binding.convection=fixture.schemes.enthalpy();
+  binding.services={MPI_COMM_SELF,&fixture.halo,9804U,5U,6U};
+  binding.authority={{2.0,-2.0,0.0,1U},9805U,fixture.geometry.topology_revision(),
+      fixture.boundary.revision(),9806U,9807U,context.collective_semantics,9808U,9809U};
+  binding.assembled_diagonal=as_const(diagonal.view);
+  binding.target_enthalpy=as_const(h.view);
+  binding.density_enthalpy_derivative=as_const(rho_h.view);
+  binding.heat_capacity=as_const(cp.view);
+  binding.thermal_conductivity=as_const(lambda.view);
+  binding.enthalpy_diffusivity=as_const(proxy.view);
+  binding.target_flux=flux; binding.convection_context=context;
+  binding.frozen_face_enthalpy=frozen;
+  binding.workspace={delta_t.view,{directional.x,directional.y,directional.z}};
+  binding.identity={9810U,9811U,9812U,9813U,9814U};
+  binding.boundary_velocity=as_const(u.view);
+  binding.conservative_total_energy=true;
+  OwnedField dh=ghosted_field(5U,9815U,9816U,cells,2U,3.0);
+  OwnedField result=shaped_field(25U,9817U,9818U,cells,0.0);
+  OwnedField local=shaped_field(26U,9819U,9820U,cells,0.0);
+  OwnedField stage=shaped_field(27U,9821U,9822U,cells,0.0);
+  OwnedFaces conductance=face_bundle(cells,9823U,9824U);
+  std::vector<std::uint16_t> branches(phi.storage.size(),0U);
+  bool passed=true;
+  for (bool compiled : {false,true}) {
+    if (compiled) binding.workspace.compiled={local.view,
+        {conductance.x,conductance.y,conductance.z},
+        {{branches.data(),branches.size()}},stage.view};
+    PressureEnergyEnthalpyOperator operation;
+    PressureEnergyEnthalpyCertificate certificate;
+    const auto bound=PressureEnergyEnthalpyOperator::bind(binding,operation,certificate);
+    passed &= expect(static_cast<bool>(bound) && certificate.conservative_total_energy,
+                     "total-energy spatial Eh binds its distinct temporal authority");
+    if (!bound) continue;
+    passed &= expect(static_cast<bool>(operation.apply(dh.view,result.view)),
+                     "signed kinetic response applies in generic and cached routes");
+    for (int z=0; z<cells.z; ++z)
+      for (int y=0; y<cells.y; ++y)
+        for (int x=0; x<cells.x; ++x)
+          passed &= close(result.view.unchecked({x,y,z},0U),-10.0);
+    if (compiled) {
+      u.view.unchecked({0,0,0},0U)=1001.0;
+      passed &= expect(!operation.apply(dh.view,result.view),
+          "cached temporal response rejects raw frozen-velocity mutation");
+    }
+  }
+  return expect(passed,"Eh includes a0*V*K*rho_h exactly without mutating A_h");
 }
 
 bool test_enthalpy_spatial_target_contract_binds(bool unity_lewis = false) {
@@ -1880,10 +1981,11 @@ bool test_enthalpy_spatial_periodic_mpi_and_inactive_interfaces() {
   return global_pass == 1;
 }
 
-bool test_enthalpy_semismooth_limiter_certificate() {
+bool test_enthalpy_semismooth_limiter_certificate(ConvectionScheme scheme) {
   EnthalpySpatialFixture fixture;
   bool passed =
-      expect(make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, false, true),
+      expect(make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, false, true,
+                                           scheme),
              "limited-convection E_h fixture compiles");
   if (!passed)
     return false;
@@ -2003,6 +2105,16 @@ bool test_enthalpy_semismooth_limiter_certificate() {
   passed &=
       expect(static_cast<bool>(semismooth.apply(direction.view, output.view)),
              "certified semismooth limiter action remains finite");
+  PressureEnergyEnthalpyBinding generic_binding = binding;
+  generic_binding.workspace.compiled = {};
+  PressureEnergyEnthalpyOperator generic;
+  PressureEnergyEnthalpyCertificate generic_certificate;
+  OwnedField generic_output = shaped_field(49U, 8946U, 8947U, cells, -4.0);
+  passed &= expect(PressureEnergyEnthalpyOperator::bind(
+                       generic_binding, generic, generic_certificate) &&
+                       generic.apply(direction.view, generic_output.view) &&
+                       generic_output.storage == output.storage,
+                   "cached LC2/TVD2 E_h exactly equals the generic action");
   PressureEnergyEnthalpyPreparedEpoch prepared_epoch;
   OwnedField prepared_output = shaped_field(48U, 8944U, 8945U, cells, -2.0);
   const Status prepare_status =
@@ -4603,10 +4715,13 @@ int main(int argc, char** argv) {
   passed &= test_enthalpy_spatial_target_contract_binds();
   passed &= test_enthalpy_spatial_target_contract_binds(true);
   passed &= test_enthalpy_spatial_periodic_mpi_and_inactive_interfaces();
-  passed &= test_enthalpy_semismooth_limiter_certificate();
+  passed &= test_enthalpy_semismooth_limiter_certificate(
+      ConvectionScheme::limited_central2);
+  passed &= test_enthalpy_semismooth_limiter_certificate(ConvectionScheme::tvd2);
   passed &= test_diagonal_operator_activity_and_identity();
   passed &= test_ibm_double_diagonal_typed_schur_authority();
   passed &= test_enthalpy_diagonal_retains_exact_thermodynamic_time_response();
+  passed &= test_total_energy_spatial_temporal_response();
   passed &= test_mass_flow_three_cell_pressure_flux_red();
   passed &= test_boundary_constant_h_and_directional_derivative();
   passed &= test_periodic_and_ibm_pressure_flux_semantics();

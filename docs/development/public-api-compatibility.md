@@ -57,3 +57,21 @@ certificate 均在既有字段之后追加 collective/rank-local lineage。手�
 默认为无效；消费者必须先检查 `jacobian_scope_valid`。该观测只存在于进程内报告，
 不改变 runtime evidence、Restart 或网络格式，但混用新旧头文件的二进制需要完整
 重编译。
+
+## GTMC conservative transport integration
+
+The GTMC merge retains native reaction/ESF/TCR/spray model and wire fields.
+The imported-marker/patch envelope precedes the existing flagged case wire.
+`EquationPlanSpec::conservative_total_energy` defaults to false; the product
+currently enables it for inert, spray-free cases. The h-primary residual uses
+rho(h+K)-p, with explicitly typed temporal K*rho derivatives and a declared
+spatial quasi-Newton scope. It does not certify a complete convective-density
+continuity Jacobian. Species enthalpy diffusion preserves the ESF Gamma-grad-h
+route by avoiding an additional species correction there.
+
+New material and historical-temperature halos, mixture/face authorities and
+report members require rebuilding every client. Method-history fingerprints
+bind the new arithmetic; create development V1 starts with the matching importer
+or use an explicitly supported recovery policy. The original GTMC V1 source
+was retained, and the mainline importer regenerated a matching V1 start with
+zero field/flux readback difference. No restart manifest was edited.

@@ -457,11 +457,11 @@ bool test_enthalpy_sources_are_selected_by_stage() {
   OwnedField pressure = make_field(2U, cells, 1U, 1U, 603U);
   OwnedField enthalpy = make_field(kEnthalpy, cells, 1U, 2U, 604U);
   OwnedField temperature = make_field(4U, cells, 1U, 1U, 605U);
-  OwnedField viscosity = make_field(5U, cells, 1U, 0U, 606U);
+  OwnedField viscosity = make_field(5U, cells, 1U, 1U, 606U);
   OwnedField conductivity = make_field(10U, cells, 1U, 1U, 607U);
   OwnedField enthalpy_diffusivity =
       make_field(11U, cells, 1U, 1U, 608U);
-  OwnedField velocity_gradient = make_field(7U, cells, 9U, 0U, 609U);
+  OwnedField velocity_gradient = make_field(7U, cells, 9U, 1U, 609U);
   OwnedField first_source = make_field(kFirstSource, cells, 1U, 0U, 610U);
   OwnedField second_source = make_field(kSecondSource, cells, 1U, 0U, 611U);
   std::fill(density.values.begin(), density.values.end(), 1.0);
