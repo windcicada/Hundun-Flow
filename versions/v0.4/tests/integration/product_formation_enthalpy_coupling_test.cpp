@@ -9,6 +9,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <string>
 #include <utility>
 using namespace hundun::v04;
 
@@ -17,8 +18,10 @@ int main(int argc, char** argv) {
   int rank{};
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   const int result = [&]() {
-    constexpr Int3 cells{8,4,4};
-    constexpr double dt=0.001, pressure=101325.0, temperature=295.0;
+    const bool wave=argc==2 && std::string(argv[1])=="--wave";
+    const Int3 cells=wave ? Int3{16,4,4} : Int3{8,4,4};
+    const double dt=wave ? 0.0001 : 0.001;
+    constexpr double pressure=101325.0, temperature=295.0;
     constexpr double formation=-1.2e7, speed=0.5;
     auto model=test::product_model(cells);
     model.turbulence=TurbulenceKind::none;
@@ -68,8 +71,11 @@ int main(int argc, char** argv) {
         const auto i=static_cast<std::size_t>((z*n.y+y)*n.x+x)*field.components;
         const double q=0.2+0.05*std::sin(2.0*std::acos(-1.0)*
             (x+start.patch.begin.x+0.5)/cells.x);
+        const double pi=wave ? pressure*0.01*std::cos(2.0*std::acos(-1.0)*
+            (x+start.patch.begin.x+0.5)/cells.x) : 0.0;
         if(field.role==RestartFieldRole::velocity) out.values[i]=speed;
-        else if(field.role==RestartFieldRole::pressure_absolute) out.values[i]=pressure;
+        else if(field.role==RestartFieldRole::pressure_absolute) out.values[i]=pressure+pi;
+        else if(field.role==RestartFieldRole::pressure_perturbation) out.values[i]=pi;
         else if(field.role==RestartFieldRole::enthalpy) {
           double cp{}, r{};
           status=thermo.mixture_enthalpy(temperature,{&q,1U},out.values[i],cp,r);
@@ -124,12 +130,26 @@ int main(int argc, char** argv) {
     if(status) status=inventory(after_mass,after_energy);
     const long double mass_error=std::abs(after_mass-before_mass)/before_mass;
     const long double energy_error=std::abs(after_energy-before_energy)/std::abs(before_energy);
+    // The pressure wave requires C2 refinement through the real driver.
+    // C1's merit belongs to another momentum predictor and cannot seed it.
+    bool first_refinement_observed=false, c2_history_local=true;
+    const auto& path=report.pressure_energy_globalization;
+    for(std::size_t i=0U;i<path.trajectory_count;++i) {
+      const auto& item=path.trajectory[i];
+      if(item.corrector==2U && item.refinement_iteration==1U) {
+        first_refinement_observed=true;
+        c2_history_local &= !item.extrapolation.attempted;
+        if(rank==0) std::cout<<"C2_FIRST_REFINEMENT extrapolation="
+          <<item.extrapolation.attempted<<" alpha="<<item.selected.alpha<<'\n';
+      }
+    }
     if(rank==0) std::cout<<std::setprecision(17)<<"FORMATION_COUPLING status="
       <<unsigned(status.code)<<'/'<<status.detail<<" accepted="<<report.accepted
       <<" sweeps="<<report.scalar_transport.coupling_sweeps
       <<" residual="<<report.scalar_transport.final_species_residual
       <<" mass_relative_error="<<mass_error<<" energy_relative_error="<<energy_error<<'\n';
-    const bool passed=status && report.accepted && mass_error<1e-12L && energy_error<1e-12L;
+    const bool passed=status && report.accepted && mass_error<1e-12L && energy_error<1e-12L &&
+        (!wave || (first_refinement_observed && c2_history_local));
     int local_pass=passed ? 1 : 0, all_pass{};
     MPI_Allreduce(&local_pass,&all_pass,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
     return all_pass ? 0 : 1;

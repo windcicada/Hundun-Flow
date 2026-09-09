@@ -15853,8 +15853,10 @@ Status ProductDriver::Impl::execute_attempt(
     const bool pressure_energy_current_merit_available =
         pressure_energy_loop_merit(candidate_loop_two,
                                    pressure_energy_current_merit);
+    // C1 and C2 use different momentum predictors. Their residual ratio is
+    // not a contraction of the C2 map; seed extrapolation with two C2 states.
     const double refinement_extrapolated_alpha =
-        pressure_energy_previous_merit_available &&
+        refinement_iteration > 1U && pressure_energy_previous_merit_available &&
                 pressure_energy_current_merit_available
             ? refinement_extrapolation.propose(
                   pressure_energy_previous_merit,

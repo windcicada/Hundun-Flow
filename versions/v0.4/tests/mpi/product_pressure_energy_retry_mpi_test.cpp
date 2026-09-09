@@ -1438,6 +1438,8 @@ bool run_candidate_accounting_certificate(
     incomplete += iteration.work.incomplete_evaluations;
     rejected_extrapolations += iteration.work.rejected_extrapolations;
     const auto &extrapolation = iteration.extrapolation;
+    if (iteration.corrector == 2U && iteration.refinement_iteration == 1U)
+      valid &= !extrapolation.attempted;
     if (extrapolation.attempted && extrapolation.complete &&
         extrapolation.selection_attempted && !extrapolation.selected) {
       valid &=
@@ -1482,6 +1484,7 @@ bool run_candidate_accounting_certificate(
              extrapolations == work.extrapolation_evaluations &&
              incomplete == work.incomplete_evaluations &&
              rejected_extrapolations == work.rejected_extrapolations;
+  const bool accounting_valid=valid;
   if (require_rejected_extrapolation)
     valid &= driver.status && report.accepted && report.attempts == 1U &&
              rejected_then_ladder_accepted && work.rejected_extrapolations > 0U;
@@ -1489,6 +1492,9 @@ bool run_candidate_accounting_certificate(
     std::cout << "warm-candidate-work status="
               << static_cast<unsigned>(driver.status.code) << '/'
               << driver.status.detail
+              << " amplitude=" << amplitude << " dt=" << dt
+              << " accounting=" << accounting_valid
+              << " require_rejection=" << require_rejected_extrapolation
               << " baseline=" << work.baseline_evaluations
               << " extrapolation=" << work.extrapolation_evaluations
               << " ladder=" << work.ladder_evaluations
@@ -1543,6 +1549,12 @@ int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (argc == 4 && std::string(argv[1]) == "--candidate-accounting") {
+    const bool passed=run_candidate_accounting_certificate(
+        rank,std::stod(argv[2]),std::stod(argv[3]),true);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   if (argc == 2 && std::string(argv[1]) == "--generic-thermal-halo") {
     const bool passed = run_generic_thermal_halo_certificate(rank);
     MPI_Finalize();
@@ -1554,7 +1566,7 @@ int main(int argc, char **argv) {
   passed &= run_candidate_accounting_certificate(rank);
   // The larger warm perturbation produces an actual alpha=2 merit rejection,
   // followed by alpha=1 acceptance. No candidate or selector is mocked.
-  passed &= run_candidate_accounting_certificate(rank, 1.0e4, 0.09, true);
+  passed &= run_candidate_accounting_certificate(rank, 1.5e4, 0.09, true);
   MPI_Finalize();
   return passed ? 0 : 1;
 }
