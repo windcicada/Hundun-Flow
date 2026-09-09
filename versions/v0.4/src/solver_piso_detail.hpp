@@ -14,6 +14,7 @@ inline MgHierarchyPolicy production_pressure_mg_policy() noexcept {
   policy.point_smoother = MgPointSmootherKind::chebyshev_jacobi;
   policy.cycle = MgCycleKind::f_cycle;
   policy.chebyshev_lower_spectrum_fraction = 0.3;
+  policy.diagonal_shortcut_maximum_ratio = 0.1;
   return policy;
 }
 

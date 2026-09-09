@@ -124,6 +124,10 @@ struct MgHierarchyPolicy {
   MgPointSmootherKind point_smoother{MgPointSmootherKind::red_black};
   MgCycleKind cycle{MgCycleKind::v_cycle};
   double chebyshev_lower_spectrum_fraction{0.3};
+  // Zero selects the ordinary cycle. Otherwise use D^-1 when the global
+  // finest-grid face-sum/diagonal bound is at most this value (< 1).
+  // Re-evaluated at numeric refresh; singular operators retain the cycle.
+  double diagonal_shortcut_maximum_ratio{0.0};
 };
 
 struct MgBoundarySet {

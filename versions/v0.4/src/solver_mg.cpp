@@ -98,7 +98,10 @@ bool valid_policy(MgHierarchyPolicy policy) noexcept {
           policy.cycle == MgCycleKind::f_cycle) &&
          std::isfinite(policy.chebyshev_lower_spectrum_fraction) &&
          policy.chebyshev_lower_spectrum_fraction > 0.0 &&
-         policy.chebyshev_lower_spectrum_fraction < 1.0;
+         policy.chebyshev_lower_spectrum_fraction < 1.0 &&
+         std::isfinite(policy.diagonal_shortcut_maximum_ratio) &&
+         policy.diagonal_shortcut_maximum_ratio >= 0.0 &&
+         policy.diagonal_shortcut_maximum_ratio < 1.0;
 }
 
 bool valid_operator_class(MgOperatorClass operator_class) noexcept {
@@ -344,6 +347,11 @@ PlanFingerprint structural_contract(const NativeCartesianMgSpec& spec,
   }
   hash = mix(hash, static_cast<std::uint64_t>(spec.policy.point_smoother));
   hash = mix(hash, static_cast<std::uint64_t>(spec.policy.cycle));
+  if (spec.policy.diagonal_shortcut_maximum_ratio != 0.0) {
+    std::uint64_t bits = 0U;
+    std::memcpy(&bits, &spec.policy.diagonal_shortcut_maximum_ratio, sizeof(bits));
+    hash = mix(hash, bits);
+  }
   hash = mix(hash, static_cast<std::uint64_t>(strategy.coarsening));
   hash = mix(hash, strategy.line_mask);
   hash = mix(hash, spec.policy.pre_sweeps);
@@ -383,6 +391,11 @@ PlanFingerprint public_symbolic_fingerprint(
   }
   hash = mix(hash, static_cast<std::uint64_t>(spec.policy.point_smoother));
   hash = mix(hash, static_cast<std::uint64_t>(spec.policy.cycle));
+  if (spec.policy.diagonal_shortcut_maximum_ratio != 0.0) {
+    std::uint64_t bits = 0U;
+    std::memcpy(&bits, &spec.policy.diagonal_shortcut_maximum_ratio, sizeof(bits));
+    hash = mix(hash, bits);
+  }
   hash = mix(hash, spec.policy.pre_sweeps);
   hash = mix(hash, spec.policy.post_sweeps);
   std::uint64_t fraction_bits = 0U;
@@ -570,6 +583,7 @@ struct NativeCartesianMgPlan::Impl {
   std::vector<detail::MgLevelStorage> levels;
   std::vector<double> hierarchy_storage;
   std::vector<double> inactive_hierarchy_storage;
+  bool diagonal_shortcut{};
   // Cold-owned positive-zero row storage used by physical Dirichlet point
   // rows.  Its capacity covers every local x extent, so the hot kernel can
   // use a resolved pointer without a per-cell mode branch or a literal
@@ -1553,6 +1567,47 @@ void copy_finest_coefficients(const Implementation& implementation,
       }
     }
   }
+}
+
+// The bound includes physical boundary faces, so it also bounds the Neumann
+// self contribution. Use the already masked coefficients: solid identity rows
+// and removed IBM faces must not change the decision. This numeric decision is
+// collective and immutable throughout a Krylov solve.
+template <class Implementation>
+Status select_diagonal_shortcut(Implementation& implementation,
+                                const double* base, bool& selected) noexcept {
+  selected = false;
+  const auto& spec = implementation.spec;
+  if (spec.policy.diagonal_shortcut_maximum_ratio == 0.0 ||
+      spec.null_space != MgNullSpace::none ||
+      spec.operator_class !=
+          MgOperatorClass::symmetric_diagonally_dominant_m_matrix) return {};
+  const auto& level = implementation.levels[0U];
+  const Int3 cells = level.view.local_shape;
+  const Int3 xe{cells.x + 1, cells.y, cells.z};
+  const Int3 ye{cells.x, cells.y + 1, cells.z};
+  const Int3 ze{cells.x, cells.y, cells.z + 1};
+  const double* diagonal = detail::block(base, level.diagonal_offset);
+  const double* x = detail::block(base, level.x_offset);
+  const double* y = detail::block(base, level.y_offset);
+  const double* z = detail::block(base, level.z_offset);
+  double local_maximum = 0.0;
+  for (std::int32_t k = 0; k < cells.z; ++k)
+    for (std::int32_t j = 0; j < cells.y; ++j)
+      for (std::int32_t i = 0; i < cells.x; ++i) {
+        const Int3 cell{i, j, k};
+        const double sum = x[face_flat(xe, cell)] + x[face_flat(xe, {i + 1, j, k})] +
+                           y[face_flat(ye, cell)] + y[face_flat(ye, {i, j + 1, k})] +
+                           z[face_flat(ze, cell)] + z[face_flat(ze, {i, j, k + 1})];
+        local_maximum = std::max(local_maximum, sum / diagonal[flat(cells, cell)]);
+      }
+  double global_maximum = 0.0;
+  const Status status = implementation.services.reductions->checked_max(
+      {&local_maximum, 1U}, {&global_maximum, 1U}, {});
+  implementation.lowest = implementation.services.reductions->lowest_failing_rank();
+  if (status)
+    selected = global_maximum <= spec.policy.diagonal_shortcut_maximum_ratio;
+  return status;
 }
 
 // Rediscretise the conservative face-flux operator by summing all fine faces
@@ -4489,6 +4544,12 @@ Status NativeCartesianMgPlan::compile(const NativeCartesianMgSpec& spec,
               candidate->replicated_operator_active.end(),
               candidate->replicated_operator_inactive.begin());
   }
+  local = select_diagonal_shortcut(*candidate, candidate->hierarchy_storage.data(),
+                                    candidate->diagonal_shortcut);
+  if (!local) {
+    destroy(candidate);
+    return local;
+  }
   candidate->generation = 1U;
   candidate->symbolic = public_symbolic_fingerprint(spec, strategy);
   candidate->numeric = make_numeric_fingerprint(spec.coefficients,
@@ -4655,6 +4716,10 @@ Status NativeCartesianMgPlan::update_coefficients(
       return agreed;
     }
   }
+  bool next_diagonal_shortcut = false;
+  local = select_diagonal_shortcut(implementation,
+      implementation.inactive_hierarchy_storage.data(), next_diagonal_shortcut);
+  if (!local) return local;
   {
   detail::LocalElapsedTimer copy_timer(implementation.runtime_counters.copy_nanoseconds);
   std::copy(implementation.inactive_hierarchy_storage.begin(),
@@ -4667,6 +4732,7 @@ Status NativeCartesianMgPlan::update_coefficients(
   }
   }
   implementation.coefficients = coefficients;
+  implementation.diagonal_shortcut = next_diagonal_shortcut;
   implementation.spec.identity = next_identity;
   implementation.spec.coefficients = identity;
   implementation.spec.coefficients.maximum_relative_change = global_change;
@@ -4822,7 +4888,21 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
   implementation.replicated_solution_revision = 0U;
   const std::uint8_t cycle_counter =
       implementation.spec.policy.cycle == MgCycleKind::f_cycle ? 2U : 1U;
-  local = mg_cycle(implementation, 0U, cycle_counter, stage, deferred);
+  if (implementation.diagonal_shortcut) {
+    const double* diagonal = detail::block(implementation.hierarchy_storage.data(),
+                                           implementation.levels[0U].diagonal_offset);
+    for (std::int32_t k = 0; k < cells.z; ++k)
+      for (std::int32_t j = 0; j < cells.y; ++j)
+        for (std::int32_t i = 0; i < cells.x; ++i) {
+          const Int3 cell{i, j, k};
+          candidate.unchecked(cell, 0U) =
+              rhs.unchecked(cell, 0U) / diagonal[flat(cells, cell)];
+        }
+    local = implementation.services.workspace->revise_level(
+        0U, MgWorkspaceSlot::solution);
+  } else {
+    local = mg_cycle(implementation, 0U, cycle_counter, stage, deferred);
+  }
   if (!prepared) {
     if (local && !deferred) {
       local = deferred;

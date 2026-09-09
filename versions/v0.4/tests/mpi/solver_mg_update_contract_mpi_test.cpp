@@ -202,6 +202,50 @@ struct Fixture {
   }
 };
 
+bool test_diagonal_shortcut_consensus(int rank, int size) {
+  Fixture fixture;
+  bool passed = expect(fixture.create(), rank, "diagonal consensus fixture compiles");
+  if (!all_true(passed)) return false;
+  fixture.spec.operator_class =
+      MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
+  fixture.spec.correction_scaling = MgCorrectionScaling::unit_linear;
+  fixture.spec.policy.diagonal_shortcut_maximum_ratio = 0.1;
+  std::fill(fixture.diagonal.storage.begin(), fixture.diagonal.storage.end(), 100.0);
+  const auto services = MgRuntimeServices{
+      &fixture.halo, &fixture.reductions, &fixture.workspace,
+      {fixture.coarse_halo_pointers.data(), fixture.coarse_halo_pointers.size()}};
+  passed &= expect(static_cast<bool>(NativeCartesianMgPlan::compile(
+      fixture.spec, services, fixture.coefficients(), fixture.plan)), rank,
+      "collective shortcut plan compiles");
+  if (!all_true(passed)) return false;
+  passed &= expect(static_cast<bool>(fixture.plan.apply(
+      as_const(fixture.residual.view), fixture.correction.view, 0U)) &&
+      detail::mg_matrix_work_counters_for_test(fixture.plan).cycle_level_calls[0U] == 0U,
+      rank, "all ranks select the strong-dominance shortcut");
+  // Only the last rank loses dominance. Every rank must enter the same cycle
+  // and halo schedule after the collective numeric update.
+  if (rank == size - 1)
+    std::fill(fixture.diagonal.storage.begin(), fixture.diagonal.storage.end(), 7.0);
+  auto identity = fixture.spec.identity;
+  ++identity.numeric;
+  ++identity.fingerprint;
+  passed &= expect(static_cast<bool>(fixture.plan.update_coefficients(
+      identity, {23U, 24U, 0.0}, fixture.coefficients())), rank,
+      "rank-local loss of dominance updates collectively");
+  if (!all_true(passed)) return false;
+  passed &= expect(static_cast<bool>(fixture.plan.apply(
+      as_const(fixture.residual.view), fixture.correction.view, 1U)) &&
+      detail::mg_matrix_work_counters_for_test(fixture.plan).cycle_level_calls[0U] == 1U,
+      rank, "one weak rank restores the cycle on every rank");
+  const auto numeric = fixture.plan.numeric_fingerprint();
+  fixture.spec.policy.diagonal_shortcut_maximum_ratio = rank == size - 1 ? 0.2 : 0.1;
+  const Status divergent = NativeCartesianMgPlan::compile(
+      fixture.spec, services, fixture.coefficients(), fixture.plan);
+  passed &= expect(!divergent && fixture.plan.numeric_fingerprint() == numeric,
+      rank, "divergent shortcut policies reject before replacing the live plan");
+  return all_true(passed);
+}
+
 bool test_divergent_update_contract(int rank, int size) {
   Fixture fixture;
   bool passed = expect(fixture.create(), rank, "baseline MG plan compiles");
@@ -402,6 +446,7 @@ int main(int argc, char** argv) {
   bool passed = expect(size == 2 || size == 4, rank,
                        "update contract RED runs at 2 or 4 ranks");
   passed &= test_divergent_update_contract(rank, size);
+  passed &= test_diagonal_shortcut_consensus(rank, size);
   passed &= test_rank_local_optional_counters(rank, size);
   passed &= test_reversed_runtime_communicators(rank, size);
   passed &= test_rank_local_null_reduction_preflight(rank, size);

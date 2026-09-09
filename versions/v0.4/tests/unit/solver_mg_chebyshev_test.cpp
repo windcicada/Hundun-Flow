@@ -151,7 +151,8 @@ struct Fixture {
                   bool variable_coefficients = false,
                   double anisotropy_threshold = 4.0,
                   MgCycleKind cycle = MgCycleKind::v_cycle,
-                  std::uint8_t maximum_levels = 2U) {
+                  std::uint8_t maximum_levels = 2U,
+                  double diagonal_shortcut_ratio = 0.0) {
     if (!CartesianGeometryCompiler::compile(
             MPI_COMM_SELF, mesh_spec(mesh_cells),
             GeometryBudget{}, geometry, patch)) {
@@ -227,6 +228,9 @@ struct Fixture {
     spec.policy.point_smoother = smoother;
     spec.policy.cycle = cycle;
     spec.policy.chebyshev_lower_spectrum_fraction = 0.3;
+    spec.policy.diagonal_shortcut_maximum_ratio = diagonal_shortcut_ratio;
+    if (diagonal_shortcut_ratio != 0.0)
+      spec.correction_scaling = MgCorrectionScaling::unit_linear;
     spec.identity = {301U, 302U, 303U, 304U, 305U};
     spec.coefficients = {1U, 401U, 0.0};
     if (with_inactive_cell) {
@@ -1243,9 +1247,76 @@ bool test_numeric_input_rejection() {
 
 }  // namespace
 
+bool test_diagonal_shortcut() {
+  Fixture fixture;
+  bool passed = expect(fixture.initialize(
+      MgPointSmootherKind::chebyshev_jacobi,
+      MgOperatorClass::symmetric_diagonally_dominant_m_matrix,
+      100.0, 1.0, 2U, {}, MgNullSpace::none, true, {8, 8, 8}, false,
+      4.0, MgCycleKind::v_cycle, 2U, 0.1), "dominant IBM fixture compiles");
+  if (!passed) return false;
+  fixture.fill_rhs();
+  const auto check_diagonal = [&]() {
+    if (!fixture.plan.apply(as_const(fixture.rhs.view),
+                            fixture.correction.view, 0U)) return false;
+    const Int3 cells = fixture.patch.cells;
+    for (int k = 0; k < cells.z; ++k)
+      for (int j = 0; j < cells.y; ++j)
+        for (int i = 0; i < cells.x; ++i) {
+          const Int3 c{i, j, k};
+          const bool solid = i == 0 && j == 0 && k == 0;
+          const bool cut_neighbor = i + j + k == 1;
+          const double expected = solid ? 0.0 :
+              fixture.rhs.view.unchecked(c, 0U) /
+                  (cut_neighbor ? 99.0 : 100.0);
+          if (fixture.correction.view.unchecked(c, 0U) != expected)
+            return false;
+        }
+    return true;
+  };
+  passed &= expect(check_diagonal(),
+      "strong dominance uses exact masked diagonal inverse and zero solid correction");
+  auto work = detail::mg_matrix_work_counters_for_test(fixture.plan);
+  passed &= expect(work.cycle_level_calls[0U] == 0U,
+                   "diagonal path avoids multigrid cycle work");
+  auto identity = fixture.spec.identity;
+  identity.numeric += 1U;
+  identity.fingerprint += 1U;
+  std::fill(fixture.diagonal.storage.begin(), fixture.diagonal.storage.end(), 7.0);
+  passed &= expect(static_cast<bool>(fixture.plan.update_coefficients(
+      identity, {2U, 402U, 0.0}, fixture.coefficients())),
+      "weak-dominance numeric update succeeds");
+  passed &= expect(static_cast<bool>(fixture.plan.apply(as_const(fixture.rhs.view),
+      fixture.correction.view, 1U)), "weak-dominance cycle applies");
+  work = detail::mg_matrix_work_counters_for_test(fixture.plan);
+  passed &= expect(work.cycle_level_calls[0U] == 1U,
+                   "numeric refresh restores multigrid for weak dominance");
+  identity.numeric += 1U;
+  identity.fingerprint += 1U;
+  std::fill(fixture.diagonal.storage.begin(), fixture.diagonal.storage.end(), 100.0);
+  passed &= expect(static_cast<bool>(fixture.plan.update_coefficients(
+      identity, {3U, 403U, 0.0}, fixture.coefficients())) && check_diagonal(),
+      "later numeric refresh restores the diagonal path");
+  const auto numeric = fixture.plan.numeric_fingerprint();
+  fixture.diagonal.storage[5U] = -1.0;
+  passed &= expect(!fixture.plan.update_coefficients(
+      identity, {4U, 404U, 0.0}, fixture.coefficients()) &&
+      fixture.plan.numeric_fingerprint() == numeric && check_diagonal(),
+      "failed refresh preserves the prior diagonal operator and selection");
+  fixture.diagonal.storage[5U] = 100.0;
+  for (double invalid : {-0.1, 1.0, std::numeric_limits<double>::quiet_NaN()}) {
+    fixture.spec.policy.diagonal_shortcut_maximum_ratio = invalid;
+    NativeCartesianMgPlan rejected;
+    passed &= expect(!NativeCartesianMgPlan::compile(fixture.spec, fixture.services(),
+        fixture.coefficients(), rejected), "invalid shortcut threshold rejects");
+  }
+  return passed;
+}
+
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
+  passed &= test_diagonal_shortcut();
   passed &= test_public_contract();
   passed &= test_certified_apply_and_hot_schedule();
   passed &= test_fixed_f_cycle_schedule_and_identity();
