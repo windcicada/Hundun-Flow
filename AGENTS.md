@@ -17,3 +17,8 @@ Default triage vocabulary is in use: `needs-triage`, `needs-info`, `ready-for-ag
 ### Domain docs
 
 Single-context layout: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Commit identity
+
+- Use `WANG YUDONG <wangyudong@buaa.edu.cn>` for this project's automated author, committer and DCO signature. Add a co-author only when the user explicitly identifies one.
+- Before integrating or pushing commits, check author, committer and trailers in every incoming commit. Correct the previously misconfigured automation identity `oooo <vvvvmarisa@163.com>` (GitHub `NotOmee`) to the identity above; preserve actual third-party authorship.
