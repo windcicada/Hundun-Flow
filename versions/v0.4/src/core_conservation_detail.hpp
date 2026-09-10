@@ -172,6 +172,11 @@ inline Status collect_boundary_balance(
     const IbmEquationInterfacePlan* immersed_interface = nullptr) noexcept {
   out = {};
   pending = {};
+  const bool direct_h = enthalpy_plan.unity_lewis_total_enthalpy();
+  const ConstFieldView thermal_coordinate = direct_h
+      ? state.enthalpy.trial : state.temperature.trial;
+  const ConstFieldView thermal_coefficient = direct_h
+      ? material.enthalpy_diffusivity : material.thermal_conductivity;
   const Int3 cells = kernels.cells();
   const std::int32_t reach = kernels.reach();
   Status local;
@@ -309,9 +314,9 @@ inline Status collect_boundary_balance(
                                       f.unchecked(left, c), f.unchecked(face, c));
             };
             sum[9U] += sign * positive_transmissibility(
-                kernels, material.thermal_conductivity, axis, face) *
-                (state.temperature.trial.unchecked(face, 0U) -
-                 state.temperature.trial.unchecked(left, 0U));
+                kernels, thermal_coefficient, axis, face) *
+                (thermal_coordinate.unchecked(face, 0U) -
+                 thermal_coordinate.unchecked(left, 0U));
             double species_heat = 0.0;
             if (local)
               local = MixtureEnthalpyDiffusion::face_flux(

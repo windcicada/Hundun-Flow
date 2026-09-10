@@ -239,6 +239,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   if (!detail::canonicalize_thermophysical_spec(canonical_spec)) {
     return {StatusCode::invalid_plan, kTransportInput};
   }
+  const bool coast_perry = canonical_spec.species.front().transport_law == TransportLaw::coast_perry;
   std::array<std::uint8_t, kMaximumSpecies> seen{};
   seen[thermodynamics.dependent_species_] = 1U;
   for (const std::uint16_t mapped :
@@ -256,6 +257,10 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
 
   TransportPlan candidate;
   try {
+    if (coast_perry) {
+      candidate.perry_temperature_.resize(count);
+      candidate.perry_scale_.resize(count);
+    }
     candidate.molecular_weight_.resize(count);
     candidate.viscosity_reference_.resize(count);
     candidate.reference_temperature_.resize(count);
@@ -286,6 +291,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
         canonical_spec.species[species];
     if (!finite_positive(input.molecular_weight) ||
         (input.transport_law != TransportLaw::coast_native_air &&
+         input.transport_law != TransportLaw::coast_perry &&
          !finite_positive(input.viscosity_reference)) ||
         !finite_positive(input.temperature_switch) ||
         std::abs(input.molecular_weight *
@@ -334,6 +340,18 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
         candidate.conductivity_[species] = 0.0;
         any_sutherland = true;
         break;
+      case TransportLaw::coast_perry:
+        candidate.perry_temperature_[species] = input.critical_temperature;
+        candidate.perry_scale_[species] =
+            std::sqrt(input.molecular_weight) * std::pow(input.critical_pressure, 2.0 / 3.0) /
+            std::pow(input.critical_temperature, 1.0 / 6.0) * 1e-7;
+        if (!finite_positive(candidate.perry_scale_[species]))
+          return {StatusCode::invalid_plan, kTransportSpecies};
+        candidate.reference_temperature_[species] = 0.0;
+        candidate.sutherland_temperature_[species] = 0.0;
+        candidate.prandtl_[species] = 0.70;
+        candidate.conductivity_[species] = 0.0;
+        break;
       case TransportLaw::coast_native_air:
         if (count != 1U || input.viscosity_reference != 0.0 ||
             input.transport_reference_temperature != 0.0 ||
@@ -355,13 +373,13 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   candidate.dependent_species_ = thermodynamics.dependent_species_;
   candidate.minimum_temperature_ = thermodynamics.minimum_temperature_;
   candidate.maximum_temperature_ = thermodynamics.maximum_temperature_;
-  candidate.kernel_ = coast_native_air
+  candidate.kernel_ = coast_perry ? TransportKernel::coast_perry : coast_native_air
                           ? TransportKernel::coast_native_air
                           : (any_sutherland
                                  ? TransportKernel::sutherland_wilke
                                  : TransportKernel::constant);
   candidate.enthalpy_prandtl_ =
-      coast_native_air ? kCoastNativeAirPrandtl : 0.0;
+      (coast_perry || coast_native_air) ? kCoastNativeAirPrandtl : 0.0;
   if (candidate.kernel_ == TransportKernel::constant) {
     try {
       candidate.constant_wilke_phi_.resize(count * count);
@@ -424,6 +442,10 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
     }
   }
   for (std::size_t species = 0U; species < count; ++species) {
+    if (coast_perry) {
+      hash.real(candidate.perry_temperature_[species]);
+      hash.real(candidate.perry_scale_[species]);
+    }
     hash.real(candidate.molecular_weight_[species]);
     hash.real(candidate.viscosity_reference_[species]);
     hash.real(candidate.reference_temperature_[species]);
@@ -461,6 +483,8 @@ Status TransportPlan::evaluate(
       wilke_denominator_reciprocal_.size() != count * count ||
       constant_wilke_phi_.size() !=
           (kernel_ == TransportKernel::constant ? count * count : 0U) ||
+      perry_temperature_.size() != (kernel_ == TransportKernel::coast_perry ? count : 0U) ||
+      perry_scale_.size() != perry_temperature_.size() ||
       independent_to_species_.size() + 1U != count ||
       dependent_species_ >= count) {
     return {StatusCode::invalid_plan, kTransportInput};
@@ -495,14 +519,22 @@ Status TransportPlan::evaluate(
   std::array<double, kMaximumSpecies> viscosity{};
   std::array<double, kMaximumSpecies> conductivity{};
   double mole_sum = 0.0;
+  double mixture_cp = 0.0;
+  const bool perry = kernel_ == TransportKernel::coast_perry;
   for (std::size_t species = 0U; species < count; ++species) {
     const double moles = mass_fraction[species] / molecular_weight_[species];
-    const double mu = species_viscosity(
+    const double reduced = perry ? temperature / perry_temperature_[species] : 0.0;
+    const double mu = perry ?
+        (4.610 * std::pow(reduced, 0.618) - 2.04 * std::exp(-0.449 * reduced) +
+         1.94 * std::exp(-4.058 * reduced) + 0.1) * perry_scale_[species] : species_viscosity(
         {viscosity_reference_.data(), viscosity_reference_.size()},
         {reference_temperature_.data(), reference_temperature_.size()},
         {sutherland_temperature_.data(), sutherland_temperature_.size()},
         species, temperature);
-    const double lambda = species_conductivity(
+    const double cp = perry ? species_cp(
+        nasa_low_, nasa_high_, {temperature_switch_.data(), temperature_switch_.size()},
+        {molecular_weight_.data(), molecular_weight_.size()}, species, temperature) : 0.0;
+    const double lambda = perry ? mu * cp / enthalpy_prandtl_ : species_conductivity(
         nasa_low_, nasa_high_,
         {temperature_switch_.data(), temperature_switch_.size()},
         {molecular_weight_.data(), molecular_weight_.size()},
@@ -518,6 +550,7 @@ Status TransportPlan::evaluate(
     viscosity[species] = mu;
     conductivity[species] = lambda;
     mole_sum += moles;
+    if (perry) mixture_cp += mass_fraction[species] * cp;
   }
   if (!finite_positive(mole_sum)) {
     return {StatusCode::numerical_failure, kTransportComposition};
@@ -561,13 +594,14 @@ Status TransportPlan::evaluate(
       }
       mixture_viscosity +=
           mole_fraction[first] * viscosity[first] / wilke_denominator;
-      // Thermal conductivity uses the same finite Wilke interaction weights.
-      // This keeps both molecular coefficients smooth at vanishing species
-      // fractions without adding a second O(N^2) interaction table.
-      mixture_conductivity +=
+      // Generic conductivity shares the Wilke weights; Perry uses the
+      // mass-weighted heat capacity and the common enthalpy Prandtl number.
+      if (!perry) mixture_conductivity +=
           mole_fraction[first] * conductivity[first] / wilke_denominator;
     }
   }
+  if (perry)
+    mixture_conductivity = mixture_cp * mixture_viscosity / enthalpy_prandtl_;
   if (!finite_positive(mixture_viscosity) ||
       !finite_positive(mixture_conductivity)) {
     return {StatusCode::numerical_failure, kTransportNumerical};
@@ -580,7 +614,7 @@ Status TransportPlan::effective_enthalpy_transport(
     double molecular_viscosity, double effective_viscosity,
     double heat_capacity, double& conductivity,
     double& enthalpy_diffusivity) const noexcept {
-  if (kernel_ != TransportKernel::coast_native_air ||
+  if (!has_effective_enthalpy_transport() ||
       enthalpy_prandtl_ != kCoastNativeAirPrandtl) {
     return {StatusCode::invalid_plan, kTransportInput};
   }

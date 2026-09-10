@@ -528,6 +528,8 @@ add_executable(v04_solver_enthalpy_terms_test
 target_link_libraries(v04_solver_enthalpy_terms_test PRIVATE
   hundun_v04_test_core
   MPI::MPI_C)
+target_include_directories(v04_solver_enthalpy_terms_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 add_test(NAME v04_solver_enthalpy_terms
   COMMAND v04_solver_enthalpy_terms_test)
 set_tests_properties(v04_solver_enthalpy_terms PROPERTIES TIMEOUT 120)
@@ -549,6 +551,13 @@ target_link_libraries(v04_solver_species_conservation_test PRIVATE
 add_test(NAME v04_solver_species_conservation
   COMMAND v04_solver_species_conservation_test)
 set_tests_properties(v04_solver_species_conservation PROPERTIES TIMEOUT 120)
+
+add_executable(v04_solver_sampled_direction_test
+  numerical/solver_sampled_direction_test.cpp)
+target_link_libraries(v04_solver_sampled_direction_test PRIVATE
+  hundun_v04_test_core MPI::MPI_C)
+add_test(NAME v04_solver_sampled_direction COMMAND v04_solver_sampled_direction_test)
+set_tests_properties(v04_solver_sampled_direction PROPERTIES TIMEOUT 60)
 
 add_executable(v04_solver_pressure_storage_test
   numerical/solver_pressure_storage_test.cpp)
@@ -1124,6 +1133,8 @@ endforeach()
 
 add_executable(v04_solver_scalar_mass_remap_mpi_test
   mpi/solver_scalar_mass_remap_mpi_test.cpp)
+target_compile_definitions(v04_solver_scalar_mass_remap_mpi_test PRIVATE
+  HUNDUN_V04_ENABLE_TEST_ACCESS=1)
 target_link_libraries(v04_solver_scalar_mass_remap_mpi_test PRIVATE
   hundun_v04_test_core MPI::MPI_C)
 foreach(rank_count IN ITEMS 1 2 4)

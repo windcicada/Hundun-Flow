@@ -1401,6 +1401,237 @@ bool test_wire_rejects_duplicate_data_paths() {
                 "wire decoder rejects duplicate data paths transactionally");
 }
 
+bool test_cold_time_method() {
+  ScratchCase fixture("cold-time");
+  fixture.write("thermophysics.d", kPlaceholderThermophysics);
+  std::string input = case_json(kUniformMesh);
+  replace_once(input, "backward_euler", "variable_bdf2");
+  fixture.write("case.json", input);
+  ValidatedModel legacy;
+  if (!expect(static_cast<bool>(compile(fixture.root(), legacy)),
+              "BDF2 migration reference compiles")) return false;
+  replace_once(input, "variable_bdf2", "coast_cn_be");
+  fixture.write("case.json", input);
+  ValidatedModel model;
+  if (!expect(static_cast<bool>(compile(fixture.root(), model)),
+              "CN momentum and BE transport have an explicit case method"))
+    return false;
+  bool passed = expect(model.time.scheme == TimeScheme::coast_cn_be &&
+      model.fingerprint != legacy.fingerprint &&
+      model.legacy_time_fingerprint == legacy.fingerprint &&
+      legacy.legacy_time_fingerprint == 0U,
+      "method identity changes while migration binds the same BDF2 case");
+  std::vector<std::uint8_t> wire, legacy_wire;
+  ValidatedModel restored;
+  passed &= expect(hundun::v04::detail::serialize_model_for_test(model, wire) &&
+      hundun::v04::detail::serialize_model_for_test(legacy, legacy_wire) &&
+      wire.size() == legacy_wire.size() + sizeof(std::uint64_t) + 1U &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.time.scheme == TimeScheme::coast_cn_be &&
+      restored.fingerprint == model.fingerprint &&
+      restored.legacy_time_fingerprint == legacy.fingerprint,
+      "cold wire carries both identities and leaves the legacy envelope size unchanged");
+  if (!passed) return false;
+  const auto reject_wire = [&](std::vector<std::uint8_t> bad) {
+    ValidatedModel retained = legacy;
+    return !hundun::v04::detail::deserialize_model_for_test(bad, retained) &&
+           retained.fingerprint == legacy.fingerprint &&
+           retained.legacy_time_fingerprint == 0U;
+  };
+  auto truncated = wire;
+  truncated.pop_back();
+  passed &= expect(reject_wire(truncated), "cold wire requires its full migration identity");
+  auto zero = wire;
+  std::fill(zero.end() - 9, zero.end() - 1, 0U);
+  passed &= expect(reject_wire(zero), "zero migration identity is rejected atomically");
+  auto same = wire;
+  std::copy(same.end() - 17, same.end() - 9, same.end() - 9);
+  passed &= expect(reject_wire(same), "current identity cannot impersonate a legacy method");
+  auto extra = legacy_wire;
+  extra.insert(extra.end(), wire.end() - 8, wire.end());
+  passed &= expect(reject_wire(extra), "legacy methods reject a migration extension");
+  auto invalid = model;
+  invalid.legacy_time_fingerprint = 0U;
+  auto retained_wire = wire;
+  passed &= expect(!hundun::v04::detail::serialize_model_for_test(invalid, retained_wire) &&
+      retained_wire == wire, "invalid migration model preserves the caller's wire buffer");
+  // Thermophysics is hashed after time. Both lanes must bind the changed data,
+  // rather than matching an unrelated restart through just its method tag.
+  std::string thermo{kPlaceholderThermophysics};
+  replace_once(thermo, "1.716e-5", "1.8e-5");
+  fixture.write("thermophysics.d", thermo);
+  ValidatedModel changed, changed_legacy;
+  passed &= expect(static_cast<bool>(compile(fixture.root(), changed)),
+                   "changed cold transport data compiles");
+  replace_once(input, "coast_cn_be", "variable_bdf2");
+  fixture.write("case.json", input);
+  passed &= expect(compile(fixture.root(), changed_legacy) &&
+      changed.fingerprint != model.fingerprint &&
+      changed.legacy_time_fingerprint != legacy.fingerprint &&
+      changed.legacy_time_fingerprint == changed_legacy.fingerprint,
+      "both method identities bind referenced physical data");
+  return passed;
+}
+
+bool test_cold_stopping_configuration() {
+  ScratchCase fixture("cold-stop");
+  fixture.write("thermophysics.d", kPlaceholderThermophysics);
+  std::string input = case_json(kUniformMesh);
+  replace_once(input, "backward_euler", "coast_cn_be");
+  fixture.write("case.json", input);
+  ValidatedModel strict, reference;
+  if (!expect(static_cast<bool>(compile(fixture.root(), strict)), "strict cold baseline compiles"))
+    return false;
+  replace_once(input, "\"pressure_correctors\":2", R"json("pressure_correctors":2,
+    "pressure_linear":{"absolute_tolerance":1e-12,"relative_tolerance":1e-12,
+      "maximum_iterations":400,"true_residual_interval":4,"krylov_restart":12},
+    "terminal_tolerances":{"eos":1e-10,"continuity":1e-10,"closed_mass":1e-10,"gauge":1e-10},
+    "cold_stopping":{"reference_time":0.001,"momentum":1e-4,"enthalpy":1e-4,"species":1e-4})json");
+  fixture.write("case.json", input);
+  if (!expect(static_cast<bool>(compile(fixture.root(), reference)),
+              "COAST stopping scales have an explicit case configuration"))
+    return false;
+  std::vector<std::uint8_t> wire;
+  ValidatedModel restored;
+  bool passed = expect(reference.fingerprint != strict.fingerprint &&
+      hundun::v04::detail::serialize_model_for_test(reference, wire) &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.fingerprint == reference.fingerprint,
+      "reference stopping survives wire and changes plan identity");
+  passed &= expect(restored.solver.cold_stopping &&
+      restored.solver.cold_stopping->reference_time == 0.001 &&
+      restored.solver.cold_stopping->momentum == 1e-4 &&
+      restored.solver.cold_stopping->enthalpy == 1e-4 &&
+      restored.solver.cold_stopping->species == 1e-4,
+      "wire carries the frozen stopping values");
+  for (unsigned cut = 1; cut <= 41; ++cut) {
+    auto bad = wire;
+    bad.resize(bad.size() - cut);
+    ValidatedModel retained = strict;
+    passed &= expect(!hundun::v04::detail::deserialize_model_for_test(bad, retained) &&
+        retained.fingerprint == strict.fingerprint && !retained.solver.cold_stopping,
+        "truncated stopping extension is rejected atomically");
+  }
+  auto bad = wire;
+  bad[bad.size() - 40] ^= 1U;
+  passed &= expect(!hundun::v04::detail::deserialize_model_for_test(bad, restored),
+                   "unknown stopping extension tag is rejected");
+  auto invalid = reference;
+  invalid.solver.cold_stopping->reference_time = 0;
+  auto retained = wire;
+  passed &= expect(!hundun::v04::detail::serialize_model_for_test(invalid, retained) && retained == wire,
+                   "invalid typed stopping preserves the wire output");
+  auto changed = input;
+  replace_once(changed, "0.001", "0.002");
+  fixture.write("case.json", changed);
+  ValidatedModel other;
+  passed &= expect(compile(fixture.root(), other) &&
+      other.fingerprint != reference.fingerprint &&
+      other.legacy_time_fingerprint == reference.legacy_time_fingerprint,
+      "stopping reference binds current identity and preserves physical migration identity");
+  for (const auto& substitution : std::vector<std::pair<std::string, std::string>>{
+      {"0.001", "0"}, {"0.001", "-1"}, {"0.001", "1e309"},
+      {"\"species\":1e-4", "\"species\":0"},
+      {"\"enthalpy\":1e-4", "\"enthalpy\":1"},
+      {"\"momentum\":1e-4", "\"unknown\":1e-4"},
+      {"coast_cn_be", "variable_bdf2"}}) {
+    auto bad = input;
+    replace_once(bad, substitution.first, substitution.second);
+    fixture.write("case.json", bad);
+    passed &= expect(!compile(fixture.root(), other),
+                     "invalid stopping scale or incompatible method is rejected");
+  }
+  return passed;
+}
+
+bool test_transport_change_compatibility() {
+  ScratchCase source_case("transport-source"), target_case("transport-target");
+  std::string mesh{kUniformMesh};
+  replace_once(mesh, "\"data_files\":[]", "\"data_files\":[\"extra.d\"]");
+  std::string input = case_json(mesh);
+  replace_once(input, "backward_euler", "coast_cn_be");
+  source_case.write("case.json", input);
+  target_case.write("case.json", input);
+  source_case.write("extra.d", "fixed geometry asset\n");
+  target_case.write("extra.d", "fixed geometry asset\n");
+  source_case.write("thermophysics.d", kPlaceholderThermophysics);
+  std::string perry{kPlaceholderThermophysics};
+  replace_once(perry, "transport_sutherland 1.716e-5 273.15 110.4 0.71",
+                     "transport_coast_perry 154.4 49.7");
+  target_case.write("thermophysics.d", perry);
+  ValidatedModel source, target;
+  if (!compile(source_case.root(), source) || !compile(target_case.root(), target))
+    return expect(false, "transport source and target fixtures compile");
+  const auto check = [&]() {
+    return CaseCompiler::validate_transport_change(MPI_COMM_SELF,
+        source_case.root(), source, target_case.root(), target);
+  };
+  bool passed = expect(check() && source.fingerprint != target.fingerprint,
+      "explicit transport change accepts matching cold physics with new transport");
+  target_case.write("extra.d", "changed geometry asset\n");
+  passed &= expect(!check(), "changed files reject a stale target identity");
+  passed &= expect(compile(target_case.root(), target) && !check(),
+      "transport migration preserves every referenced asset byte");
+  target_case.write("extra.d", "fixed geometry asset\n");
+  std::string thermal = perry;
+  replace_once(thermal, "temperature_bounds 200 3000", "temperature_bounds 210 3000");
+  target_case.write("thermophysics.d", thermal);
+  passed &= expect(compile(target_case.root(), target) && !check(),
+      "transport migration preserves thermodynamic validity bounds");
+  thermal = perry;
+  replace_once(thermal, "nasa7_low 3.5", "nasa7_low 3.6");
+  replace_once(thermal, "nasa7_high 3.5", "nasa7_high 3.6");
+  target_case.write("thermophysics.d", thermal);
+  passed &= expect(compile(target_case.root(), target) && !check(),
+      "transport migration preserves NASA enthalpy and heat capacity");
+  target_case.write("thermophysics.d", perry);
+  std::string time_input = input;
+  replace_once(time_input, "\"initial_dt\":0.001", "\"initial_dt\":0.002");
+  target_case.write("case.json", time_input);
+  passed &= expect(compile(target_case.root(), target) && !check(),
+      "transport migration preserves original time controls");
+  target_case.write("case.json", input);
+  passed &= expect(compile(target_case.root(), target) && check(),
+      "restored original physics restores transport compatibility");
+  passed &= expect(!CaseCompiler::validate_transport_change(MPI_COMM_SELF,
+      target_case.root(), target, source_case.root(), source),
+      "transport migration is an explicit Sutherland to Perry transition");
+  return passed;
+}
+
+bool test_coast_perry_transport() {
+  ScratchCase fixture("perry");
+  fixture.write("case.json", case_json(kUniformMesh));
+  std::string data{kPlaceholderThermophysics};
+  replace_once(data, "transport_sutherland 1.716e-5 273.15 110.4 0.71",
+               "transport_coast_perry 154.4 49.7");
+  fixture.write("thermophysics.d", data);
+  ValidatedModel model;
+  bool passed = expect(static_cast<bool>(compile(fixture.root(), model)),
+                "COAST Perry transport has an explicit physical input law");
+  std::vector<std::uint8_t> wire;
+  ValidatedModel restored;
+  passed &= expect(hundun::v04::detail::serialize_model_for_test(model, wire) &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.thermophysics.species[0].transport_law == TransportLaw::coast_perry &&
+      restored.thermophysics.species[0].critical_temperature == 154.4 &&
+      restored.thermophysics.species[0].critical_pressure == 49.7 &&
+      restored.thermophysics.species[0].prandtl == 0.70,
+      "wire preserves the physical critical constants and heat closure");
+  auto changed = data;
+  replace_once(changed, "154.4 49.7", "154.4 50.7");
+  fixture.write("thermophysics.d", changed);
+  passed &= expect(compile(fixture.root(), restored) && restored.fingerprint != model.fingerprint,
+                   "critical constants bind the case identity");
+  for (const auto* invalid : {"0 49.7", "154.4 -1", "nan 49.7", "154.4"}) {
+    changed = data;
+    replace_once(changed, "154.4 49.7", invalid);
+    fixture.write("thermophysics.d", changed);
+    passed &= expect(!compile(fixture.root(), restored), "invalid Perry input is rejected");
+  }
+  return passed;
+}
+
 bool test_defaults_and_enums() {
   ScratchCase defaults("defaults");
   defaults.write("case.json", case_json(kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
@@ -1909,6 +2140,10 @@ int main(int argc, char** argv) {
   passed &= test_case_and_reference_security();
   passed &= test_wire_rejects_duplicate_data_paths();
   passed &= test_defaults_and_enums();
+  passed &= test_cold_time_method();
+  passed &= test_cold_stopping_configuration();
+  passed &= test_coast_perry_transport();
+  passed &= test_transport_change_compatibility();
   passed &= test_immersed_reconstruction_policy_is_typed_and_hashed();
   passed &= test_reaction_wire();
   passed &= test_spray_json();

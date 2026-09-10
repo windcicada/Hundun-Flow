@@ -4,6 +4,7 @@
 #pragma once
 
 #include "hundun/v04_execution.hpp"
+#include "hundun/v04_flow.hpp"
 #include "hundun/v04_linear.hpp"
 #include "hundun/v04_mesh.hpp"
 
@@ -352,12 +353,14 @@ enum class RuntimePressureSolveContract : std::uint8_t {
   invalid,
   pressure_continuity,
   continuity_energy_coupled,
+  coast_cn_be,
 };
 
 enum class RuntimeCouplingKind : std::uint8_t {
   invalid,
   piso,
   simple,
+  coast_cn_be,
 };
 
 // Runtime evidence deliberately projects only the rank-invariant part of a
@@ -452,6 +455,7 @@ struct RuntimeCandidateIdentity {
   std::array<char, kRuntimeSha256HexCharacters + 1U> build_manifest{};
   std::array<char, kRuntimeSha256HexCharacters + 1U> executable{};
   std::array<char, kRuntimeSha256HexCharacters + 1U> identity{};
+  bool cold_schema{};
 };
 
 enum class RuntimeRunStartKind : std::uint8_t { fresh, restart };
@@ -468,10 +472,12 @@ struct RuntimeRunStartAnchor {
   std::uint32_t source_format_version{};
   PlanFingerprint source_history_signature{};
   PlanFingerprint target_history_signature{};
+  PlanFingerprint transport_source_case{};
   RestartHistoryPolicy history_policy{RestartHistoryPolicy::require_compatible};
 };
 
 struct RuntimeEvidenceRecord {
+  ColdCouplingReport cold{};
   PlanFingerprint build{};
   PlanFingerprint binary{};
   RuntimeCandidateIdentity candidate_identity{};

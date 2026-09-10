@@ -805,6 +805,32 @@ Status FinalFaceFluxWriter::restore_committed(
   return {};
 }
 
+Status FinalFaceFluxWriter::copy_pending(
+    ConstFaceFluxView source, PendingFaceFluxView& pending) noexcept {
+  const Status lease = validate_pending_lease(pending);
+  if (!lease) return lease;
+  if (source.revision == 0U ||
+      !detail::valid_flux_view(source, storage_->cells_, source.revision))
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  const std::array<ConstFaceFieldView, 3U> inputs{source.x, source.y, source.z};
+  const std::array<FaceFieldView, 3U> outputs{pending.x_, pending.y_, pending.z_};
+  for (const auto input : inputs) {
+    if (input.storage_identity == storage_->identity_)
+      return {StatusCode::invalid_plan, kFaceAuthority};
+    for (std::int32_t z = 0; z < input.extents.z; ++z)
+      for (std::int32_t y = 0; y < input.extents.y; ++y)
+        for (std::int32_t x = 0; x < input.extents.x; ++x)
+          if (!std::isfinite(input.unchecked({x, y, z})))
+            return {StatusCode::numerical_failure, kFaceAuthority};
+  }
+  for (std::size_t axis = 0U; axis < inputs.size(); ++axis)
+    for (std::int32_t z = 0; z < inputs[axis].extents.z; ++z)
+      for (std::int32_t y = 0; y < inputs[axis].extents.y; ++y)
+        for (std::int32_t x = 0; x < inputs[axis].extents.x; ++x)
+          outputs[axis].unchecked({x, y, z}) = inputs[axis].unchecked({x, y, z});
+  return {};
+}
+
 Status FinalFaceFluxWriter::publish_pending(
     Span<const RevisionDependency> dependencies,
     PendingFaceFluxView& pending) noexcept {
@@ -839,8 +865,7 @@ Status FinalFaceFluxWriter::publish_pending(
   return published;
 }
 
-Status FinalFaceFluxWriter::preflight_publish_pending(
-    Span<const RevisionDependency> dependencies,
+Status FinalFaceFluxWriter::validate_pending_lease(
     const PendingFaceFluxView& pending) const noexcept {
   const FaceFluxView pending_flux{pending.x_, pending.y_, pending.z_,
                                   pending.revision_, {}};
@@ -868,6 +893,14 @@ Status FinalFaceFluxWriter::preflight_publish_pending(
       pending.x_.revision_domain != storage_->revision_domain_) {
     return {StatusCode::invalid_plan, kFaceTransaction};
   }
+  return {};
+}
+
+Status FinalFaceFluxWriter::preflight_publish_pending(
+    Span<const RevisionDependency> dependencies,
+    const PendingFaceFluxView& pending) const noexcept {
+  const Status lease = validate_pending_lease(pending);
+  if (!lease) return lease;
   return transaction_->preflight_final_face_flux_cache(
       cache_slot_, dependencies, PendingCacheStamp{pending_revision_},
       authority_fingerprint_);
@@ -1009,6 +1042,39 @@ void FinalFaceFluxWriter::abandon_pending_view(
   pending.attempt_identity_ = 0U;
   pending.storage_ = nullptr;
   pending.writer_ = nullptr;
+}
+
+Status FinalFaceFluxWriter::published_pending(
+    const AttemptTransaction& transaction, ConstFaceFluxView& out) const noexcept {
+  if (!issued_ || !ready_for_collective(transaction) ||
+      authority_transaction_ != &transaction || pending_revision_ == 0U ||
+      transaction.final_face_flux_writer_ != this ||
+      transaction.final_face_flux_writer_identity_ != authority_fingerprint_ ||
+      storage_->authority_identity_ != authority_fingerprint_ ||
+      storage_->pending_writer_ != this ||
+      storage_->pending_writer_identity_ != authority_fingerprint_ ||
+      storage_->pending_attempt_identity_ != pending_attempt_identity_) {
+    return {StatusCode::invalid_plan, kFaceAuthority};
+  }
+  const Status viewed = storage_->view_impl(pending_replica_, pending_revision_,
+                                          out);
+  if (viewed) {
+    out.certificate.revision_ = pending_revision_;
+    out.certificate.authority_ = authority_fingerprint_;
+    out.certificate.storage_ = storage_->identity_;
+    out.certificate.revision_domain_ = storage_->revision_domain_;
+    out.certificate.x_base_ = out.x.base;
+    out.certificate.y_base_ = out.y.base;
+    out.certificate.z_base_ = out.z.base;
+    out.certificate.x_stride_y_ = out.x.stride_y;
+    out.certificate.x_stride_z_ = out.x.stride_z;
+    out.certificate.y_stride_y_ = out.y.stride_y;
+    out.certificate.y_stride_z_ = out.y.stride_z;
+    out.certificate.z_stride_y_ = out.z.stride_y;
+    out.certificate.z_stride_z_ = out.z.stride_z;
+    out.certificate.cells_ = storage_->cells_;
+  }
+  return viewed;
 }
 
 Status FinalFaceFluxWriter::committed(const FaceFluxStorage& storage,

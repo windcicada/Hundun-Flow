@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_flow.hpp"
+#include "core_conservation_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -182,7 +183,8 @@ struct Fixture {
 };
 
 bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
-                  bool unity_lewis = false, bool current_source = false) {
+                  bool unity_lewis = false, bool current_source = false,
+                  bool boundary_heat = false) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -191,6 +193,11 @@ bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
   for (BoundaryFaceSpec& face : model.boundaries) {
     face.flow_kind = BoundaryKind::periodic;
     face.thermal_kind = BoundaryKind::none;
+    if (boundary_heat) {
+      face.flow_kind = BoundaryKind::no_slip_wall;
+      face.thermal_kind = BoundaryKind::isothermal_wall;
+      face.temperature = 300.0;
+    }
   }
   model.schemes.momentum = ConvectionScheme::central2;
   model.schemes.enthalpy = ConvectionScheme::central2;
@@ -597,7 +604,8 @@ bool same_certificate(const EquationAssemblyCertificate& left,
 }
 
 bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
-                                              bool current_source = false) {
+                                              bool current_source = false,
+                                              bool boundary_heat = false) {
   constexpr std::int32_t n = 6;
   constexpr double velocity_x = 4.0;
   constexpr double enthalpy_slope = 3.0;
@@ -610,7 +618,7 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
 
   Fixture fixture;
   bool passed =
-      expect(make_fixture(n, fixture, false, unity_lewis, current_source),
+      expect(make_fixture(n, fixture, false, unity_lewis, current_source, boundary_heat),
              "enthalpy production fixture compiles");
   if (!passed) {
     return false;
@@ -822,6 +830,24 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
     certificate = assemble_and_check(
         -conductivity / heat_capacity * n * n * volume,
         "unity-Lewis total-enthalpy diffusion enters actual energy residual");
+    if (boundary_heat) {
+      auto kinetic = make_field(90U, cells, 1U, 2U, 2001U);
+      auto scratch = make_field(91U, cells, 1U, 2U, 2002U);
+      ReductionEngine reductions;
+      auto ledger_status = ReductionEngine::compile(
+          MPI_COMM_SELF, ReductionMode::mpi_allreduce, 12U, reductions);
+      DriverConservationReport balance;
+      detail::ProductBoundaryBalanceHistory pending;
+      if (ledger_status) ledger_status = detail::collect_boundary_balance(
+          fixture.equations.enthalpy(), fixture.equations.kernels(),
+          fixture.schemes, fixture.boundary, state, material,
+          as_const(gradients.view), context.bdf, context.mass_flux, {},
+          kinetic.view, scratch.view, 1U, {}, reductions, balance, pending);
+      passed &= expect(static_cast<bool>(ledger_status) &&
+          close(balance.conductive_heat_input, conductivity/heat_capacity*n*n) &&
+          balance.species_enthalpy_diffusion_input == 0.0,
+          "direct-h boundary ledger equals the integrated quadratic h diffusion rate");
+    }
   }
   const double transmissibility =
       (conductivity / heat_capacity) * spacing;
@@ -988,6 +1014,27 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
                        same_certificate(residual_certificate,
                                         target_certificate),
                    "residual-only target path is bitwise equal to full assembly");
+
+  auto diagonal_workspace = target_workspace;
+  diagonal_workspace.retain_diagonal = true;
+  const auto diagonal_status = assemble_target_coupled_enthalpy_residual(
+      fixture.equations.enthalpy(), state, material,
+      as_const(gradients.view), context, target_residual.view,
+      diagonal_workspace, residual_certificate);
+  bool diagonal_equal = true;
+  for (int z = 0; z < cells.z; ++z)
+    for (int y = 0; y < cells.y; ++y)
+      for (int x = 0; x < cells.x; ++x) {
+        const double actual =
+            target_pressure_work_scratch.view.unchecked({x, y, z}, 0U);
+        const double expected = diagonal.view.unchecked({x, y, z}, 0U);
+        diagonal_equal &= std::memcmp(&actual, &expected, sizeof(double)) == 0;
+      }
+  passed &= expect(bool(diagonal_status) && diagonal_equal &&
+                       bitwise_equal(target_residual.bytes, full_residual) &&
+                       same_certificate(residual_certificate,
+                                        target_certificate),
+                   "target residual retains the exact ordinary enthalpy diagonal");
 
   const std::vector<double> published_target_residual = target_residual.bytes;
   const EquationAssemblyCertificate published_residual_certificate =
@@ -1273,6 +1320,7 @@ int main(int argc, char** argv) {
   passed &= test_viscous_dissipation_uses_complete_tau();
   passed &= test_production_enthalpy_assembly_oracle();
   passed &= test_production_enthalpy_assembly_oracle(true);
+  passed &= test_production_enthalpy_assembly_oracle(true, false, true);
   passed &= test_production_enthalpy_assembly_oracle(false, true);
   MPI_Finalize();
   return passed ? 0 : 1;

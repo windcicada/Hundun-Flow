@@ -374,7 +374,10 @@ bool valid_spec(const ThermophysicalSpec& spec) noexcept {
         species.temperature_switch <= spec.minimum_temperature ||
         species.temperature_switch >= spec.maximum_temperature ||
         (species.transport_law != TransportLaw::coast_native_air &&
-         !finite_positive(species.viscosity_reference))) {
+         species.transport_law != TransportLaw::coast_perry &&
+         !finite_positive(species.viscosity_reference)) ||
+        (species.transport_law != TransportLaw::coast_perry &&
+         (species.critical_temperature != 0.0 || species.critical_pressure != 0.0))) {
       return false;
     }
     for (std::size_t prior = 0U; prior < species_index; ++prior) {
@@ -405,6 +408,14 @@ bool valid_spec(const ThermophysicalSpec& spec) noexcept {
           !finite_positive(species.prandtl) || species.conductivity != 0.0) {
         return false;
       }
+    } else if (species.transport_law == TransportLaw::coast_perry) {
+      if (!finite_positive(species.critical_temperature) ||
+          !finite_positive(species.critical_pressure) || species.prandtl != 0.70 ||
+          species.viscosity_reference != 0.0 || species.transport_reference_temperature != 0.0 ||
+          species.sutherland_temperature != 0.0 || species.conductivity != 0.0 ||
+          std::any_of(spec.species.begin(), spec.species.end(), [](const auto& item) {
+            return item.transport_law != TransportLaw::coast_perry;
+          })) return false;
     } else if (species.transport_law == TransportLaw::coast_native_air) {
       if (spec.species.size() != 1U || !coast_native_air_species(species)) {
         return false;
@@ -530,6 +541,10 @@ PlanFingerprint fingerprint_spec(const ThermophysicalSpec& spec) {
       hash.real(species.sutherland_temperature);
       hash.real(species.prandtl);
       hash.real(species.conductivity);
+      if (species.transport_law == TransportLaw::coast_perry) {
+        hash.real(species.critical_temperature);
+        hash.real(species.critical_pressure);
+      }
     }
     return hash.finish();
 }
@@ -634,6 +649,11 @@ Status parse_text(std::string_view text, ThermophysicalSpec& out) noexcept {
             !tokens.real(species.prandtl)) {
           return invalid(kSyntax);
         }
+      } else if (tokens.exact("transport_coast_perry")) {
+        species.transport_law = TransportLaw::coast_perry;
+        species.prandtl = 0.70;
+        if (!tokens.real(species.critical_temperature) ||
+            !tokens.real(species.critical_pressure)) return invalid(kSyntax);
       } else if (tokens.exact("transport_coast_native_air")) {
         species.transport_law = TransportLaw::coast_native_air;
       } else {

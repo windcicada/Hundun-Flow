@@ -920,8 +920,10 @@ bool test_prescribed_interface_mass_flux() {
         as_const(grad.view), {}, context, energy_system, full_energy);
     const Status replay_status = assemble_target_coupled_enthalpy_residual(
         equations.enthalpy(), state, material, as_const(grad.view), context,
-        replay.view, {pressure_work.view, viscous_work.view, conduction.view}, replay_energy);
+        replay.view, {pressure_work.view, viscous_work.view, conduction.view, true}, replay_energy);
     passed &= expect(full_status && replay_status, "both source-bearing energy paths assemble");
+    passed &= expect(pressure_work.storage == e_diagonal.storage,
+        "target residual retains the full IBM fluid and solid diagonals");
     double matrix_error=0.0, blocked_coefficient=0.0;
     const auto scalar_region=fixture.topology.region();
     for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
@@ -1193,6 +1195,37 @@ bool run() {
       }
   passed &= expect(maximum_gradient_error < 5.0e-12,
                    "IBM pressure correction matches the quadratic-row oracle");
+
+  // GTMC failure pattern: a pressure minimum at a fluid--solid link must
+  // retain the restoring fluid-side pressure slope (COAST delta stencil).
+  for (std::size_t i = 0; i < links.size; ++i) {
+    const auto& link = links.data[i];
+    const auto axis = face_axis(link.direction);
+    const int sign = positive_face(link.direction) ? 1 : -1;
+    auto opposite_global = link.fluid_global_index;
+    (axis == 0 ? opposite_global.x : axis == 1 ? opposite_global.y : opposite_global.z) -= sign;
+    if (!fixture.topology.is_fluid_global(opposite_global)) continue;
+    auto probe = make_force_field(pressure.view.field, cells, 1U, ghosts, 27U, 117U);
+    auto slope = make_force_field(24U, cells, 3U, 0U, 28U, 118U);
+    std::fill(probe.storage.begin(), probe.storage.end(), 0.0);
+    probe.view.unchecked(link.fluid_local_index, 0) = -1000.0;
+    passed &= expect(gradient_from_pressure(as_const(probe.view), slope.view),
+                     "corner pressure probe forms its ordinary gradient");
+    IbmEquationInterfacePlan cold_interface;
+    passed &= expect(IbmEquationInterfacePlan::compile(
+        kernels, fixture.topology, fixture.boundary, cold_interface,
+        IbmPressureGradientKind::coast_fluid_delta),
+        "cold pressure interface compiles its immutable gradient policy");
+    passed &= expect(cold_interface.fingerprint() != interface.fingerprint(),
+                     "pressure gradient policies have distinct identities");
+    const auto corrected = cold_interface.correct_pressure_gradient(
+        as_const(probe.view), slope.view);
+    passed &= expect(corrected &&
+        std::abs(slope.view.unchecked(link.fluid_local_index, axis) +
+                 sign * 1000.0 * inverse_width) < 1e-8,
+        "COAST fluid-side pressure gradient restores a wall-adjacent minimum");
+    break;
+  }
 
   ForceOwnedField dirichlet_probe =
       make_force_field(9U, cells, 1U, ghosts, 10U, 100U);
@@ -1598,6 +1631,57 @@ bool run() {
   passed &= expect(maximum_error < 5.0e-12,
                    "per-link momentum residual and positive deferred diagonal "
                    "match the independent oracle");
+  // The cold pressure policy must reach every consumer of pressure force.
+  // Compare two complete interface assemblies with all non-pressure inputs
+  // held fixed: delta(momentum residual) = volume * delta(grad p), and
+  // delta(pressure work) = U dot delta(grad p).
+  {
+    IbmEquationInterfacePlan cold_interface;
+    passed &= expect(IbmEquationInterfacePlan::compile(
+        kernels, fixture.topology, fixture.boundary, cold_interface,
+        IbmPressureGradientKind::coast_fluid_delta),
+        "cold pressure coupling fixture compiles");
+    auto cold_gradient = make_force_field(24U, cells, 3U, 0U, 35U, 125U);
+    auto cold_work = make_force_field(27U, cells, 1U, 0U, 36U, 126U);
+    auto cold_diagonal = make_force_field(12U, cells, 3U, 0U, 37U, 127U);
+    auto cold_rhs = make_force_field(13U, cells, 3U, 0U, 38U, 128U);
+    auto cold_residual = make_force_field(14U, cells, 3U, 0U, 39U, 129U);
+    std::copy(initial_diagonal.begin(), initial_diagonal.end(), cold_diagonal.storage.begin());
+    std::copy(initial_rhs.begin(), initial_rhs.end(), cold_rhs.storage.begin());
+    std::copy(initial_residual.begin(), initial_residual.end(), cold_residual.storage.begin());
+    std::fill(cold_work.storage.begin(), cold_work.storage.end(), 0.0);
+    passed &= expect(gradient_from_pressure(as_const(pressure.view), cold_gradient.view) &&
+        cold_interface.correct_pressure_gradient(as_const(pressure.view), cold_gradient.view) &&
+        cold_interface.correct_pressure_work(as_const(pressure.view), as_const(velocity.view), cold_work.view) &&
+        cold_interface.constrain_momentum(as_const(velocity.view), as_const(gradient.view),
+            as_const(pressure.view), as_const(density.view), as_const(molecular.view),
+            as_const(viscosity.view), nullptr,
+            {cold_diagonal.view, cold_rhs.view, cold_residual.view}),
+        "cold pressure consumers assemble the same trial state");
+    double coupling_error{};
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x) {
+          const Int3 c{x,y,z};
+          if (region.data[flat(cells,c)] != static_cast<std::uint8_t>(RegionFlag::fluid)) continue;
+          double work_delta{};
+          for (unsigned k = 0; k < 3; ++k) {
+            const double dg = cold_gradient.view.unchecked(c,k) - pressure_gradient.view.unchecked(c,k);
+            const double force_delta = width * width * width * dg;
+            work_delta += velocity.view.unchecked(c,k) * dg;
+            coupling_error = std::max(coupling_error,
+                std::abs(cold_residual.view.unchecked(c,k) - residual.view.unchecked(c,k) - force_delta));
+            coupling_error = std::max(coupling_error,
+                std::abs(cold_rhs.view.unchecked(c,k) - rhs.view.unchecked(c,k) + force_delta));
+            coupling_error = std::max(coupling_error,
+                std::abs(cold_diagonal.view.unchecked(c,k) - diagonal.view.unchecked(c,k)));
+          }
+          coupling_error = std::max(coupling_error,
+              std::abs(cold_work.view.unchecked(c,0) - pressure_work_rate.view.unchecked(c,0) - work_delta));
+        }
+    passed &= expect(coupling_error < 5e-11,
+        "cold momentum force, pressure gradient and pressure work remain coupled");
+  }
   passed &= expect(
       cartesian_traction_mutation_gap > 1.0e-6,
       "mutation feeding Cartesian control area to physical traction fails");
@@ -1970,6 +2054,36 @@ bool run() {
     std::cerr << "accepted-IBM-thermal-rate-mismatch=" << mismatch << '\n';
     passed &= expect(mismatch < 1.0e-10,
                      "persisted energy history and target residual use one IBM thermal operator");
+    // COAST bndry2 isolates solid thermal rows and removes cut-face heat
+    // transfer. Stored rates must use that same operator for CN/BE history.
+    const auto reconstructed_rhs = rhs.storage;
+    const auto reconstructed_target = target_rate.storage;
+    const auto reconstructed_certificate = certificate;
+    input.ibm_thermal_closure = IbmThermalRateClosure::impermeable;
+    passed &= expect(evaluate_thermophysical_rates(equations, input, output, certificate),
+                     "CN/BE impermeable thermal history evaluates");
+    passed &= expect(cartesian_diffusion(kernels, as_const(lambda.view),
+        {{reads.data(), reads.size()}, {writes.data(), writes.size()},
+         {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U, nullptr}) &&
+        interface.correct_impermeable_scalar_diffusion(
+            as_const(t.view), as_const(lambda.view), target_rate.view),
+        "COAST binary-solid thermal reference evaluates");
+    double cold_mismatch = 0.0, closure_difference = 0.0;
+    for (std::size_t i = 0U; i < rhs.storage.size(); ++i) {
+      cold_mismatch = std::max(cold_mismatch,
+          std::abs(rhs.storage[i] - target_rate.storage[i]));
+      closure_difference = std::max(closure_difference,
+          std::abs(reconstructed_rhs[i] - target_rate.storage[i]));
+    }
+    passed &= expect(closure_difference > 1.0e-8 && cold_mismatch < 1.0e-10 &&
+        certificate.state != reconstructed_certificate.state,
+        "stored cold rates bind the distinct impermeable thermal operator");
+    const auto retained_rhs = rhs.storage;
+    input.ibm_thermal_closure = static_cast<IbmThermalRateClosure>(255U);
+    passed &= expect(!evaluate_thermophysical_rates(equations, input, output, certificate) &&
+        rhs.storage == retained_rhs, "invalid thermal history closure preserves output");
+    input.ibm_thermal_closure = IbmThermalRateClosure::reconstructed_zero_normal;
+    std::copy(reconstructed_target.begin(), reconstructed_target.end(), target_rate.storage.begin());
     // Frozen-lambda donor Jv: deltaT=T-350 contains both signs, and linearity
     // plus D(constant)=0 gives the independent identity D(deltaT)=D(T).
     // This checks the target donor response, not a claim that masked Schur Eh

@@ -5,7 +5,9 @@
 #include "hundun/v04_app.hpp"
 
 #include "core_product_freeze_detail.hpp"
+#include "solver_cold.hpp"
 #include "../support/product_fixture.hpp"
+#include "../support/piso_fixture.hpp"
 
 #include <mpi.h>
 
@@ -14,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -299,6 +302,284 @@ bool test_pressure_extrapolation_backoff() {
   detail::ProductPressureExtrapolationBackoff next_sequence;
   passed &= expect(next_sequence.propose(1.0, 0.2, 1.0) > 1.0,
                    "the next sequence starts with independent backoff state");
+  return passed;
+}
+
+bool test_cold_momentum_mach_policy() {
+  return expect(!detail::cold_momentum_uses_tvd(0.0) &&
+                    !detail::cold_momentum_uses_tvd(0.60) &&
+                    detail::cold_momentum_uses_tvd(std::nextafter(0.60, 1.0)) &&
+                    detail::cold_momentum_uses_tvd(1.3),
+                "COAST momentum TVD uses the strict isothermal Mach threshold");
+}
+
+bool test_cold_momentum_periodic_translation() {
+  test::PeriodicPisoFixture fixture;
+  if (!fixture.initialize(8)) return false;
+  const auto cells = fixture.patch.cells;
+  auto u = test::make_field(1, cells, 3, 2, 1, 1);
+  auto rho = test::make_field(0, cells, 1, 2, 1, 2);
+  auto diagonal = test::make_field(30, cells, 3, 0, 1, 3);
+  auto residual = test::make_field(31, cells, 3, 0, 1, 4);
+  auto dx = test::make_face_field(CartesianAxis::x, cells, 5);
+  auto dy = test::make_face_field(CartesianAxis::y, cells, 6);
+  auto dz = test::make_face_field(CartesianAxis::z, cells, 7);
+  test::fill(rho, 1.0);
+  std::fill(dx.storage.begin(), dx.storage.end(), 0.01);
+  std::fill(dy.storage.begin(), dy.storage.end(), 0.01);
+  std::fill(dz.storage.begin(), dz.storage.end(), 0.01);
+  EquationSystemView reference;
+  reference.diagonal = diagonal.view;
+  reference.residual = residual.view;
+  reference.x_coefficient = dx.view;
+  reference.y_coefficient = dy.view;
+  reference.z_coefficient = dz.view;
+  EquationStateView state;
+  state.velocity = {as_const(u.view), as_const(u.view), as_const(u.view)};
+  state.density = {as_const(rho.view), as_const(rho.view), as_const(rho.view)};
+  EquationAssemblyContext context;
+  context.dt = 0.01;
+  context.bdf = {100.0, -100.0, 0.0, 1};
+  context.mass_flux = as_const(fixture.trial_flux);
+  const auto index = [=](Int3 c) { return (std::size_t(c.z)*cells.y+c.y)*cells.x+c.x; };
+  bool passed = true;
+  for (unsigned axis = 0; axis < 3; ++axis) {
+    for (int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<=cells.x;++x)
+      fixture.trial_flux.x.unchecked({x,y,z}) = axis==0 ? 0.2 : 0.0;
+    for (int z=0;z<cells.z;++z) for(int y=0;y<=cells.y;++y) for(int x=0;x<cells.x;++x)
+      fixture.trial_flux.y.unchecked({x,y,z}) = axis==1 ? 0.2 : 0.0;
+    for (int z=0;z<=cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x)
+      fixture.trial_flux.z.unchecked({x,y,z}) = axis==2 ? 0.2 : 0.0;
+    for (bool tvd : {false, true}) {
+      std::array<std::array<std::vector<detail::ColdPressureRow>,3>,2> rows;
+      for (int shift=0;shift<2;++shift) {
+        for (int z=-2;z<cells.z+2;++z) for(int y=-2;y<cells.y+2;++y) for(int x=-2;x<cells.x+2;++x)
+          for (unsigned component=0;component<3;++component)
+            u.view.unchecked({x,y,z},component) = std::sin(0.25*std::acos(-1.0)*
+                ((axis==0?x:axis==1?y:z)+shift))*(component+1.0);
+        for (int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+          const Int3 c{x,y,z};
+          auto lo=c, hi=c;
+          --(axis==0?lo.x:axis==1?lo.y:lo.z);
+          ++(axis==0?hi.x:axis==1?hi.y:hi.z);
+          const double volume=detail::cell_volume(fixture.equations.kernels(),c);
+          for (unsigned component=0;component<3;++component) {
+            diagonal.view.unchecked(c,component)=100.0*volume+0.06+0.2;
+            residual.view.unchecked(c,component)=0.1*(u.view.unchecked(hi,component)-u.view.unchecked(lo,component))-
+                0.01*(u.view.unchecked(hi,component)-2*u.view.unchecked(c,component)+u.view.unchecked(lo,component));
+          }
+        }
+        detail::ColdMomentumClosureReport report;
+        const auto status=detail::close_cold_momentum_rows(fixture.equations.kernels(),
+            fixture.patch, cells, nullptr, fixture.boundary, state, context,
+            reference, rows[shift], report, ConvectionScheme::central2, tvd);
+        if (!status) return expect(false,"cold periodic momentum closure assembles");
+        // The cold residual must be independent of the native reference
+        // convection used to assemble it. Compare against the analytic
+        // central residual above, including both nonlinear reference limiters.
+        for (auto native : {ConvectionScheme::limited_central2,
+                            ConvectionScheme::tvd2}) {
+          for (int z = 0; z < cells.z; ++z)
+            for (int y = 0; y < cells.y; ++y)
+              for (int x = 0; x < cells.x; ++x) {
+                const Int3 c{x, y, z};
+                auto lo = c, hi = c;
+                --(axis == 0 ? lo.x : axis == 1 ? lo.y : lo.z);
+                ++(axis == 0 ? hi.x : axis == 1 ? hi.y : hi.z);
+                for (unsigned component = 0; component < 3; ++component) {
+                  double lower{}, upper{};
+                  auto reconstructed = reconstruct_cartesian_convection_face(
+                      fixture.equations.kernels(), native, as_const(u.view),
+                      component, static_cast<CartesianAxis>(axis), c, 0.2, lower);
+                  if (reconstructed)
+                    reconstructed = reconstruct_cartesian_convection_face(
+                        fixture.equations.kernels(), native, as_const(u.view),
+                        component, static_cast<CartesianAxis>(axis), hi, 0.2, upper);
+                  if (!reconstructed) return false;
+                  residual.view.unchecked(c, component) = 0.2 * (upper - lower) -
+                      0.01 * (u.view.unchecked(hi, component) -
+                              2 * u.view.unchecked(c, component) +
+                              u.view.unchecked(lo, component));
+                }
+              }
+          std::array<std::vector<detail::ColdPressureRow>, 3> converted;
+          detail::ColdMomentumClosureReport converted_report;
+          const auto closed = detail::close_cold_momentum_rows(
+              fixture.equations.kernels(), fixture.patch, cells, nullptr,
+              fixture.boundary, state, context, reference, converted,
+              converted_report, native, tvd);
+          if (!closed) return false;
+          double difference{};
+          for (unsigned component = 0; component < 3; ++component)
+            for (std::size_t i = 0; i < converted[component].size(); ++i) {
+              const auto& a = rows[shift][component][i];
+              const auto& b = converted[component][i];
+              difference = std::max({difference, std::abs(a.rhs - b.rhs),
+                                     std::abs(a.diagonal - b.diagonal)});
+              for (unsigned f = 0; f < 6; ++f)
+                difference = std::max(difference,
+                                     std::abs(a.neighbour[f] - b.neighbour[f]));
+            }
+          passed &= expect(difference < 1e-9,
+              "cold CN matrix and RHS are independent of reference convection");
+        }
+      }
+      double error{};
+      for (int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+        const Int3 c{x,y,z};auto shifted=c;
+        auto &v=axis==0?shifted.x:axis==1?shifted.y:shifted.z;v=(v+1)%8;
+        for (unsigned component=0;component<3;++component) {
+          const auto &a=rows[0][component][index(shifted)], &b=rows[1][component][index(c)];
+          error=std::max({error,std::abs(a.diagonal-b.diagonal),std::abs(a.rhs-b.rhs)});
+          for (unsigned f=0;f<6;++f) error=std::max(error,std::abs(a.neighbour[f]-b.neighbour[f]));
+        }
+      }
+      passed &= expect(error<1e-9,"central/VLS momentum rows commute with a periodic translation");
+    }
+  }
+  return passed;
+}
+
+bool test_method_history_identity() {
+  // The cold pressure-gradient change creates a new history contract;
+  // retained hf/hj checkpoints require explicit method-history recovery.
+  constexpr auto cold = detail::product_method_history_signature(
+      TimeScheme::coast_cn_be, true, false, false, false, false, true);
+  constexpr auto bdf = detail::product_method_history_signature(
+      TimeScheme::variable_bdf2, true, false, false, false, false, true);
+  constexpr auto be = detail::product_method_history_signature(
+      TimeScheme::backward_euler, true, false, false, false, false, true);
+  constexpr auto quadratic = detail::product_method_history_signature(
+      TimeScheme::coast_cn_be, true, false, false, false, false, true, false,
+      detail::ColdHistoryRevision::quadratic_pressure);
+  constexpr auto fluid = detail::product_method_history_signature(
+      TimeScheme::coast_cn_be, true, false, false, false, false, true, false,
+      detail::ColdHistoryRevision::fluid_pressure);
+  return expect(quadratic == UINT64_C(98744320109196643) &&
+                    fluid == UINT64_C(2172767200665140607) &&
+                    cold == UINT64_C(16011690793152888057) &&
+                    cold != UINT64_C(98744320109196643) && cold != bdf && be == bdf,
+      "CN/BE preserves its verified checkpoint signature and separates legacy history");
+}
+
+bool test_cold_method_admission() {
+  auto model = test::product_model();
+  model.time.scheme = TimeScheme::coast_cn_be;
+  model.legacy_time_fingerprint = model.fingerprint + 1U;
+  CompiledCasePlan plan;
+  const auto status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
+  return expect(status.code == StatusCode::invalid_plan && plan.fingerprint() == 0U,
+      "CN/BE rejects a model outside the supported cold mixture contract");
+}
+
+bool test_cold_perry_diffusion_contract(bool reference_stopping) {
+  auto model = test::product_model({7, 7, 7});
+  model.time.initial_dt = 9.7088612375381536e-8;
+  model.time.scheme = TimeScheme::coast_cn_be;
+  if (reference_stopping) model.solver.cold_stopping = ColdStoppingSpec{0.001};
+  model.legacy_time_fingerprint = model.fingerprint + 1U;
+  model.pressure_reference = PressureReferenceKind::boundary_absolute;
+  model.boundaries[0].flow_kind = BoundaryKind::symmetry;
+  model.boundaries[1].flow_kind = BoundaryKind::zero_gradient_mass_outlet;
+  model.boundaries[1].pressure = 100000.0;
+  model.boundaries[0].scalars.push_back({"air", ScalarBoundaryKind::zero_gradient});
+  model.boundaries[1].scalars.push_back({"air", ScalarBoundaryKind::zero_gradient});
+  auto &species = model.thermophysics.species.front();
+  species.transport_law = TransportLaw::coast_perry;
+  species.viscosity_reference = species.conductivity = 0.0;
+  species.prandtl = 0.70;
+  species.critical_temperature = 126.2;
+  species.critical_pressure = 33.5;
+  auto dependent = species;
+  dependent.stable_name = "dependent";
+  model.thermophysics.species.push_back(dependent);
+  model.transported_scalars.push_back(
+      {"air", TransportedScalarRole::species, 0.70, 0.70});
+  CompiledCasePlan plan;
+  auto status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
+  if (!status) {
+    std::cerr << "cold Perry fixture status=" << unsigned(status.code)
+              << "/" << status.detail << '\n';
+    return false;
+  }
+  bool passed = expect(plan.summary().unity_lewis_enthalpy,
+      "cold Perry product selects common h/Y diffusion independently of ESF");
+  for (bool molecular : {false, true}) {
+    auto incompatible = model;
+    (molecular ? incompatible.transported_scalars[0].molecular_schmidt
+               : incompatible.transported_scalars[0].turbulent_schmidt) = 0.72;
+    CompiledCasePlan rejected;
+    passed &= expect(!ProductCompiler::compile(MPI_COMM_SELF, incompatible, {}, rejected)
+                         && rejected.fingerprint() == 0U,
+        "cold common h/Y diffusion requires matching molecular and SGS Schmidt numbers");
+  }
+  ProductDriver driver;
+  status = ProductDriver::create(MPI_COMM_SELF, std::move(plan), driver);
+  RestartExpected expected;
+  if (status) status = driver.restart_expected(expected,
+      RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
+  passed &= expect(status && expected.compatible_method_plan == 0U &&
+      expected.method_history_signature != detail::product_method_history_signature(
+          TimeScheme::coast_cn_be, true),
+      "direct h has a distinct history contract and no implicit time-only migration");
+  const std::array<double, 1U> composition{0.3};
+  DriverInitialState initial;
+  initial.pressure_reference = 100000.0;
+  initial.temperature = 300.0;
+  initial.transported_scalars = {composition.data(), composition.size()};
+  if (status) status = driver.initialize(initial);
+  DriverStepReport report;
+  if (status) status = driver.advance(
+      {model.time.initial_dt/model.time.convective_cfl, 1.0, 1.0, 1.0, 1.0}, report);
+  if (!status) std::cerr << "cold Perry advance=" << unsigned(status.code)
+                        << "/" << status.detail << '\n';
+  passed &= expect(status && report.accepted,
+      "native cold Perry product advances the stationary mixture with full final audit");
+  if (status && reference_stopping) {
+    ::setenv("HUNDUN_COLD_PREPARE_NEGATIVE", "1", 1);
+    DriverStepReport failed;
+    const auto rejected = driver.advance(
+        {model.time.initial_dt/model.time.convective_cfl, 1.0, 1.0, 1.0, 1.0}, failed);
+    ::unsetenv("HUNDUN_COLD_PREPARE_NEGATIVE");
+    RestartSnapshot retained;
+    const auto retained_status = driver.committed_restart_snapshot(retained);
+    passed &= expect(rejected.code == StatusCode::invalid_plan &&
+        rejected.detail == 17851U && !failed.accepted &&
+        retained_status && retained.step == 1U &&
+        retained.time == model.time.initial_dt,
+        "failed cold preparation returns its cause and retains the accepted checkpoint");
+    DriverStepReport recovered;
+    status = driver.advance(
+        {model.time.initial_dt/model.time.convective_cfl, 1.0, 1.0, 1.0, 1.0}, recovered);
+    passed &= expect(status && recovered.accepted,
+        "cold advancement recovers after failed preparation rollback");
+  }
+  std::string temporary = (std::filesystem::temp_directory_path() / "hf-iv-XXXXXX").string();
+  std::vector<char> name(temporary.begin(), temporary.end());
+  name.push_back('\0');
+  const char *created = ::mkdtemp(name.data());
+  if (created == nullptr) return expect(false, "cold restart fixture directory exists");
+  const auto directory = std::filesystem::path(created);
+  RestartSnapshot snapshot;
+  if (status) status = driver.committed_restart_snapshot(snapshot);
+  if (status) status = RestartWriter::write(MPI_COMM_SELF, directory / "Restart", snapshot);
+  CompiledCasePlan restored_plan;
+  ProductDriver restored;
+  if (status) status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, restored_plan);
+  if (status) status = ProductDriver::create(MPI_COMM_SELF, std::move(restored_plan), restored);
+  RestartExpected restore_expected;
+  if (status) status = restored.restart_expected(restore_expected,
+      RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
+  RestartImage image;
+  if (status) status = RestartReader::load(MPI_COMM_SELF, directory / "Restart", restore_expected, image);
+  if (status) status = restored.initialize_restart(image,
+      RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
+  if (!status) std::cerr << "cold Perry history rebuild=" << unsigned(status.code)
+                        << "/" << status.detail << '\n';
+  passed &= expect(static_cast<bool>(status),
+      "cold direct-h history rebuild supplies its effective enthalpy diffusivity");
+  std::error_code cleanup;
+  std::filesystem::remove_all(directory, cleanup);
   return passed;
 }
 
@@ -1341,6 +1622,12 @@ int main(int argc, char** argv) {
                       test_simple_diagonal_schur_policy() &&
                       test_pressure_aitken_initial_alpha() &&
                       test_pressure_extrapolation_backoff() &&
+                      test_method_history_identity() &&
+                      test_cold_momentum_mach_policy() &&
+                      test_cold_momentum_periodic_translation() &&
+                      test_cold_method_admission() &&
+                      test_cold_perry_diffusion_contract(false) &&
+                      test_cold_perry_diffusion_contract(true) &&
                       test_freeze() &&
                       test_live_thermal_halo_resource_contract() &&
                       test_pressure_energy_restart_schema() &&

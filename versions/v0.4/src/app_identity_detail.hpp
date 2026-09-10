@@ -11,12 +11,15 @@ namespace hundun::v04::detail {
 
 inline constexpr std::string_view kRuntimeEvidenceSchema =
     "HUNDUN_V04_EVIDENCE_V8";
+inline constexpr std::string_view kColdRuntimeEvidenceSchema =
+    "HUNDUN_V04_EVIDENCE_V9";
 inline constexpr std::string_view kRuntimeCandidateIdentitySchema =
     "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2";
 
 Status runtime_candidate_identity(MPI_Comm communicator,
                                   RuntimeCandidateIdentity& out,
-                                  std::string_view target_manifest = {}) noexcept;
+                                  std::string_view target_manifest = {},
+                                  bool cold_schema = false) noexcept;
 bool valid_runtime_candidate_identity(
     const RuntimeCandidateIdentity& identity) noexcept;
 PlanFingerprint runtime_sha256_fingerprint(

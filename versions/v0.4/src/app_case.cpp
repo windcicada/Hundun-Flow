@@ -206,6 +206,7 @@ class Hash64 {
       value_ ^= static_cast<std::uint64_t>(input[index]);
       value_ *= kFnvPrime;
     }
+    if (mirror_ != nullptr) mirror_->bytes(data, size);
   }
 
   void text(std::string_view value) noexcept {
@@ -234,12 +235,23 @@ class Hash64 {
     integer(bits);
   }
 
+  // Both lanes consume the remaining physical inputs exactly once. The
+  // second lane has already hashed its own time method at the branch point.
+  void mirror_remaining(Hash64& other) noexcept { mirror_ = &other; }
+
+  Hash64 detached() const noexcept {
+    Hash64 result;
+    result.value_ = value_;
+    return result;
+  }
+
   PlanFingerprint finish() const noexcept {
     return value_ == 0U ? 1U : value_;
   }
 
  private:
   std::uint64_t value_{kFnvOffset};
+  Hash64* mirror_{};
 };
 
 class Document {
@@ -649,6 +661,8 @@ bool parse_time_scheme(std::string_view value, TimeScheme& out) noexcept {
     out = TimeScheme::backward_euler;
   } else if (value == "variable_bdf2") {
     out = TimeScheme::variable_bdf2;
+  } else if (value == "coast_cn_be") {
+    out = TimeScheme::coast_cn_be;
   } else {
     return false;
   }
@@ -750,6 +764,17 @@ bool parse_solver_controls(yyjson_val* value, SolverSpec& out) noexcept {
       !object_has_exact_keys(terminal,
                              {"eos", "continuity", "closed_mass", "gauge"})) {
     return false;
+  }
+  if (auto* stopping = yyjson_obj_get(value, "cold_stopping")) {
+    out.cold_stopping.emplace();
+    auto& spec = *out.cold_stopping;
+    if (!object_has_exact_keys(stopping,
+          {"reference_time", "momentum", "enthalpy", "species"}) ||
+        !finite_real(yyjson_obj_get(stopping, "reference_time"), spec.reference_time) ||
+        !finite_real(yyjson_obj_get(stopping, "momentum"), spec.momentum) ||
+        !finite_real(yyjson_obj_get(stopping, "enthalpy"), spec.enthalpy) ||
+        !finite_real(yyjson_obj_get(stopping, "species"), spec.species) || !spec.valid())
+      return false;
   }
   const auto algorithm = string_value(pressure, "algorithm");
   if (has_algorithm &&
@@ -1378,7 +1403,8 @@ bool valid_solver(const SolverSpec& solver) noexcept {
           : pressure.krylov_restart == 0U;
   const bool valid_coupling = solver.coupling == CouplingKind::piso ||
                               solver.coupling == CouplingKind::simple;
-  return finite && valid_coupling && valid_algorithm && valid_scaling &&
+  return (!solver.cold_stopping || solver.cold_stopping->valid()) &&
+         finite && valid_coupling && valid_algorithm && valid_scaling &&
          valid_pair && valid_restart && pressure.absolute_tolerance > 0.0 &&
          pressure.absolute_tolerance < 1.0 &&
          pressure.relative_tolerance > 0.0 &&
@@ -1419,7 +1445,7 @@ bool valid_time(const TimeControlSpec& time) noexcept {
          static_cast<std::uint8_t>(time.control) <=
              static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) &&
          static_cast<std::uint8_t>(time.scheme) <=
-             static_cast<std::uint8_t>(TimeScheme::variable_bdf2);
+             static_cast<std::uint8_t>(TimeScheme::coast_cn_be);
 }
 
 void hash_boundary(Hash64& hash, const BoundaryFaceSpec& face) noexcept {
@@ -2003,6 +2029,21 @@ void write_solver(WireWriter &writer, const SolverSpec &value, bool extended) {
   writer.real(value.terminal.gauge);
 }
 
+bool read_cold_stopping(WireReader& reader, ValidatedModel& model) noexcept {
+  if (model.time.scheme != TimeScheme::coast_cn_be) return reader.finished();
+  std::uint8_t present{};
+  if (!reader.byte(present) || present > 1U) return false;
+  if (present == 0U) return true;
+  std::uint64_t tag{};
+  ColdStoppingSpec stopping;
+  if (!reader.u64(tag) || tag != UINT64_C(0x434e424553544f31) ||
+      !reader.real(stopping.reference_time) || !reader.real(stopping.momentum) ||
+      !reader.real(stopping.enthalpy) || !reader.real(stopping.species) ||
+      !stopping.valid()) return false;
+  model.solver.cold_stopping = stopping;
+  return true;
+}
+
 bool read_solver(WireReader &reader, SolverSpec &value,
                  bool extended) noexcept {
   std::uint8_t algorithm = 0U;
@@ -2109,6 +2150,10 @@ void write_thermophysics(WireWriter& writer,
     writer.real(species.sutherland_temperature);
     writer.real(species.prandtl);
     writer.real(species.conductivity);
+    if (species.transport_law == TransportLaw::coast_perry) {
+      writer.real(species.critical_temperature);
+      writer.real(species.critical_pressure);
+    }
   }
 }
 
@@ -2149,7 +2194,7 @@ bool read_thermophysics(WireReader& reader, std::uint8_t wire_version,
       }
     }
     if (!reader.byte(law) ||
-        law > static_cast<std::uint8_t>(TransportLaw::coast_native_air) ||
+        law > static_cast<std::uint8_t>(TransportLaw::coast_perry) ||
         !transport_law_wire_compatible(wire_version,
                                        static_cast<TransportLaw>(law)) ||
         !reader.real(species.viscosity_reference) ||
@@ -2160,6 +2205,9 @@ bool read_thermophysics(WireReader& reader, std::uint8_t wire_version,
       return false;
     }
     species.transport_law = static_cast<TransportLaw>(law);
+    if (species.transport_law == TransportLaw::coast_perry &&
+        (!reader.real(species.critical_temperature) || !reader.real(species.critical_pressure)))
+      return false;
     value.species.push_back(std::move(species));
   }
   return detail::valid_thermophysical_spec(value);
@@ -2171,7 +2219,7 @@ bool read_time(WireReader& reader, TimeControlSpec& value) noexcept {
   if (!reader.byte(control) ||
       control > static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) ||
       !reader.byte(scheme) ||
-      scheme > static_cast<std::uint8_t>(TimeScheme::variable_bdf2) ||
+      scheme > static_cast<std::uint8_t>(TimeScheme::coast_cn_be) ||
       !reader.real(value.initial_dt) || !reader.real(value.minimum_dt) ||
       !reader.real(value.maximum_dt) || !reader.real(value.convective_cfl) ||
       !reader.real(value.viscous_cfl) || !reader.real(value.thermal_cfl) ||
@@ -2245,6 +2293,11 @@ Status serialize_model(const ValidatedModel& model,
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
         !valid_solver(model.solver) || !valid_schemes(model.schemes) ||
         !valid_time(model.time) ||
+        (model.solver.cold_stopping && model.time.scheme != TimeScheme::coast_cn_be) ||
+        (model.time.scheme == TimeScheme::coast_cn_be
+             ? model.legacy_time_fingerprint == 0U ||
+                   model.legacy_time_fingerprint == model.fingerprint
+             : model.legacy_time_fingerprint != 0U) ||
         !valid_patch_inlets(model) ||
         !valid_transported_scalars(model.transported_scalars) ||
         model.mesh.focus_regions.size() > detail::kMaxFocusRegions ||
@@ -2415,6 +2468,18 @@ Status serialize_model(const ValidatedModel& model,
       if (model.patch_inlets) write_patch_inlets(writer, *model.patch_inlets);
     }
     writer.u64(model.fingerprint);
+    if (model.time.scheme == TimeScheme::coast_cn_be)
+      writer.u64(model.legacy_time_fingerprint);
+    if (model.time.scheme == TimeScheme::coast_cn_be)
+      writer.byte(model.solver.cold_stopping ? 1U : 0U);
+    if (model.solver.cold_stopping) {
+      const auto& stopping = *model.solver.cold_stopping;
+      writer.u64(UINT64_C(0x434e424553544f31));
+      writer.real(stopping.reference_time);
+      writer.real(stopping.momentum);
+      writer.real(stopping.enthalpy);
+      writer.real(stopping.species);
+    }
     std::vector<std::uint8_t> candidate = std::move(writer).take();
     if (candidate.empty() || candidate.size() > detail::kMaxWireBytes) {
       return invalid_case(detail_wire);
@@ -2690,6 +2755,11 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         return invalid_case(detail_wire);
     }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
+        (model.time.scheme == TimeScheme::coast_cn_be &&
+         (!reader.u64(model.legacy_time_fingerprint) ||
+          model.legacy_time_fingerprint == 0U ||
+          model.legacy_time_fingerprint == model.fingerprint)) ||
+        !read_cold_stopping(reader, model) ||
         !unique_reference_paths(model) ||
         model.data_files.size() + (model.spray ? 1U : 0U) +
                 (model.patch_inlets ? 1U : 0U) +
@@ -2713,7 +2783,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
 
 Status compile_on_root(const fs::path& case_root, int rank,
                        ValidatedModel& model,
-                       std::vector<std::uint8_t>& payload) {
+                       std::vector<std::uint8_t>& payload,
+                       PlanFingerprint* transport_base = nullptr) {
   try {
     std::error_code error;
     const fs::path canonical_root = fs::canonical(case_root, error);
@@ -2806,7 +2877,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
           object_has_exact_keys(
               solver,
               {"coupling", "pressure_correctors", "pressure_linear",
-               "terminal_tolerances"})) ||
+               "terminal_tolerances"}) ||
+          object_has_exact_keys(solver,
+              {"coupling", "pressure_correctors", "pressure_linear",
+               "terminal_tolerances", "cold_stopping"})) ||
         !object_has_exact_keys(boundaries,
                                {"x_min", "x_max", "y_min", "y_max",
                                 "z_min", "z_max"}) ||
@@ -3132,9 +3206,28 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
     hash_solver(hash, model.solver);
     hash_schemes(hash, model.schemes);
+    Hash64 legacy_time_hash = hash;
+    const bool cold_method = model.time.scheme == TimeScheme::coast_cn_be;
+    if (cold_method) {
+      TimeControlSpec legacy_time = model.time;
+      legacy_time.scheme = TimeScheme::variable_bdf2;
+      hash_time(legacy_time_hash, legacy_time);
+    }
     hash_time(hash, model.time);
+    // The COAST stopping contract changes this plan, while the explicit
+    // BDF migration lane continues to bind exactly the original physical case.
+    if (model.solver.cold_stopping) {
+      const auto& stopping = *model.solver.cold_stopping;
+      hash.text("coast-stopping-v1");
+      hash.real(stopping.reference_time);
+      hash.real(stopping.momentum);
+      hash.real(stopping.enthalpy);
+      hash.real(stopping.species);
+    }
+    if (cold_method) hash.mirror_remaining(legacy_time_hash);
     hash.integer(static_cast<std::uint16_t>(data_file_count));
 
+    Hash64 physical_hash = hash.detached();
     model.data_files.reserve(data_file_count);
     {
       fs::path relative;
@@ -3183,6 +3276,24 @@ Status compile_on_root(const fs::path& case_root, int rank,
       }
       hash.text("typed-thermophysics");
       hash.integer(thermophysical_fingerprint);
+      if (transport_base != nullptr) {
+        ThermophysicalSpec physical = thermophysics;
+        for (auto &species : physical.species) {
+          species.transport_law = TransportLaw::constant;
+          species.viscosity_reference = species.conductivity = 1.0;
+          species.transport_reference_temperature = species.sutherland_temperature =
+              species.prandtl = species.critical_temperature = species.critical_pressure = 0.0;
+        }
+        const auto identity = detail::thermophysical_spec_fingerprint(physical);
+        if (identity == 0U) return invalid_case(detail_json_value);
+        physical_hash.text("thermodynamics-without-transport-v1");
+        physical_hash.text(thermophysics.data_file.generic_string());
+        physical_hash.integer(identity);
+        // Existing plan and BDF migration hashes keep their exact byte lanes.
+        // Only this separate witness omits the molecular transport parameters.
+        if (cold_method) legacy_time_hash.mirror_remaining(physical_hash);
+        else hash.mirror_remaining(physical_hash);
+      }
       model.thermophysics = std::move(thermophysics);
     }
     std::size_t index = 0U;
@@ -3410,7 +3521,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
 
     model.fingerprint = hash.finish();
-    return serialize_model(model, payload);
+    model.legacy_time_fingerprint = cold_method ? legacy_time_hash.finish() : 0U;
+    const auto serialized = serialize_model(model, payload);
+    if (serialized && transport_base != nullptr) *transport_base = physical_hash.finish();
+    return serialized;
   } catch (const std::bad_alloc&) {
     return {StatusCode::allocation_failure, detail_none};
   } catch (...) {
@@ -3451,6 +3565,48 @@ Status deserialize_model_for_test(const std::vector<std::uint8_t>& bytes,
 #endif
 
 }  // namespace detail
+
+Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
+    const fs::path& source_root, const ValidatedModel& source,
+    const fs::path& target_root, const ValidatedModel& target) {
+  if (communicator == MPI_COMM_NULL)
+    return {StatusCode::invalid_plan, detail_collective};
+  const auto all_law = [](const ValidatedModel &model, TransportLaw law) {
+    return !model.thermophysics.species.empty() && std::all_of(
+        model.thermophysics.species.begin(), model.thermophysics.species.end(),
+        [=](const SpeciesThermophysicalSpec &species) { return species.transport_law == law; });
+  };
+  const bool supported = source.fingerprint != 0U && target.fingerprint != 0U &&
+      source.time.scheme == TimeScheme::coast_cn_be && target.time.scheme == TimeScheme::coast_cn_be &&
+      source.reaction.mode == ReactionMode::none && target.reaction.mode == ReactionMode::none &&
+      !source.spray && !target.spray && all_law(source, TransportLaw::sutherland) &&
+      all_law(target, TransportLaw::coast_perry);
+  std::array<std::uint64_t, 3U> minimum{
+      source.fingerprint, target.fingerprint, supported ? 1U : 0U}, maximum = minimum;
+  if (MPI_Allreduce(MPI_IN_PLACE, minimum.data(), 3, MPI_UINT64_T, MPI_MIN, communicator) != MPI_SUCCESS ||
+      MPI_Allreduce(MPI_IN_PLACE, maximum.data(), 3, MPI_UINT64_T, MPI_MAX, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, detail_collective};
+  if (minimum != maximum || minimum[2] == 0U) return invalid_case(detail_json_value);
+  int rank = 0;
+  if (MPI_Comm_rank(communicator, &rank) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, detail_collective};
+  std::array<std::uint64_t, 4U> header{};
+  if (rank == 0) {
+    ValidatedModel actual_source, actual_target;
+    std::vector<std::uint8_t> payload;
+    PlanFingerprint source_base{}, target_base{};
+    auto status = compile_on_root(source_root, rank, actual_source, payload, &source_base);
+    if (status) status = compile_on_root(target_root, rank, actual_target, payload, &target_base);
+    if (status && (actual_source.fingerprint != source.fingerprint ||
+        actual_target.fingerprint != target.fingerprint || source_base == 0U || source_base != target_base))
+      status = invalid_case(detail_json_value);
+    header[0] = static_cast<std::uint64_t>(status.code);
+    header[1] = status.detail;
+  }
+  const auto broadcast = bcast_header(header, communicator);
+  if (!broadcast) return broadcast;
+  return {static_cast<StatusCode>(header[0]), static_cast<std::uint32_t>(header[1])};
+}
 
 Status CaseCompiler::load_and_compile(MPI_Comm communicator,
                                       const fs::path& case_root,

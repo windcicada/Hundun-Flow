@@ -11,8 +11,112 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <string_view>
 
 namespace hundun::v04::detail {
+
+enum class ColdHistoryRevision : std::uint8_t {
+  quadratic_pressure,
+  fluid_pressure,
+  mach_tvd
+};
+
+// Semantic history contract, independent of Git/build/partition identity.
+// Bump the affected component when its stored state, rate, flux or time
+// interpretation changes. Model/BC/transport parameters remain bound by plan.
+constexpr PlanFingerprint
+product_method_history_signature(TimeScheme scheme, bool transported_scalars,
+                                 bool reacting = false, bool esf = false,
+                                 bool tcr = false, bool spray = false,
+                                 bool inlet_patches = false,
+                                 bool cold_unity_lewis = false,
+                                 ColdHistoryRevision cold_revision =
+                                     ColdHistoryRevision::mach_tvd) noexcept {
+  std::uint64_t hash = UINT64_C(1469598103934665603);
+  const std::string_view method = scheme == TimeScheme::coast_cn_be
+      ? "hundun-cold-history-v1;CN-midpoint-momentum-BE-mass-energy-species-v1;"
+        "endpoint-rate-history-v1;rho-h-p-v1;scalar-split-v1;"
+        "accepted-ibm-thermal-impermeable-v1;molecular-accepted-before-PDF-v1;"
+        "momentum-rates-v1;"
+      : "hundun-history-v1;bdf2-ex2-v1;rho-h-p-v1;scalar-split-v1;"
+        "accepted-ibm-thermal-zero-normal-v3;momentum-rates-v1;";
+  for (char byte : method) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= UINT64_C(1099511628211);
+  }
+  if (scheme == TimeScheme::coast_cn_be) {
+    if (cold_revision != ColdHistoryRevision::quadratic_pressure)
+      for (char byte : std::string_view("coast-ibm-fluid-pressure-delta-v1;")) {
+        hash ^= static_cast<unsigned char>(byte);
+        hash *= UINT64_C(1099511628211);
+      }
+    if (cold_revision == ColdHistoryRevision::mach_tvd)
+      for (char byte : std::string_view("coast-momentum-central-vls-mach06-global-v1;")) {
+        hash ^= static_cast<unsigned char>(byte);
+        hash *= UINT64_C(1099511628211);
+      }
+  }
+  for (char byte : std::string_view(
+      "thermal-inverse-representable-v1;thermal-inverse-newton-polish-v1;stationary-ibm-placeholder-v1;"
+      "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"
+      "periodic-metrics-v2;momentum-afc-arithmetic-v4;conditional-boundary-v2;"
+      "physical-inlet-face-thermophysics-v1;generic-thermal-neighbor-material-v1;compatible-viscous-face-heating-v1;paired-physical-viscosity-v1;h-primary-conservative-total-energy-inert-v1;total-energy-typed-temporal-response-v1;actual-face-metric-limiter-v1;trace-face-rate-arithmetic-v1;reference-covariant-enthalpy-convection-v1;reference-covariant-enthalpy-predictor-v1;subnormal-face-reconstruction-v1;stable-tvd-endpoint-v1;physical-ibm-species-row-v1")) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= UINT64_C(1099511628211);
+  }
+  if (cold_unity_lewis)
+    for (char byte : std::string_view(";cold-common-gamma-direct-h-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (transported_scalars)
+    for (char byte : std::string_view(
+        ";scalar-paired-mass-remap-v1;composition-picard-v1;mass-roundoff-closure-v1;"
+        "passive-envelope-v1;physical-donor-v2;composition-inner-accuracy-v1;"
+        "ibm-scalar-impermeable-flux-v1;species-carried-enthalpy-diffusion-v1;target-time-inert-species-v1;isothermal-composition-guess-v1;species-tvd-response-diagonal-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (reacting && !esf)
+    for (char byte : std::string_view(";finite-rate-conservative-ex2-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (esf)
+    for (char byte :
+         std::string_view(";esf-native-transport-iem-two-half-chemistry-be-v1;"
+                          "esf-mean-reconciliation-v1;esf-shared-gamma-total-h-"
+                          "v1;esf-ibm-neumann-solid-carry-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (tcr)
+    for (char byte : std::string_view(
+             ";tcr-accepted-ph-statistics-v1;branch-history-bytes-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (spray)
+    for (char byte :
+         std::string_view(";spray-native-as-tab-be-v2;parcel-current-source-v1;"
+                          "parcel-cell-history-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (spray && esf)
+    for (char byte :
+         std::string_view(";p8-source-before-transport-tcr-chemistry-be-v1")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (inlet_patches)
+    for (char byte : std::string_view(";labelled-mass-inlets-v2;ibm-prescribed-state-convection-v2")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  return hash;
+}
+
 
 enum ProductCapability : std::uint32_t {
   product_fields = 1U << 0U,

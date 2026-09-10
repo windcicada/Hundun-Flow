@@ -10237,7 +10237,8 @@ Status PisoPressureSolveEpoch::solve_prepared(
     const LinearSolveControl& solve_control,
     ReductionEngine& reductions,
     ResourceCounters* resources,
-    FgmresRecoveryObservation* recovery_observation) noexcept {
+    FgmresRecoveryObservation* recovery_observation,
+    LinearPreconditioner* coupled_preconditioner) noexcept {
   // Also reset on early lifecycle rejection or a non-FGMRES solve. This
   // rank-local sink never changes collective control or accepted method state.
   if (recovery_observation != nullptr) *recovery_observation = {};
@@ -10360,7 +10361,23 @@ Status PisoPressureSolveEpoch::solve_prepared(
 
   PisoPlan const& plan = *prepared.plan;
   PressureVelocityCoupler& coupler = *prepared.coupler;
-  NativeCartesianMgPlan& preconditioner = *prepared.preconditioner;
+  // The lifecycle matrix remains the certified continuity block. Coupled
+  // energy solves may use a preconditioner for their actual Schur operator.
+  // Agree the optional binding before any Krylov callback; Krylov also
+  // compares the selected certificate/lifecycle across every rank.
+  Status selected_preconditioner_status;
+  if (coupled_preconditioner != nullptr &&
+      (contract != PisoPressureSolveContract::continuity_energy_coupled ||
+       !same_linear_identity(coupled_preconditioner->certificate().identity,
+                             prepared.identity) ||
+       coupled_preconditioner->certificate().collective_fingerprint == 0U))
+    selected_preconditioner_status = {StatusCode::invalid_plan, kPisoSolve};
+  selected_preconditioner_status =
+      reductions.consensus(selected_preconditioner_status);
+  if (!selected_preconditioner_status)
+    return reject(selected_preconditioner_status);
+  LinearPreconditioner& preconditioner = coupled_preconditioner != nullptr
+      ? *coupled_preconditioner : *prepared.preconditioner;
   PressureCorrectionSystemView system = prepared.system;
   FieldView correction = prepared.correction;
   SolverWorkspace& workspace = *prepared.workspace;

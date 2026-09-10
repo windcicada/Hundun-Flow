@@ -220,22 +220,37 @@ bool test_diagonal_shortcut_consensus(int rank, int size) {
   if (!all_true(passed)) return false;
   passed &= expect(static_cast<bool>(fixture.plan.apply(
       as_const(fixture.residual.view), fixture.correction.view, 0U)) &&
-      detail::mg_matrix_work_counters_for_test(fixture.plan).cycle_level_calls[0U] == 0U,
+      detail::mg_matrix_work_counters_for_test(fixture.plan).cycle_level_calls[0U] == 0U &&
+      fixture.plan.uses_diagonal_preconditioner(),
       rank, "all ranks select the strong-dominance shortcut");
+  auto identity = fixture.spec.identity;
+  ++identity.numeric;
+  ++identity.fingerprint;
+  const auto before_refresh = fixture.plan.counters();
+  const auto before_builds = detail::mg_matrix_work_counters_for_test(fixture.plan)
+                                 .coarse_coefficient_builds;
+  passed &= expect(static_cast<bool>(fixture.plan.update_coefficients(
+      identity, {23U, 24U, 0.0}, fixture.coefficients())), rank,
+      "strong-dominance numeric refresh succeeds");
+  const auto after_refresh = fixture.plan.counters();
+  passed &= expect(after_refresh.blocking_collectives == before_refresh.blocking_collectives &&
+      after_refresh.point_to_point_messages == before_refresh.point_to_point_messages &&
+      detail::mg_matrix_work_counters_for_test(fixture.plan).coarse_coefficient_builds == before_builds,
+      rank, "diagonal refresh avoids unused coarse coefficient communication");
   // Only the last rank loses dominance. Every rank must enter the same cycle
   // and halo schedule after the collective numeric update.
   if (rank == size - 1)
     std::fill(fixture.diagonal.storage.begin(), fixture.diagonal.storage.end(), 7.0);
-  auto identity = fixture.spec.identity;
   ++identity.numeric;
   ++identity.fingerprint;
   passed &= expect(static_cast<bool>(fixture.plan.update_coefficients(
-      identity, {23U, 24U, 0.0}, fixture.coefficients())), rank,
+      identity, {25U, 26U, 0.0}, fixture.coefficients())), rank,
       "rank-local loss of dominance updates collectively");
   if (!all_true(passed)) return false;
   passed &= expect(static_cast<bool>(fixture.plan.apply(
       as_const(fixture.residual.view), fixture.correction.view, 1U)) &&
-      detail::mg_matrix_work_counters_for_test(fixture.plan).cycle_level_calls[0U] == 1U,
+      detail::mg_matrix_work_counters_for_test(fixture.plan).cycle_level_calls[0U] == 1U &&
+      !fixture.plan.uses_diagonal_preconditioner(),
       rank, "one weak rank restores the cycle on every rank");
   const auto numeric = fixture.plan.numeric_fingerprint();
   fixture.spec.policy.diagonal_shortcut_maximum_ratio = rank == size - 1 ? 0.2 : 0.1;

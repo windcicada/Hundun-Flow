@@ -25,6 +25,14 @@ double sampled_convection_face(const CartesianKernelPlan& kernels,
     ConvectionScheme scheme, const std::array<double,4U>& samples,
     CartesianAxis axis, Int3 face, double mass_rate) noexcept;
 
+// Directional action of the same sampled face reconstruction. Uses the
+// production semismooth zero-slope choice at limiter kinks; samples and
+// variations share offsets -2,-1,0,+1. Caller validates stencil authority.
+double sampled_convection_direction(const CartesianKernelPlan& kernels,
+    ConvectionScheme scheme, const std::array<double,4U>& samples,
+    const std::array<double,4U>& variation, CartesianAxis axis,
+    Int3 face, double mass_rate) noexcept;
+
 // Same scalar face leaf, preserving fractional subnormal values until the
 // caller accumulates physical face products. Validated stencil/flux required.
 long double precise_scalar_convection_face(const CartesianKernelPlan& kernels,

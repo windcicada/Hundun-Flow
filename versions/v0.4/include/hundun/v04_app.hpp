@@ -41,12 +41,16 @@ struct ApplicationRunOptions {
   std::filesystem::path run_directory;
   std::filesystem::path source_root;
   std::filesystem::path restart_directory;
+  // Explicit cold Sutherland -> Perry transfer; requires method-history rebuild.
+  // Source case is revalidated and bound before any source checkpoint is read.
+  std::filesystem::path restart_source_case;
   std::uint64_t steps{};
   std::uint64_t output_interval{1U};
   std::uint64_t restart_interval{1U};
   // Caller-supplied operator time scales. The application tightens convection
   // from the accepted state; remaining entries are NOT automatic physical
-  // diffusion/acoustic estimates. Fixed-dt control does not use these entries.
+  // diffusion/acoustic estimates. Fixed-dt control ignores those five scales;
+  // maximum_dt is a separate explicit ceiling and must accommodate a fixed step.
   LocalTimeLimits time_limits{1.0, 1.0, 1.0, 1.0, 1.0};
   RestartStorageCompatibility restart_storage_compatibility{
       RestartStorageCompatibility::strict};
@@ -428,6 +432,8 @@ struct DriverStageTiming {
 };
 
 struct PressureEnergyPerformanceTotals {
+  // Fixed local payload reserved for the coupled Schur workspace.
+  std::uint64_t owned_payload_bytes{};
   // Sums across ALL numerical attempts in this advance, including rejected
   // attempts. Last-attempt trajectories above remain a separate diagnostic.
   PressureEnergyCandidateWorkReport candidate{};
@@ -441,6 +447,12 @@ struct PressureEnergyPerformanceTotals {
   struct Loop {
     std::uint32_t attempt{};
     std::uint32_t scalar_coupling_sweep{1U};
+    bool target_species_evaluated{};
+    // This sample improved an uncommitted guess on a provisional flux.
+    bool provisional_species_guess{};
+    bool accelerated_species_guess{};
+    double initial_species_residual{};
+    std::uint32_t scalar_remap_iterations{};
     double dt{};
     Status attempt_status{};
     PressureEnergySolveObservation solve{};
@@ -508,6 +520,7 @@ struct DriverScalarTransportReport {
   bool active{};
   std::uint64_t owned_payload_bytes{}; // Separate from halo/MPI and RSS.
   std::uint32_t coupling_sweeps{};
+  std::uint32_t provisional_coupling_sweeps{};
   std::uint32_t remap_iterations{};
   std::uint64_t remap_nanoseconds{};
   double final_species_residual{};

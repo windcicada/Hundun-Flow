@@ -97,14 +97,15 @@ void usage(int rank) {
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
                  " [--restart <restart-dir>] [--output-interval <N>]"
                  " [--restart-interval <N>]"
-                 " [--diagnostics-interval <N>]"
+                 " [--diagnostics-interval <N>] [--max-dt <seconds>]"
                  " [--initial-state p,T,Ux,Uy,Uz[,q...]]"
-                 " [--restart-method-recovery]"
+                 " [--restart-method-recovery] [--restart-source-case <case-dir>]"
                  " [--restart-storage-compatibility mg-bundle-ghost-v1]\n"
               << "    interval 0 disables Visit/screen/monitor or Restart;"
                  " evidence remains enabled outside the timed step\n"
               << "    initial-state is a uniform fresh state (Pa, K, m/s);"
                  " q values follow the scalar catalog; incompatible with restart\n"
+              << "    max-dt adds an absolute ceiling to adaptive stepping; CFL bounds remain active\n"
               << "  hundun init-case --output <case-dir>\n";
   }
 }
@@ -156,6 +157,15 @@ bool positive_integer(std::string_view text, std::uint64_t& out) noexcept {
   if (parsed.ec != std::errc{} || parsed.ptr != end || candidate == 0U)
     return false;
   out = candidate;
+  return true;
+}
+
+bool positive_real(const char* text, double& out) noexcept {
+  char* end = nullptr;
+  const double value = std::strtod(text, &end);
+  if (end == text || *end != '\0' || !std::isfinite(value) || value <= 0.0)
+    return false;
+  out = value;
   return true;
 }
 
@@ -287,9 +297,14 @@ int main(int argc, char* argv[]) {
         parsed = nonnegative_integer(value, options.restart_interval);
       } else if (flag == "--diagnostics-interval") {
         parsed = nonnegative_integer(value, options.diagnostics_interval);
+      } else if (flag == "--max-dt" && options.time_limits.maximum_dt == 0.0) {
+        parsed = positive_real(argv[index - 1], options.time_limits.maximum_dt);
       } else if (flag == "--restart" &&
                  options.restart_directory.empty()) {
         options.restart_directory = std::string{value};
+      } else if (flag == "--restart-source-case" && options.restart_source_case.empty()) {
+        options.restart_source_case = std::string{value};
+        options.restart_history_policy = hundun::v04::RestartHistoryPolicy::rebuild_method_history;
       } else if (flag == "--initial-state" && !options.initial_state.has_value()) {
         hundun::v04::DriverInitialState initial;
         parsed = initial_state(argv[index - 1], initial_values, initial);

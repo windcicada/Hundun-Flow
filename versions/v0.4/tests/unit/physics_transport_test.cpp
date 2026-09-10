@@ -401,6 +401,133 @@ bool test_transport_rejects_mismatched_thermodynamics() {
   return passed;
 }
 
+bool test_coast_perry_mixture() {
+  auto spec = two_species_spec(false);
+  spec.maximum_temperature = 6000;
+  spec.species = {species("CH4", 16.04308, 4.0, 0.0, 0.0),
+                  species("O2", 31.9988, 3.5, 0.0, 0.0),
+                  species("N2", 28.0134, 3.5, 0.0, 0.0)};
+  const double tc[]{190.7, 154.4, 126.2}, pc[]{45.8, 49.7, 33.5};
+  for (std::size_t i = 0; i < spec.species.size(); ++i) {
+    spec.species[i].transport_law = TransportLaw::coast_perry;
+    spec.species[i].prandtl = 0.70;
+    spec.species[i].critical_temperature = tc[i];
+    spec.species[i].critical_pressure = pc[i];
+  }
+  const std::array<TransportedScalarSpec, 2U> scalars{{
+      {"CH4", TransportedScalarRole::species}, {"O2", TransportedScalarRole::species}}};
+  const auto compile = [&](const ThermophysicalSpec& input, ThermodynamicsPlan& th, TransportPlan& tr) {
+    return ThermodynamicsPlan::compile(input, {scalars.data(), scalars.size()}, th) &&
+           TransportPlan::compile(input, th, tr);
+  };
+  ThermodynamicsPlan thermo;
+  TransportPlan transport;
+  if (!expect(compile(spec, thermo, transport), "Perry mixture compiles")) return false;
+  bool passed = expect(transport.kernel() == TransportKernel::coast_perry &&
+      transport.has_effective_enthalpy_transport() && transport.enthalpy_prandtl() == 0.70,
+      "mixture exposes its effective enthalpy transport contract");
+  // Original COAST viscos.F90 in REAL4 with fsc=Y/W. Frozen independent
+  // oracle: 10 temperatures x 5 CH4/air mixtures, including pure endpoints.
+  constexpr double oracle[][4]{
+      {200, 0, 0.23291751145757963, 1.3187656804802828e-05},
+      {200, 0.10000000000000001, 0.2096257603118217, 1.2341170076979324e-05},
+      {200, 0.5, 0.11645875572878982, 9.7737465694081038e-06},
+      {200, 0.90000000000000002, 0.023291751145757957, 8.0438112490810454e-06},
+      {200, 1, 0, 7.6964579420746304e-06},
+      {250, 0, 0.23291751145757963, 1.5912963135633618e-05},
+      {250, 0.10000000000000001, 0.2096257603118217, 1.4929972167010419e-05},
+      {250, 0.5, 0.11645875572878982, 1.1922228623006959e-05},
+      {250, 0.90000000000000002, 0.023291751145757957, 9.8739183158613741e-06},
+      {250, 1, 0, 9.4605802587466314e-06},
+      {280, 0, 0.23291751145757963, 1.743458051350899e-05},
+      {280, 0.10000000000000001, 0.2096257603118217, 1.6378455256926827e-05},
+      {280, 0.5, 0.11645875572878982, 1.3132734238752164e-05},
+      {280, 0.90000000000000002, 0.023291751145757957, 1.0910538549069315e-05},
+      {280, 1, 0, 1.0460988050908782e-05},
+      {295, 0, 0.23291751145757963, 1.8167504094890319e-05},
+      {295, 0.10000000000000001, 0.2096257603118217, 1.7076708900276572e-05},
+      {295, 0.5, 0.11645875572878982, 1.3717810361413285e-05},
+      {295, 0.90000000000000002, 0.023291751145757957, 1.1412608728278428e-05},
+      {295, 1, 0, 1.0945739632006735e-05},
+      {310, 0, 0.23291751145757963, 1.8883332813857123e-05},
+      {310, 0.10000000000000001, 0.2096257603118217, 1.7758955436875112e-05},
+      {310, 0.5, 0.11645875572878982, 1.4290285434981342e-05},
+      {310, 0.90000000000000002, 0.023291751145757957, 1.1904414350283332e-05},
+      {310, 1, 0, 1.1420696864661295e-05},
+      {350, 0, 0.23291751145757963, 2.0716024664579891e-05},
+      {350, 0.10000000000000001, 0.2096257603118217, 1.9506718672346324e-05},
+      {350, 0.5, 0.11645875572878982, 1.5759840607643127e-05},
+      {350, 0.90000000000000002, 0.023291751145757957, 1.316897487413371e-05},
+      {350, 1, 0, 1.26423856272595e-05},
+      {500, 0, 0.23291751145757963, 2.6813086151378229e-05},
+      {500, 0.10000000000000001, 0.2096257603118217, 2.532793405407574e-05},
+      {500, 0.5, 0.11645875572878982, 2.06744771276135e-05},
+      {500, 0.90000000000000002, 0.023291751145757957, 1.7412399756722152e-05},
+      {500, 1, 0, 1.6745079847169109e-05},
+      {1000, 0, 0.23291751145757963, 4.2340740037616342e-05},
+      {1000, 0.10000000000000001, 0.2096257603118217, 4.0156373870559037e-05},
+      {1000, 0.5, 0.11645875572878982, 3.3211428672075272e-05},
+      {1000, 0.90000000000000002, 0.023291751145757957, 2.8255304641788825e-05},
+      {1000, 1, 0, 2.7232790671405382e-05},
+      {2000, 0, 0.23291751145757963, 6.5120308136101812e-05},
+      {2000, 0.10000000000000001, 0.2096257603118217, 6.1838916735723615e-05},
+      {2000, 0.5, 0.11645875572878982, 5.135696119396016e-05},
+      {2000, 0.90000000000000002, 0.023291751145757957, 4.3833548261318356e-05},
+      {2000, 1, 0, 4.2277104512322694e-05},
+      {6000, 0, 0.23291751145757963, 0.00012816263188142329},
+      {6000, 0.10000000000000001, 0.2096257603118217, 0.00012170975969638675},
+      {6000, 0.5, 0.11645875572878982, 0.00010109362483490258},
+      {6000, 0.90000000000000002, 0.023291751145757957, 8.6293555796146393e-05},
+      {6000, 1, 0, 8.3231418102513999e-05},
+  };
+  for (const auto& sample : oracle) {
+    const double y[]{sample[1], sample[2]};
+    MolecularTransportState state;
+    passed &= expect(transport.evaluate(sample[0], {y, 2U}, state) &&
+        close(state.viscosity, sample[3], 6e-7, 0.0),
+        "Perry/Wilke matches the original REAL4 COAST routine");
+    const double cp = kUniversalGasConstant *
+        (4.0 * y[0] / 16.04308 + 3.5 * y[1] / 31.9988 +
+         3.5 * (1.0 - y[0] - y[1]) / 28.0134);
+    passed &= expect(close(state.conductivity, cp * state.viscosity / .70),
+        "mixture heat conductivity uses mass-weighted cp and mixture viscosity");
+    double lambda{}, gamma{};
+    passed &= expect(transport.effective_enthalpy_transport(state.viscosity,
+        11.0 * state.viscosity, cp, lambda, gamma) &&
+        close(gamma, 11.0 * state.viscosity / .70) && close(lambda, cp * gamma),
+        "SGS and molecular viscosity both contribute to heat transport");
+    lambda = 7; gamma = 9;
+    passed &= expect(!transport.effective_enthalpy_transport(state.viscosity,
+        .5 * state.viscosity, cp, lambda, gamma) && lambda == 7 && gamma == 9,
+        "invalid effective viscosity leaves the caller's coefficients unchanged");
+  }
+  const double y[]{.2, .3};
+  std::size_t allocations{};
+  Status evaluated;
+  MolecularTransportState state;
+  {
+    allocation_observer::Guard guard;
+    for (unsigned i = 0; i < 1000; ++i) evaluated = transport.evaluate(295, {y, 2U}, state);
+    allocations = allocation_observer::count.load();
+  }
+  passed &= expect(evaluated && allocations == 0, "Perry hot evaluation allocates no storage");
+  auto changed = spec;
+  changed.species[0].critical_pressure *= 1.01;
+  ThermodynamicsPlan other_thermo;
+  TransportPlan other;
+  passed &= expect(compile(changed, other_thermo, other) &&
+      other.fingerprint() != transport.fingerprint(), "critical properties bind physical identity");
+  changed = spec;
+  changed.species[0].critical_temperature = 0;
+  ThermodynamicsPlan rejected_thermo;
+  TransportPlan rejected;
+  passed &= expect(!compile(changed, rejected_thermo, rejected), "invalid critical temperature is rejected");
+  changed = spec;
+  changed.species[0] = species("CH4", 16.04308, 4.0, 1e-5, .02);
+  passed &= expect(!compile(changed, rejected_thermo, rejected), "mixed transport contracts are rejected");
+  return passed;
+}
+
 bool test_coast_native_air_oracle() {
   const ThermophysicalSpec spec = coast_native_air_spec();
   ThermodynamicsPlan thermodynamics;
@@ -935,6 +1062,7 @@ int main(int argc, char** argv) {
   passed &= test_sutherland_temperature_dependence();
   passed &= test_transport_rejects_mismatched_thermodynamics();
   passed &= test_coast_native_air_oracle();
+  passed &= test_coast_perry_mixture();
   passed &= test_derived_gradient_lifecycle();
   passed &= test_quadratic_gradient(uniform_mesh(), false);
   passed &= test_quadratic_gradient(stretched_mesh(), true);

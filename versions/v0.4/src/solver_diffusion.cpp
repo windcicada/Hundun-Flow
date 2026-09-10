@@ -305,9 +305,9 @@ struct FaceBranchSelection {
   bool differentiable{};
 };
 
-template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme>
+template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme, class Target>
 inline FaceBranchSelection select_face_branches(
-    const CartesianKernelPlan& plan, ConstFieldView target,
+    const CartesianKernelPlan& plan, Target target,
     std::uint8_t component, Int3 face, double mass_rate) noexcept {
   if constexpr (Scheme == ConvectionScheme::central2) {
     return {{}, {}, UINT64_C(0x101), true};
@@ -407,10 +407,10 @@ struct DirectionalFaceEvaluation {
   bool generalized{};
 };
 
-template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme>
+template <bool Uniform, std::size_t Axis, ConvectionScheme Scheme, class Target, class Variation>
 inline DirectionalFaceEvaluation reconstructed_face_direction(
-    const CartesianKernelPlan& plan, ConstFieldView target,
-    std::uint8_t target_component, ConstFieldView variation,
+    const CartesianKernelPlan& plan, Target target,
+    std::uint8_t target_component, Variation variation,
     std::uint8_t variation_component, Int3 face,
     double mass_rate, FrozenConvectionLinearizationPolicy policy) noexcept {
   const FaceBranchSelection selection = select_face_branches<
@@ -2551,6 +2551,42 @@ double detail::sampled_convection_face(const CartesianKernelPlan& plan,
       const auto reconstruct=[&](auto scheme_tag) noexcept {
         return reconstructed_face<decltype(uniform)::value,
             decltype(axis_tag)::value,decltype(scheme_tag)::value>(plan,field,0U,face,mass_rate);
+      };
+      switch(scheme) {
+        case ConvectionScheme::central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::central2>{});
+        case ConvectionScheme::limited_central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::limited_central2>{});
+        case ConvectionScheme::tvd2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::tvd2>{});
+      }
+      return std::numeric_limits<double>::quiet_NaN();
+    };
+    switch(axis) {
+      case CartesianAxis::x: return direction(std::integral_constant<std::size_t,0U>{});
+      case CartesianAxis::y: return direction(std::integral_constant<std::size_t,1U>{});
+      case CartesianAxis::z: return direction(std::integral_constant<std::size_t,2U>{});
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  return plan.geometry_kind()==GeometryKind::uniform ? metric(std::true_type{}) : metric(std::false_type{});
+}
+
+double detail::sampled_convection_direction(const CartesianKernelPlan& plan,
+    ConvectionScheme scheme, const std::array<double,4U>& samples, const std::array<double,4U>& delta,
+    CartesianAxis axis, Int3 face, double mass_rate) noexcept {
+  struct SampleField {
+    const std::array<double,4U>& values; CartesianAxis axis; int begin;
+    double unchecked(Int3 c,std::uint8_t) const noexcept {
+      const int normal=axis==CartesianAxis::x ? c.x : axis==CartesianAxis::y ? c.y : c.z;
+      return values[static_cast<std::size_t>(normal-begin)];
+    }
+  };
+  const int normal=axis==CartesianAxis::x ? face.x : axis==CartesianAxis::y ? face.y : face.z;
+  const SampleField field{samples,axis,normal-2};
+  const SampleField variation{delta,axis,normal-2};
+  const auto metric=[&](auto uniform) noexcept {
+    const auto direction=[&](auto axis_tag) noexcept {
+      const auto reconstruct=[&](auto scheme_tag) noexcept {
+        return reconstructed_face_direction<decltype(uniform)::value,
+            decltype(axis_tag)::value,decltype(scheme_tag)::value>(plan,field,0U,variation,0U,face,mass_rate,FrozenConvectionLinearizationPolicy::semismooth_generalized_zero_slope).value;
       };
       switch(scheme) {
         case ConvectionScheme::central2: return reconstruct(std::integral_constant<ConvectionScheme,ConvectionScheme::central2>{});

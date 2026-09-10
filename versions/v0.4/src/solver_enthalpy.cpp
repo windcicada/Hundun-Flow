@@ -1536,8 +1536,10 @@ Status assemble_target_coupled_enthalpy_residual(
         EnthalpyCellTerms terms;
         const Status cell_status = evaluate_enthalpy_cell_terms(
             *plan.kernels_, state, material, velocity_gradient, contributions,
-            context, cell, false, terms, plan.conservative_total_energy_);
-        if (!cell_status) return cell_status;
+            context, cell, workspace.retain_diagonal, terms,
+            plan.conservative_total_energy_);
+        if (!cell_status)
+          return cell_status;
         workspace.pressure_work.unchecked(cell, 0U) = terms.pressure_work;
         workspace.viscous_dissipation.unchecked(cell, 0U) =
             terms.viscous_dissipation;
@@ -1604,8 +1606,15 @@ Status assemble_target_coupled_enthalpy_residual(
         if (context.immersed_interface != nullptr) {
           const auto activity=context.immersed_interface->cell_activity();
           const auto n=plan.cells_;
-          const auto i=std::size_t(x)+std::size_t(n.x)*(std::size_t(y)+std::size_t(n.y)*z);
-          if(activity.data[i]==0U) { residual.unchecked(cell,0U)=0.0; continue; }
+          const auto i =
+              std::size_t(x) +
+              std::size_t(n.x) * (std::size_t(y) + std::size_t(n.y) * z);
+          if (activity.data[i] == 0U) {
+            residual.unchecked(cell, 0U) = 0.0;
+            if (workspace.retain_diagonal)
+              workspace.pressure_work.unchecked(cell, 0U) = 1.0;
+            continue;
+          }
         }
         const double rho = state.density.trial.unchecked(cell, 0U);
         EnthalpyCellTerms terms;
@@ -1628,14 +1637,17 @@ Status assemble_target_coupled_enthalpy_residual(
             workspace.diffusion.unchecked(cell, 0U), terms, cell_system);
         if (!cell_status) return cell_status;
         residual.unchecked(cell, 0U) = cell_system.residual;
+        if (workspace.retain_diagonal)
+          workspace.pressure_work.unchecked(cell, 0U) = cell_system.diagonal;
       }
     }
   }
   RevisionToken assembled_state = state_revision(state, material, velocity_gradient, contributions);
   if (context.wall_treatment != nullptr)
-    assembled_state = hash_mix(assembled_state, context.wall_treatment->fingerprint());
-  certificate = {plan.fingerprint_, context.scope, context.time,
-                 context.geometry, context.face_flux, assembled_state,
+    assembled_state =
+        hash_mix(assembled_state, context.wall_treatment->fingerprint());
+  certificate = {plan.fingerprint_, context.scope,     context.time,
+                 context.geometry,  context.face_flux, assembled_state,
                  context.dt};
   return {};
 }

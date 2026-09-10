@@ -18,7 +18,7 @@
 
 namespace hundun::v04 {
 
-namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; }
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; }
 
 class IbmEquationInterfacePlan;
 class EBTopology;
@@ -64,7 +64,8 @@ struct EquationPlanSpec {
   StageId closed_mass_service_stage{};
   // Zero disables interphase mass exchange. Frozen model identity otherwise.
   PlanFingerprint mass_source_identity{};
-  // ESF common composition/total-enthalpy diffusion, Gamma = lambda_eff/cp.
+  // Common composition/static-enthalpy diffusion for ESF or cold Le=1,
+  // Gamma = lambda_eff/cp; h includes formation and sensible enthalpy.
   bool unity_lewis_total_enthalpy{};
   bool physical_inlet_material{};
   // Preserve the standalone static-h equation by default. ProductDriver
@@ -258,6 +259,11 @@ struct TargetCoupledEnthalpyResidualWorkspace {
   FieldView pressure_work{};
   FieldView viscous_dissipation{};
   FieldView diffusion{};
+  // On success, retain the ordinary A_h diagonal in pressure_work instead
+  // of the temporary pressure-work term. Solid rows have unit diagonal.
+  // The residual certificate still describes the target residual; this
+  // option does not produce a face-coefficient matrix certificate.
+  bool retain_diagonal{};
 };
 
 // "v04mafc4": direction-preserving, owner-published common-face scalar AFC
@@ -890,6 +896,11 @@ struct ThermophysicalPredictorCertificate {
   }
 };
 
+enum class IbmThermalRateClosure : std::uint8_t {
+  reconstructed_zero_normal,
+  impermeable
+};
+
 struct ThermophysicalRateInput {
   EquationStateView state{};
   EquationMaterialView material{};
@@ -899,6 +910,8 @@ struct ThermophysicalRateInput {
   Span<const EquationContributionView> contributions{};
   const IbmEquationInterfacePlan* immersed_interface{};
   const TurbulencePlan* wall_treatment{};
+  IbmThermalRateClosure ibm_thermal_closure{
+      IbmThermalRateClosure::reconstructed_zero_normal};
 };
 
 struct ThermophysicalRateOutput {
@@ -1103,6 +1116,7 @@ class EnthalpyEquationPlan {
 
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
   Int3 cells() const noexcept { return cells_; }
+  bool unity_lewis_total_enthalpy() const noexcept { return unity_lewis_total_enthalpy_; }
   bool conservative_total_energy() const noexcept { return conservative_total_energy_; }
   ConvectionScheme kinetic_convection() const noexcept { return kinetic_convection_; }
 
@@ -1191,6 +1205,11 @@ class SpeciesEquationPlan {
       const EquationMaterialView&, Span<const EquationContributionView>,
       const EquationAssemblyContext&, EquationSystemView,
       EquationAssemblyCertificate&, bool, bool, bool) noexcept;
+  friend Status assemble_species_impl(
+      const SpeciesEquationPlan&, std::size_t, const EquationStateView&,
+      const EquationMaterialView&, Span<const EquationContributionView>,
+      const EquationAssemblyContext&, EquationSystemView,
+      EquationAssemblyCertificate&, bool, bool, bool, bool) noexcept;
   friend Status evaluate_thermophysical_rates(
       const EquationPlanSet&, const ThermophysicalRateInput&,
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;
@@ -1992,6 +2011,7 @@ class PressureEnergyEnthalpyOperator final : public LinearOperator {
 
  private:
   friend class PressureEnergySchurOperator;
+  friend class detail::PressureEnergyCoupledSchur;
   Status enter_schur_prepared_halo() const noexcept;
   Status apply_schur_prepared(FieldView input, FieldView output,
                               Status& deferred) const noexcept;
@@ -2343,6 +2363,9 @@ class PressureEnergySchurOperator final : public LinearOperator {
       int lowest_failing_rank) const noexcept;
 
  private:
+  friend class detail::PressureEnergyCoupledSchur;
+  Status apply_pressure_pair(FieldView pressure, FieldView continuity,
+                             FieldView energy, ReductionEngine& reductions) const noexcept;
   Status apply_energy_enthalpy(FieldView input, FieldView output) const noexcept;
   const LinearOperator* continuity_pressure_{};
   const LinearOperator* energy_pressure_{};
@@ -2500,7 +2523,37 @@ struct PisoPressureEnergyRefinementSolveReport {
   }
 };
 
+// Counts include every CN/BE outer sweep. Legacy C1/C2 arrays keep their
+// own meaning; the split method reports its actual linear solves here.
+struct ColdCouplingReport {
+  bool active{};
+  std::uint32_t outer_iterations{};
+  std::uint32_t momentum_solve_calls{};
+  std::uint32_t pressure_solve_calls{};
+  std::uint32_t enthalpy_solve_calls{};
+  std::uint32_t species_solve_calls{};
+  std::uint64_t momentum_iterations{};
+  std::uint64_t pressure_iterations{};
+  std::uint64_t enthalpy_iterations{};
+  std::uint64_t species_iterations{};
+  std::array<LinearSolveResult, 3U> final_momentum{};
+  LinearSolveResult final_pressure{};
+  LinearSolveResult final_enthalpy{};
+  double momentum_residual{};
+  double species_residual{};
+  double enthalpy_residual{};
+  double solid_velocity_max{};
+  // Reference gates and frozen accepted-state scales; residual order is U,h,Y.
+  // species_reference_scales includes the dependent species as its last entry.
+  std::optional<ColdStoppingSpec> stopping;
+  double momentum_reference_scale{};
+  double enthalpy_reference_scale{};
+  std::vector<double> species_reference_scales;
+  std::array<double, 3U> reference_residual{};
+};
+
 struct PisoAttemptReport {
+  ColdCouplingReport cold{};
   std::array<LinearSolveResult, 2U> pressure{};
   std::array<PisoPressureEnergyRefinementSolveReport,
              kPressureEnergyRefinementCapacity>
@@ -4411,7 +4464,8 @@ class PisoPressureSolveEpoch {
       const LinearSolveControl& solve_control,
       ReductionEngine& reductions,
       ResourceCounters* resources = nullptr,
-      FgmresRecoveryObservation* recovery_observation = nullptr) noexcept;
+      FgmresRecoveryObservation* recovery_observation = nullptr,
+      LinearPreconditioner* coupled_preconditioner = nullptr) noexcept;
   Status record_stationary(
       const PisoPlan& plan,
       const PressureCorrectionCertificate& pressure,

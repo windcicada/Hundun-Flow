@@ -265,7 +265,7 @@ DigestText identity_digest(const RuntimeCandidateIdentity& identity) noexcept {
   // Same byte stream as the V2 payload, without heap allocation before MPI.
   const std::array<std::string_view, 13U> parts{{
       "schema=", kRuntimeCandidateIdentitySchema,
-      "\nevidence_schema=", kRuntimeEvidenceSchema,
+      "\nevidence_schema=", identity.cold_schema ? kColdRuntimeEvidenceSchema : kRuntimeEvidenceSchema,
       "\nhead=", {identity.head.data(), kRuntimeGitObjectHexCharacters},
       "\ntree=", {identity.tree.data(), kRuntimeGitObjectHexCharacters},
       "\nbuild_manifest_sha256=",
@@ -341,10 +341,11 @@ bool runtime_sha256_bytes(Span<const std::uint8_t> bytes,
 
 Status runtime_candidate_identity(MPI_Comm communicator,
                                   RuntimeCandidateIdentity& out,
-                                  std::string_view target_manifest) noexcept try {
+                                  std::string_view target_manifest, bool cold_schema) noexcept try {
   if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, kRuntimeIdentityFailure};
   RuntimeCandidateIdentity local;
+  local.cold_schema = cold_schema;
   bool valid = copy_git_object(identity_source_commit, local.head) &&
                copy_git_object(identity_source_tree, local.tree) &&
                copy_digest(target_manifest.empty() ? identity_build_manifest_sha256 : target_manifest,

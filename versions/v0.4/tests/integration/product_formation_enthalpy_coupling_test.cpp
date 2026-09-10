@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
         const auto i=static_cast<std::size_t>((z*n.y+y)*n.x+x)*field.components;
         const double q=0.2+0.05*std::sin(2.0*std::acos(-1.0)*
             (x+start.patch.begin.x+0.5)/cells.x);
-        const double pi=wave ? pressure*0.01*std::cos(2.0*std::acos(-1.0)*
+        const double pi=wave ? pressure*0.03*std::cos(2.0*std::acos(-1.0)*
             (x+start.patch.begin.x+0.5)/cells.x) : 0.0;
         if(field.role==RestartFieldRole::velocity) out.values[i]=speed;
         else if(field.role==RestartFieldRole::pressure_absolute) out.values[i]=pressure+pi;
@@ -130,7 +130,8 @@ int main(int argc, char** argv) {
     if(status) status=inventory(after_mass,after_energy);
     const long double mass_error=std::abs(after_mass-before_mass)/before_mass;
     const long double energy_error=std::abs(after_energy-before_energy)/std::abs(before_energy);
-    // The pressure wave requires C2 refinement through the real driver.
+    // A 3% pressure wave retains C2 refinement after composition recoupling.
+    // The 1% wave now converges with only the initial C1 and C2 directions.
     // C1's merit belongs to another momentum predictor and cannot seed it.
     bool first_refinement_observed=false, c2_history_local=true;
     const auto& path=report.pressure_energy_globalization;
@@ -145,6 +146,7 @@ int main(int argc, char** argv) {
     }
     if(rank==0) std::cout<<std::setprecision(17)<<"FORMATION_COUPLING status="
       <<unsigned(status.code)<<'/'<<status.detail<<" accepted="<<report.accepted
+      <<" trajectory="<<unsigned(path.trajectory_count)
       <<" sweeps="<<report.scalar_transport.coupling_sweeps
       <<" residual="<<report.scalar_transport.final_species_residual
       <<" mass_relative_error="<<mass_error<<" energy_relative_error="<<energy_error<<'\n';

@@ -6,6 +6,10 @@
 #include "hundun/v04_flow.hpp"
 #include "hundun/v04_ibm.hpp"
 #include "solver_species_guess_detail.hpp"
+#include "solver_y_history.hpp"
+#include "solver_cold.hpp"
+
+#include <memory>
 #include "solver_cartesian_detail.hpp"
 #include "solver_mass_source_detail.hpp"
 #include "solver_scalar_boundary_detail.hpp"
@@ -18,6 +22,8 @@
 #include <vector>
 
 namespace hundun::v04::detail {
+
+enum class SpeciesCouplingSolver : std::uint8_t { diagonal, dilu };
 
 // Passive transport uses a conservative mass correction, not a cellwise density
 // rescaling. The predictor's *actual paired* flux includes its BDF/EX weights
@@ -47,10 +53,13 @@ class ScalarMassRemap {
       128.0 * std::numeric_limits<double>::epsilon();
 
   struct Report {
+    bool target_species_evaluated{};
+    bool provisional_target_species{};
+    bool accelerated_coupling_guess{};
     unsigned iterations{};
     double initial_species_residual{};
     double residual{};
-    double convergence_residual{}; // Residual beyond binary64 quantization.
+    double convergence_residual{}; // Quantization-aware, with a trace scale for target species.
     double mass_pairing_residual{};
   };
 
@@ -66,6 +75,9 @@ class ScalarMassRemap {
     if (passives > std::numeric_limits<std::size_t>::max() / 2U)
       return {StatusCode::invalid_plan, kInvalid};
     out = std::max(std::size_t{4U}, 2U * passives);
+    for (std::size_t i = 0U; i < roles.size; ++i)
+      if (roles.data[i] == TransportedScalarRole::species)
+        out = std::max(out, SpeciesCouplingHistory::reduction_capacity);
     return {};
   }
 
@@ -73,7 +85,12 @@ class ScalarMassRemap {
   // the caller can agree bad_alloc before any rank enters HaloEngine::reserve.
   Status allocate(const MeshPatch& patch, Span<const FieldId> fields,
                   Span<const TransportedScalarRole> roles,
-                  std::uint8_t ghosts) {
+                  std::uint8_t ghosts,
+                  SpeciesCouplingSolver solver = SpeciesCouplingSolver::diagonal) {
+    if (solver != SpeciesCouplingSolver::diagonal &&
+        solver != SpeciesCouplingSolver::dilu)
+      return {StatusCode::invalid_plan, kInvalid};
+    target_solver_ = solver;
     cells_ = patch.cells;
     patch_ = patch;
     ghosts_ = ghosts;
@@ -107,6 +124,17 @@ class ScalarMassRemap {
         if(roles_[s]==TransportedScalarRole::species) species_indices_.push_back(s);
       target_species_history_.resize(species_indices_.size());
       target_species_diffusivity_.resize(species_indices_.size());
+      target_species_diagonal_.resize(species_indices_.size() * count_);
+      if (target_solver_ == SpeciesCouplingSolver::dilu) {
+        target_species_rows_.resize(species_indices_.size());
+        target_species_dilu_.reserve(species_indices_.size());
+        for (auto& rows : target_species_rows_) {
+          rows.resize(count_);
+          // Direct correction sweeps do not publish a Krylov certificate.
+          target_species_dilu_.push_back(
+              std::make_unique<ColdPressureDilu>(rows, cells_, LinearIdentity{}));
+        }
+      }
     }
     const auto passive_count = static_cast<std::size_t>(std::count(
         roles_.begin(), roles_.end(), TransportedScalarRole::passive_scalar));
@@ -141,6 +169,19 @@ class ScalarMassRemap {
                          boundary.halo_topology());
   }
 
+  Status reserve_coupling_history() { return history_.reserve(quantity_count_); }
+  void begin_coupling_sweep(unsigned sweep) noexcept { history_.begin(sweep); }
+  Status update_coupling_guess(Span<const FieldView> input,
+      Span<const std::uint8_t> activity, ReductionEngine& reductions,
+      Report& report) noexcept {
+    // solve_target_species has already validated all views and the activity
+    // mask collectively; its output is kept separate from the next guess.
+    return history_.update(cells_, input, {views_.data(), views_.size()},
+        {species_indices_.data(), species_indices_.size()}, activity,
+        report.initial_species_residual, reductions,
+        report.accelerated_coupling_guess);
+  }
+
   const HaloEngine& halo() const noexcept { return halo_; }
 
   // Owned capacities, not a process RSS/peak estimate. Halo/MPI bookkeeping
@@ -154,10 +195,21 @@ class ScalarMassRemap {
       else bytes += count * sizeof(Element);
     };
     add(mass_); add(quantity_); add(next_); add(storage_);
-    add(species_indices_); add(target_species_history_); add(target_species_diffusivity_);
+    add(species_indices_); add(target_species_history_); add(target_species_diffusivity_); add(target_species_diagonal_);
+    add(target_species_rows_);
+    add(target_species_dilu_);
+    for (const auto& rows : target_species_rows_) add(rows);
+    for (const auto& preconditioner : target_species_dilu_) {
+      const auto owned = preconditioner->owned_payload_bytes();
+      bytes = sizeof(ColdPressureDilu) > UINT64_MAX - bytes
+          ? UINT64_MAX : bytes + sizeof(ColdPressureDilu);
+      bytes = owned > UINT64_MAX - bytes ? UINT64_MAX : bytes + owned;
+    }
     for (const auto& values : storage_) add(values);
     add(views_); add(halo_specs_); add(roles_); add(intervals_);
     add(bounds_local_); add(bounds_global_);
+    const auto history_bytes = history_.owned_payload_bytes();
+    bytes = history_bytes > UINT64_MAX - bytes ? UINT64_MAX : bytes + history_bytes;
     return bytes;
   }
 
@@ -442,7 +494,8 @@ class ScalarMassRemap {
       EquationAssemblyContext context, EquationSystemView scratch,
       FieldView diffusivity, Span<const FieldView> input,
       Span<const std::uint8_t> activity, BoundaryResolvedValues boundary_values,
-      ReductionEngine& reductions, Report& report) noexcept {
+      ReductionEngine& reductions, Report& report,
+      bool intermediate_coupling = false) noexcept {
     if(species_indices_.empty()) return {};
     Status local;
     const auto& kernels=equations.kernels();
@@ -511,7 +564,99 @@ class ScalarMassRemap {
               }
               diffusivity.unchecked(c,0U)=gamma;
             }
-        if(local) local=assemble_species_coupling_rows(species,s,state,material,context,scratch);
+        // Only q changes in this inner solve. Density, diffusivity, time and
+        // flux remain fixed; each new solve rebuilds the diagonal at iteration 0.
+        if (local && iteration == 0U) {
+          local = assemble_species_coupling_rows(species, s, state, material,
+                                                 context, scratch);
+          std::size_t cell_index = s * count_;
+          for (int z = 0; z < cells_.z && local; ++z)
+            for (int y = 0; y < cells_.y; ++y)
+              for (int x = 0; x < cells_.x; ++x, ++cell_index)
+                target_species_diagonal_[cell_index] =
+                    scratch.diagonal.unchecked({x, y, z}, 0U);
+        } else if (local) {
+          std::size_t cell_index = s * count_;
+          for (int z = 0; z < cells_.z; ++z)
+            for (int y = 0; y < cells_.y; ++y)
+              for (int x = 0; x < cells_.x; ++x, ++cell_index)
+                scratch.diagonal.unchecked({x, y, z}, 0U) =
+                    target_species_diagonal_[cell_index];
+          local = assemble_species_coupling_residual(species, s, state, material,
+                                                     context, scratch);
+        }
+        if (local && target_solver_ == SpeciesCouplingSolver::dilu &&
+            iteration == 0U) {
+          auto& yrows = target_species_rows_[s];
+          std::size_t row_index{};
+          const std::array<ConstFaceFieldView, 3> diffusion{
+              as_const(scratch.x_coefficient), as_const(scratch.y_coefficient),
+              as_const(scratch.z_coefficient)};
+          for (int z = 0; z < cells_.z && local; ++z)
+            for (int y = 0; y < cells_.y && local; ++y)
+              for (int x = 0; x < cells_.x; ++x, ++row_index) {
+                Int3 c{x, y, z};
+                auto& row = yrows[row_index];
+                row = {};
+                if (activity.size && activity.data[row_index] == 0U) {
+                  row.diagonal = 1;
+                  continue;
+                }
+                const double volume = cell_volume(kernels, c);
+                row.diagonal = scratch.diagonal.unchecked(c, 0);
+                const Int3 neighbours[] = {{x - 1, y, z}, {x + 1, y, z},
+                                           {x, y - 1, z}, {x, y + 1, z},
+                                           {x, y, z - 1}, {x, y, z + 1}};
+                for (unsigned face_id = 0; face_id < 6; ++face_id) {
+                  unsigned axis = face_id / 2;
+                  Int3 face = face_id % 2 ? neighbours[face_id] : c;
+                  double D = diffusion[axis].unchecked(face),
+                         F = flux[axis].unchecked(face) * (face_id % 2 ? 1 : -1);
+                  row.diagonal += std::max(F, 0.0) / volume;
+                  row.neighbour[face_id] = (D + std::max(-F, 0.0)) / volume;
+                  double imposed{};
+                  if (context.immersed_interface &&
+                      context.immersed_interface->prescribed_face_flux(
+                          static_cast<CartesianAxis>(axis), face, imposed))
+                    row.neighbour[face_id] = 0;
+                  int coordinate = axis == 0   ? x
+                                   : axis == 1 ? y
+                                               : z,
+                      extent = axis == 0   ? cells_.x
+                               : axis == 1 ? cells_.y
+                                           : cells_.z;
+                  if (coordinate != (face_id % 2 ? extent - 1 : 0)) continue;
+                  const BoundaryFacePlan* boundary_face{};
+                  local = boundary_->face(static_cast<CartesianFace>(face_id),
+                                          boundary_face);
+                  if (!local || !boundary_face) break;
+                  if (!boundary_face->local_owner || boundary_face->periodic)
+                    continue;
+                  switch (boundary_face->flow_kind) {
+                    case BoundaryKind::velocity_inlet:
+                    case BoundaryKind::mass_flow_inlet:
+                      row.diagonal += D / volume;
+                      break;
+                    case BoundaryKind::symmetry:
+                    case BoundaryKind::no_slip_wall:
+                    case BoundaryKind::zero_gradient_mass_outlet:
+                      row.diagonal -= row.neighbour[face_id];
+                      break;
+                    default:
+                      local = {StatusCode::invalid_plan, 17820};
+                      break;
+                  }
+                  row.neighbour[face_id] = 0;
+                }
+              }
+          if (local) {
+            local = target_species_dilu_[s]->prepare();
+          }
+        }
+        if (local && target_solver_ == SpeciesCouplingSolver::dilu)
+          local = target_species_dilu_[s]->apply(as_const(scratch.residual),
+                                                 scratch.rhs, 0);
+
         std::size_t i=0U;
         for(int z=0;z<cells_.z && local;++z)
           for(int y=0;y<cells_.y && local;++y)
@@ -526,11 +671,21 @@ class ScalarMassRemap {
                   std::abs(static_cast<long double>(diagonal)*q-residual);
               const long double floor=0.5L*diagonal*std::numeric_limits<double>::denorm_min();
               const double norm=scale==0.0L ? 0.0 : static_cast<double>(std::abs(residual)/scale);
-              const double converged=scale==0.0L ? 0.0 : static_cast<double>(std::max(0.0L,std::abs(static_cast<long double>(residual))-floor)/scale);
+              // Mass fractions have the natural reference scale one. Retain
+              // the relative row test above epsilon; below it, bound the
+              // absolute row correction by tolerance * epsilon. A trace near
+              // 1e-280 must not reject a step whose composition has converged.
+              // Keep the raw relative residual separately for diagnostics.
+              const long double reference_scale =
+                  static_cast<long double>(diagonal) *
+                  std::numeric_limits<double>::epsilon();
+              const double converged=scale==0.0L ? 0.0 : static_cast<double>(std::max(0.0L,std::abs(static_cast<long double>(residual))-floor)/std::max(scale,reference_scale));
               const double mass_scale=context.bdf.a0*
                   (state.density.trial.unchecked(c,0U)+state.density.accepted.unchecked(c,0U));
               const double value=static_cast<double>(static_cast<long double>(q)-
-                  static_cast<long double>(residual)/diagonal);
+                  (target_solver_ == SpeciesCouplingSolver::dilu
+                       ? static_cast<long double>(scratch.rhs.unchecked(c,0U))
+                       : static_cast<long double>(residual)/diagonal));
               if(!std::isfinite(value) || !std::isfinite(norm) || !std::isfinite(diagonal) || diagonal<=0.0 || mass_scale<=0.0) {
                 local={StatusCode::rejected_step,kInvalid}; break;
               }
@@ -543,10 +698,20 @@ class ScalarMassRemap {
       double global[3]{};
       status=reductions.checked_max({maximum,3U},{global,3U},local);
       if(!status) return status;
-      if(iteration==0U) report.initial_species_residual=global[1];
+      if(iteration==0U) {
+        report.initial_species_residual=global[1];
+        report.target_species_evaluated=true;
+        report.provisional_target_species =
+            context.scope != EquationAssemblyScope::final_conservative;
+      }
       report.iterations=passive_iterations+iteration;
       report.residual=global[0]; report.convergence_residual=global[2];
       if(report.convergence_residual<=tolerance) return {};
+      // An explicit uncommitted outer update may use inexact inner solves.
+      // Its caller still owns the complete final species/equation audit.
+      if (intermediate_coupling && target_solver_ == SpeciesCouplingSolver::dilu &&
+          iteration >= 2U && report.initial_species_residual > 1e-10 &&
+          global[1] <= 0.01 * report.initial_species_residual) return {};
       std::size_t i=0U;
       for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x,++i) {
         const Int3 c{x,y,z};
@@ -583,7 +748,10 @@ class ScalarMassRemap {
     for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x,++i) {
       const Int3 c{x,y,z}; bool changed=false;
       const auto guess=[&](std::size_t slot) noexcept {
-        return use_target_solution ? views_[slot].unchecked(c,0U) : next_[slot*count_+i];
+        return use_target_solution
+            ? (history_.valid() ? history_.guess(slot*count_+i)
+                                : views_[slot].unchecked(c,0U))
+            : next_[slot*count_+i];
       };
       for(std::size_t s=0U;s<species_indices_.size();++s) {
         const auto slot=species_indices_[s];
@@ -627,6 +795,7 @@ class ScalarMassRemap {
   }
 
  private:
+  SpeciesCouplingHistory history_;
   Int3 cells_{};
   MeshPatch patch_{};
   std::uint8_t ghosts_{};
@@ -635,6 +804,10 @@ class ScalarMassRemap {
   const BoundaryPlan* boundary_{};
   std::vector<double> mass_, quantity_, next_;
   std::vector<double> bounds_local_, bounds_global_;
+  std::vector<double> target_species_diagonal_;
+  SpeciesCouplingSolver target_solver_{SpeciesCouplingSolver::diagonal};
+  std::vector<std::vector<ColdPressureRow>> target_species_rows_;
+  std::vector<std::unique_ptr<ColdPressureDilu>> target_species_dilu_;
   std::vector<ScalarAdmissibleInterval> intervals_;
   std::vector<std::vector<double>> storage_;
   std::vector<FieldView> views_;

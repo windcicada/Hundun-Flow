@@ -438,6 +438,10 @@ static Status run_application(MPI_Comm communicator,
       communicator,
       options.case_root.empty() || options.run_directory.empty() ||
               options.source_root.empty() || options.steps == 0U ||
+              (!options.restart_source_case.empty() &&
+               (options.restart_directory.empty() ||
+                options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history ||
+                options.restart_storage_compatibility != RestartStorageCompatibility::strict)) ||
               (options.initial_state.has_value() &&
                (!options.restart_directory.empty() || options.initial_state->start_time != 0.0)) ||
               (options.restart_storage_compatibility !=
@@ -453,13 +457,13 @@ static Status run_application(MPI_Comm communicator,
   if (!status) return status;
   // These controls determine collective order, not local storage identity.
   // Check once before filesystem/product work; do not add hot halo checks.
-  const std::array<std::uint64_t, 8U> control{{
+  const std::array<std::uint64_t, 9U> control{{
       options.steps, options.output_interval, options.restart_interval,
       options.restart_directory.empty() ? 0U : 1U,
       static_cast<std::uint64_t>(options.restart_storage_compatibility),
       static_cast<std::uint64_t>(options.restart_history_policy),
       options.initial_state.has_value() ? 1U : 0U,
-      options.diagnostics_interval}};
+      options.diagnostics_interval, options.restart_source_case.empty() ? 0U : 1U}};
   auto minimum = control, maximum = control;
   const int min_status = MPI_Allreduce(MPI_IN_PLACE, minimum.data(),
       static_cast<int>(minimum.size()), MPI_UINT64_T, MPI_MIN, communicator);
@@ -474,6 +478,10 @@ static Status run_application(MPI_Comm communicator,
         communicator,
         ApplicationService::validate_run_directories(
             options.case_root, options.run_directory, options.source_root));
+  if (status && !options.restart_source_case.empty())
+    status = detail::output_collective_status(communicator,
+        ApplicationService::validate_run_directories(options.restart_source_case,
+            options.run_directory, options.source_root));
   if (!status) return status;
   report.failure_phase = ApplicationFailurePhase::case_compile;
   ValidatedModel model;
@@ -484,9 +492,13 @@ static Status run_application(MPI_Comm communicator,
   report.case_model = model.fingerprint;
   report.failure_phase = ApplicationFailurePhase::product_compile;
   CompiledCasePlan plan;
-  if (status)
-    status = ProductCompiler::compile(communicator, model, options.case_root,
-                                      plan);
+  ValidatedModel source_model;
+  if (status && !options.restart_source_case.empty()) {
+    status = CaseCompiler::load_and_compile(communicator, options.restart_source_case, source_model);
+    if (status) status = ProductCompiler::compile_transport_restart(communicator,
+        source_model, options.restart_source_case, model, options.case_root, plan);
+  } else if (status)
+    status = ProductCompiler::compile(communicator, model, options.case_root, plan);
   if (!status) return status;
   const PlanFingerprint product_fingerprint = plan.fingerprint();
   report.product = product_fingerprint;
@@ -528,6 +540,7 @@ static Status run_application(MPI_Comm communicator,
       run_start.source_history_signature = image.method_history_signature;
       run_start.target_history_signature = expected.method_history_signature;
       run_start.history_policy = options.restart_history_policy;
+      run_start.transport_source_case = source_model.fingerprint;
       restart_backward_euler_recovery = image.backward_euler_recovery ||
           options.restart_history_policy == RestartHistoryPolicy::rebuild_method_history;
       report.failure_phase = ApplicationFailurePhase::initialize;
@@ -588,7 +601,8 @@ static Status run_application(MPI_Comm communicator,
   RuntimeCandidateIdentity candidate_identity;
   status = detail::runtime_candidate_identity(communicator,
                                               candidate_identity,
-                                              options.target_build_manifest);
+                                              options.target_build_manifest,
+                                              model.time.scheme == TimeScheme::coast_cn_be);
   if (!status) return status;
   const PlanFingerprint build_identity =
       detail::runtime_sha256_fingerprint(
@@ -910,10 +924,12 @@ static Status run_application(MPI_Comm communicator,
       evidence.time = step.accepted_time;
       evidence.requested_bdf_order = step.proposal.bdf.order;
       evidence.bdf_order = step.effective_bdf.order;
-      evidence.coupling =
-          model.solver.coupling == CouplingKind::simple
-              ? RuntimeCouplingKind::simple
-              : RuntimeCouplingKind::piso;
+      evidence.cold = step.piso.cold;
+      evidence.coupling = step.piso.cold.active
+                              ? RuntimeCouplingKind::coast_cn_be
+                          : model.solver.coupling == CouplingKind::simple
+                              ? RuntimeCouplingKind::simple
+                              : RuntimeCouplingKind::piso;
       evidence.thermophysical_predictor_calls =
           step.thermophysical_predictor_calls;
       evidence.temporal_method_fallback = step.temporal_method_fallback;
@@ -978,7 +994,9 @@ static Status run_application(MPI_Comm communicator,
       // the same coupled attempt.  Termination alone cannot identify this
       // contract because zero-RHS exits before any optional linear audit.
       evidence.pressure_solve_contract =
-          RuntimePressureSolveContract::continuity_energy_coupled;
+          step.piso.cold.active
+              ? RuntimePressureSolveContract::coast_cn_be
+              : RuntimePressureSolveContract::continuity_energy_coupled;
       evidence.pressure_energy_refinement_solve_calls =
           step.piso.pressure_energy_refinement_solve_calls;
       evidence.pressure_energy_refinement_termination =
@@ -1015,6 +1033,12 @@ static Status run_application(MPI_Comm communicator,
       // configured normalized continuity tolerance.
       evidence.terminal_physical_audit.energy_tolerance =
           model.solver.terminal.continuity;
+      if (step.piso.cold.active && step.piso.cold.stopping) {
+        evidence.terminal_physical_audit.energy_residual =
+            step.piso.cold.reference_residual[1];
+        evidence.terminal_physical_audit.energy_tolerance =
+            step.piso.cold.stopping->enthalpy;
+      }
       evidence.momentum_predictor_passes =
           step.momentum_predictor_solve.predictor_passes;
       evidence.terminal_physical_audit.closed_mass_residual =
@@ -1056,9 +1080,10 @@ static Status run_application(MPI_Comm communicator,
           step.momentum_predictor_limiter.limited_face_fraction;
       evidence.momentum_predictor_limited =
           step.momentum_predictor_limiter.limited;
-      status = detail::runtime_advective_cfl(
-          communicator, step.momentum_predictor_limiter.advective_cfl,
-          evidence.momentum_advective_cfl);
+      if (!step.piso.cold.active)
+        status = detail::runtime_advective_cfl(
+            communicator, step.momentum_predictor_limiter.advective_cfl,
+            evidence.momentum_advective_cfl);
       if (!status) break;
       evidence.predictor_theta = step.thermophysical_predictor.theta;
       evidence.predictor_mass_flux_scale =

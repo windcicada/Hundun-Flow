@@ -3142,6 +3142,8 @@ bool run_warm_start_lifecycle_product(int rank) {
       second.piso.pressure_solve_calls == 2U && warm_seed_consumed &&
       independent_cold_comparison && c1_semantic && c2_semantic &&
       resources_semantic &&
+      first.pressure_energy_performance.owned_payload_bytes ==
+          second.pressure_energy_performance.owned_payload_bytes &&
       terminal_physics(first) && terminal_physics(second) &&
       !first.momentum_predictor_limiter.limited &&
       first.momentum_predictor_limiter.theta == 1.0 &&
@@ -3157,7 +3159,11 @@ bool run_warm_start_lifecycle_product(int rank) {
       momentum_solve_semantic(second.momentum_predictor_solve);
   if (!passed) {
     std::cerr << std::setprecision(17) << "rank " << rank
-              << " warm-start lifecycle status="
+              << " warm-start lifecycle checks=" << warm_seed_consumed << '/'
+              << independent_cold_comparison << '/' << c1_semantic << '/'
+              << c2_semantic << '/' << resources_semantic << '/'
+              << terminal_physics(first) << '/' << terminal_physics(second)
+              << " status="
               << static_cast<unsigned>(status.code) << '/' << status.detail
               << " accepted/attempts=" << first.accepted << '/'
               << first.attempts << ' ' << second.accepted << '/'

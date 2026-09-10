@@ -70,6 +70,7 @@ enum class MgCycleFailurePhase : std::uint8_t {
 };
 
 struct MgMatrixWorkCounters {
+  std::uint64_t coarse_coefficient_builds{};
   std::array<std::uint64_t, kMgMaximumLevels> cycle_level_calls{};
   std::uint64_t cycle_restrictions{};
   std::uint64_t cycle_prolongations{};

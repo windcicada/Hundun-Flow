@@ -917,6 +917,43 @@ bool test_production_species_and_passive_assembly() {
         close(diagonal.view.unchecked(cell,0U),10.0+6.0*6.0*dx/volume),
         "private density row has the same physical equation and diagonal before volume scaling");
   }
+  // The nonlinear iterate changes while the prepared material and density
+  // remain fixed. Compare the retained-diagonal path against full assembly.
+  auto varied = make_field(species.view.field, cells, 1U, 2U, 904U);
+  for (std::size_t i = 0; i < species.bytes.size(); ++i)
+    varied.bytes[i] = 0.9 * species.bytes[i];
+  auto varied_history = species_history;
+  varied_history.trial = as_const(varied.view);
+  const std::array varied_species{varied_history};
+  auto varied_state = state;
+  varied_state.independent_species = {varied_species.data(), varied_species.size()};
+  const auto saved_diagonal = diagonal.bytes;
+  const auto original_residual = residual.bytes;
+  std::fill(ax.bytes.begin(), ax.bytes.end(), 91.0);
+  std::fill(ay.bytes.begin(), ay.bytes.end(), 91.0);
+  std::fill(az.bytes.begin(), az.bytes.end(), 91.0);
+  passed &= expect(static_cast<bool>(detail::assemble_species_coupling_residual(
+      fixture.equations.species(), 0U, varied_state, material, context, system)) &&
+      diagonal.bytes == saved_diagonal && faces_are(ax, ay, az, 91.0) &&
+      residual.bytes != original_residual,
+      "retained diagonal evaluates the new iterate and preserves coefficient storage");
+  const auto cached_residual = residual.bytes;
+  const auto cached_rhs = rhs.bytes;
+  passed &= expect(static_cast<bool>(detail::assemble_species_coupling_rows(
+      fixture.equations.species(), 0U, varied_state, material, context, system)) &&
+      residual.bytes == cached_residual && rhs.bytes == cached_rhs &&
+      diagonal.bytes == saved_diagonal,
+      "retained diagonal matches the full physical species rows exactly");
+  std::fill(residual.bytes.begin(), residual.bytes.end(), 91.0);
+  std::fill(rhs.bytes.begin(), rhs.bytes.end(), 91.0);
+  diagonal.view.unchecked({1, 1, 1}, 0U) = -1.0;
+  passed &= expect(detail::assemble_species_coupling_residual(
+      fixture.equations.species(), 0U, varied_state, material, context, system).code ==
+      StatusCode::numerical_failure &&
+      std::all_of(residual.bytes.begin(), residual.bytes.end(), [](double v) { return v == 91.0; }) &&
+      std::all_of(rhs.bytes.begin(), rhs.bytes.end(), [](double v) { return v == 91.0; }),
+      "invalid retained diagonal rejects before residual and rhs writes");
+
   reset_outputs();
   const auto saved_scope=context.scope;
   context.scope=EquationAssemblyScope::target_coupled;

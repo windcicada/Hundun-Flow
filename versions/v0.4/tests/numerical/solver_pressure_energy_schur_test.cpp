@@ -22,6 +22,10 @@
 #include <vector>
 
 #include "hundun/v04_flow.hpp"
+#include "../support/ibm_force_fixture.hpp"
+#include "../../src/solver_schur_pc_detail.hpp"
+#include "../../src/solver_schur_rho_detail.hpp"
+#include "../../src/solver_schur_seed_detail.hpp"
 
 namespace allocation_observer {
 
@@ -673,6 +677,152 @@ bool authorize_generic_schur(PressureEnergySchurBinding& binding) {
                                    binding.block_authority));
 }
 
+bool test_pressure_direction_history() {
+  const Int3 shape{2, 2, 2};
+  auto source = shaped_field(0U, 1U, 9301U, shape, 3.0);
+  auto output = shaped_field(1U, 1U, 9302U, shape, 91.0);
+  detail::PressureEnergyDirectionHistory history;
+  history.reserve(shape);
+  const auto bytes = history.owned_payload_bytes();
+  bool passed = bytes == 4U * 8U * sizeof(double);
+  const auto fill = [&](double value) {
+    for (int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x)
+      source.view.unchecked({x,y,z},0U)=value;
+  };
+  const auto matches = [&](double value) {
+    for (int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x)
+      if(output.view.unchecked({x,y,z},0U)!=value) return false;
+    return true;
+  };
+  {
+    allocation_observer::Guard guard;
+    history.begin_coupling(1U);
+    passed &= bool(history.remember(1U,0U,as_const(source.view)));
+    fill(4.0);
+    passed &= bool(history.remember(2U,0U,as_const(source.view)));
+    fill(5.0);
+    passed &= bool(history.remember(2U,1U,as_const(source.view)));
+    history.begin_coupling(2U);
+    passed &= bool(history.restore(1U,0U,output.view)) && matches(3.0);
+    auto invalid=output.view;invalid.interior.x=1;
+    passed &= history.restore(1U,0U,invalid).code==StatusCode::invalid_plan && matches(3.0);
+    passed &= bool(history.restore(2U,0U,output.view)) && matches(4.0);
+    passed &= bool(history.restore(2U,1U,output.view)) && matches(5.0);
+    passed &= bool(history.restore(2U,2U,output.view)) && matches(5.0);
+    passed &= bool(history.restore(2U,3U,output.view)) && matches(5.0);
+    fill(9.0);
+    passed &= bool(history.remember(1U,0U,as_const(source.view)));
+    source.view.unchecked({1,1,1},0U)=std::numeric_limits<double>::quiet_NaN();
+    passed &= history.remember(1U,0U,as_const(source.view)).code==StatusCode::numerical_failure;
+    history.begin_coupling(3U);
+    passed &= bool(history.restore(1U,0U,output.view)) && matches(9.0);
+    passed &= bool(history.restore(2U,0U,output.view)) && matches(9.0);
+    fill(11.0);
+    passed &= bool(history.remember(1U,0U,as_const(source.view)));
+    history.begin_coupling(1U);
+    history.begin_coupling(2U);
+    passed &= bool(history.restore(1U,0U,output.view)) && matches(9.0);
+    passed &= bool(history.remember(1U,0U,as_const(source.view)));
+    history.begin_coupling(4U);
+    passed &= bool(history.restore(1U,0U,output.view)) && matches(9.0);
+    passed &= bool(history.remember(1U,0U,as_const(source.view)));
+    history.observe_coupling_residual(1e-8);
+    history.begin_coupling(5U);
+    passed &= bool(history.restore(1U,0U,output.view)) && matches(11.0);
+    fill(12.0);
+    passed &= bool(history.remember(1U,0U,as_const(source.view)));
+    history.observe_coupling_residual(9.5e-9);
+    history.begin_coupling(6U);
+    passed &= bool(history.restore(1U,0U,output.view)) && matches(11.0) && history.restarts()==1U;
+  }
+  return expect(passed && allocation_observer::count.load()==0U &&
+                    history.owned_payload_bytes()==bytes,
+                "pressure direction history isolates stages, expires across "
+                "proposals/gaps, and preserves finite seeds after failure");
+}
+
+bool test_coupled_density_face_response() {
+  EnthalpySpatialFixture fixture;
+  if (!make_enthalpy_spatial_fixture(fixture)) return false;
+  const auto n = fixture.patch.cells;
+  auto rp = shaped_field(0U, 1U, 9201U, n, 0.2);
+  auto rh = shaped_field(1U, 1U, 9202U, n, -0.4);
+  auto velocity = ghosted_components_field(2U, 1U, 9203U, n, 1U, 3U, 0.6);
+  auto coefficient = face_bundle(n, 9204U, 9205U, 1.0);
+  auto enthalpy = face_bundle(n, 9206U, 9207U, 3.0);
+  LinearOperatorCertificate certificate;
+  certificate.local_shape = n;
+  certificate.collective_fingerprint = 9210U;
+  certificate.identity = {9211U, 9212U, 9213U, 9214U, 9215U};
+  IdentityCertificateOperator identity(certificate);
+  detail::PressureEnergyCoupledSchur schur;
+  bool passed = expect(bool(schur.allocate(fixture.geometry, fixture.patch,
+      fixture.boundary, 0U, 5U, 2U, 6U, 0U, 1)) &&
+      bool(schur.bind_halo(MPI_COMM_SELF, fixture.patch, fixture.boundary)),
+      "coupled density workspace reserves before stepping");
+  if (!passed) return false;
+  schur.cp = schur.ep = schur.eh = &identity;
+  schur.kernels = &fixture.kernels;
+  schur.rp = as_const(rp.view); schur.rh = as_const(rh.view);
+  schur.velocity = as_const(velocity.view); schur.a0 = 7.0;
+  schur.coeff = {as_const(coefficient.x), as_const(coefficient.y), as_const(coefficient.z)};
+  schur.hface = {as_const(enthalpy.x), as_const(enthalpy.y), as_const(enthalpy.z)};
+  const auto bytes = schur.owned_payload_bytes();
+  std::array<std::vector<std::uint8_t>, 3> activity;
+  for (int a=0; a<3; ++a) {
+    auto e=n; (a==0?e.x:a==1?e.y:e.z)++;
+    activity[a].assign(std::size_t(e.x)*e.y*e.z, 1U);
+  }
+  schur.continuity_activity.x_faces = {activity[0].data(), activity[0].size()};
+  schur.continuity_activity.y_faces = {activity[1].data(), activity[1].size()};
+  schur.continuity_activity.z_faces = {activity[2].data(), activity[2].size()};
+  const auto direction=[](Int3 c) { return 0.3 + 0.07*c.x*c.x - 0.11*c.y + 0.09*c.z; };
+  // Rebind nonzero, fully masked, then a changed partial mask. This catches
+  // stale coefficients in a persistent workspace, including the IBM face cut.
+  for (int binding=0; binding<3; ++binding) {
+    for (auto& flags:activity) std::fill(flags.begin(),flags.end(),binding==1?0U:1U);
+    if (binding==2) activity[0][schur.face_index(0,{2,1,1})]=0U;
+    schur.cert=certificate;
+    Status prepared, applied, closed;
+    {
+      allocation_observer::Guard guard;
+      prepared=schur.prepare();
+      if (prepared) {
+        schur.cells([&](Int3 c,std::size_t) {schur.fields[0].unchecked(c,0U)=direction(c);});
+        applied=schur.advect();
+      }
+      closed=schur.close();
+    }
+    passed &= expect(bool(prepared)&&bool(applied)&&bool(closed)&&
+        allocation_observer::count.load()==0U&&schur.owned_payload_bytes()==bytes,
+        "density rebind and halo response retain cold capacity without allocations");
+    if (!prepared || !applied) return false;
+    const auto flux=[&](int a,Int3 f,double epsilon) {
+      const int normal=a==0?f.x:a==1?f.y:f.z;
+      const int extent=a==0?n.x:a==1?n.y:n.z;
+      if (normal==0||normal==extent||!activity[a][schur.face_index(a,f)]) return 0.0;
+      auto l=f;(a==0?l.x:a==1?l.y:l.z)--;
+      // Independent physical central mass flux, perturbed at fixed velocity.
+      return 0.6*(1.2+epsilon*0.5*(direction(l)+direction(f)));
+    };
+    double error=0;
+    schur.cells([&](Int3 c,std::size_t) {
+      double fd=0;
+      constexpr double eps=1e-3;
+      for (int a=0;a<3;++a) {
+        auto f=c;(a==0?f.x:a==1?f.y:f.z)++;
+        fd+=(flux(a,f,eps)-flux(a,c,eps)-flux(a,f,-eps)+flux(a,c,-eps))/(2*eps);
+      }
+      error=std::max(error,std::abs(schur.fields[1].unchecked(c,0U)-fd));
+      error=std::max(error,std::abs(schur.fields[2].unchecked(c,0U)-3.0*fd));
+    });
+    passed &= expect(error<2e-12,"masked density C/E response matches physical flux finite difference");
+  }
+  passed &= expect(schur.halo.runtime_counters().begin_calls==3U,
+                   "owned density halo exposes all exchanges");
+  return passed;
+}
+
 bool test_exact_schur_and_recovery() {
   const Matrix continuity_pressure{{
       2.0, -1.0, 0.0,
@@ -905,6 +1055,67 @@ bool test_enthalpy_diagonal_retains_exact_thermodynamic_time_response() {
       static_cast<bool>(operation.apply(direction.view, response.view)) &&
       close(response.view.unchecked({0, 0, 0}, 0U), 3.0),
       "inactive IBM enthalpy rows remain identity without reading solid EOS");
+  return passed;
+}
+
+bool test_temporal_schur_preconditioner() {
+  EnthalpySpatialFixture fixture;
+  if (!make_enthalpy_spatial_fixture(fixture)) return false;
+  const auto cells = fixture.patch.cells;
+  auto rho = shaped_field(0U, 9901U, 9902U, cells, 1.2);
+  auto rp = shaped_field(1U, 9903U, 9904U, cells, 1e-5);
+  auto rh = shaped_field(2U, 9905U, 9906U, cells, -4e-6);
+  auto rhs = shaped_field(3U, 9907U, 9908U, cells, 0.0);
+  auto result = shaped_field(4U, 9909U, 9910U, cells, 0.0);
+  std::vector<std::uint8_t> active(rho.storage.size(), 1U);
+  active[0] = 0U;
+  rho.storage[0] = rp.storage[0] = rh.storage[0] =
+      std::numeric_limits<double>::quiet_NaN();
+  const PressureEnergyCellActivity activity{{active.data(), active.size()}, 9911U, 9912U};
+  LinearPreconditionerCertificate lifecycle;
+  lifecycle.identity = {9913U, 9914U, 9915U, 9916U, 9917U};
+  lifecycle.collective_fingerprint = 9918U;
+  detail::PressureEnergyTemporalPreconditioner pc;
+  bool passed = expect(!pc.apply(as_const(rhs.view), result.view, 0U),
+                       "unbound Schur preconditioner rejects apply");
+  passed &= expect(bool(pc.bind(fixture.kernels, 7.0, as_const(rho.view),
+      as_const(rp.view), as_const(rh.view), activity, lifecycle)),
+      "temporal Schur preconditioner binds with inactive NaN EOS values");
+  // Form the two physical BDF rows independently, eliminate h through C,
+  // and require the preconditioner to recover the prescribed p direction.
+  for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y)
+    for (int x=0; x<cells.x; ++x) {
+      const Int3 c{x,y,z};
+      const double p = 0.125 * (1+x+y+z), h = -34000.0, kinetic = 120.0;
+      const double av = 7.0 * detail::cell_volume(fixture.kernels, c);
+      const double dp = rp.view.unchecked(c,0U), dh = rh.view.unchecked(c,0U);
+      const double ep = av * ((h+kinetic)*dp-1.0);
+      const double eh = av * (rho.view.unchecked(c,0U)+(h+kinetic)*dh);
+      rhs.view.unchecked(c,0U) = ep*p + eh*(-dp*p/dh);
+    }
+  Status applied;
+  {
+    allocation_observer::Guard guard;
+    applied = pc.apply(as_const(rhs.view), result.view, 0U);
+  }
+  passed &= expect(bool(applied) && allocation_observer::count.load() == 0U &&
+                   pc.applications() == 1U,
+                   "temporal preconditioner apply allocates no storage");
+  for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y)
+    for (int x=0; x<cells.x; ++x) {
+      const double expected = x+y+z == 0 ? 0.0 : 0.125*(1+x+y+z);
+      passed &= expect(std::abs(result.view.unchecked({x,y,z},0U)-expected)<1e-13,
+                       "temporal Schur inverse recovers pressure and closes solid rows");
+    }
+  passed &= expect(!pc.apply(as_const(rhs.view), rhs.view, 0U) &&
+                   !pc.apply(as_const(rhs.view), rho.view, 0U),
+                   "preconditioner rejects vector and EOS storage aliasing");
+  const auto certificate = pc.certificate();
+  rh.storage[1] = 0.0;
+  passed &= expect(!pc.bind(fixture.kernels, 7.0, as_const(rho.view),
+      as_const(rp.view), as_const(rh.view), activity, lifecycle) &&
+      pc.certificate().collective_fingerprint == certificate.collective_fingerprint,
+      "invalid active EOS rejects binding without replacing the prior certificate");
   return passed;
 }
 
@@ -1981,10 +2192,11 @@ bool test_enthalpy_spatial_periodic_mpi_and_inactive_interfaces() {
   return global_pass == 1;
 }
 
-bool test_enthalpy_semismooth_limiter_certificate(ConvectionScheme scheme) {
+bool test_enthalpy_semismooth_limiter_certificate(ConvectionScheme scheme,
+    MPI_Comm communicator = MPI_COMM_SELF) {
   EnthalpySpatialFixture fixture;
   bool passed =
-      expect(make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, false, true,
+      expect(make_enthalpy_spatial_fixture(fixture, communicator, false, true,
                                            scheme),
              "limited-convection E_h fixture compiles");
   if (!passed)
@@ -2042,7 +2254,7 @@ bool test_enthalpy_semismooth_limiter_certificate(ConvectionScheme scheme) {
   binding.boundary = &fixture.boundary;
   binding.patch = fixture.patch;
   binding.convection = fixture.schemes.enthalpy();
-  binding.services = {MPI_COMM_SELF, &fixture.halo, 8923U, 5U, 6U};
+  binding.services = {communicator, &fixture.halo, 8923U, 5U, 6U};
   binding.authority = {
       {2.0, -2.0, 0.0, 1U},         8924U, fixture.geometry.topology_revision(),
       fixture.boundary.revision(),  8925U, 8926U,
@@ -2135,6 +2347,63 @@ bool test_enthalpy_semismooth_limiter_certificate(ConvectionScheme scheme) {
                        static_cast<bool>(close_status) && prepared_equal &&
                        !prepared_epoch.valid(),
                    "prepared limited E_h epoch preserves the exact action");
+
+  detail::PressureEnergyCoupledSchur coupled;
+  coupled.eh = &semismooth;
+  coupled.fields[5] = direction.view;
+  coupled.fields[6] = prepared_output.view;
+  const auto controls_before =
+      fixture.halo.runtime_counters().control_consensus_calls;
+  Status coupled_prepare, coupled_apply, coupled_close;
+  {
+    allocation_observer::Guard guard;
+    coupled_prepare = coupled.prepare_enthalpy();
+    if (coupled_prepare)
+      coupled_apply = coupled.apply_eh();
+    coupled_close = coupled.close();
+  }
+  passed &=
+      expect(coupled_prepare && coupled_apply && coupled_close &&
+                 prepared_output.storage == output.storage &&
+                 allocation_observer::count.load() == 0U &&
+                 fixture.halo.runtime_counters().control_consensus_calls ==
+                     controls_before,
+             "coupled prepared enthalpy preserves response without repeated "
+             "Halo consensus");
+  passed &=
+      expect(bool(semismooth.apply(direction.view, prepared_output.view)),
+             "ordinary enthalpy apply resumes after coupled epoch closes");
+  // One rank fails after epoch entry. Every rank must finish the same Halo
+  // payload schedule and regain the ordinary path after the explicit close.
+  int rank = 0;
+  MPI_Comm_rank(communicator, &rank);
+  const double saved_direction = direction.view.unchecked({1, 1, 1}, 0U);
+  const auto response_before_failure = prepared_output.storage;
+  const Status failure_prepare = coupled.prepare_enthalpy();
+  if (rank == 0)
+    direction.view.unchecked({1, 1, 1}, 0U) =
+        std::numeric_limits<double>::quiet_NaN();
+  const Status failed_apply =
+      failure_prepare ? coupled.apply_eh() : failure_prepare;
+  const auto provenance = coupled.failure_provenance();
+  const int local_failed = !failed_apply ? 1 : 0;
+  int failed_ranks = 0;
+  MPI_Allreduce(&local_failed, &failed_ranks, 1, MPI_INT, MPI_SUM,
+                communicator);
+  const Status failure_close = coupled.close();
+  direction.view.unchecked({1, 1, 1}, 0U) = saved_direction;
+  passed &= expect(
+      failure_prepare && failure_close && failed_ranks > 0 &&
+          (rank != 0 ||
+           (!failed_apply && provenance.status_scope ==
+                                 LinearOperatorStatusScope::rank_local)) &&
+          (failed_apply || prepared_output.storage == response_before_failure),
+      "coupled enthalpy local failure finishes payload and leaves output "
+      "uncommitted");
+  passed &= expect(
+      bool(semismooth.apply(direction.view, prepared_output.view)) &&
+          prepared_output.storage == output.storage,
+      "ordinary enthalpy action recovers exactly after failed prepared epoch");
 
   std::fill(prepared_output.storage.begin(), prepared_output.storage.end(),
             -3.0);
@@ -2598,10 +2867,11 @@ bool test_boundary_constant_h_and_directional_derivative() {
 // Analytic oracle for one frozen Cartesian target layer.  This deliberately
 // does not refresh EOS, transport, boundary coefficients, HbyA, rAU, or phi;
 // it must never be cited as a full-refresh/nonlinear Jacobian certificate.
-bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
+bool test_analytic_frozen_target_cartesian_four_block_fd_certificate(bool ibm_case=false, MPI_Comm communicator=MPI_COMM_SELF) {
   EnthalpySpatialFixture fixture;
   bool passed = expect(
-      make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, true, true),
+      make_enthalpy_spatial_fixture(fixture, communicator, true, true,
+          ConvectionScheme::limited_central2, ibm_case?8:4),
       "analytic frozen-target fixture compiles a periodic Cartesian layer");
   if (!passed) return false;
 
@@ -2640,7 +2910,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   equation_spec.velocity_gradient = 9U;
   equation_spec.pressure_reference = PressureReferenceKind::closed_mass;
   equation_spec.closed_mass_service_stage = 1U;
-  equation_spec.maximum_cells_per_rank = 64U;
+  equation_spec.maximum_cells_per_rank = static_cast<std::uint64_t>(fixture.patch.cells.x)*fixture.patch.cells.y*fixture.patch.cells.z;
   passed &= expect(
       static_cast<bool>(ThermodynamicsPlan::compile(thermophysical, {},
                                                     thermodynamics)) &&
@@ -2650,7 +2920,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
               {declared.data(), declared.size()})) &&
           static_cast<bool>(contributions.freeze()) &&
           static_cast<bool>(EquationPlanSet::compile(
-              MPI_COMM_SELF, fixture.schemes, fixture.geometry,
+              communicator, fixture.schemes, fixture.geometry,
               fixture.patch, fixture.boundary, contributions, thermodynamics,
               transport, equation_spec, equations)),
       "analytic frozen-target fixture compiles real pressure/enthalpy plans");
@@ -2668,7 +2938,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   piso_spec.gauge_tolerance = 1.0e-12;
   PisoPlan piso;
   passed &= expect(static_cast<bool>(PisoPlan::compile(
-                       MPI_COMM_SELF, equations, piso_spec, piso)),
+                       communicator, equations, piso_spec, piso)),
                    "analytic frozen-target fixture compiles the real PISO plan");
   if (!passed) return false;
 
@@ -2816,16 +3086,16 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   HaloEngine pressure_halo;
   passed &= expect(
       static_cast<bool>(coupler_halo.reserve(
-          MPI_COMM_SELF, fixture.patch,
+          communicator, fixture.patch,
           {coupler_halo_fields.data(), coupler_halo_fields.size()},
           fixture.boundary.halo_topology())) &&
           static_cast<bool>(pressure_halo.reserve(
-              MPI_COMM_SELF, fixture.patch,
+              communicator, fixture.patch,
               {pressure_halo_fields.data(), pressure_halo_fields.size()},
               fixture.boundary.halo_topology())),
       "analytic frozen-target fixture reserves PISO and pressure halos");
   const PisoCouplerServices coupler_services{
-      MPI_COMM_SELF, &fixture.geometry, fixture.patch, &fixture.boundary,
+      communicator, &fixture.geometry, fixture.patch, &fixture.boundary,
       &thermodynamics, &coupler_halo, 911U, density.view.field,
       &pressure_halo, 912U,
       pressure_direction_field};
@@ -2884,7 +3154,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
            static_cast<bool>(history_writer.publish_pending(
                {dependencies.data(), dependencies.size()}, pending)) &&
            static_cast<bool>(history_transaction.collective_finish(
-               MPI_COMM_SELF, Status{})) &&
+               communicator, Status{})) &&
            static_cast<bool>(history_writer.committed(history_storage,
                                                       committed));
   };
@@ -2998,7 +3268,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   PressureLinearOperator continuity_pressure;
   passed &= expect(
       static_cast<bool>(coupler.bind_pressure_operator(
-          {MPI_COMM_SELF, &pressure_halo, 914U, pressure_direction_field, 1U},
+          {communicator, &pressure_halo, 914U, pressure_direction_field, 1U},
           pressure_system, continuity_pressure)) &&
           static_cast<bool>(continuity_pressure.refresh(
               {pressure_certificate,
@@ -3167,7 +3437,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   energy_pressure_binding.boundary = &fixture.boundary;
   energy_pressure_binding.patch = fixture.patch;
   energy_pressure_binding.services = {
-      MPI_COMM_SELF, &pressure_halo, 914U, pressure_direction_field, 1U};
+      communicator, &pressure_halo, 914U, pressure_direction_field, 1U};
   energy_pressure_binding.intermediate = intermediate;
   energy_pressure_binding.pressure = pressure_certificate;
   energy_pressure_binding.temporal_diagonal =
@@ -3219,7 +3489,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   }};
   HaloEngine energy_halo;
   passed &= expect(static_cast<bool>(energy_halo.reserve(
-                       MPI_COMM_SELF, fixture.patch,
+                       communicator, fixture.patch,
                        {energy_halo_fields.data(), energy_halo_fields.size()},
                        fixture.boundary.halo_topology())),
                    "analytic frozen-target reserves the exact E_h halo");
@@ -3230,7 +3500,7 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
   energy_enthalpy_binding.patch = fixture.patch;
   energy_enthalpy_binding.convection = ConvectionScheme::central2;
   energy_enthalpy_binding.services = {
-      MPI_COMM_SELF, &energy_halo, 916U, enthalpy_direction_field,
+      communicator, &energy_halo, 916U, enthalpy_direction_field,
       delta_temperature.view.field};
   energy_enthalpy_binding.authority = {
       bdf,
@@ -3408,6 +3678,274 @@ bool test_analytic_frozen_target_cartesian_four_block_fd_certificate() {
       shaped_field(66U, 9227U, 10229U, cells, 0.0);
   OwnedField energy_enthalpy_action =
       shaped_field(67U, 9228U, 10230U, cells, 0.0);
+  // The IBM oracle needs three fluid normal bands. Its separate 8^3 grid
+  // reuses the real block setup; the FD oracle retains its 4^3 grid/tolerances.
+  if (ibm_case) {
+    OwnedField schur_action = shaped_field(93U, 9522U, 9523U, cells, 0.0);
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x)
+          pressure_direction.view.unchecked({x, y, z}, 0U) =
+              1.0 + 0.4 * x * x - 0.3 * y + 0.2 * z;
+    // Exercise the shared-halo Schur route with a real IBM continuity owner.
+    // Compare against independently applied blocks, including the solid rows
+    // and impermeable interface correction supplied by IbmPressureOperator.
+    auto ibm_triangles = test::force_cube();
+    for (auto &triangle : ibm_triangles)
+      for (Real3 *point : {&triangle.a, &triangle.b, &triangle.c}) {
+        point->x = 4.0 + 1.6 * point->x;
+        point->y = 4.0 + 1.6 * point->y;
+        point->z = 4.0 + 1.6 * point->z;
+      }
+    StlScanPlan ibm_scan;
+    ImmersedSurfacePlan ibm_surface;
+    EBTopology ibm_topology;
+    BoundaryStencilPlan ibm_boundary;
+    ImmersedPlanLimits ibm_limits;
+    Status ibm_status = StlScanCompiler::compile_triangles(
+        fixture.geometry, fixture.patch,
+        {ibm_triangles.data(), ibm_triangles.size()}, CartesianAxis::y,
+        test::kForceScanBudget, ibm_scan);
+    if (ibm_status)
+      ibm_status = ImmersedSurfaceCompiler::compile(ibm_scan, ibm_surface);
+    if (ibm_status)
+      ibm_status = EBTopologyCompiler::compile(
+          communicator, fixture.geometry, fixture.patch, ibm_scan, ibm_surface,
+          ImmersedFluidSide::outside, ibm_limits, ibm_topology);
+    if (ibm_status)
+      ibm_status = BoundaryStencilCompiler::compile(
+          communicator, fixture.geometry, fixture.patch, ibm_surface,
+          ibm_topology, ibm_limits, ibm_boundary);
+    const std::uint64_t local_links=ibm_topology.links().size;
+    std::uint64_t global_links=0U;
+    MPI_Allreduce(&local_links,&global_links,1,MPI_UINT64_T,MPI_SUM,communicator);
+    passed &= expect(bool(ibm_status) && global_links > 0U,
+                     "real IBM shared Schur topology compiles");
+    if (!passed) {
+      std::cerr << "IBM topology status=" << unsigned(ibm_status.code) << '/'
+                << ibm_status.detail << '\n';
+      return false;
+    }
+    const auto ibm_index = [&](Int3 e, Int3 c) {
+      return std::size_t(c.x) +
+             std::size_t(e.x) * (c.y + std::size_t(e.y) * c.z);
+    };
+    std::vector<std::uint8_t> ibm_cells(
+        std::size_t(cells.x) * cells.y * cells.z, 1U);
+    for (std::size_t i = 0; i < ibm_cells.size(); ++i)
+      ibm_cells[i] = ibm_topology.region().data[i] !=
+                     static_cast<std::uint8_t>(RegionFlag::solid);
+    std::array<std::vector<std::uint8_t>, 3> ibm_faces;
+    for (int a = 0; a < 3; ++a) {
+      auto extent = cells;
+      (a == 0 ? extent.x : a == 1 ? extent.y : extent.z)++;
+      ibm_faces[a].assign(std::size_t(extent.x) * extent.y * extent.z, 1U);
+      for (int z = 0; z < extent.z; ++z)
+        for (int y = 0; y < extent.y; ++y)
+          for (int x = 0; x < extent.x; ++x) {
+            const Int3 f{x, y, z};
+            auto l = f;
+            (a == 0 ? l.x : a == 1 ? l.y : l.z)--;
+            const auto fluid = [&](Int3 c) {
+              return c.x < 0 || c.y < 0 || c.z < 0 || c.x >= cells.x ||
+                     c.y >= cells.y || c.z >= cells.z ||
+                     ibm_cells[ibm_index(cells, c)] != 0U;
+            };
+            ibm_faces[a][ibm_index(extent, f)] = fluid(l) && fluid(f);
+          }
+    }
+    PressureContinuityActivityView ibm_activity{
+        {ibm_cells.data(), ibm_cells.size()},
+        {ibm_faces[0].data(), ibm_faces[0].size()},
+        {ibm_faces[1].data(), ibm_faces[1].size()},
+        {ibm_faces[2].data(), ibm_faces[2].size()},
+        9520U,
+        9521U};
+    IbmPressureOperator ibm_pressure;
+    ibm_status = IbmPressureOperator::bind(
+        continuity_pressure, ibm_topology, ibm_boundary,
+        as_const(pressure_coefficient.x), as_const(pressure_coefficient.y),
+        as_const(pressure_coefficient.z), fixture.geometry.topology_revision(),
+        ibm_pressure);
+    auto ibm_ep_binding = energy_pressure_binding;
+    ibm_ep_binding.pressure_work = {};
+    ibm_ep_binding.activity = ibm_activity;
+    auto ibm_eh_binding = energy_enthalpy_binding;
+    ibm_eh_binding.activity = ibm_activity;
+    PressureEnergyPressureFluxOperator ibm_ep;
+    PressureEnergyPressureFluxCertificate ibm_ep_cert;
+    PressureEnergyEnthalpyOperator ibm_eh;
+    PressureEnergyEnthalpyCertificate ibm_eh_cert;
+    if (ibm_status)
+      ibm_status = PressureEnergyPressureFluxOperator::bind(
+          ibm_ep_binding, ibm_ep, ibm_ep_cert);
+    if (ibm_status)
+      ibm_status = PressureEnergyEnthalpyOperator::bind(ibm_eh_binding, ibm_eh,
+                                                        ibm_eh_cert);
+    auto ibm_binding = schur_binding;
+    ibm_binding.continuity_pressure = &ibm_pressure;
+    ibm_binding.energy_pressure = &ibm_ep;
+    ibm_binding.energy_enthalpy = &ibm_eh;
+    ibm_binding.activity = {ibm_activity.cells, ibm_activity.local_fingerprint,
+                            ibm_activity.collective_fingerprint};
+    if (ibm_status)
+      ibm_status =
+          PressureEnergySchurBlockAuthority::ibm_cartesian_spatial_quasi_newton(
+              ibm_ep, ibm_eh, ibm_binding.block_authority);
+    PressureEnergySchurOperator ibm_schur;
+    PressureEnergyJacobianCertificate ibm_jacobian;
+    if (ibm_status)
+      ibm_status = PressureEnergySchurOperator::bind(ibm_binding, ibm_schur,
+                                                     ibm_jacobian);
+    passed &= expect(
+        ibm_status && ibm_jacobian.shared_pressure.valid() &&
+            ibm_jacobian.shared_pressure.scope() ==
+                PressureEnergySharedPressureScope::ibm_decorated,
+        "real IBM continuity owner obtains shared pressure exchange authority");
+    if (!passed) {
+      std::cerr << "IBM Schur status=" << unsigned(ibm_status.code) << '/'
+                << ibm_status.detail << '\n';
+      return false;
+    }
+    ibm_status = ibm_pressure.apply(pressure_direction.view,
+                                    continuity_pressure_action.view);
+    if (ibm_status)
+      ibm_status =
+          ibm_ep.apply(pressure_direction.view, energy_pressure_action.view);
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x) {
+          const Int3 c{x, y, z};
+          schur_enthalpy_workspace.view.unchecked(c, 0U) =
+              ibm_cells[ibm_index(cells, c)]
+                  ? continuity_pressure_action.view.unchecked(c, 0U) /
+                        continuity_enthalpy.view.unchecked(c, 0U)
+                  : 0.0;
+        }
+    if (ibm_status)
+      ibm_status = ibm_eh.apply(schur_enthalpy_workspace.view,
+                                energy_enthalpy_action.view);
+    if (ibm_status)
+      ibm_status = ibm_schur.apply(pressure_direction.view, schur_action.view);
+    double ibm_error = 0.0;
+    for (int z = 0; z < cells.z; ++z)
+      for (int y = 0; y < cells.y; ++y)
+        for (int x = 0; x < cells.x; ++x) {
+          const Int3 c{x, y, z};
+          const double expected =
+              ibm_cells[ibm_index(cells, c)]
+                  ? energy_pressure_action.view.unchecked(c, 0U) -
+                        energy_enthalpy_action.view.unchecked(c, 0U)
+                  : pressure_direction.view.unchecked(c, 0U);
+          ibm_error =
+              std::max(ibm_error,
+                       std::abs(schur_action.view.unchecked(c, 0U) - expected) /
+                           std::max(1.0, std::abs(expected)));
+        }
+    std::cout << "ibm-shared-schur-block-error=" << ibm_error << '\n';
+    passed &= expect(ibm_status && ibm_error < 5e-12,
+                     "shared IBM Schur preserves solid rows and interface "
+                     "matrix correction");
+
+    ReductionEngine pair_reductions;
+    passed &= expect(bool(ReductionEngine::compile(communicator,
+                                                   ReductionMode::mpi_allreduce,
+                                                   4U, pair_reductions)),
+                     "paired pressure reductions compile");
+    detail::PressureEnergyCoupledSchur pair;
+    pair.cp = &ibm_pressure;
+    pair.ep = &ibm_ep;
+    pair.pressure_pair = &ibm_schur;
+    pair.reductions = &pair_reductions;
+    pair.cert = ibm_schur.certificate();
+    pair.pressure_input_field = pressure_direction.view.field;
+    pair.fields[3] = continuity_pressure_action.view;
+    pair.fields[4] = energy_pressure_action.view;
+    const auto cp_reference = continuity_pressure_action.storage;
+    const auto ep_reference = energy_pressure_action.storage;
+    const auto exchanges_before = pressure_halo.runtime_counters().begin_calls;
+    Status pair_status;
+    {
+      allocation_observer::Guard guard;
+      pair_status = pair.pressure_blocks(pressure_direction.view);
+    }
+    passed &= expect(
+        pair_status && cp_reference == continuity_pressure_action.storage &&
+            ep_reference == energy_pressure_action.storage &&
+            allocation_observer::count.load() == 0U &&
+            pressure_halo.runtime_counters().begin_calls ==
+                exchanges_before + 1U,
+        "coupled pressure pair reuses one exchange and retains IBM action");
+    int pair_rank = 0;
+    MPI_Comm_rank(communicator, &pair_rank);
+    auto invalid_pressure = pressure_direction.view;
+    if (pair_rank == 0)
+      invalid_pressure.field = std::numeric_limits<FieldId>::max();
+    const auto entry_exchanges = pressure_halo.runtime_counters().begin_calls;
+    const auto invalid_status = pair.pressure_blocks(invalid_pressure);
+    passed &= expect(
+        invalid_status.code == StatusCode::invalid_plan &&
+            pair.failure_provenance().status_scope ==
+                LinearOperatorStatusScope::collective &&
+            pair.failure_provenance().lowest_failing_rank == 0 &&
+            pressure_halo.runtime_counters().begin_calls == entry_exchanges,
+        "rank-local pressure metadata failure agrees before shared Halo");
+    const double saved_pressure =
+        pressure_direction.view.unchecked({1, 1, 1}, 0U);
+    if (pair_rank == 0)
+      pressure_direction.view.unchecked({1, 1, 1}, 0U) =
+          std::numeric_limits<double>::quiet_NaN();
+    const auto arithmetic_status =
+        pair.pressure_blocks(pressure_direction.view);
+    passed &= expect(arithmetic_status.code == StatusCode::numerical_failure &&
+                         pair.failure_provenance().status_scope ==
+                             LinearOperatorStatusScope::collective &&
+                         pair.failure_provenance().lowest_failing_rank == 0,
+                     "rank-local pressure arithmetic failure agrees before "
+                     "subsequent payloads");
+    pressure_direction.view.unchecked({1, 1, 1}, 0U) = saved_pressure;
+    passed &= expect(bool(pair.pressure_blocks(pressure_direction.view)) &&
+                         cp_reference == continuity_pressure_action.storage &&
+                         ep_reference == energy_pressure_action.storage,
+                     "shared pressure pair recovers both exact blocks after a "
+                     "local failure");
+    pair.pressure_pair = nullptr;
+    int pair_size = 0;
+    MPI_Comm_size(communicator, &pair_size);
+    invalid_pressure = pressure_direction.view;
+    if (pair_rank == pair_size - 1)
+      invalid_pressure.field = std::numeric_limits<FieldId>::max();
+    const auto fallback_exchanges = pressure_halo.runtime_counters().begin_calls;
+    const auto fallback_status = pair.pressure_blocks(invalid_pressure);
+    passed &= expect(
+        fallback_status.code == StatusCode::invalid_plan &&
+            pair.failure_provenance().status_scope ==
+                LinearOperatorStatusScope::collective &&
+            pair.failure_provenance().lowest_failing_rank == pair_size - 1 &&
+            pressure_halo.runtime_counters().begin_calls == fallback_exchanges,
+        "generic pressure pair agrees invalid metadata before Halo");
+    passed &= expect(bool(pair.pressure_blocks(pressure_direction.view)) &&
+                         cp_reference == continuity_pressure_action.storage &&
+                         ep_reference == energy_pressure_action.storage,
+                     "generic pressure pair retains both independent blocks");
+    if (pair_rank == pair_size - 1)
+      pressure_direction.view.unchecked({1, 1, 1}, 0U) =
+          std::numeric_limits<double>::quiet_NaN();
+    const auto fallback_arithmetic = pair.pressure_blocks(pressure_direction.view);
+    passed &= expect(
+        fallback_arithmetic.code == StatusCode::numerical_failure &&
+            pair.failure_provenance().status_scope ==
+                LinearOperatorStatusScope::collective &&
+            pair.failure_provenance().lowest_failing_rank == pair_size - 1,
+        "generic pressure pair preserves the original failing rank");
+    pressure_direction.view.unchecked({1, 1, 1}, 0U) = saved_pressure;
+    passed &= expect(bool(pair.pressure_blocks(pressure_direction.view)) &&
+                         cp_reference == continuity_pressure_action.storage &&
+                         ep_reference == energy_pressure_action.storage,
+                     "generic pressure pair recovers after arithmetic failure");
+    return passed;
+  }
+
   std::vector<double> base_pressure(local_cells, 0.0);
   std::vector<double> base_enthalpy(local_cells, 0.0);
   std::vector<double> pressure_probe(local_cells, 0.0);
@@ -4463,6 +5001,42 @@ ThermodynamicsPlan constant_cp_thermodynamics(double cp,
   return plan;
 }
 
+bool test_mixture_binding_replaces_faces() {
+  EnthalpySpatialFixture fixture;
+  if (!make_enthalpy_spatial_fixture(fixture)) return false;
+  const auto n=fixture.patch.cells;
+  auto h=ghosted_field(3U,1U,9301U,n,1U,301500.0);
+  auto t=ghosted_field(4U,1U,9302U,n,1U,300.0);
+  auto cp=ghosted_field(6U,1U,9303U,n,1U,1005.0);
+  auto flow=face_bundle(n,9304U,9305U,0.7);
+  auto coeff=face_bundle(n,9306U,9307U,1.0);
+  auto thermo=constant_cp_thermodynamics(1005.0,287.0);
+  PressureCorrectionBoundaryPlan boundary;
+  if (!PressureCorrectionBoundaryPlan::compile(fixture.geometry,fixture.patch,fixture.boundary,boundary))return false;
+  detail::SchurMixture mixture;
+  mixture.reserve(n,0U);
+  bool passed=true;
+  for(int binding=0;binding<2;++binding) {
+    for(auto& axis:mixture.faces)for(auto& face:axis){face.h.fill(12.0);face.p=34.0;}
+    Status status;
+    {
+      allocation_observer::Guard guard;
+      status=mixture.bind(boundary,fixture.kernels,thermo,
+          ConvectionScheme::central2,ConvectionScheme::central2,
+          as_const(h.view),as_const(t.view),as_const(cp.view),{},
+          flux_view(flow,1U),{as_const(coeff.x),as_const(coeff.y),as_const(coeff.z)});
+    }
+    bool zero=true;
+    for(const auto& axis:mixture.faces)for(const auto& face:axis){
+      zero=zero&&face.p==0.0;for(double weight:face.h)zero=zero&&weight==0.0;
+    }
+    passed &= expect(bool(status)&&zero&&allocation_observer::count.load()==0U,
+        "central one-ghost mixture rebind replaces stale face weights without allocation");
+    std::fill(flow.storage.begin(),flow.storage.end(),0.0);
+  }
+  return passed;
+}
+
 BdfCoefficients bdf(double dt, double ratio) {
   if (ratio == 0.0) return {1.0 / dt, -1.0 / dt, 0.0, 1U};
   return {(1.0 + 2.0 * ratio) / ((1.0 + ratio) * dt),
@@ -4718,15 +5292,27 @@ int main(int argc, char** argv) {
   passed &= test_enthalpy_semismooth_limiter_certificate(
       ConvectionScheme::limited_central2);
   passed &= test_enthalpy_semismooth_limiter_certificate(ConvectionScheme::tvd2);
+  int ranks=0;
+  MPI_Comm_size(MPI_COMM_WORLD,&ranks);
+  if(ranks>1) {
+    passed &= test_enthalpy_semismooth_limiter_certificate(ConvectionScheme::limited_central2,MPI_COMM_WORLD);
+    passed &= test_enthalpy_semismooth_limiter_certificate(ConvectionScheme::tvd2,MPI_COMM_WORLD);
+  }
   passed &= test_diagonal_operator_activity_and_identity();
   passed &= test_ibm_double_diagonal_typed_schur_authority();
   passed &= test_enthalpy_diagonal_retains_exact_thermodynamic_time_response();
   passed &= test_total_energy_spatial_temporal_response();
+  passed &= test_temporal_schur_preconditioner();
+  passed &= test_pressure_direction_history();
+  passed &= test_coupled_density_face_response();
+  passed &= test_mixture_binding_replaces_faces();
   passed &= test_mass_flow_three_cell_pressure_flux_red();
   passed &= test_boundary_constant_h_and_directional_derivative();
   passed &= test_periodic_and_ibm_pressure_flux_semantics();
   passed &=
       test_analytic_frozen_target_cartesian_four_block_fd_certificate();
+  passed &= test_analytic_frozen_target_cartesian_four_block_fd_certificate(true);
+  if(ranks>1) passed &= test_analytic_frozen_target_cartesian_four_block_fd_certificate(true,MPI_COMM_WORLD);
   passed &= test_masked_solid_rows_rhs_sign_and_stale_components();
   passed &= test_thermodynamic_tangent_and_frozen_mutations();
   passed &= test_pressure_rate_modal_oracle();

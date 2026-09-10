@@ -51,6 +51,7 @@ struct PlanSummary {
   double terminal_continuity_tolerance{};
   double terminal_closed_mass_tolerance{};
   double terminal_gauge_tolerance{};
+  bool unity_lewis_enthalpy{};
   bool immersed{};
   IbmReconstructionAudit ibm_boundary_reconstruction{};
   IbmReconstructionAudit ibm_surface_reconstruction{};
@@ -138,6 +139,11 @@ class ProductCompiler {
                         const std::filesystem::path& case_root,
                         CompiledCasePlan& out,
                         ProductCouplingBindings coupling = {}) noexcept;
+  // Bind one validated source plan for explicit transport-history recovery.
+  static Status compile_transport_restart(MPI_Comm communicator,
+      const ValidatedModel& source, const std::filesystem::path& source_root,
+      const ValidatedModel& target, const std::filesystem::path& target_root,
+      CompiledCasePlan& out) noexcept;
 };
 
 }  // namespace hundun::v04

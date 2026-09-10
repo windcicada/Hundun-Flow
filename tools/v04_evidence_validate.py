@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Set
 
 SCHEMA = "HUNDUN_V04_CANDIDATE_V1"
 RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V8"
+COLD_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V9"
 V7_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V7"
 V6_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V6"
 V5_RUNTIME_SCHEMA = "HUNDUN_V04_EVIDENCE_V5"
@@ -866,7 +867,7 @@ def validate_v6_v8_candidate_identity(record: Dict[str, Any],
         record.get("candidate_identity"), V6_CANDIDATE_IDENTITY_FIELDS,
         prefix)
     runtime_schema = record.get("schema")
-    if runtime_schema in (RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA):
+    if runtime_schema in (COLD_RUNTIME_SCHEMA, RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA):
         identity_schema = "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2"
     elif runtime_schema == V6_RUNTIME_SCHEMA:
         identity_schema = "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V1"
@@ -884,7 +885,7 @@ def validate_v6_v8_candidate_identity(record: Dict[str, Any],
     payload = (
         f"schema={identity_schema}\n" +
         (f"evidence_schema={runtime_schema}\n"
-         if runtime_schema in (RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA) else "") +
+         if runtime_schema in (COLD_RUNTIME_SCHEMA, RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA) else "") +
         f"head={identity['head']}\n"
         f"tree={identity['tree']}\n"
         f"build_manifest_sha256={identity['build_manifest_sha256']}\n"
@@ -943,6 +944,10 @@ def validate_v6_run_start(record: Dict[str, Any],
         source = require_integer(history["source_signature"], f"{prefix}.source_signature", 0)
         target = require_integer(history["target_signature"], f"{prefix}.target_signature", 1)
         rebuild = history["policy"] == "rebuild_method_history"
+        if "transport_source_case" in history:
+            require_integer(history["transport_source_case"], f"{prefix}.transport_source_case", 1)
+            if not rebuild or version < 3 or record.get("coupling") != "CN_BE":
+                raise EvidenceError(f"{prefix} has incompatible transport recovery")
         if (kind != "restart" or version not in (1, 2, 3, 4, 5) or
                 (version < 3 and source != 0) or (version >= 3 and source == 0) or
                 history["policy"] not in ("require_compatible", "rebuild_method_history") or
@@ -1033,6 +1038,102 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
     }
 
 
+def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
+    prefix = f"line {line_number}: V9 CN/BE"
+    require_object_fields(record, V3_REQUIRED_FIELDS + V8_COUPLING_FIELDS +
+                          V4_REFINEMENT_FIELDS + ("cold",), prefix)
+    validate_v3_top_level_types(record, line_number)
+    if (record["coupling"] != "CN_BE" or
+            record["pressure_solve_contract"] != "coast_cn_be" or
+            record["requested_bdf_order"] != 1 or record["bdf_order"] != 1 or
+            record["temporal_method_fallback"] or
+            record["pressure_solve_calls"] != 0 or record["pressure"] != [] or
+            record["momentum_predictor_solve_calls"] != 0 or
+            require_integer(record["momentum_predictor_passes"], prefix) != 0 or
+            record["momentum_predictor"] != [] or
+            record["pressure_energy_refinement_solve_calls"] != 0 or
+            record["pressure_energy_refinement"] != [] or
+            record["pressure_energy_refinement_termination"] != "none"):
+        raise EvidenceError(f"{prefix} fabricates a legacy solve or time method")
+    cold = require_object_fields(record["cold"], (
+        "outer_iterations", "momentum_solve_calls", "pressure_solve_calls",
+        "enthalpy_solve_calls", "species_solve_calls", "momentum_iterations",
+        "pressure_iterations", "enthalpy_iterations", "species_iterations",
+        "momentum_residual", "enthalpy_residual", "species_residual",
+        "solid_velocity_max", "normalization", "final_momentum",
+        "final_pressure", "final_enthalpy"), prefix)
+    outer = require_integer(cold["outer_iterations"], prefix, 1, 16)
+    for name in ("momentum", "pressure", "enthalpy", "species"):
+        calls = require_integer(cold[name + "_solve_calls"], prefix, 1)
+        if calls != outer * (3 if name == "momentum" else 1):
+            raise EvidenceError(f"{prefix} has incoherent {name} call counts")
+        require_integer(cold[name + "_iterations"], prefix)
+    if record["linear_iterations"] < sum(cold[name + "_iterations"]
+            for name in ("momentum", "pressure", "enthalpy", "species")):
+        raise EvidenceError(f"{prefix} drops split iterations from the resource total")
+    for name in ("momentum_residual", "enthalpy_residual", "species_residual",
+                 "solid_velocity_max"):
+        require_nonnegative_finite_number(cold[name], f"{prefix}.{name}")
+    if cold["solid_velocity_max"] != 0:
+        raise EvidenceError(f"{prefix} has nonzero solid velocity")
+
+    def accepted_solve(solve):
+        require_object_fields(solve, ("status_code", "termination", "iterations",
+            "initial_true_residual", "final_true_residual", "recursive_residual"), prefix)
+        if (require_integer(solve["status_code"], prefix) != 0 or
+                solve["termination"] not in ("converged", "zero_rhs")):
+            raise EvidenceError(f"{prefix} has an unconverged final solve")
+        for name in ("initial_true_residual", "final_true_residual", "recursive_residual"):
+            require_nonnegative_finite_number(solve[name], prefix)
+        return require_integer(solve["iterations"], prefix)
+
+    momentum = cold["final_momentum"]
+    if not isinstance(momentum, list) or len(momentum) != 3:
+        raise EvidenceError(f"{prefix} requires three final momentum solves")
+    if (sum(accepted_solve(solve) for solve in momentum) > cold["momentum_iterations"] or
+            accepted_solve(cold["final_pressure"]) > cold["pressure_iterations"] or
+            accepted_solve(cold["final_enthalpy"]) > cold["enthalpy_iterations"]):
+        raise EvidenceError(f"{prefix} has inconsistent iteration totals")
+    terminal = require_object_fields(record["terminal_physical_audit"],
+                                     V3_TERMINAL_FIELDS, prefix)
+    validate_v3_terminal_audit(terminal, "coast_cn_be", line_number)
+    if (terminal["eos_residual"] > 128 * float.fromhex("0x1p-52")):
+        raise EvidenceError(f"{prefix} EOS is outside the cold roundoff gate")
+    reference_fields = ("reference_time", "reference_tolerances", "reference_residuals",
+        "momentum_reference_scale", "enthalpy_reference_scale", "species_reference_scales")
+    if cold["normalization"] == "coast_reference":
+        require_object_fields(cold, reference_fields, prefix)
+        for name in ("reference_time", "momentum_reference_scale", "enthalpy_reference_scale"):
+            if require_nonnegative_finite_number(cold[name], prefix) == 0:
+                raise EvidenceError(f"{prefix} has a zero {name}")
+        scales = cold["species_reference_scales"]
+        if not isinstance(scales, list) or len(scales) < 2:
+            raise EvidenceError(f"{prefix} omits dependent species scale")
+        for scale in scales:
+            if require_nonnegative_finite_number(scale, prefix) == 0:
+                raise EvidenceError(f"{prefix} has zero species scale")
+        tolerances, residuals = cold["reference_tolerances"], cold["reference_residuals"]
+        if any(not isinstance(a, list) or len(a) != 3 for a in (tolerances, residuals)):
+            raise EvidenceError(f"{prefix} needs U/h/Y reference gates")
+        for residual, tolerance in zip(residuals, tolerances):
+            require_nonnegative_finite_number(residual, prefix)
+            require_nonnegative_finite_number(tolerance, prefix)
+            if not 0 < tolerance < 1 or residual > tolerance:
+                raise EvidenceError(f"{prefix} exceeds a reference gate")
+        if (terminal["energy_residual"] != residuals[1] or
+                terminal["energy_tolerance"] != tolerances[1]):
+            raise EvidenceError(f"{prefix} energy normalization disagrees")
+    elif cold["normalization"] == "local_time":
+        if (any(name in cold for name in reference_fields) or
+                cold["momentum_residual"] > 1e-10 or
+                cold["enthalpy_residual"] > 1e-10 or
+                cold["species_residual"] > 128 * float.fromhex("0x1p-52") or
+                terminal["energy_residual"] != cold["enthalpy_residual"]):
+            raise EvidenceError(f"{prefix} fails local-time stopping")
+    else:
+        raise EvidenceError(f"{prefix} has unknown normalization")
+
+
 def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
                                   refinement_capacity: int) -> str:
     """Validate immutable identity, first-step time, AFC and CFL V6-V8 data."""
@@ -1044,6 +1145,9 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
     validate_v6_v8_candidate_identity(record, line_number)
     validate_v6_run_start(record, line_number)
 
+    is_cold = record.get("schema") == COLD_RUNTIME_SCHEMA
+    if is_cold:
+        validate_v9_cold_record(record, line_number)
     if record.get("schema") == RUNTIME_SCHEMA:
         require_object_fields(record, V8_COUPLING_FIELDS, prefix)
         coupling = record["coupling"]
@@ -1162,6 +1266,13 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
     advective = require_object_fields(
         limiter["advective_cfl"], V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS,
         f"{prefix}.momentum_predictor_limiter.advective_cfl")
+    if is_cold:
+        if (require_boolean(advective["present"], prefix) or
+                applicability != "not_applicable" or
+                any(require_nonnegative_finite_number(advective[name], prefix) != 0
+                    for name in V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS if name != "present")):
+            raise EvidenceError(f"{prefix} fabricates a legacy advective certificate")
+        return "coast_cn_be"
     if not require_boolean(advective["present"],
                            f"{prefix}.advective CFL.present"):
         raise EvidenceError(f"{prefix}.advective CFL must be present")
@@ -1824,7 +1935,7 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                 raise EvidenceError(
                     f"line {line_number}: runtime record must be an object")
             schema = record.get("schema")
-            if schema not in (RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA,
+            if schema not in (COLD_RUNTIME_SCHEMA, RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA,
                               V6_RUNTIME_SCHEMA,
                               V5_RUNTIME_SCHEMA,
                               V4_RUNTIME_SCHEMA,
@@ -1836,15 +1947,18 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
             elif schema != run_schema:
                 raise EvidenceError(
                     f"line {line_number}: runtime schema changed within one file")
+            is_cold = schema == COLD_RUNTIME_SCHEMA
+            if not is_cold and "cold" in record:
+                raise EvidenceError(f"line {line_number}: historical schema carries cold data")
             is_v8 = schema == RUNTIME_SCHEMA
             is_v7 = schema == V7_RUNTIME_SCHEMA
             is_v6 = schema == V6_RUNTIME_SCHEMA
-            is_modern = is_v8 or is_v7 or is_v6
+            is_modern = is_cold or is_v8 or is_v7 or is_v6
             is_v5 = schema == V5_RUNTIME_SCHEMA
             is_v4 = schema == V4_RUNTIME_SCHEMA
             is_v3 = schema == V3_RUNTIME_SCHEMA
             is_v2 = schema == V2_RUNTIME_SCHEMA
-            if not is_v8:
+            if not (is_v8 or is_cold):
                 reject_v8_fields_in_pre_v8(record, line_number)
             if not is_modern:
                 reject_v6_fields_in_pre_v6(record, line_number)
@@ -1865,7 +1979,7 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                     record, line_number)
             else:
                 pressure_contract = None
-            if is_modern:
+            if is_modern and not is_cold:
                 validate_v4_refinement(
                     record, line_number,
                     PRESSURE_ENERGY_REFINEMENT_CAPACITY
@@ -1943,6 +2057,10 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                         raise EvidenceError(
                             f"line {line_number}: V6/V7/V8 previous committed "
                             "time does not bind the adjacent row")
+                    if is_cold:
+                        for field in ("normalization", "reference_time", "reference_tolerances"):
+                            if record["cold"].get(field) != prior_modern_record["cold"].get(field):
+                                raise EvidenceError(f"line {line_number}: cold stopping configuration changed")
                     current_advective = record[
                         "momentum_predictor_limiter"]["advective_cfl"]
                     prior_advective = prior_modern_record[
@@ -2026,7 +2144,7 @@ def validate_runtime(path: Path, run_start_manifest: Path = None) -> None:
                     pressure_calls is None:
                 raise EvidenceError(
                     f"line {line_number}: {schema} lacks pressure evidence")
-            if pressure is not None or pressure_calls is not None:
+            if not is_cold and (pressure is not None or pressure_calls is not None):
                 if pressure_calls != 2 or not isinstance(pressure, list) or \
                         len(pressure) != 2:
                     raise EvidenceError(
@@ -2789,7 +2907,7 @@ def self_test() -> None:
 
         def make_candidate_identity(executable, runtime_schema,
                                     build_manifest="3" * 64):
-            if runtime_schema in (RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA):
+            if runtime_schema in (COLD_RUNTIME_SCHEMA, RUNTIME_SCHEMA, V7_RUNTIME_SCHEMA):
                 identity_schema = \
                     "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2"
                 evidence_binding = f"evidence_schema={runtime_schema}\n"
@@ -2888,6 +3006,64 @@ def self_test() -> None:
         }
         runtime_path.write_text(json.dumps(runtime_v8) + "\n",
                                 encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        runtime_cold = json.loads(json.dumps(runtime_v8))
+        runtime_cold.update({
+            "schema": COLD_RUNTIME_SCHEMA, "linear_iterations": 24,
+            "candidate_identity": make_candidate_identity("4" * 64, COLD_RUNTIME_SCHEMA),
+            "coupling": "CN_BE", "pressure_solve_contract": "coast_cn_be",
+            "requested_bdf_order": 1, "bdf_order": 1, "temporal_method_fallback": False,
+            "pressure": [], "pressure_solve_calls": 0, "momentum_predictor": [],
+            "momentum_predictor_solve_calls": 0, "momentum_predictor_passes": 0,
+            "pressure_energy_refinement": [], "pressure_energy_refinement_solve_calls": 0,
+            "pressure_energy_refinement_termination": "none",
+        })
+        solve = {"status_code": 0, "termination": "converged", "iterations": 2,
+                 "initial_true_residual": 1.0, "final_true_residual": 1e-12,
+                 "recursive_residual": 1e-12}
+        runtime_cold["cold"] = {
+            "outer_iterations": 2, "momentum_solve_calls": 6,
+            "pressure_solve_calls": 2, "enthalpy_solve_calls": 2, "species_solve_calls": 2,
+            "momentum_iterations": 12, "pressure_iterations": 4,
+            "enthalpy_iterations": 4, "species_iterations": 4,
+            "momentum_residual": 1e-8, "enthalpy_residual": 1e-8, "species_residual": 1e-9,
+            "solid_velocity_max": 0, "normalization": "coast_reference",
+            "reference_time": 0.001, "reference_tolerances": [1e-4] * 3,
+            "reference_residuals": [1e-5] * 3, "momentum_reference_scale": 100,
+            "enthalpy_reference_scale": 1000, "species_reference_scales": [1, 2, 3],
+            "final_momentum": [solve] * 3, "final_pressure": solve, "final_enthalpy": solve,
+        }
+        runtime_cold["terminal_physical_audit"].update({
+            "energy_residual": 1e-5, "energy_tolerance": 1e-4, "eos_residual": 1e-16})
+        runtime_cold["momentum_predictor_limiter"]["advective_cfl"] = {
+            name: (False if name == "present" else 0)
+            for name in V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS}
+        runtime_path.write_text(json.dumps(runtime_cold) + "\n", encoding="utf-8")
+        validate_runtime(runtime_path)
+        for mutation in range(11):
+            bad = json.loads(json.dumps(runtime_cold))
+            if mutation == 0: bad["cold"]["reference_residuals"][2] = 1e-3
+            if mutation == 1: bad["cold"]["species_reference_scales"] = []
+            if mutation == 2: bad["cold"]["reference_time"] = 0
+            if mutation == 3: bad["cold"]["final_pressure"]["termination"] = "maximum_iterations"
+            if mutation == 4: bad["cold"]["momentum_solve_calls"] = 3
+            if mutation == 5: bad["pressure_solve_calls"] = 2
+            if mutation == 6: bad["cold"]["solid_velocity_max"] = 1e-10
+            if mutation == 7: bad["schema"] = RUNTIME_SCHEMA
+            if mutation == 8: bad["candidate_identity"] = runtime_v8["candidate_identity"]
+            if mutation == 9: bad["terminal_physical_audit"]["energy_tolerance"] = 1
+            if mutation == 10: bad["linear_iterations"] = 0
+            reject_runtime(bad, "V9 accepted a malformed cold contract")
+        strict_cold = json.loads(json.dumps(runtime_cold))
+        strict_cold["cold"]["normalization"] = "local_time"
+        for field in ("reference_time", "reference_tolerances", "reference_residuals",
+                      "momentum_reference_scale", "enthalpy_reference_scale", "species_reference_scales"):
+            strict_cold["cold"].pop(field)
+        for field in ("momentum_residual", "enthalpy_residual", "species_residual"):
+            strict_cold["cold"][field] = 1e-15
+        strict_cold["terminal_physical_audit"].update({"energy_residual": 1e-15, "energy_tolerance": 1e-10})
+        runtime_path.write_text(json.dumps(strict_cold) + "\n", encoding="utf-8")
         validate_runtime(runtime_path)
 
         runtime_v7 = json.loads(json.dumps(runtime_v8))

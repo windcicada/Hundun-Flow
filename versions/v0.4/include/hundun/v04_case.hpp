@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -88,11 +89,17 @@ enum class ConvectionScheme : std::uint8_t {
   tvd2
 };
 enum class DiffusionScheme : std::uint8_t { central2 };
-enum class TimeScheme : std::uint8_t { backward_euler, variable_bdf2 };
+enum class TimeScheme : std::uint8_t {
+  backward_euler,
+  variable_bdf2,
+  // CN midpoint momentum; BE mass, species and total energy.
+  coast_cn_be
+};
 enum class TransportLaw : std::uint8_t {
   constant,
   sutherland,
-  coast_native_air
+  coast_native_air,
+  coast_perry
 };
 enum class ImmersedFluidSide : std::uint8_t { outside, inside };
 enum class IbmReconstructionPolicy : std::uint8_t {
@@ -296,10 +303,27 @@ struct SolverToleranceSpec {
   double gauge{1.0e-10};
 };
 
+// COAST ewt/ewt_pdf: freeze max accepted conservative variables per attempt,
+// divide by this physical reference time, and test equation residuals.
+struct ColdStoppingSpec {
+  double reference_time{};
+  double momentum{1.0e-4};
+  double enthalpy{1.0e-4};
+  double species{1.0e-4};
+
+  bool valid() const noexcept {
+    return std::isfinite(reference_time) && reference_time > 0.0 &&
+           std::isfinite(momentum) && momentum > 0.0 && momentum < 1.0 &&
+           std::isfinite(enthalpy) && enthalpy > 0.0 && enthalpy < 1.0 &&
+           std::isfinite(species) && species > 0.0 && species < 1.0;
+  }
+};
+
 struct SolverSpec {
   CouplingKind coupling{CouplingKind::piso};
   PressureLinearSolverSpec pressure;
   SolverToleranceSpec terminal;
+  std::optional<ColdStoppingSpec> cold_stopping;
 };
 
 struct TimeControlSpec {
@@ -332,6 +356,8 @@ struct SpeciesThermophysicalSpec {
   double sutherland_temperature{};
   double prandtl{};
   double conductivity{};
+  double critical_temperature{};  // K, COAST/Perry corresponding states.
+  double critical_pressure{};     // atm.
 };
 
 struct ThermophysicalSpec {
@@ -363,6 +389,9 @@ struct ValidatedModel {
   std::optional<SpraySpec> spray;
   std::optional<PatchInletsSpec> patch_inlets;
   PlanFingerprint fingerprint{};
+  // Same physical case with variable_bdf2, for explicit history rebuild only.
+  // Zero for methods which do not migrate from that time scheme.
+  PlanFingerprint legacy_time_fingerprint{};
 };
 
 class CaseCompiler {
@@ -370,6 +399,11 @@ class CaseCompiler {
   static Status load_and_compile(MPI_Comm communicator,
                                  const std::filesystem::path& case_root,
                                  ValidatedModel& out);
+  // Re-read both cold cases and permit only Sutherland -> Perry transport.
+  // All other physical controls, thermodynamics and referenced bytes match.
+  static Status validate_transport_change(MPI_Comm communicator,
+      const std::filesystem::path& source_root, const ValidatedModel& source,
+      const std::filesystem::path& target_root, const ValidatedModel& target);
 };
 
 }  // namespace hundun::v04

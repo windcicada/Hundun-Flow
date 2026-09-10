@@ -1313,6 +1313,157 @@ bool test_restored_final_flux_starts_with_restart_lineage() {
   return passed;
 }
 
+bool test_solved_flux_copy_is_atomic_and_transactional() {
+  FieldId velocity{}, pressure{};
+  StateLayers layers;
+  bool passed = make_layers(layers, velocity, pressure);
+  AttemptTransaction transaction;
+  FaceFluxStorage source_storage, final_storage;
+  FaceFluxView source;
+  FinalFaceFluxAuthority authority;
+  FinalFaceFluxWriter writer, foreign_writer;
+  constexpr Int3 cells{2, 1, 1};
+  passed &= expect(
+      static_cast<bool>(AttemptTransaction::create(
+          layers.field_count(), 1U, layers.field_count(), transaction)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_workspace(
+              cells, 1U, source_storage)) &&
+          static_cast<bool>(source_storage.workspace_view(0U, 151U, source)) &&
+          static_cast<bool>(FaceFluxStorage::allocate_final(cells, final_storage)) &&
+          static_cast<bool>(authority.claim(171U, 0U, transaction, writer)),
+      "solved-flux staging fixture initializes");
+  const auto fill_source = [&](double offset) {
+    const std::array faces{source.x, source.y, source.z};
+    for (std::size_t axis = 0U; axis < faces.size(); ++axis) {
+      const auto face = faces[axis];
+      for (int z = 0; z < face.extents.z; ++z)
+        for (int y = 0; y < face.extents.y; ++y)
+          for (int x = 0; x < face.extents.x; ++x)
+            face.unchecked({x, y, z}) = offset + 100.0 * axis + 10.0 * z + y + .1 * x;
+    }
+  };
+  fill_source(1.0);
+  passed &= expect(static_cast<bool>(writer.initialize_committed(
+      final_storage, hundun::v04::as_const(source))), "staging baseline initializes");
+  const auto baseline_bits = flux_bits(hundun::v04::as_const(source));
+  fill_source(2.0);
+  const auto first_bits = flux_bits(hundun::v04::as_const(source));
+  const auto begin = [&](PendingFaceFluxView& pending) {
+    return transaction.begin(layers) && transaction.revise_trial(velocity) &&
+           transaction.revise_trial(pressure) &&
+           writer.begin_pending(transaction, final_storage, pending);
+  };
+  ConstFaceFluxView published;
+  AttemptTransaction foreign_transaction;
+  passed &= expect(!writer.published_pending(transaction, published),
+                   "inactive attempt has no published pending flux");
+  PendingFaceFluxView pending;
+  passed &= expect(begin(pending), "staging transaction begins");
+  Status copied;
+  std::size_t allocations{};
+  {
+    allocation_observer::Guard guard;
+    copied = writer.copy_pending(hundun::v04::as_const(source), pending);
+    allocations = allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  passed &= expect(static_cast<bool>(copied) && allocations == 0U,
+                   "solved flux stages without allocation");
+  passed &= expect(!writer.published_pending(transaction, published),
+                   "writable staged flux is not available as published");
+  fill_source(3.0);
+  const auto second_bits = flux_bits(hundun::v04::as_const(source));
+  auto malformed = hundun::v04::as_const(source);
+  malformed.x.extents.x += 1;
+  passed &= expect(!writer.copy_pending(malformed, pending) &&
+                       !foreign_writer.copy_pending(hundun::v04::as_const(source), pending),
+                   "wrong layout and foreign writer cannot replace staged bytes");
+  const Int3 last{source.z.extents.x - 1, source.z.extents.y - 1, source.z.extents.z - 1};
+  const double last_value = source.z.unchecked(last);
+  source.z.unchecked(last) = std::numeric_limits<double>::quiet_NaN();
+  const auto nonfinite = writer.copy_pending(hundun::v04::as_const(source), pending);
+  source.z.unchecked(last) = last_value;
+  passed &= expect(nonfinite.code == StatusCode::numerical_failure,
+                   "nonfinite final source entry rejects the whole copy");
+  ConstFaceFluxView before_commit;
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, before_commit)) &&
+                       flux_bits(before_commit) == baseline_bits,
+                   "staging leaves committed flux unchanged");
+  auto dependency = depends_on(transaction, pressure);
+  PreparedAttemptFinish accepted;
+  passed &= expect(static_cast<bool>(writer.publish_pending({&dependency, 1U}, pending)) &&
+                       static_cast<bool>(transaction.collective_prepare(MPI_COMM_SELF, {}, accepted)) &&
+                       accepted.decision() == AttemptFinishDecision::accept,
+                   "failed staging inputs remain retryable before publication");
+  Status inspected;
+  {
+    allocation_observer::Guard guard;
+    inspected = writer.published_pending(transaction, published);
+    allocations = allocation_observer::count.load(std::memory_order_relaxed);
+  }
+  passed &= expect(static_cast<bool>(inspected) && allocations == 0U &&
+                       published.certificate.valid() &&
+                       published.certificate.matches(published) &&
+                       flux_bits(published) == first_bits &&
+                       published.revision != before_commit.revision,
+                   "published pending flux has exact bytes and authority without allocation");
+  const auto published_base = published.x.base;
+  passed &= expect(!writer.published_pending(foreign_transaction, published) &&
+                       !foreign_writer.published_pending(transaction, published) &&
+                       published.x.base == published_base,
+                   "foreign transactions and writers cannot inspect or replace the view");
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, before_commit)) &&
+                       flux_bits(before_commit) == baseline_bits,
+                   "published inspection preserves accepted bytes");
+  transaction.commit_accept(accepted);
+  passed &= expect(!writer.published_pending(transaction, published),
+                   "accepted attempt no longer exposes pending flux");
+  ConstFaceFluxView current, previous;
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, current)) &&
+                       static_cast<bool>(writer.committed_previous(final_storage, previous)) &&
+                       flux_bits(current) == first_bits && flux_bits(previous) == baseline_bits,
+                   "full-source validation prevents partial writes and rotates exact history");
+  passed &= expect(!writer.copy_pending(hundun::v04::as_const(source), pending),
+                   "published lease cannot be written again");
+  PendingFaceFluxView rejected_pending;
+  passed &= expect(begin(rejected_pending) &&
+                       static_cast<bool>(writer.copy_pending(hundun::v04::as_const(source), rejected_pending)),
+                   "second solved flux stages in its own attempt");
+  dependency = depends_on(transaction, pressure);
+  passed &= expect(static_cast<bool>(writer.publish_pending({&dependency, 1U}, rejected_pending)),
+                   "second solved flux publishes as pending");
+  PreparedAttemptFinish rejected;
+  passed &= expect(static_cast<bool>(transaction.collective_prepare(
+                       MPI_COMM_SELF, {StatusCode::rejected_step, 603U}, rejected)) &&
+                       rejected.decision() == AttemptFinishDecision::reject,
+                   "later equation failure prepares a rollback");
+  passed &= expect(static_cast<bool>(writer.published_pending(transaction, published)) &&
+                       flux_bits(published) == second_bits,
+                   "terminal diagnostics can inspect the flux before rollback");
+  transaction.commit_reject(rejected);
+  passed &= expect(!writer.published_pending(transaction, published),
+                   "rejected attempt no longer exposes pending flux");
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, current)) &&
+                       static_cast<bool>(writer.committed_previous(final_storage, previous)) &&
+                       flux_bits(current) == first_bits && flux_bits(previous) == baseline_bits,
+                   "rollback preserves both accepted flux levels");
+  PendingFaceFluxView retry;
+  passed &= expect(begin(retry) &&
+                       static_cast<bool>(writer.copy_pending(hundun::v04::as_const(source), retry)),
+                   "fresh attempt can retry the solved flux");
+  dependency = depends_on(transaction, pressure);
+  PreparedAttemptFinish retried;
+  passed &= expect(static_cast<bool>(writer.publish_pending({&dependency, 1U}, retry)) &&
+                       static_cast<bool>(transaction.collective_prepare(MPI_COMM_SELF, {}, retried)) &&
+                       retried.decision() == AttemptFinishDecision::accept,
+                   "retried solved flux prepares acceptance");
+  transaction.commit_accept(retried);
+  passed &= expect(static_cast<bool>(writer.committed(final_storage, current)) &&
+                       static_cast<bool>(writer.committed_previous(final_storage, previous)) &&
+                       flux_bits(current) == second_bits && flux_bits(previous) == first_bits,
+                   "retry commits exact solved bytes with the previous solution retained");
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1356,6 +1507,7 @@ int main(int argc, char** argv) {
   passed &= test_prepare_then_commit_transaction_and_final_flux();
   passed &= test_final_flux_publish_preflight_is_read_only_and_allocation_free();
   passed &= test_restored_final_flux_starts_with_restart_lineage();
+  passed &= test_solved_flux_copy_is_atomic_and_transactional();
   MPI_Finalize();
   return passed ? 0 : 1;
 }

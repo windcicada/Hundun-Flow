@@ -3757,6 +3757,71 @@ Status PressureEnergySchurOperator::apply_energy_enthalpy(
   return {};
 }
 
+// Reuse the certified C_p/E_p exchange in the density-coupled operator.
+// Ordinary Halo checks remain here; collective entry/exit protects the next
+// density/enthalpy payload schedule from a rank-local component failure.
+Status PressureEnergySchurOperator::apply_pressure_pair(
+    FieldView pressure, FieldView continuity, FieldView energy,
+    ReductionEngine &reductions) const noexcept {
+  failure_ = {};
+  const bool current =
+      certificate_.valid() && certificate_.shared_pressure.valid() &&
+      !repeated_apply_active_ && shared_cartesian_pressure_ &&
+      shared_energy_pressure_ &&
+      components_current(continuity_pressure_, continuity_pressure_certificate_,
+                         energy_pressure_, energy_pressure_certificate_,
+                         energy_enthalpy_, energy_enthalpy_certificate_) &&
+      !overlaps(as_const(continuity), as_const(energy));
+  Status status =
+      current ? Status{}
+              : Status{StatusCode::invalid_plan, kPressureEnergySchurApply};
+  if (status)
+    status =
+        shared_cartesian_pressure_->validate_apply_views(pressure, continuity);
+  if (status)
+    status = shared_energy_pressure_->validate_apply_views(pressure, energy);
+  status = reductions.consensus(status);
+  if (!status) {
+    failure_ = {status, LinearOperatorStatusScope::collective,
+                reductions.lowest_failing_rank()};
+    return status;
+  }
+  PressureEnergySharedPressureInputCertificate shared_input;
+  if (shared_ibm_pressure_) {
+    status = shared_ibm_pressure_->exchange_pressure_energy_shared_input(
+        pressure, certificate_.shared_pressure, shared_input);
+    if (status)
+      status = shared_ibm_pressure_->apply_pressure_energy_shared_input(
+          pressure, continuity, certificate_.shared_pressure, shared_input);
+  } else {
+    status = shared_cartesian_pressure_->exchange_pressure_energy_shared_input(
+        pressure, certificate_.shared_pressure, shared_input);
+    if (status)
+      status = shared_cartesian_pressure_->apply_pressure_energy_shared_input(
+          pressure, continuity, certificate_.shared_pressure, shared_input);
+  }
+  if (!status)
+    capture_component_failure(*continuity_pressure_, status, failure_);
+  if (status) {
+    status = shared_energy_pressure_->apply_pressure_energy_shared_input(
+        pressure, energy, certificate_.shared_pressure, shared_input);
+    if (!status)
+      capture_component_failure(*energy_pressure_, status, failure_);
+  }
+  const auto prior = failure_;
+  status = reductions.consensus(status);
+  if (!status) {
+    const bool collective_origin =
+        prior.status.code == status.code &&
+        prior.status.detail == status.detail &&
+        prior.status_scope == LinearOperatorStatusScope::collective;
+    failure_ = {status, LinearOperatorStatusScope::collective,
+                collective_origin ? prior.lowest_failing_rank
+                                  : reductions.lowest_failing_rank()};
+  }
+  return status;
+}
+
 Status PressureEnergySchurOperator::apply(FieldView pressure,
                                           FieldView output) const noexcept {
   failure_ = {};
@@ -3913,7 +3978,9 @@ Status PressureEnergySchurOperator::apply(FieldView pressure,
     // the second payload halo, this keeps the per-input certificate fail-closed:
     // no intervening exchange can advance the certified pressure ghost view.
     PressureEnergySharedPressureInputCertificate shared_input;
-    if (shared_cartesian_pressure_ != nullptr) {
+    // An IBM shared certificate also carries its regular Cartesian issuer.
+    // Preserve the owning wrapper so solid rows and interface cuts are applied.
+    if (shared_cartesian_pressure_ != nullptr && shared_ibm_pressure_ == nullptr) {
       status = shared_cartesian_pressure_
                    ->exchange_pressure_energy_shared_input(
                        pressure, certificate_.shared_pressure, shared_input);

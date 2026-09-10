@@ -134,6 +134,8 @@ Status evaluate_thermophysical_rates(
       !same_cells(cells, species_plan.cells_) ||
       !same_cells(cells, scalar_plan.cells_) ||
       input.contribution_stage == 0U ||
+      (input.ibm_thermal_closure != IbmThermalRateClosure::reconstructed_zero_normal &&
+       input.ibm_thermal_closure != IbmThermalRateClosure::impermeable) ||
       !detail::valid_bdf_coefficients(input.bdf) ||
       output.species_nonadvective_rhs.size != species_plan.specs_.size() ||
       output.passive_scalar_nonadvective_rhs.size !=
@@ -347,8 +349,11 @@ Status evaluate_thermophysical_rates(
     // positivity through its separate source endpoint/blend; changing this
     // accepted rate to a clipped donor closure would EX2-extrapolate a
     // different diffusion equation from the one audited at the final state.
-    status = input.immersed_interface->correct_zero_normal_diffusion(
-        thermal_coordinate, thermal_coefficient, output.diffusion_scratch);
+    status = input.ibm_thermal_closure == IbmThermalRateClosure::impermeable
+        ? input.immersed_interface->correct_impermeable_scalar_diffusion(
+              thermal_coordinate, thermal_coefficient, output.diffusion_scratch)
+        : input.immersed_interface->correct_zero_normal_diffusion(
+              thermal_coordinate, thermal_coefficient, output.diffusion_scratch);
     if (!status) return status;
   }
 
@@ -405,6 +410,8 @@ Status evaluate_thermophysical_rates(
   state_hash = mix(state_hash, bits(input.state.accepted_pressure_reference));
   state_hash = mix(state_hash, bits(input.state.previous_pressure_reference));
   state_hash = mix(state_hash, input.contribution_stage);
+  if (input.ibm_thermal_closure == IbmThermalRateClosure::impermeable)
+    state_hash = mix(state_hash, UINT64_C(0x434e424549424d31));
   if (input.immersed_interface != nullptr)
     state_hash = mix(state_hash, input.immersed_interface->fingerprint());
   if (input.wall_treatment != nullptr)

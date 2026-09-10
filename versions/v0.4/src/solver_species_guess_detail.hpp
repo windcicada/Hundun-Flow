@@ -6,6 +6,45 @@
 
 namespace hundun::v04::detail {
 
+// Controls work on rejected coupling iterates, never time-step acceptance.
+// A stalled composition update requests the complete inner solve next time.
+class SpeciesCouplingForcing {
+ public:
+  void begin(unsigned sweep) noexcept {
+    if (sweep == 1U || sweep != sweep_ + 1U) {
+      sampled_ = false;
+      full_ = false;
+      previous_ = 0.0;
+    }
+    sweep_ = sweep;
+  }
+  void observe(double residual) noexcept {
+    full_ = !std::isfinite(residual) || residual < 0.0 ||
+            (sampled_ && residual >= 0.9 * previous_);
+    previous_ = residual;
+    sampled_ = true;
+  }
+  bool can_update_composition(double continuity, double energy,
+                              double final_continuity,
+                              double final_energy) const noexcept {
+    if (full_ || !std::isfinite(continuity) || continuity < 0.0 ||
+        !std::isfinite(energy) || energy < 0.0 ||
+        !std::isfinite(final_continuity) || final_continuity <= 0.0 ||
+        !std::isfinite(final_energy) || final_energy <= 0.0 ||
+        (sampled_ && previous_ <= final_energy))
+      return false;
+    const double c = sampled_ ? 0.01 * previous_ : std::sqrt(final_continuity);
+    const double e = sampled_ ? 0.01 * previous_ : std::sqrt(final_energy);
+    return c > final_continuity && e > final_energy && continuity <= c &&
+           energy <= e;
+  }
+
+ private:
+  unsigned sweep_{};
+  double previous_{};
+  bool sampled_{}, full_{};
+};
+
 // Positive local convective response used by the private nonlinear search.
 // The physical residual and public species assembly are independent of it.
 inline double species_coupling_search_diagonal(const CartesianKernelPlan& kernels,
@@ -52,6 +91,15 @@ Status assemble_species_guess(const SpeciesEquationPlan& plan,
 // Diagonal/rhs/residual are rate densities; face diffusion coefficients retain
 // their ordinary integrated transmissibility. Public assembly stays integral.
 Status assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
+    std::size_t species, const EquationStateView& state,
+    const EquationMaterialView& material, const EquationAssemblyContext& context,
+    EquationSystemView system) noexcept;
+
+// Re-evaluate the current species equation using system.diagonal prepared by
+// assemble_species_coupling_rows. The private caller holds density, material,
+// flux, time, geometry and boundary fixed until this solve ends. Only the
+// species iterate changes. Retains face coefficients and all physical checks.
+Status assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system) noexcept;

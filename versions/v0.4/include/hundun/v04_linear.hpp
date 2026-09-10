@@ -974,6 +974,8 @@ class NativeCartesianMgPlan final : public LinearPreconditioner {
   Status level(std::size_t index, MgLevelView& out) const noexcept;
   CoarseningKind finest_coarsening() const noexcept;
   std::uint8_t line_axis_mask() const noexcept;
+  // Globally selected from the current masked finest matrix at bind/update.
+  bool uses_diagonal_preconditioner() const noexcept;
   PlanFingerprint symbolic_fingerprint() const noexcept;
   PlanFingerprint numeric_fingerprint() const noexcept;
   PlanFingerprint hierarchy_fingerprint() const noexcept;

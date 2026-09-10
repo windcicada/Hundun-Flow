@@ -520,7 +520,7 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
         t_stencil=2.0*temperature-t_owner;
       }
       double k=molecular.conductivity, gamma=k/thermo.cp;
-      if (transport.kernel()==TransportKernel::coast_native_air) {
+      if (transport.has_effective_enthalpy_transport()) {
         evaluated=transport.effective_enthalpy_transport(molecular.viscosity,mu_effective,thermo.cp,k,gamma);
         if (!evaluated) return evaluated;
       }

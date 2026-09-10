@@ -272,7 +272,8 @@ Status assemble_transport(
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial,
-    const IbmInterfaceInletField* inlet_field, bool density_units=false) noexcept {
+    const IbmInterfaceInletField* inlet_field, bool density_units=false,
+    bool retain_diagonal=false) noexcept {
   Span<const CompiledContribution> descriptors{};
   if (!detail::select_contribution_stage(
           all_descriptors, context.contribution_stage, descriptors)) {
@@ -346,7 +347,7 @@ Status assemble_transport(
           }
         }
         const double diffusion_diagonal =
-            context.immersed_interface != nullptr
+            retain_diagonal ? 0.0 : context.immersed_interface != nullptr
             ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
             :
             positive_transmissibility(kernels, diffusivity,
@@ -373,8 +374,9 @@ Status assemble_transport(
             context.bdf.a0 * rho_trial * q_trial +
             context.bdf.a1 * rho_accepted * q_accepted +
             context.bdf.a2 * rho_previous * q_previous;
-        const double diagonal =
-            (context.bdf.a0 * rho_trial + implicit_sink) * volume +
+        const double diagonal = retain_diagonal
+            ? system.diagonal.unchecked(cell, 0U)
+            : (context.bdf.a0 * rho_trial + implicit_sink) * volume +
             diffusion_diagonal;
         const double non_diffusive_without_convection =
             (unsteady - explicit_source + implicit_sink * q_trial) * volume;
@@ -443,7 +445,7 @@ Status assemble_transport(
             context.bdf.a2 * rho_previous * q_previous;
         const double volume = detail::cell_volume(kernels, cell);
         const double diffusion_diagonal =
-            context.immersed_interface != nullptr
+            retain_diagonal ? 0.0 : context.immersed_interface != nullptr
             ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
             :
             positive_transmissibility(kernels, diffusivity,
@@ -458,7 +460,9 @@ Status assemble_transport(
                                       CartesianAxis::z, cell) +
             positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::z, {x, y, z + 1});
-        const double diagonal = density_units
+        const double diagonal = retain_diagonal
+            ? system.diagonal.unchecked(cell, 0U)
+            : density_units
             ? context.bdf.a0 * rho_trial + implicit_sink + diffusion_diagonal / volume
             : (context.bdf.a0 * rho_trial + implicit_sink) * volume + diffusion_diagonal;
         const double non_diffusive =
@@ -512,7 +516,7 @@ Status assemble_transport(
     }
   }
 
-  if (system.x_coefficient.base != nullptr) {
+  if (!retain_diagonal && system.x_coefficient.base != nullptr) {
     evaluated = fill_face_coefficients<CartesianAxis::x>(
         kernels, diffusivity, box, system.x_coefficient);
     if (evaluated) {
@@ -685,7 +689,7 @@ Status assemble_species_impl(
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial,
-    bool initial_guess, bool density_units) noexcept {
+    bool initial_guess, bool density_units, bool retain_diagonal) noexcept {
   if (plan.kernels_ == nullptr ||
       context.geometry != plan.geometry_revision_ ||
       context.boundary != plan.boundary_revision_ ||
@@ -771,7 +775,18 @@ Status assemble_species_impl(
                 plan.contribution_counts_[species]},
       state.independent_species.data[species],
       state, plan.unity_lewis_total_enthalpy_ ? material.enthalpy_diffusivity : material.scalar_mass_diffusivity.data[species], contributions,
-      context, system, certificate, allow_partial, &inlet_field, density_units);
+      context, system, certificate, allow_partial, &inlet_field, density_units, retain_diagonal);
+}
+
+Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
+    const EquationStateView& state, const EquationMaterialView& material,
+    Span<const EquationContributionView> contributions,
+    const EquationAssemblyContext& context, EquationSystemView system,
+    EquationAssemblyCertificate& certificate, bool allow_partial,
+    bool initial_guess, bool density_units) noexcept {
+  return assemble_species_impl(plan, species, state, material, contributions,
+      context, system, certificate, allow_partial, initial_guess, density_units,
+      false);
 }
 
 Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
@@ -896,6 +911,21 @@ Status detail::assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
   EquationAssemblyCertificate local_certificate;
   return assemble_species_impl(plan,species,state,material,{},context,system,
       local_certificate,false,context.scope==EquationAssemblyScope::momentum_predictor,true);
+}
+
+Status detail::assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
+    std::size_t species, const EquationStateView& state,
+    const EquationMaterialView& material, const EquationAssemblyContext& context,
+    EquationSystemView system) noexcept {
+  if (context.contribution_stage == 0U ||
+      !detail::full_equation_box(resolved_box(context.box, plan.cells()), plan.cells()) ||
+      (context.scope != EquationAssemblyScope::momentum_predictor &&
+       context.scope != EquationAssemblyScope::final_conservative))
+    return {StatusCode::invalid_plan, kScalarAssembly};
+  EquationAssemblyCertificate certificate;
+  return assemble_species_impl(plan, species, state, material, {}, context,
+      system, certificate, false,
+      context.scope == EquationAssemblyScope::momentum_predictor, true, true);
 }
 
 Status assemble_species(

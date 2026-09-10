@@ -55,6 +55,8 @@ std::string_view pressure_solve_contract_name(
       return "pressure_continuity";
     case RuntimePressureSolveContract::continuity_energy_coupled:
       return "continuity_energy_coupled";
+    case RuntimePressureSolveContract::coast_cn_be:
+      return "coast_cn_be";
     case RuntimePressureSolveContract::invalid:
       break;
   }
@@ -67,6 +69,8 @@ std::string_view coupling_name(RuntimeCouplingKind coupling) noexcept {
       return "PISO";
     case RuntimeCouplingKind::simple:
       return "SIMPLE";
+    case RuntimeCouplingKind::coast_cn_be:
+      return "CN_BE";
     case RuntimeCouplingKind::invalid:
       break;
   }
@@ -129,6 +133,10 @@ bool valid_runtime_cfl_winner(const RuntimeConvectiveCflWinner& winner,
 
 bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
   const RuntimeRunStartAnchor& anchor = record.run_start;
+  if (anchor.transport_source_case != 0U &&
+      (anchor.kind != RuntimeRunStartKind::restart || anchor.source_format_version < 3U ||
+       anchor.history_policy != RestartHistoryPolicy::rebuild_method_history ||
+       record.coupling != RuntimeCouplingKind::coast_cn_be)) return false;
   if (!std::isfinite(anchor.previous_time) || anchor.previous_time < 0.0 ||
       record.step <= anchor.previous_step)
     return false;
@@ -230,6 +238,73 @@ std::string_view predictor_low_state_name(std::uint8_t low_state) noexcept {
 
 Status validate_record(const IoServicePlan& services,
                        const RuntimeEvidenceRecord& record) noexcept {
+  const bool cold_contract = record.pressure_solve_contract ==
+                             RuntimePressureSolveContract::coast_cn_be;
+  const auto &cold = record.cold;
+  const auto accepted_solve = [](const LinearSolveResult &solve) {
+    return solve.status &&
+           (solve.termination == LinearTermination::converged ||
+            solve.termination == LinearTermination::zero_rhs) &&
+           std::isfinite(solve.initial_true_residual) &&
+           solve.initial_true_residual >= 0.0 &&
+           std::isfinite(solve.final_true_residual) &&
+           solve.final_true_residual >= 0.0 &&
+           std::isfinite(solve.recursive_residual) &&
+           solve.recursive_residual >= 0.0;
+  };
+  const auto positive_scale = [](double value) {
+    return std::isfinite(value) && value > 0.0;
+  };
+  const bool valid_reference_stopping = cold.stopping && cold.stopping->valid() &&
+      positive_scale(cold.momentum_reference_scale) &&
+      positive_scale(cold.enthalpy_reference_scale) &&
+      cold.species_reference_scales.size() >= 2U &&
+      std::all_of(cold.species_reference_scales.begin(), cold.species_reference_scales.end(),
+                  positive_scale) &&
+      accepted_terminal_metric(cold.reference_residual[0], cold.stopping->momentum) &&
+      accepted_terminal_metric(cold.reference_residual[1], cold.stopping->enthalpy) &&
+      accepted_terminal_metric(cold.reference_residual[2], cold.stopping->species);
+  const bool valid_cold_norms = cold.stopping
+      ? valid_reference_stopping &&
+        accepted_terminal_metric(cold.momentum_residual, 0.0, false) &&
+        accepted_terminal_metric(cold.enthalpy_residual, 0.0, false) &&
+        accepted_terminal_metric(cold.species_residual, 0.0, false)
+      : accepted_terminal_metric(cold.momentum_residual, 1e-10) &&
+        accepted_terminal_metric(cold.enthalpy_residual, 1e-10) &&
+        accepted_terminal_metric(cold.species_residual,
+                                  128.0 * std::numeric_limits<double>::epsilon()) &&
+        cold.momentum_reference_scale == 0.0 && cold.enthalpy_reference_scale == 0.0 &&
+        cold.species_reference_scales.empty() &&
+        cold.reference_residual == std::array<double, 3U>{};
+  const bool valid_cold =
+      cold.active && cold.outer_iterations > 0U &&
+      cold.outer_iterations <= 16U &&
+      cold.momentum_solve_calls == 3U * cold.outer_iterations &&
+      cold.pressure_solve_calls == cold.outer_iterations &&
+      cold.enthalpy_solve_calls == cold.outer_iterations &&
+      cold.species_solve_calls == cold.outer_iterations &&
+      std::all_of(cold.final_momentum.begin(), cold.final_momentum.end(),
+                  accepted_solve) &&
+      accepted_solve(cold.final_pressure) &&
+      accepted_solve(cold.final_enthalpy) &&
+      cold.momentum_iterations >=
+          std::uint64_t(cold.final_momentum[0].iterations) +
+              cold.final_momentum[1].iterations +
+              cold.final_momentum[2].iterations &&
+      cold.pressure_iterations >= cold.final_pressure.iterations &&
+      cold.enthalpy_iterations >= cold.final_enthalpy.iterations &&
+      valid_cold_norms &&
+      record.linear_iterations >= cold.momentum_iterations + cold.pressure_iterations +
+                                      cold.enthalpy_iterations + cold.species_iterations &&
+      cold.solid_velocity_max == 0.0 && record.bdf_order == 1U &&
+      record.requested_bdf_order == 1U && !record.temporal_method_fallback &&
+      record.pressure_solve_calls == 0U &&
+      record.momentum_predictor_solve_calls == 0U &&
+      record.momentum_predictor_passes == 0U &&
+      !record.momentum_advective_cfl.present &&
+      record.pressure_energy_refinement_solve_calls == 0U &&
+      record.pressure_energy_refinement_termination ==
+          RuntimePressureEnergyRefinementTermination::none;
   const bool pressure_continuity_contract =
       record.pressure_solve_contract ==
       RuntimePressureSolveContract::pressure_continuity;
@@ -237,10 +312,12 @@ Status validate_record(const IoServicePlan& services,
       record.pressure_solve_contract ==
       RuntimePressureSolveContract::continuity_energy_coupled;
   const bool valid_coupling =
-      (record.coupling == RuntimeCouplingKind::piso &&
-       record.momentum_predictor_passes == 1U) ||
-      (record.coupling == RuntimeCouplingKind::simple &&
-       record.momentum_predictor_passes == 2U);
+      cold_contract
+          ? valid_cold && record.coupling == RuntimeCouplingKind::coast_cn_be
+          : !cold.active && ((record.coupling == RuntimeCouplingKind::piso &&
+                              record.momentum_predictor_passes == 1U) ||
+                             (record.coupling == RuntimeCouplingKind::simple &&
+                              record.momentum_predictor_passes == 2U));
   const RuntimeTerminalPhysicalAudit& terminal =
       record.terminal_physical_audit;
   constexpr double kConvectiveCflComparisonSlack =
@@ -283,18 +360,20 @@ Status validate_record(const IoServicePlan& services,
           advective.limit * kConvectiveCflComparisonSlack;
   const bool valid_terminal_physical_audit =
       terminal.present && terminal.final_flux_revision != 0U &&
-      accepted_terminal_metric(terminal.eos_residual,
-                               terminal.eos_tolerance) &&
+      accepted_terminal_metric(terminal.eos_residual, terminal.eos_tolerance) &&
       accepted_terminal_metric(terminal.continuity_residual,
                                terminal.continuity_tolerance) &&
-      accepted_terminal_metric(terminal.energy_residual,
-                               terminal.energy_tolerance,
-                               continuity_energy_coupled_contract) &&
+      accepted_terminal_metric(
+          terminal.energy_residual, terminal.energy_tolerance,
+          continuity_energy_coupled_contract || cold_contract) &&
       accepted_terminal_metric(terminal.closed_mass_residual,
                                terminal.closed_mass_tolerance) &&
       accepted_terminal_metric(terminal.gauge_residual,
                                terminal.gauge_tolerance) &&
-      valid_committed_convective_cfl;
+      valid_committed_convective_cfl &&
+      (!cold_contract || !cold.stopping ||
+       (terminal.energy_residual == cold.reference_residual[1] &&
+        terminal.energy_tolerance == cold.stopping->enthalpy));
   const bool valid_temporal_method =
       (record.requested_bdf_order == 1U ||
        record.requested_bdf_order == 2U) &&
@@ -497,9 +576,11 @@ Status validate_record(const IoServicePlan& services,
   valid_refinement =
       valid_refinement &&
       record.linear_iterations >= refinement_linear_iterations;
-  if (detail::output_service(services, RuntimeServiceKind::evidence) == nullptr ||
+  if (detail::output_service(services, RuntimeServiceKind::evidence) ==
+          nullptr ||
       record.build == 0U || record.binary == 0U || record.case_model == 0U ||
       record.product == 0U || record.step == 0U ||
+      record.candidate_identity.cold_schema != cold_contract ||
       !detail::valid_runtime_candidate_identity(record.candidate_identity) ||
       record.build != detail::runtime_sha256_fingerprint(
                           record.candidate_identity.build_manifest) ||
@@ -510,7 +591,7 @@ Status validate_record(const IoServicePlan& services,
       !std::isfinite(record.time) ||
       !(record.time > record.previous_committed_time) ||
       std::abs((record.time - record.previous_committed_time) -
-               record.momentum_advective_cfl.dt) >
+               record.committed_convective_cfl.dt) >
           128.0 * std::numeric_limits<double>::epsilon() *
               std::max({1.0, std::abs(record.time),
                         std::abs(record.previous_committed_time),
@@ -518,19 +599,19 @@ Status validate_record(const IoServicePlan& services,
       !valid_temporal_method ||
       ((record.startup || record.retry || record.restart_recovery) &&
        record.statistics_eligible) ||
-      record.pressure_solve_calls != 2U ||
+      (!cold_contract && record.pressure_solve_calls != 2U) ||
       !valid_coupling ||
-      (!pressure_continuity_contract &&
-       !continuity_energy_coupled_contract) ||
-      !valid_refinement ||
-      !valid_terminal_physical_audit ||
-      record.momentum_predictor_solve_calls != 3U ||
+      (!pressure_continuity_contract && !continuity_energy_coupled_contract &&
+       !cold_contract) ||
+      (!cold_contract && !valid_refinement) || !valid_terminal_physical_audit ||
+      (!cold_contract && record.momentum_predictor_solve_calls != 3U) ||
       record.blocking_collectives < record.predictor_blocking_collectives ||
-      !valid_momentum_predictor || !valid_advective_convective_cfl ||
+      (!cold_contract &&
+       (!valid_momentum_predictor || !valid_advective_convective_cfl)) ||
       !valid_predictor ||
       (record.stages.size != 0U && record.stages.data == nullptr))
     return {StatusCode::invalid_plan, detail::kOutputInput};
-  for (std::size_t corrector = 0U; corrector < record.pressure.size();
+  for (std::size_t corrector = 0U; corrector < record.pressure_solve_calls;
        ++corrector) {
     const LinearSolveResult& solve = record.pressure[corrector];
     const bool accepted_termination =
@@ -622,34 +703,35 @@ Status validate_record(const IoServicePlan& services,
         !valid_recycle_admission)
       return {StatusCode::invalid_plan, detail::kOutputInput};
   }
-  for (const LinearSolveResult& solve : record.momentum_predictor) {
-    const bool accepted_termination =
-        solve.termination == LinearTermination::converged ||
-        solve.termination == LinearTermination::zero_rhs;
-    const bool finite = std::isfinite(solve.initial_true_residual) &&
-                        solve.initial_true_residual >= 0.0 &&
-                        std::isfinite(solve.final_true_residual) &&
-                        solve.final_true_residual >= 0.0 &&
-                        std::isfinite(solve.recursive_residual) &&
-                        solve.recursive_residual >= 0.0;
-    if (!solve.status || !accepted_termination || !finite ||
-        solve.final_true_residual > solve.initial_true_residual ||
-        solve.convergence_audits != 0U ||
-        solve.convergence_rejections != 0U ||
-        solve.recycle_offered_directions != 0U ||
-        solve.recycle_retained_directions != 0U ||
-        solve.recycle_operator_applies != 0U ||
-        solve.recycle_reduction_calls != 0U ||
-        solve.recycle_projection_attempted ||
-        solve.recycle_projection_accepted ||
-        solve.recycle_projected_true_residual != 0.0 ||
-        solve.recycle_cycle_corrections != 0U ||
-        solve.recycle_capture_vector_passes != 0U ||
-        solve.recycle_capture_cycle_attempts != 0U ||
-        solve.recycle_capture_reduction_calls != 0U ||
-        solve.recycle_capture_blocking_operations != 0U)
-      return {StatusCode::invalid_plan, detail::kOutputInput};
-  }
+  if (!cold_contract)
+    for (const LinearSolveResult &solve : record.momentum_predictor) {
+      const bool accepted_termination =
+          solve.termination == LinearTermination::converged ||
+          solve.termination == LinearTermination::zero_rhs;
+      const bool finite = std::isfinite(solve.initial_true_residual) &&
+                          solve.initial_true_residual >= 0.0 &&
+                          std::isfinite(solve.final_true_residual) &&
+                          solve.final_true_residual >= 0.0 &&
+                          std::isfinite(solve.recursive_residual) &&
+                          solve.recursive_residual >= 0.0;
+      if (!solve.status || !accepted_termination || !finite ||
+          solve.final_true_residual > solve.initial_true_residual ||
+          solve.convergence_audits != 0U ||
+          solve.convergence_rejections != 0U ||
+          solve.recycle_offered_directions != 0U ||
+          solve.recycle_retained_directions != 0U ||
+          solve.recycle_operator_applies != 0U ||
+          solve.recycle_reduction_calls != 0U ||
+          solve.recycle_projection_attempted ||
+          solve.recycle_projection_accepted ||
+          solve.recycle_projected_true_residual != 0.0 ||
+          solve.recycle_cycle_corrections != 0U ||
+          solve.recycle_capture_vector_passes != 0U ||
+          solve.recycle_capture_cycle_attempts != 0U ||
+          solve.recycle_capture_reduction_calls != 0U ||
+          solve.recycle_capture_blocking_operations != 0U)
+        return {StatusCode::invalid_plan, detail::kOutputInput};
+    }
   const std::uint64_t expected_offered_directions =
       std::min<std::uint64_t>(
           record.pressure[0U].recycle_cycle_corrections,
@@ -675,7 +757,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
   json.exceptions(std::ios::badbit | std::ios::failbit);
   json.imbue(std::locale::classic());
   json << std::setprecision(17)
-       << "{\"schema\":\"" << detail::kRuntimeEvidenceSchema << "\""
+       << "{\"schema\":\"" << (record.cold.active ? detail::kColdRuntimeEvidenceSchema : detail::kRuntimeEvidenceSchema) << "\""
        << ",\"build\":" << record.build
        << ",\"binary\":" << record.binary
        << ",\"candidate_identity\":{\"schema\":\""
@@ -710,7 +792,10 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"target_signature\":" << record.run_start.target_history_signature
          << ",\"policy\":\""
          << (record.run_start.history_policy == RestartHistoryPolicy::rebuild_method_history
-                 ? "rebuild_method_history" : "require_compatible") << "\"}";
+                 ? "rebuild_method_history" : "require_compatible") << "\"";
+    if (record.run_start.transport_source_case != 0U)
+      json << ",\"transport_source_case\":" << record.run_start.transport_source_case;
+    json << '}';
   }
   json << '}'
        << ",\"step\":" << record.step
@@ -917,7 +1002,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << ",\"norm_breakdown_restarts\":"
        << record.predictor_enthalpy_endpoint.norm_breakdown_restarts << '}'
        << ",\"pressure\":[";
-  for (std::size_t corrector = 0U; corrector < record.pressure.size();
+  for (std::size_t corrector = 0U; corrector < record.pressure_solve_calls;
        ++corrector) {
     if (corrector != 0U) json << ',';
     const LinearSolveResult& solve = record.pressure[corrector];
@@ -1022,7 +1107,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
   }
   json << ']' << ",\"momentum_predictor\":[";
   for (std::size_t component = 0U;
-       component < record.momentum_predictor.size(); ++component) {
+       component < record.momentum_predictor_solve_calls; ++component) {
     if (component != 0U) json << ',';
     const LinearSolveResult& solve = record.momentum_predictor[component];
     json << "{\"component\":" << component
@@ -1056,7 +1141,58 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << stage.mean_nanoseconds << ",\"max_ns\":"
          << stage.maximum_nanoseconds << '}';
   }
-  json << "]}\n";
+  json << ']';
+  if (record.cold.active) {
+    const auto &cold = record.cold;
+    json << ",\"cold\":{\"outer_iterations\":" << cold.outer_iterations
+         << ",\"momentum_solve_calls\":" << cold.momentum_solve_calls
+         << ",\"pressure_solve_calls\":" << cold.pressure_solve_calls
+         << ",\"enthalpy_solve_calls\":" << cold.enthalpy_solve_calls
+         << ",\"species_solve_calls\":" << cold.species_solve_calls
+         << ",\"momentum_iterations\":" << cold.momentum_iterations
+         << ",\"pressure_iterations\":" << cold.pressure_iterations
+         << ",\"enthalpy_iterations\":" << cold.enthalpy_iterations
+         << ",\"species_iterations\":" << cold.species_iterations
+         << ",\"momentum_residual\":" << cold.momentum_residual
+         << ",\"species_residual\":" << cold.species_residual
+         << ",\"enthalpy_residual\":" << cold.enthalpy_residual
+         << ",\"solid_velocity_max\":" << cold.solid_velocity_max
+         << ",\"normalization\":\"" << (cold.stopping ? "coast_reference" : "local_time") << "\"";
+    if (cold.stopping) {
+      json << ",\"reference_time\":" << cold.stopping->reference_time
+           << ",\"reference_tolerances\":[" << cold.stopping->momentum << ','
+           << cold.stopping->enthalpy << ',' << cold.stopping->species << ']'
+           << ",\"reference_residuals\":[" << cold.reference_residual[0] << ','
+           << cold.reference_residual[1] << ',' << cold.reference_residual[2] << ']'
+           << ",\"momentum_reference_scale\":" << cold.momentum_reference_scale
+           << ",\"enthalpy_reference_scale\":" << cold.enthalpy_reference_scale
+           << ",\"species_reference_scales\":[";
+      for (std::size_t j = 0; j < cold.species_reference_scales.size(); ++j) {
+        if (j) json << ',';
+        json << cold.species_reference_scales[j];
+      }
+      json << ']';
+    }
+    const auto write_final_solve = [&](const LinearSolveResult& solve) {
+      json << "{\"status_code\":" << unsigned(solve.status.code)
+           << ",\"termination\":\"" << termination_name(solve.termination)
+           << "\",\"iterations\":" << solve.iterations
+           << ",\"initial_true_residual\":" << solve.initial_true_residual
+           << ",\"final_true_residual\":" << solve.final_true_residual
+           << ",\"recursive_residual\":" << solve.recursive_residual << '}';
+    };
+    json << ",\"final_momentum\":[";
+    for (std::size_t j = 0; j < cold.final_momentum.size(); ++j) {
+      if (j) json << ',';
+      write_final_solve(cold.final_momentum[j]);
+    }
+    json << "],\"final_pressure\":";
+    write_final_solve(cold.final_pressure);
+    json << ",\"final_enthalpy\":";
+    write_final_solve(cold.final_enthalpy);
+    json << '}';
+  }
+  json << "}\n";
   return json.str();
 }
 

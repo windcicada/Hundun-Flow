@@ -1874,6 +1874,9 @@ Status aggregate_tensor_channel(Implementation& implementation,
 template <class Implementation>
 Status build_coarse_coefficients(Implementation& implementation,
                                  double* base) noexcept {
+#if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+  ++implementation.matrix_work.coarse_coefficient_builds;
+#endif
   copy_finest_coefficients(implementation, base);
   for (std::size_t level_index = 1U;
        level_index < implementation.levels.size(); ++level_index) {
@@ -1960,7 +1963,8 @@ Status build_coarse_coefficients(Implementation& implementation,
 
 template <class Implementation>
 Status validate_certified_hierarchy(const Implementation& implementation,
-                                    const double* base) noexcept {
+                                    const double* base,
+                                    bool finest_only = false) noexcept {
   if (implementation.spec.operator_class !=
       MgOperatorClass::symmetric_diagonally_dominant_m_matrix) {
     return {};
@@ -1969,7 +1973,7 @@ Status validate_certified_hierarchy(const Implementation& implementation,
     return {StatusCode::numerical_failure, kMgCoefficient};
   }
   for (std::size_t level_index = 0U;
-       level_index < implementation.levels.size(); ++level_index) {
+       level_index < (finest_only ? 1U : implementation.levels.size()); ++level_index) {
     const detail::MgLevelStorage& level = implementation.levels[level_index];
     const Int3 cells = level.view.local_shape;
     const Int3 xe{cells.x + 1, cells.y, cells.z};
@@ -2012,6 +2016,25 @@ Status validate_certified_hierarchy(const Implementation& implementation,
     }
   }
   return {};
+}
+
+// A diagonal application only consumes the finest operator. Refill and
+// validate it before deciding whether coarse numeric work is needed. The
+// unused coarse storage stays private; a later cycle selection rebuilds it
+// fully before publication. Disabled policies preserve the ordinary path.
+template <class Implementation>
+Status prepare_diagonal_shortcut(Implementation& implementation,
+                                 double* base, bool& selected) noexcept {
+  selected = false;
+  if (implementation.spec.policy.diagonal_shortcut_maximum_ratio == 0.0 ||
+      implementation.spec.null_space != MgNullSpace::none ||
+      implementation.spec.operator_class !=
+          MgOperatorClass::symmetric_diagonally_dominant_m_matrix) return {};
+  copy_finest_coefficients(implementation, base);
+  const Status local = validate_certified_hierarchy(implementation, base, true);
+  const Status agreed = consensus(implementation, local);
+  if (!agreed) return agreed;
+  return select_diagonal_shortcut(implementation, base, selected);
 }
 
 template <class Implementation>
@@ -4520,10 +4543,14 @@ Status NativeCartesianMgPlan::compile(const NativeCartesianMgSpec& spec,
   local = initialize_replicated_coarse(
       *candidate, counters, next_external_collectives, next_external_bytes);
   if (local) {
+    local = prepare_diagonal_shortcut(*candidate, candidate->hierarchy_storage.data(),
+                                      candidate->diagonal_shortcut);
+  }
+  if (local && !candidate->diagonal_shortcut) {
     local = build_coarse_coefficients(*candidate,
                                       candidate->hierarchy_storage.data());
   }
-  if (local) {
+  if (local && !candidate->diagonal_shortcut) {
     local = validate_certified_hierarchy(*candidate,
                                          candidate->hierarchy_storage.data());
   }
@@ -4532,7 +4559,7 @@ Status NativeCartesianMgPlan::compile(const NativeCartesianMgSpec& spec,
     destroy(candidate);
     return agreed;
   }
-  if (candidate->replicated_coarse) {
+  if (candidate->replicated_coarse && !candidate->diagonal_shortcut) {
     local = build_replicated_operator(*candidate,
                                       candidate->hierarchy_storage.data(),
                                       candidate->replicated_operator_active);
@@ -4543,12 +4570,6 @@ Status NativeCartesianMgPlan::compile(const NativeCartesianMgSpec& spec,
     std::copy(candidate->replicated_operator_active.begin(),
               candidate->replicated_operator_active.end(),
               candidate->replicated_operator_inactive.begin());
-  }
-  local = select_diagonal_shortcut(*candidate, candidate->hierarchy_storage.data(),
-                                    candidate->diagonal_shortcut);
-  if (!local) {
-    destroy(candidate);
-    return local;
   }
   candidate->generation = 1U;
   candidate->symbolic = public_symbolic_fingerprint(spec, strategy);
@@ -4671,11 +4692,18 @@ Status NativeCartesianMgPlan::update_coefficients(
   if (!agreed) {
     return agreed;
   }
+  const MgCoefficientViews previous_coefficients = implementation.coefficients;
+  bool next_diagonal_shortcut = false;
+  implementation.coefficients = coefficients;
+  local = prepare_diagonal_shortcut(implementation,
+      implementation.inactive_hierarchy_storage.data(), next_diagonal_shortcut);
+  implementation.coefficients = previous_coefficients;
+  if (!local) return local;
   std::uint64_t next_external_collectives =
       counters == nullptr ? 0U : counters->blocking_collectives;
   std::uint64_t next_external_bytes =
       counters == nullptr ? 0U : counters->collective_logical_bytes;
-  if (implementation.replicated_coarse) {
+  if (implementation.replicated_coarse && !next_diagonal_shortcut) {
     const std::size_t logical_bytes =
         implementation.replicated_global_cells *
         kReplicatedOperatorWidth * sizeof(double);
@@ -4692,22 +4720,23 @@ Status NativeCartesianMgPlan::update_coefficients(
       return agreed;
     }
   }
-  const MgCoefficientViews previous_coefficients = implementation.coefficients;
   implementation.coefficients = coefficients;
-  local = build_coarse_coefficients(
-      implementation, implementation.inactive_hierarchy_storage.data());
+  if (!next_diagonal_shortcut)
+    local = build_coarse_coefficients(
+        implementation, implementation.inactive_hierarchy_storage.data());
   implementation.coefficients = previous_coefficients;
   agreed = consensus(implementation, local);
   if (!agreed) {
     return agreed;
   }
-  local = validate_certified_hierarchy(
-      implementation, implementation.inactive_hierarchy_storage.data());
+  if (!next_diagonal_shortcut)
+    local = validate_certified_hierarchy(
+        implementation, implementation.inactive_hierarchy_storage.data());
   agreed = consensus(implementation, local);
   if (!agreed) {
     return agreed;
   }
-  if (implementation.replicated_coarse) {
+  if (implementation.replicated_coarse && !next_diagonal_shortcut) {
     local = build_replicated_operator(
         implementation, implementation.inactive_hierarchy_storage.data(),
         implementation.replicated_operator_inactive);
@@ -4716,16 +4745,12 @@ Status NativeCartesianMgPlan::update_coefficients(
       return agreed;
     }
   }
-  bool next_diagonal_shortcut = false;
-  local = select_diagonal_shortcut(implementation,
-      implementation.inactive_hierarchy_storage.data(), next_diagonal_shortcut);
-  if (!local) return local;
   {
   detail::LocalElapsedTimer copy_timer(implementation.runtime_counters.copy_nanoseconds);
   std::copy(implementation.inactive_hierarchy_storage.begin(),
             implementation.inactive_hierarchy_storage.end(),
             implementation.hierarchy_storage.begin());
-  if (implementation.replicated_coarse) {
+  if (implementation.replicated_coarse && !next_diagonal_shortcut) {
     std::copy(implementation.replicated_operator_inactive.begin(),
               implementation.replicated_operator_inactive.end(),
               implementation.replicated_operator_active.begin());
@@ -5185,6 +5210,10 @@ Status NativeCartesianMgPlan::level(std::size_t index,
   }
   out = implementation_->levels[index].view;
   return {};
+}
+
+bool NativeCartesianMgPlan::uses_diagonal_preconditioner() const noexcept {
+  return implementation_ != nullptr && implementation_->diagonal_shortcut;
 }
 
 CoarseningKind NativeCartesianMgPlan::finest_coarsening() const noexcept {

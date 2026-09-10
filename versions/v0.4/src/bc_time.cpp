@@ -201,7 +201,7 @@ Status TimeSchemePlan::compile(const TimeControlSpec& spec,
       static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic);
   const bool valid_scheme =
       static_cast<std::uint8_t>(spec.scheme) <=
-      static_cast<std::uint8_t>(TimeScheme::variable_bdf2);
+      static_cast<std::uint8_t>(TimeScheme::coast_cn_be);
   if (!valid_control || !valid_scheme || !finite_positive(spec.initial_dt) ||
       !finite_positive(spec.minimum_dt) ||
       !finite_positive(spec.maximum_dt) ||
@@ -249,7 +249,11 @@ Status TimeSchemePlan::local_candidate(LocalTimeLimits limits, double& dt,
   if (fingerprint_ == 0U) {
     return {StatusCode::invalid_plan, kTimeState};
   }
+  if (!std::isfinite(limits.maximum_dt) || limits.maximum_dt < 0.0)
+    return {StatusCode::numerical_failure, kTimeLimitValue};
   if (spec_.control == TimeControlKind::fixed) {
+    if (limits.maximum_dt > 0.0 && limits.maximum_dt < spec_.initial_dt)
+      return {StatusCode::numerical_failure, kTimeLimitValue};
     dt = spec_.initial_dt;
     active_limit = TimeLimit::fixed;
     return {};
@@ -269,6 +273,8 @@ Status TimeSchemePlan::local_candidate(LocalTimeLimits limits, double& dt,
   const std::size_t count =
       spec_.control == TimeControlKind::adaptive_acoustic ? 5U : 4U;
   double candidate = spec_.maximum_dt;
+  if (limits.maximum_dt > 0.0)
+    candidate = std::min(candidate, limits.maximum_dt);
   TimeLimit candidate_kind = TimeLimit::growth;
   constexpr double tie_scale = 32.0 * std::numeric_limits<double>::epsilon();
   for (std::size_t index = 0U; index < count; ++index) {

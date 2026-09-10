@@ -541,6 +541,88 @@ bool run_case(const fs::path& root, bool stretched,
     return allocation_failures(root, "evidence", [&](const fs::path& path) {
       return EvidenceWriter::append(MPI_COMM_WORLD, path, services, evidence);
     });
+  // The split method carries actual outer counts and terminal audits;
+  // publishing it as two legacy pressure correctors must be rejected.
+  RuntimeEvidenceRecord cold = evidence;
+  passed &= static_cast<bool>(detail::runtime_candidate_identity(
+      MPI_COMM_SELF, cold.candidate_identity, {}, true));
+  cold.coupling = RuntimeCouplingKind::coast_cn_be;
+  cold.pressure_solve_contract = RuntimePressureSolveContract::coast_cn_be;
+  cold.requested_bdf_order = cold.bdf_order = 1U;
+  cold.cold.active = true;
+  cold.cold.outer_iterations = 1U;
+  cold.cold.momentum_solve_calls = 3U;
+  cold.cold.pressure_solve_calls = cold.cold.enthalpy_solve_calls =
+      cold.cold.species_solve_calls = 1U;
+  cold.cold.final_momentum = evidence.momentum_predictor;
+  cold.cold.final_pressure = cold.cold.final_enthalpy = evidence.pressure[0U];
+  for (const auto &solve : cold.cold.final_momentum)
+    cold.cold.momentum_iterations += solve.iterations;
+  cold.cold.pressure_iterations = cold.cold.enthalpy_iterations =
+      evidence.pressure[0U].iterations;
+  cold.pressure_solve_calls = cold.momentum_predictor_solve_calls =
+      cold.momentum_predictor_passes = 0U;
+  cold.cold.species_iterations = 2U;
+  cold.momentum_advective_cfl = {};
+  cold.linear_iterations = cold.cold.momentum_iterations + cold.cold.pressure_iterations +
+                           cold.cold.enthalpy_iterations + cold.cold.species_iterations;
+  cold.pressure_energy_refinement_termination =
+      RuntimePressureEnergyRefinementTermination::none;
+  passed &= static_cast<bool>(EvidenceWriter::append(
+      MPI_COMM_SELF, root / "evidence" / "cold.jsonl", services, cold));
+  const auto cold_text = read(root / "evidence" / "cold.jsonl");
+  passed &=
+      cold_text.find("\"coupling\":\"CN_BE\"") != std::string::npos &&
+      cold_text.find("\"pressure\":[]") != std::string::npos &&
+      cold_text.find("\"cold\":{\"outer_iterations\":1") != std::string::npos;
+  auto reference = cold;
+  reference.cold.stopping = ColdStoppingSpec{0.002, 1e-4, 2e-4, 3e-4};
+  reference.cold.momentum_reference_scale = 10.0;
+  reference.cold.enthalpy_reference_scale = 20.0;
+  reference.cold.species_reference_scales = {1.0, 2.0, 3.0};
+  reference.cold.reference_residual = {1e-5, 2e-5, 3e-5};
+  reference.cold.momentum_residual = reference.cold.enthalpy_residual =
+      reference.cold.species_residual = 1e-7;
+  reference.terminal_physical_audit.energy_residual = 2e-5;
+  reference.terminal_physical_audit.energy_tolerance = 2e-4;
+  passed &= static_cast<bool>(EvidenceWriter::append(MPI_COMM_SELF,
+      root / "evidence" / "reference.jsonl", services, reference));
+  const auto reference_text = read(root / "evidence" / "reference.jsonl");
+  passed &= reference_text.find("\"normalization\":\"coast_reference\"") != std::string::npos &&
+            reference_text.find("\"species_reference_scales\":[1,2,3]") != std::string::npos;
+  for (unsigned mutation = 0; mutation < 8; ++mutation) {
+    auto bad = reference;
+    if (mutation == 0) bad.cold.stopping->reference_time = 0.0;
+    if (mutation == 1) bad.cold.species_reference_scales.clear();
+    if (mutation == 2) bad.cold.reference_residual[2] = 4e-4;
+    if (mutation == 3) bad.cold.momentum_reference_scale = 0.0;
+    if (mutation == 4) bad.cold.stopping.reset();
+    if (mutation == 5) bad.terminal_physical_audit.energy_tolerance = 1.0;
+    if (mutation == 6) bad.cold.solid_velocity_max = 1e-12;
+    if (mutation == 7) bad.linear_iterations = 0;
+    passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+        root / "evidence" / "cold-invalid.jsonl", services, bad);
+  }
+  auto relabelled = cold;
+  relabelled.candidate_identity = evidence.candidate_identity;
+  passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+      root / "evidence" / "cold-invalid.jsonl", services, relabelled);
+  auto invalid_cold = cold;
+  invalid_cold.pressure_solve_calls = 2U;
+  passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+                                    root / "evidence" / "cold-invalid.jsonl",
+                                    services, invalid_cold);
+  invalid_cold = cold;
+  invalid_cold.cold.final_pressure.termination =
+      LinearTermination::maximum_iterations;
+  passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+                                    root / "evidence" / "cold-invalid.jsonl",
+                                    services, invalid_cold);
+  invalid_cold = cold;
+  invalid_cold.cold.species_residual = 1e-6;
+  passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+                                    root / "evidence" / "cold-invalid.jsonl",
+                                    services, invalid_cold);
   RuntimeEvidenceRecord invalid_simple = evidence;
   invalid_simple.coupling = RuntimeCouplingKind::simple;
   passed &= !EvidenceWriter::append(

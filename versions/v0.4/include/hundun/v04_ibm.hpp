@@ -489,6 +489,7 @@ class EBTopology {
   ImmersedFluidSide fluid_side() const noexcept { return fluid_side_; }
   std::uint8_t region_halo_width() const noexcept { return region_halo_width_; }
   bool is_fluid_global(Int3 global_index) const noexcept;
+  Int3 global_cells() const noexcept { return global_cells_; }
   RevisionToken geometry_revision() const noexcept {
     return geometry_revision_;
   }
@@ -642,6 +643,12 @@ struct IbmCellEquationView {
 // stationary immersed wall.  All hot methods are allocation-free and operate
 // on the owning fluid row; shared solid ghost values are never used as
 // boundary authority.
+// Cold COAST coupling uses fluid-side pressure differences at cut faces;
+// the quadratic Neumann reconstruction remains the default for other methods.
+enum class IbmPressureGradientKind : std::uint8_t {
+  quadratic_neumann, coast_fluid_delta
+};
+
 class IbmEquationInterfacePlan {
  public:
   // An unbound/default object rejects Status-returning hot calls with
@@ -650,35 +657,47 @@ class IbmEquationInterfacePlan {
                         const EBTopology& topology,
                         const BoundaryStencilPlan& boundary,
                         const IbmInterfaceMetricPlan& metric,
-                        IbmEquationInterfacePlan& out) noexcept;
+                        IbmEquationInterfacePlan& out,
+                        IbmPressureGradientKind pressure_gradient =
+                            IbmPressureGradientKind::quadratic_neumann) noexcept;
   static Status compile(
       const CartesianKernelPlan& kernels, const EBTopology& topology,
       const BoundaryStencilPlan& boundary,
       const IbmInterfaceMetricPlan& metric,
       Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
-      IbmEquationInterfacePlan& out) noexcept;
+      IbmEquationInterfacePlan& out,
+                        IbmPressureGradientKind pressure_gradient =
+                            IbmPressureGradientKind::quadratic_neumann) noexcept;
   static Status compile(
       const CartesianKernelPlan& kernels, const EBTopology& topology,
       const BoundaryStencilPlan& boundary,
       const IbmInterfaceMetricPlan& metric,
       Span<const IbmInterfaceInletState> inlet_states,
       std::size_t independent_species_count,
-      IbmEquationInterfacePlan& out) noexcept;
+      IbmEquationInterfacePlan& out,
+                        IbmPressureGradientKind pressure_gradient =
+                            IbmPressureGradientKind::quadratic_neumann) noexcept;
   static Status compile(const CartesianKernelPlan& kernels,
                         const EBTopology& topology,
                         const BoundaryStencilPlan& boundary,
-                        IbmEquationInterfacePlan& out) noexcept;
+                        IbmEquationInterfacePlan& out,
+                        IbmPressureGradientKind pressure_gradient =
+                            IbmPressureGradientKind::quadratic_neumann) noexcept;
   static Status compile(
       const CartesianKernelPlan& kernels, const EBTopology& topology,
       const BoundaryStencilPlan& boundary,
       Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
-      IbmEquationInterfacePlan& out) noexcept;
+      IbmEquationInterfacePlan& out,
+                        IbmPressureGradientKind pressure_gradient =
+                            IbmPressureGradientKind::quadratic_neumann) noexcept;
   static Status compile(
       const CartesianKernelPlan& kernels, const EBTopology& topology,
       const BoundaryStencilPlan& boundary,
       Span<const IbmInterfaceInletState> inlet_states,
       std::size_t independent_species_count,
-      IbmEquationInterfacePlan& out) noexcept;
+      IbmEquationInterfacePlan& out,
+                        IbmPressureGradientKind pressure_gradient =
+                            IbmPressureGradientKind::quadratic_neumann) noexcept;
 
   Status constrain_interface_flux(FaceFluxView flux) const noexcept;
   // Compatibility spelling for the sealed-wall path.  Source-aware plans
@@ -830,7 +849,8 @@ class IbmEquationInterfacePlan {
       Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
       Span<const IbmInterfaceInletState> inlet_states,
       std::size_t independent_species_count, bool inlet_state_bound,
-      IbmEquationInterfacePlan& out) noexcept;
+      IbmEquationInterfacePlan& out,
+      IbmPressureGradientKind pressure_gradient) noexcept;
   Status add_source_convection_correction_impl(
       IbmInterfaceInletField field, const ConvectionScheme* scheme,
       ConstFieldView transported, double scale, FieldView output,
@@ -846,6 +866,7 @@ class IbmEquationInterfacePlan {
   std::vector<double> prescribed_independent_species_;
   std::size_t independent_species_count_{};
   bool inlet_state_bound_{};
+  IbmPressureGradientKind pressure_gradient_{IbmPressureGradientKind::quadratic_neumann};
   PlanFingerprint fingerprint_{};
 };
 

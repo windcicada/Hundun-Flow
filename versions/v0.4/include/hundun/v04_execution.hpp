@@ -1215,6 +1215,11 @@ class FinalFaceFluxWriter {
   Status begin_pending(AttemptTransaction& transaction,
                        FaceFluxStorage& storage,
                        PendingFaceFluxView& out) noexcept;
+  // Stage an already solved flux in this writer's current transaction.
+  // The source uses separate storage. Validate it completely before copying;
+  // publication and accepted history rotation remain separate operations.
+  Status copy_pending(ConstFaceFluxView source,
+                      PendingFaceFluxView& pending) noexcept;
   Status initialize_committed(FaceFluxStorage& storage,
                               ConstFaceFluxView source) noexcept;
   // Restart images already represent both accepted time levels while the
@@ -1237,6 +1242,12 @@ class FinalFaceFluxWriter {
       const PendingFaceFluxView& pending) const noexcept;
   Status publish_pending(Span<const RevisionDependency> dependencies,
                          PendingFaceFluxView& pending) noexcept;
+  // Read the immutable, published flux of an active attempt for terminal
+  // diagnostics. Publication has consumed the writable lease; acceptance
+  // and history rotation still belong to the transaction. Reacquire views
+  // after each transaction finishes.
+  Status published_pending(const AttemptTransaction& transaction,
+                           ConstFaceFluxView& out) const noexcept;
   Status committed(const FaceFluxStorage& storage,
                    ConstFaceFluxView& out) const noexcept;
   Status committed_previous(const FaceFluxStorage& storage,
@@ -1250,6 +1261,7 @@ class FinalFaceFluxWriter {
   friend class ProductDriver;
   Status restore_committed(FaceFluxStorage& storage,
                            ConstFaceFluxView source) noexcept;
+  Status validate_pending_lease(const PendingFaceFluxView& pending) const noexcept;
   bool ready_for_collective(const AttemptTransaction& transaction) const
       noexcept;
   void complete_from_transaction(const AttemptTransaction& transaction,

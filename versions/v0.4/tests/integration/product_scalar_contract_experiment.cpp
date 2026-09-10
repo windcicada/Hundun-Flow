@@ -278,11 +278,31 @@ Result run(bool species, bool uniform, double dt) {
                 << " remap_residual=" << report.scalar_transport.final_remap_residual
                 << " mass_pairing=" << report.scalar_transport.mass_pairing_residual
                 << " energy=" << report.piso.energy_residual << '\n';
+      const auto& perf=report.pressure_energy_performance;
+      for(std::size_t k=0;k<perf.loop_count;++k) {
+        const auto& loop=perf.loops[k];
+        std::cerr<<"scalar_failure_loop sweep="<<loop.scalar_coupling_sweep
+                 <<" residual="<<loop.initial_species_residual
+                 <<" corrector="<<unsigned(loop.solve.corrector)
+                 <<" refinement="<<unsigned(loop.solve.refinement)
+                 <<" iterations="<<loop.linear.iterations<<'\n';
+      }
       result.ran=false; break;
     }
     result.history &= report.attempts==1U && !report.temporal_method_fallback &&
         report.effective_bdf.order==(i==0 ? 1U : 2U) && report.proposal.dt==dt;
     result.correction_active &= report.scalar_transport.active;
+    if (species) {
+      const auto& perf = report.pressure_energy_performance;
+      bool certified_species = false;
+      for (std::size_t k = 0U; k < perf.loop_count; ++k) {
+        const auto& loop = perf.loops[k];
+        if (loop.scalar_coupling_sweep == report.scalar_transport.coupling_sweeps)
+          certified_species |= loop.target_species_evaluated &&
+                               !loop.provisional_species_guess;
+      }
+      result.correction_active &= certified_species;
+    }
     if (i==0U) payload_bytes=report.scalar_transport.owned_payload_bytes;
     result.correction_active &= payload_bytes!=0U &&
         report.scalar_transport.owned_payload_bytes==payload_bytes;

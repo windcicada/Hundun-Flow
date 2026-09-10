@@ -384,7 +384,7 @@ struct MixtureFixture {
   std::array<ConstFieldView, 1U> species_views{};
   std::array<BoundaryGhostFieldAuthority, 3U> field_authority{};
 
-  bool initialize(bool compact_stencil = false) {
+  bool initialize(bool compact_stencil = false, bool perry = false) {
     CartesianGeometryPlan geometry;
     MeshPatch patch;
     FieldRegistry registry;
@@ -420,7 +420,17 @@ struct MixtureFixture {
     }
     species.view.field = transported.data[0U].field;
     species_views[0U] = as_const(species.view);
-    const ThermophysicalSpec thermo = mixture_spec();
+    ThermophysicalSpec thermo = mixture_spec();
+    if (perry) {
+      for (auto &entry : thermo.species) {
+        entry.transport_law = TransportLaw::coast_perry;
+        entry.viscosity_reference = 0.0;
+        entry.conductivity = 0.0;
+        entry.prandtl = 0.70;
+        entry.critical_temperature = 154.4;
+        entry.critical_pressure = 49.7;
+      }
+    }
     const std::array<TransportedScalarSpec, 1U> catalog{{
         {"A", TransportedScalarRole::species, 1.0, 1.0},
     }};
@@ -761,9 +771,9 @@ bool test_physical_inlet_face_keeps_discrete_mirror(bool compact_stencil = false
   return passed;
 }
 
-bool test_inlet_material_refresh_and_conservative_consumers() {
+bool test_inlet_material_refresh_and_conservative_consumers(bool perry = false) {
   MixtureFixture fixture;
-  if (!fixture.initialize()) return false;
+  if (!fixture.initialize(false, perry)) return false;
   CartesianGeometryPlan geometry;
   MeshPatch patch;
   FieldRegistry registry;
@@ -784,7 +794,11 @@ bool test_inlet_material_refresh_and_conservative_consumers() {
   const std::array<double,1U> y{0.35};
   MolecularTransportState face_transport;
   passed &= static_cast<bool>(fixture.transport.evaluate(500.0,{y.data(),1U},face_transport));
-  const double k=face_transport.conductivity;
+  double h=0.0, cp=0.0, gas=0.0;
+  passed &= static_cast<bool>(fixture.thermodynamics.mixture_enthalpy(
+      500.0,{y.data(),1U},h,cp,gas));
+  const double k=perry ? (face_transport.viscosity+3e-5)*cp/0.70
+                       : face_transport.conductivity;
   std::fill(fixture.pressure.storage.begin(),fixture.pressure.storage.end(),0.0);
   std::fill(fixture.output[1].storage.begin(),fixture.output[1].storage.end(),650.0);
   std::fill(fixture.output[5].storage.begin(),fixture.output[5].storage.end(),2e-5);
@@ -792,12 +806,14 @@ bool test_inlet_material_refresh_and_conservative_consumers() {
   OwnedField effective=make_field(88U,91U,300U), divergence=make_field(89U,92U,301U);
   std::fill(effective.storage.begin(),effective.storage.end(),5e-5);
   const BoundaryThermophysicalGhostOutput outputs{{},fixture.output[1].view,{},{},{},
-      fixture.output[5].view,fixture.output[6].view,{}};
+      fixture.output[5].view,fixture.output[6].view,fixture.output[7].view};
   passed &= expect(static_cast<bool>(BoundaryThermophysicalFaceClosure::refresh_inlet_material(
       boundary,fixture.thermodynamics,fixture.transport,100000.0,
       as_const(fixture.pressure.view),outputs,effective.view)),"physical inlet survives material re-publication");
   passed &= expect(near(effective.view.unchecked({-1,0,0},0U),face_transport.viscosity+3e-5,1e-14),
                    "extrapolated SGS addition stays separate from face molecular viscosity");
+  passed &= expect(near(fixture.output[7].view.unchecked({-1,0,0},0U),k/cp,1e-14),
+                   "inlet enthalpy diffusivity includes the configured SGS heat transport");
   const double coefficient=detail::positive_transmissibility(kernels,as_const(fixture.output[6].view),CartesianAxis::x,{0,0,0});
   const double old_coefficient=detail::positive_transmissibility(legacy,as_const(fixture.output[6].view),CartesianAxis::x,{0,0,0});
   passed &= expect(near(coefficient,k,1e-14) && near(old_coefficient,4.0*k/3.0,1e-14),
@@ -1145,6 +1161,7 @@ int main(int argc, char **argv) {
       test_physical_inlet_face_keeps_discrete_mirror() &&
       test_physical_inlet_face_keeps_discrete_mirror(true) &&
       test_inlet_material_refresh_and_conservative_consumers() &&
+      test_inlet_material_refresh_and_conservative_consumers(true) &&
       test_invalid_state_and_contract_are_atomic() &&
       test_mpi_and_periodic_ghosts_remain_halo_owned(rank, size);
   const int finalized = MPI_Finalize();

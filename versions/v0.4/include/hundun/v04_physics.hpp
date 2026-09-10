@@ -246,7 +246,8 @@ class ThermodynamicsPlan {
 enum class TransportKernel : std::uint8_t {
   constant,
   sutherland_wilke,
-  coast_native_air
+  coast_native_air,
+  coast_perry
 };
 
 struct MolecularTransportState {
@@ -277,6 +278,10 @@ class TransportPlan {
 
   TransportKernel kernel() const noexcept { return kernel_; }
   double enthalpy_prandtl() const noexcept { return enthalpy_prandtl_; }
+  bool has_effective_enthalpy_transport() const noexcept {
+    return kernel_ == TransportKernel::coast_native_air ||
+           kernel_ == TransportKernel::coast_perry;
+  }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 
  private:
@@ -292,6 +297,8 @@ class TransportPlan {
   std::vector<double> molecular_weight_ratio_quarter_;
   std::vector<double> wilke_denominator_reciprocal_;
   std::vector<double> constant_wilke_phi_;
+  std::vector<double> perry_temperature_;
+  std::vector<double> perry_scale_;
   std::vector<std::uint16_t> independent_to_species_;
   std::size_t dependent_species_{};
   double minimum_temperature_{};

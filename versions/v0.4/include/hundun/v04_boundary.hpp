@@ -603,6 +603,9 @@ struct LocalTimeLimits {
   double thermal{};
   double species{};
   double acoustic{};
+  // Absolute step ceiling in seconds; zero leaves the compiled maximum.
+  // This is independent of the five unit-CFL physical stability scales.
+  double maximum_dt{};
 };
 
 struct BdfCoefficients {

@@ -341,6 +341,24 @@ bool test_compile_and_local_limits() {
   limits.acoustic = std::numeric_limits<double>::quiet_NaN();
   passed &= expect(static_cast<bool>(flow.local_candidate(limits, dt, active)),
                    "adaptive flow never validates unused acoustic limit");
+  limits = loose_limits();
+  limits.maximum_dt = 9.7088612375381536e-8;
+  passed &= expect(flow.local_candidate(limits, dt, active) && dt == limits.maximum_dt &&
+                       acoustic.local_candidate(limits, dt, active) && dt == limits.maximum_dt,
+                   "explicit step ceiling applies directly to both adaptive controllers");
+  dt = 7.0;
+  passed &= expect(!fixed.local_candidate(limits, dt, active) && dt == 7.0,
+                   "a smaller ceiling rejects a fixed step without silently changing its method");
+  limits.maximum_dt = fixed_spec.initial_dt;
+  passed &= expect(fixed.local_candidate(limits, dt, active) && dt == fixed_spec.initial_dt,
+                   "a compatible ceiling preserves the fixed step");
+  for (double invalid_cap : {-1.0, std::numeric_limits<double>::infinity(),
+                            std::numeric_limits<double>::quiet_NaN()}) {
+    limits.maximum_dt = invalid_cap;
+    dt = 7.0;
+    passed &= expect(!flow.local_candidate(limits, dt, active) && dt == 7.0,
+                     "invalid explicit ceiling is rejected atomically");
+  }
   return passed;
 }
 
@@ -510,6 +528,37 @@ bool test_state_and_bdf() {
                            MPI_COMM_SELF, limits, be_second)) &&
                        be_second.bdf.order == 1U,
                    "backward-Euler scheme never upgrades to BDF2");
+  return passed;
+}
+
+bool test_cold_time_method() {
+  TimeSchemePlan plan, bdf_plan;
+  const auto spec = valid_spec(TimeControlKind::fixed, TimeScheme::coast_cn_be);
+  bool passed = expect(TimeSchemePlan::compile(spec, plan) &&
+      TimeSchemePlan::compile(valid_spec(TimeControlKind::fixed), bdf_plan) &&
+      plan.fingerprint() != bdf_plan.fingerprint(),
+      "CN/BE controller has a distinct method identity");
+  if (!passed) return false;
+  TimeControllerState state;
+  passed &= expect(static_cast<bool>(TimeControllerState::start(plan, 0.0, state)),
+                   "CN/BE controller starts");
+  for (unsigned step = 0U; step < 3U; ++step) {
+    StepTime proposed;
+    passed &= expect(state.propose(MPI_COMM_SELF, loose_limits(), proposed) &&
+        proposed.dt == spec.initial_dt && proposed.bdf.order == 1U &&
+        proposed.bdf.a0 == 1.0 / proposed.dt &&
+        proposed.bdf.a1 == -proposed.bdf.a0 && proposed.bdf.a2 == 0.0 &&
+        accept_self(state, proposed),
+        "CN/BE mass and scalar storage stay BE across accepted steps");
+  }
+  TimeControllerState restarted;
+  StepTime proposed;
+  passed &= expect(TimeControllerState::restart_exact(plan, state.time(),
+      state.last_accepted_dt(), state.accepted_step(), state.next_generation(),
+      restarted) && restarted.propose(MPI_COMM_SELF, loose_limits(), proposed) &&
+      proposed.bdf.order == 1U && proposed.bdf.a2 == 0.0 &&
+      proposed.dt == spec.initial_dt,
+      "exact CN/BE restart retains scalar BE storage with complete history");
   return passed;
 }
 
@@ -1268,6 +1317,7 @@ int main(int argc, char** argv) {
   bool passed = true;
   passed &= test_compile_and_local_limits();
   passed &= test_state_and_bdf();
+  passed &= test_cold_time_method();
   passed &= test_prepare_then_commit_time_finish();
   passed &= test_retry_exhaustion_and_minimum();
   passed &= test_fatal_consume_arms_collective_be_recovery();

@@ -131,6 +131,43 @@ std::int32_t normal_index(Int3 face, CartesianAxis axis) noexcept {
              : (axis == CartesianAxis::y ? face.y : face.z);
 }
 
+// COAST pressure_delta_core mirrors the adjacent fluid difference across
+// a cut face. Sum the two half differences before converting to Cartesian
+// coordinates. Apply each cut axis once, including a one-cell fluid gap.
+double coast_pressure_link_correction(const CartesianKernelPlan& kernels,
+    const EBTopology& topology, const ImmersedLink& link,
+    ConstFieldView pressure) noexcept {
+  const auto axis = interface_face(link).axis;
+  const unsigned a = static_cast<unsigned>(axis);
+  const Int3 cell = link.fluid_local_index;
+  const Int3 minus = offset(cell, axis, -1), plus = offset(cell, axis, 1);
+  const auto extent = topology.global_cells();
+  const auto fluid = [&](Int3 global) {
+    // Physical ghost values remain owned by the ordinary boundary plan.
+    if (global.x < 0 || global.y < 0 || global.z < 0 ||
+        global.x >= extent.x || global.y >= extent.y || global.z >= extent.z)
+      return true;
+    return topology.is_fluid_global(global);
+  };
+  const bool fm = fluid(offset(link.fluid_global_index, axis, -1));
+  const bool fp = fluid(offset(link.fluid_global_index, axis, 1));
+  if (!fm && !fp && !positive_face(link.direction)) return 0.0;
+  const int n = normal_index(cell, axis);
+  const double pm = pressure.unchecked(minus, 0),
+               pc = pressure.unchecked(cell, 0),
+               pp = pressure.unchecked(plus, 0);
+  const auto weights = kernels.geometry_kind() == GeometryKind::uniform
+      ? detail::metric_derivative_weights<true>(kernels, a, n)
+      : detail::metric_derivative_weights<false>(kernels, a, n);
+  const double original = weights.minus * pm + weights.centre * pc + weights.plus * pp;
+  const double dm = fm ? pc - pm : fp ? pp - pc : 0.0;
+  const double dp = fp ? pp - pc : fm ? pc - pm : 0.0;
+  const double desired = (dm + dp) /
+      (detail::centre_coordinate(kernels, axis, n + 1) -
+       detail::centre_coordinate(kernels, axis, n - 1));
+  return desired - original;
+}
+
 double regular_cross_traction(const CartesianKernelPlan& kernels,
                               ConstFieldView gradient,
                               ConstFieldView viscosity, InterfaceFace face,
@@ -787,20 +824,22 @@ IbmPhysicalBoundaryFluxAuthority::validate_inactive_physical_boundary_flux(
 Status IbmEquationInterfacePlan::compile(
     const CartesianKernelPlan& kernels, const EBTopology& topology,
     const BoundaryStencilPlan& boundary,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
   return compile_sources(
       kernels, topology, boundary, topology.interface_metric(), {}, {}, 0U,
-      false, out);
+      false, out, pressure_gradient);
 }
 
 Status IbmEquationInterfacePlan::compile(
     const CartesianKernelPlan& kernels, const EBTopology& topology,
     const BoundaryStencilPlan& boundary,
     Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
   return compile_sources(kernels, topology, boundary,
                          topology.interface_metric(), mass_flux_sources, {},
-                         0U, false, out);
+                         0U, false, out, pressure_gradient);
 }
 
 Status IbmEquationInterfacePlan::compile(
@@ -808,19 +847,21 @@ Status IbmEquationInterfacePlan::compile(
     const BoundaryStencilPlan& boundary,
     Span<const IbmInterfaceInletState> inlet_states,
     std::size_t independent_species_count,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
   return compile_sources(kernels, topology, boundary,
                          topology.interface_metric(), {}, inlet_states,
-                         independent_species_count, true, out);
+                         independent_species_count, true, out, pressure_gradient);
 }
 
 Status IbmEquationInterfacePlan::compile(
     const CartesianKernelPlan& kernels, const EBTopology& topology,
     const BoundaryStencilPlan& boundary,
     const IbmInterfaceMetricPlan& metric,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
   return compile_sources(kernels, topology, boundary, metric, {}, {}, 0U,
-                         false, out);
+                         false, out, pressure_gradient);
 }
 
 Status IbmEquationInterfacePlan::compile(
@@ -828,9 +869,10 @@ Status IbmEquationInterfacePlan::compile(
     const BoundaryStencilPlan& boundary,
     const IbmInterfaceMetricPlan& metric,
     Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
   return compile_sources(kernels, topology, boundary, metric,
-                         mass_flux_sources, {}, 0U, false, out);
+                         mass_flux_sources, {}, 0U, false, out, pressure_gradient);
 }
 
 Status IbmEquationInterfacePlan::compile(
@@ -839,9 +881,10 @@ Status IbmEquationInterfacePlan::compile(
     const IbmInterfaceMetricPlan& metric,
     Span<const IbmInterfaceInletState> inlet_states,
     std::size_t independent_species_count,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
   return compile_sources(kernels, topology, boundary, metric, {},
-                         inlet_states, independent_species_count, true, out);
+                         inlet_states, independent_species_count, true, out, pressure_gradient);
 }
 
 Status IbmEquationInterfacePlan::compile_sources(
@@ -851,7 +894,11 @@ Status IbmEquationInterfacePlan::compile_sources(
     Span<const IbmInterfaceMassFluxSource> mass_flux_sources,
     Span<const IbmInterfaceInletState> inlet_states,
     std::size_t independent_species_count, bool inlet_state_bound,
-    IbmEquationInterfacePlan& out) noexcept {
+    IbmEquationInterfacePlan& out,
+    IbmPressureGradientKind pressure_gradient) noexcept {
+  if (pressure_gradient != IbmPressureGradientKind::quadratic_neumann &&
+      pressure_gradient != IbmPressureGradientKind::coast_fluid_delta)
+    return {StatusCode::invalid_plan, kIbmEquationPlan};
   if (!valid_plan_inputs(kernels, topology, boundary, metric) ||
       (mass_flux_sources.size != 0U && mass_flux_sources.data == nullptr) ||
       (inlet_states.size != 0U && inlet_states.data == nullptr) ||
@@ -865,6 +912,8 @@ Status IbmEquationInterfacePlan::compile_sources(
   fingerprint = mix(fingerprint, boundary.fingerprint());
   fingerprint = mix(fingerprint, metric.fingerprint());
   fingerprint = mix(fingerprint, topology.geometry_revision());
+  if (pressure_gradient == IbmPressureGradientKind::coast_fluid_delta)
+    fingerprint = mix(fingerprint, UINT64_C(0x434f415354504431));
   if (fingerprint == 0U) fingerprint = 1U;
   IbmEquationInterfacePlan candidate;
   candidate.kernels_ = &kernels;
@@ -873,6 +922,7 @@ Status IbmEquationInterfacePlan::compile_sources(
   candidate.metric_ = &metric;
   candidate.independent_species_count_ = independent_species_count;
   candidate.inlet_state_bound_ = inlet_state_bound;
+  candidate.pressure_gradient_ = pressure_gradient;
   try {
     const Int3 cells=kernels.cells();
     const auto region=topology.region();
@@ -1890,6 +1940,7 @@ Status IbmEquationInterfacePlan::constrain_momentum(
       !detail::valid_cell_view(system.residual, cells, 0U, 3U))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
+  const bool coast_delta = pressure_gradient_ == IbmPressureGradientKind::coast_fluid_delta;
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const IbmInterfaceLinkMetric> physical_links = metric_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
@@ -1914,13 +1965,15 @@ Status IbmEquationInterfacePlan::constrain_momentum(
     const Int3 cell = link.fluid_local_index;
     const WallLinearization linearization = wall_linearization_[index];
     double pressure_ghost = 0.0;
-    if (status)
+    if (status && !coast_delta)
       status = evaluate_quadratic_row(
           boundary_->reconstruction(), row.zero_normal_value_row,
           pressure_perturbation, 0U, 0.0, 0.0, pressure_ghost);
     const double solid_pressure =
         pressure_perturbation.unchecked(link.solid_local_index, 0U);
     const double pressure_gradient_correction =
+        coast_delta ? coast_pressure_link_correction(*kernels_, *topology_, link,
+                                                     pressure_perturbation) :
         linearization.solid_pressure_derivative_weight *
         (pressure_ghost - solid_pressure);
     const double pressure_force_correction =
@@ -2050,6 +2103,7 @@ Status IbmEquationInterfacePlan::correct_pressure_gradient(
       detail::field_views_overlap(pressure, as_const(gradient)))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
+  const bool coast_delta = pressure_gradient_ == IbmPressureGradientKind::coast_fluid_delta;
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
   if (wall_linearization_.size() != rows.size)
@@ -2063,12 +2117,14 @@ Status IbmEquationInterfacePlan::correct_pressure_gradient(
     const InterfaceFace face = interface_face(link);
     const std::uint8_t component = static_cast<std::uint8_t>(face.axis);
     double ghost = 0.0;
-    status = evaluate_quadratic_row(
-        boundary_->reconstruction(), row.zero_normal_value_row, pressure, 0U,
-        0.0, 0.0, ghost);
+    if (!coast_delta)
+      status = evaluate_quadratic_row(
+          boundary_->reconstruction(), row.zero_normal_value_row, pressure, 0U,
+          0.0, 0.0, ghost);
     const double solid =
         pressure.unchecked(link.solid_local_index, 0U);
     const double correction =
+        coast_delta ? coast_pressure_link_correction(*kernels_, *topology_, link, pressure) :
         linearization.solid_pressure_derivative_weight *
         (ghost - solid);
     const double value =
@@ -2102,6 +2158,7 @@ Status IbmEquationInterfacePlan::correct_pressure_work(
       detail::field_views_overlap(velocity, as_const(rate)))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
+  const bool coast_delta = pressure_gradient_ == IbmPressureGradientKind::coast_fluid_delta;
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
   if (wall_linearization_.size() != rows.size)
@@ -2115,11 +2172,13 @@ Status IbmEquationInterfacePlan::correct_pressure_work(
     const std::uint8_t component = static_cast<std::uint8_t>(face.axis);
     const WallLinearization linearization = wall_linearization_[index];
     double ghost = 0.0;
-    status = evaluate_quadratic_row(
-        boundary_->reconstruction(), row.zero_normal_value_row, pressure, 0U,
-        0.0, 0.0, ghost);
+    if (!coast_delta)
+      status = evaluate_quadratic_row(
+          boundary_->reconstruction(), row.zero_normal_value_row, pressure, 0U,
+          0.0, 0.0, ghost);
     const double solid = pressure.unchecked(link.solid_local_index, 0U);
     const double pressure_gradient_correction =
+        coast_delta ? coast_pressure_link_correction(*kernels_, *topology_, link, pressure) :
         linearization.solid_pressure_derivative_weight * (ghost - solid);
     const double velocity_normal =
         velocity.unchecked(link.fluid_local_index, component);

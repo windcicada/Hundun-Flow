@@ -306,6 +306,13 @@ bool run() {
             !fs::exists(benchmark_options.run_directory / "Restart") &&
             !fs::exists(benchmark_options.run_directory / "screen.log") &&
             !fs::exists(benchmark_options.run_directory / "monitor.jsonl");
+  ApplicationRunOptions capped = benchmark_options;
+  capped.run_directory = root / "cap";
+  capped.time_limits.maximum_dt = 1.0e-4;
+  ApplicationRunReport capped_report;
+  passed &= static_cast<bool>(ApplicationService::run(MPI_COMM_SELF, capped, capped_report));
+  passed &= capped_report.accepted_steps == 2U &&
+            std::abs(capped_report.final_time - 2.0e-4) < 1.0e-18;
   ApplicationRunReport unchanged_run;
   unchanged_run.product = UINT64_C(0xcafef00d);
   ApplicationRunOptions invalid_run = run_options;
