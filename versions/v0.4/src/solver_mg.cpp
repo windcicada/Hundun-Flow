@@ -5039,9 +5039,11 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
   const bool skip_final_projection = implementation.spec.correction_scaling ==
                                      MgCorrectionScaling::unit_linear;
 #endif
+  // A flexible cycle may point against the residual. The scalar minimum
+  // then uses a negative scale; zeroing it destroys a Krylov direction.
   const double alpha = skip_final_projection
                            ? 1.0
-                           : (projection[1] > 0.0 && projection[2] > tiny
+                           : (projection[2] > tiny
                                   ? projection[1] / projection[2]
                                   : 0.0);
   const bool unit_linear = implementation.spec.correction_scaling ==

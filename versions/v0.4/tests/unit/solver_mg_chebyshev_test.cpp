@@ -1313,9 +1313,52 @@ bool test_diagonal_shortcut() {
   return passed;
 }
 
+bool test_signed_residual_minimum() {
+  const MgBoundarySet periodic{MgBoundaryKind::periodic, MgBoundaryKind::periodic,
+                              MgBoundaryKind::periodic, MgBoundaryKind::periodic,
+                              MgBoundaryKind::periodic, MgBoundaryKind::periodic};
+  Fixture fixture;
+  if (!expect(fixture.initialize(MgPointSmootherKind::red_black,
+          MgOperatorClass::general, 4.0, 1.0, 2U, periodic,
+          MgNullSpace::none, false, {4, 4, 4}, false, 4.0,
+          MgCycleKind::v_cycle, 2U), "signed projection fixture compiles"))
+    return false;
+  std::fill(fixture.rhs.storage.begin(), fixture.rhs.storage.end(), 1.0);
+  const auto measure = [&]() {
+    std::array<double, 2U> result{};
+    const auto value = [&](int x, int y, int z) {
+      return fixture.correction.view.unchecked({(x + 4) % 4, (y + 4) % 4,
+                                                (z + 4) % 4}, 0U);
+    };
+    for (int z = 0; z < 4; ++z)
+      for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+          const double action = 4.0 * value(x, y, z) - value(x - 1, y, z) -
+              value(x + 1, y, z) - value(x, y - 1, z) - value(x, y + 1, z) -
+              value(x, y, z - 1) - value(x, y, z + 1);
+          result[0] += action;
+          result[1] += (1.0 - action) * (1.0 - action);
+        }
+    return result;
+  };
+  detail::set_mg_skip_final_projection_for_test(fixture.plan, true);
+  if (!expect(static_cast<bool>(fixture.plan.apply(as_const(fixture.rhs.view),
+          fixture.correction.view, 0U)), "raw signed cycle applies")) return false;
+  const auto raw = measure();
+  if (!expect(raw[0] < 0.0, "raw MG direction has negative residual alignment"))
+    return false;
+  detail::set_mg_skip_final_projection_for_test(fixture.plan, false);
+  if (!expect(static_cast<bool>(fixture.plan.apply(as_const(fixture.rhs.view),
+          fixture.correction.view, 1U)), "signed minimum applies")) return false;
+  const auto projected = measure();
+  return expect(projected[1] < 64.0 && projected[1] < raw[1],
+                "negative-alignment correction reduces the independent true residual");
+}
+
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
+  passed &= test_signed_residual_minimum();
   passed &= test_diagonal_shortcut();
   passed &= test_public_contract();
   passed &= test_certified_apply_and_hot_schedule();
