@@ -399,8 +399,9 @@ class CaseCompiler {
   static Status load_and_compile(MPI_Comm communicator,
                                  const std::filesystem::path& case_root,
                                  ValidatedModel& out);
-  // Re-read both cold cases and permit only Sutherland -> Perry transport.
-  // All other physical controls, thermodynamics and referenced bytes match.
+  // Re-read both cold cases for Sutherland -> Perry transport, or a Perry
+  // zero-gradient outlet -> static-pressure outlet with backflow transition.
+  // The selected change preserves every other control and referenced byte.
   static Status validate_transport_change(MPI_Comm communicator,
       const std::filesystem::path& source_root, const ValidatedModel& source,
       const std::filesystem::path& target_root, const ValidatedModel& target);

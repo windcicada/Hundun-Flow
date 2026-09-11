@@ -2723,8 +2723,20 @@ Status resolve_static_boundary_values(
               if (vector_dot(owner_velocity, boundary_outward_normal(face)) >=
                   0.0)
                 vectors[begin + face_cell] = owner_velocity;
-              else
-                vectors[begin + face_cell] = runtime_spec.backflow_velocity;
+              else {
+                Real3 incoming = runtime_spec.backflow_velocity;
+                if (boundary.pressure_driven_backflow()) {
+                  // Static pressure determines the normal flux; the reservoir
+                  // supplies only the incoming tangential velocity.
+                  const auto normal = boundary_outward_normal(face);
+                  const double correction = vector_dot(owner_velocity, normal) -
+                      vector_dot(incoming, normal);
+                  incoming.x += correction * normal.x;
+                  incoming.y += correction * normal.y;
+                  incoming.z += correction * normal.z;
+                }
+                vectors[begin + face_cell] = incoming;
+              }
             }
           }
       }
@@ -3576,6 +3588,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       case BoundaryKind::velocity_inlet:
       case BoundaryKind::mass_flow_inlet:
       case BoundaryKind::zero_gradient_mass_outlet:
+      case BoundaryKind::pressure_outlet:
       case BoundaryKind::symmetry:
       case BoundaryKind::no_slip_wall:
       case BoundaryKind::periodic: return true;
@@ -6462,8 +6475,9 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
       product.boundary, product.thermodynamics, product.transport,
       cold_pressure_reference, as_const(trial_pressure),
-      {{}, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity, {}},
-      effective_viscosity);
+      {trial_density, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity, {}},
+      effective_viscosity, as_const(trial_enthalpy),
+      {species_accepted.data(), species_accepted.size()});
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -7160,7 +7174,9 @@ Status ProductDriver::initialize(const DriverInitialState& initial) noexcept {
     status=BoundaryThermophysicalFaceClosure::refresh_inlet_material(
         product.boundary,product.thermodynamics,product.transport,
         initial.pressure_reference,as_const(initial_pressure_with_ghosts),
-        {{},{},{},{},{},initial_molecular_viscosity,{},{}},initial_effective_viscosity);
+        {{},{},{},{},{},initial_molecular_viscosity,{},{}},
+        initial_effective_viscosity, as_const(initial_enthalpy_with_ghosts),
+        {runtime.species_accepted.data(), runtime.species_accepted.size()});
   initial_density = as_const(initial_density_with_ghosts);
   initial_velocity = as_const(initial_velocity_with_ghosts);
   initial_enthalpy = as_const(initial_enthalpy_with_ghosts);
@@ -8331,7 +8347,9 @@ Status ProductDriver::initialize_restart(
     if(status) status=BoundaryThermophysicalFaceClosure::refresh_inlet_material(
         product.boundary,product.thermodynamics,product.transport,
         image.previous_pressure_reference,previous_pressure,
-        {{},previous_temperature,{},{},{},{},{},{}},{});
+        {{},previous_temperature,{},{},{},{},{},{}},{},
+        as_const(previous_enthalpy),
+        {runtime.species_previous.data(), runtime.species_previous.size()});
     status = product.reductions.consensus(status);
     if (!status) return status;
 
@@ -8894,9 +8912,16 @@ Status ProductDriver::Impl::execute_attempt(
     accepted_temperature_mutable=halo_views[accepted_temperature_slot];
     status=apply_physical_zero_gradient(product.boundary,{&accepted_temperature_mutable,1U});
   }
+  FieldView accepted_density_mutable;
+  if (status && cold_method)
+    status = product.layers.view(StateRole::accepted_n, product.fields.rho,
+                                 accepted_density_mutable);
   if(status) status=BoundaryThermophysicalFaceClosure::refresh_inlet_material(
       product.boundary,product.thermodynamics,product.transport,pressure_reference,
-      pressure_history.accepted,{{},accepted_temperature_mutable,{},{},{},{},{},{}},{});
+      pressure_history.accepted,
+      {accepted_density_mutable,accepted_temperature_mutable,{},{},{},{},{},{}},{},
+      as_const(accepted_enthalpy_mutable),
+      {species_accepted.data(), species_accepted.size()});
   if(status) temperature_history.accepted=as_const(accepted_temperature_mutable);
   if (status) enthalpy_history.accepted = as_const(accepted_enthalpy_mutable);
   species_index = 0U;
@@ -10469,7 +10494,8 @@ Status ProductDriver::Impl::execute_attempt(
             product.boundary, product.thermodynamics, product.transport,
             attempt_pressure_reference, as_const(trial_pressure),
             {trial_density, {}, {}, {}, {}, molecular_viscosity,
-             conductivity, enthalpy_diffusivity}, effective_viscosity);
+             conductivity, enthalpy_diffusivity}, effective_viscosity,
+            as_const(trial_enthalpy), {species_accepted.data(), species_accepted.size()});
     }
     prerequisite = product.reductions.consensus(prerequisite);
     if (prerequisite && product.ibm_momentum_donors.has_value()) {
@@ -10937,7 +10963,8 @@ Status ProductDriver::Impl::execute_attempt(
           product.boundary, product.thermodynamics, product.transport,
           attempt_pressure_reference, as_const(trial_pressure),
           {{}, {}, {}, {}, {}, molecular_viscosity, conductivity,
-           enthalpy_diffusivity}, effective_viscosity);
+           enthalpy_diffusivity}, effective_viscosity,
+          as_const(trial_enthalpy), {species_accepted.data(), species_accepted.size()});
     refreshed = product.reductions.consensus(refreshed);
     if (!refreshed) return refreshed;
     // Publish the final viscosity, not the value preceding this turbulence
@@ -13703,7 +13730,8 @@ Status ProductDriver::Impl::execute_attempt(
                  molecular_viscosity,
                  conductivity,
                  enthalpy_diffusivity},
-                effective_viscosity);
+                effective_viscosity, as_const(trial_enthalpy),
+                {species_accepted.data(), species_accepted.size()});
           status = product.reductions.consensus(status);
           if (status && product.ibm_rate_donors.has_value()) {
             halo_count = 0U;

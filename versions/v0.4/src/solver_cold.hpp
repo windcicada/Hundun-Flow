@@ -604,8 +604,13 @@ inline Status close_cold_momentum_rows(
               case BoundaryKind::mass_flow_inlet:
                 dirichlet = true;
                 break;
-              case BoundaryKind::zero_gradient_mass_outlet:
               case BoundaryKind::pressure_outlet:
+                dirichlet = component != a &&
+                    boundary.allow_backflow().data[rule->flow_parameter] != 0 &&
+                    (f % 2 ? 1.0 : -1.0) *
+                        state.velocity.trial.unchecked(c, a) < 0.0;
+                break;
+              case BoundaryKind::zero_gradient_mass_outlet:
                 dirichlet = false;
                 break;
               default:
@@ -721,7 +726,11 @@ inline Status close_cold_enthalpy_rows(
           if (rule->periodic) continue;
           bool dirichlet = rule->flow_kind == BoundaryKind::velocity_inlet ||
                            rule->flow_kind == BoundaryKind::mass_flow_inlet ||
-                           rule->thermal_kind == BoundaryKind::isothermal_wall;
+                           rule->thermal_kind == BoundaryKind::isothermal_wall ||
+                           (rule->flow_kind == BoundaryKind::pressure_outlet &&
+                            boundary.allow_backflow().data[rule->flow_parameter] != 0 &&
+                            (f % 2 ? 1.0 : -1.0) *
+                                state.velocity.trial.unchecked(c, a) < 0.0);
           if (dirichlet)
             spatial.diagonal += physical_diffusion[f] / volume;
           else
@@ -839,6 +848,17 @@ inline bool assemble_midpoint_cold_grid(
                         rule) ||
                     !rule)
                   return false;
+                if (rule->flow_kind == BoundaryKind::pressure_outlet) {
+                  // The thermophysical closure stores the physical outlet
+                  // material in the exterior slot. At fixed p and frozen h/Y
+                  // its density has zero pressure-correction response.
+                  const Int3 exterior = global_face == 0 ? lo : hi;
+                  const auto ul = midpoint_velocity(lo), uh = midpoint_velocity(hi);
+                  f.mass_flux = midpoint_rho(exterior) * area *
+                      (f.owner_lower_weight * ul[a] +
+                       (1 - f.owner_lower_weight) * uh[a]);
+                  continue;
+                }
                 if (!rule->periodic &&
                     rule->flow_kind !=
                         BoundaryKind::zero_gradient_mass_outlet &&

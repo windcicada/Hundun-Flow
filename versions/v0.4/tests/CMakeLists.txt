@@ -2177,3 +2177,13 @@ add_executable(v04_solver_shared_faces_test unit/solver_shared_faces_test.cpp)
 target_link_libraries(v04_solver_shared_faces_test PRIVATE hundun_v04_core MPI::MPI_C)
 add_test(NAME v04_solver_shared_faces COMMAND v04_solver_shared_faces_test)
 set_tests_properties(v04_solver_shared_faces PROPERTIES TIMEOUT 15 LABELS "v04_focused")
+
+add_executable(v04_cold_outlet_test mpi/cold_outlet_test.cpp)
+target_link_libraries(v04_cold_outlet_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_cold_outlet_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_cold_outlet_test>")
+  set_tests_properties(v04_cold_outlet_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+endforeach()

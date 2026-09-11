@@ -2784,7 +2784,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
 Status compile_on_root(const fs::path& case_root, int rank,
                        ValidatedModel& model,
                        std::vector<std::uint8_t>& payload,
-                       PlanFingerprint* transport_base = nullptr) {
+                       PlanFingerprint* transport_base = nullptr,
+                       const std::array<BoundaryFaceSpec, 6U>* fingerprint_boundaries = nullptr) {
   try {
     std::error_code error;
     const fs::path canonical_root = fs::canonical(case_root, error);
@@ -3201,7 +3202,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
     hash.integer(static_cast<std::uint8_t>(model.turbulence));
     hash.integer(static_cast<std::uint8_t>(model.pressure_reference));
     hash_transported_scalars(hash, model.transported_scalars);
-    for (const BoundaryFaceSpec& face : model.boundaries) {
+    for (const BoundaryFaceSpec& face :
+         fingerprint_boundaries ? *fingerprint_boundaries : model.boundaries) {
       hash_boundary(hash, face);
     }
     hash_solver(hash, model.solver);
@@ -3576,11 +3578,22 @@ Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
         model.thermophysics.species.begin(), model.thermophysics.species.end(),
         [=](const SpeciesThermophysicalSpec &species) { return species.transport_law == law; });
   };
+  const bool transport_change = all_law(source, TransportLaw::sutherland) &&
+      all_law(target, TransportLaw::coast_perry);
+  bool outlet_change = false;
+  for (std::size_t face = 0; face < target.boundaries.size(); ++face) {
+    if (source.boundaries[face].flow_kind == BoundaryKind::zero_gradient_mass_outlet &&
+        target.boundaries[face].flow_kind == BoundaryKind::pressure_outlet &&
+        target.boundaries[face].allow_backflow) {
+      outlet_change = true;
+    }
+  }
+  outlet_change &= all_law(source, TransportLaw::coast_perry) &&
+      all_law(target, TransportLaw::coast_perry);
   const bool supported = source.fingerprint != 0U && target.fingerprint != 0U &&
       source.time.scheme == TimeScheme::coast_cn_be && target.time.scheme == TimeScheme::coast_cn_be &&
       source.reaction.mode == ReactionMode::none && target.reaction.mode == ReactionMode::none &&
-      !source.spray && !target.spray && all_law(source, TransportLaw::sutherland) &&
-      all_law(target, TransportLaw::coast_perry);
+      !source.spray && !target.spray && (transport_change || outlet_change);
   std::array<std::uint64_t, 3U> minimum{
       source.fingerprint, target.fingerprint, supported ? 1U : 0U}, maximum = minimum;
   if (MPI_Allreduce(MPI_IN_PLACE, minimum.data(), 3, MPI_UINT64_T, MPI_MIN, communicator) != MPI_SUCCESS ||
@@ -3595,10 +3608,32 @@ Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
     ValidatedModel actual_source, actual_target;
     std::vector<std::uint8_t> payload;
     PlanFingerprint source_base{}, target_base{};
-    auto status = compile_on_root(source_root, rank, actual_source, payload, &source_base);
-    if (status) status = compile_on_root(target_root, rank, actual_target, payload, &target_base);
+    auto status = compile_on_root(source_root, rank, actual_source, payload,
+                                  transport_change ? &source_base : nullptr);
+    if (status) status = compile_on_root(target_root, rank, actual_target, payload,
+                                        transport_change ? &target_base : nullptr);
     if (status && (actual_source.fingerprint != source.fingerprint ||
-        actual_target.fingerprint != target.fingerprint || source_base == 0U || source_base != target_base))
+                   actual_target.fingerprint != target.fingerprint))
+      status = invalid_case(detail_json_value);
+    if (status && outlet_change) {
+      // Re-hash the target with only the admitted outlet kind/backflow switch
+      // restored. Every other input, including transport and asset bytes,
+      // remains in the ordinary source identity lane.
+      auto normalized = actual_target.boundaries;
+      for (std::size_t face = 0; face < normalized.size(); ++face) {
+        if (actual_source.boundaries[face].flow_kind == BoundaryKind::zero_gradient_mass_outlet &&
+            normalized[face].flow_kind == BoundaryKind::pressure_outlet &&
+            normalized[face].allow_backflow) {
+          normalized[face].flow_kind = BoundaryKind::zero_gradient_mass_outlet;
+          normalized[face].allow_backflow = actual_source.boundaries[face].allow_backflow;
+        }
+      }
+      ValidatedModel witness;
+      status = compile_on_root(target_root, rank, witness, payload, nullptr, &normalized);
+      source_base = actual_source.fingerprint;
+      target_base = witness.fingerprint;
+    }
+    if (status && (source_base == 0U || source_base != target_base))
       status = invalid_case(detail_json_value);
     header[0] = static_cast<std::uint64_t>(status.code);
     header[1] = status.detail;

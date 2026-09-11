@@ -139,7 +139,7 @@ class ProductCompiler {
                         const std::filesystem::path& case_root,
                         CompiledCasePlan& out,
                         ProductCouplingBindings coupling = {}) noexcept;
-  // Bind one validated source plan for explicit transport-history recovery.
+  // Bind one validated source plan for explicit cold transport/outlet history recovery.
   static Status compile_transport_restart(MPI_Comm communicator,
       const ValidatedModel& source, const std::filesystem::path& source_root,
       const ValidatedModel& target, const std::filesystem::path& target_root,

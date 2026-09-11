@@ -674,8 +674,14 @@ Status prepare_physical_boundary_flux(
                          kCandidateBoundaryBackflow};
                 return false;
               }
-              const Real3 prescribed = vector_parameter(
+              Real3 prescribed = vector_parameter(
                   *impl.boundary, face_plan->flow_parameter, true, false);
+              if (impl.boundary->pressure_driven_backflow()) {
+                const double normal = input.velocity.unchecked(owner, axis_index);
+                if (axis_index == 0) prescribed.x = normal;
+                else if (axis_index == 1) prescribed.y = normal;
+                else prescribed.z = normal;
+              }
               ThermoState thermo;
               local = configured_thermo(face, *face_plan, owner, true,
                                         prescribed, thermo);

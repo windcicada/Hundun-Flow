@@ -637,6 +637,14 @@ class ScalarMassRemap {
                     case BoundaryKind::mass_flow_inlet:
                       row.diagonal += D / volume;
                       break;
+                    case BoundaryKind::pressure_outlet:
+                      if (boundary_->allow_backflow().data[boundary_face->flow_parameter] != 0 &&
+                          (face_id % 2 ? 1.0 : -1.0) *
+                              state.velocity.trial.unchecked(c, axis) < 0.0)
+                        row.diagonal += D / volume;
+                      else
+                        row.diagonal -= row.neighbour[face_id];
+                      break;
                     case BoundaryKind::symmetry:
                     case BoundaryKind::no_slip_wall:
                     case BoundaryKind::zero_gradient_mass_outlet:

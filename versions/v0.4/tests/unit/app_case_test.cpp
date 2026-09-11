@@ -1596,6 +1596,25 @@ bool test_transport_change_compatibility() {
   passed &= expect(!CaseCompiler::validate_transport_change(MPI_COMM_SELF,
       target_case.root(), target, source_case.root(), source),
       "transport migration is an explicit Sutherland to Perry transition");
+  source_case.write("thermophysics.d", perry);
+  std::string old_outlet = input;
+  replace_once(old_outlet, "pressure_outlet", "zero_gradient_mass_outlet");
+  replace_once(old_outlet, "\"allow_backflow\":true", "\"allow_backflow\":false");
+  source_case.write("case.json", old_outlet);
+  passed &= expect(compile(source_case.root(), source) && check(),
+      "explicit cold outlet migration binds the original physical case");
+  auto changed = input;
+  replace_once(changed, "\"velocity\":[1,0,0]", "\"velocity\":[2,0,0]");
+  target_case.write("case.json", changed);
+  passed &= expect(compile(target_case.root(), target) && !check(),
+      "outlet migration preserves the inlet target");
+  target_case.write("case.json", input);
+  target_case.write("extra.d", "changed geometry asset\n");
+  passed &= expect(compile(target_case.root(), target) && !check(),
+      "outlet migration preserves referenced asset bytes");
+  target_case.write("extra.d", "fixed geometry asset\n");
+  passed &= expect(compile(target_case.root(), target) && check(),
+      "restored assets restore outlet migration compatibility");
   return passed;
 }
 

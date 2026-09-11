@@ -220,10 +220,12 @@ struct InletFaceCell {
   CartesianFace face{};
   Int3 mirror{};
   Int3 owner{};
+  bool pressure_outlet{};
 };
 
 InletFaceCell inlet_face_cell(const BoundaryPlan &boundary,
-    BoundaryThermophysicalClosureKind kind, Int3 cell, Int3 n) noexcept {
+    BoundaryThermophysicalClosureKind kind, Int3 cell, Int3 n,
+    bool include_pressure_outlet = false) noexcept {
   if (kind != BoundaryThermophysicalClosureKind::physical_inlet_face) return {};
   const std::int32_t indices[]{cell.x,cell.y,cell.z};
   const std::int32_t extents[]{n.x,n.y,n.z};
@@ -231,7 +233,11 @@ InletFaceCell inlet_face_cell(const BoundaryPlan &boundary,
     const auto i=indices[axis], extent=extents[axis];
     if (i>=0 && i<extent) continue;
     const auto face=static_cast<CartesianFace>(2U*axis+(i>=extent ? 1U : 0U));
-    if (!boundary.has_thermophysical_inlet_face(face)) continue;
+    const BoundaryFacePlan* face_plan{};
+    const bool outlet = include_pressure_outlet && boundary.pressure_driven_backflow() &&
+        boundary.face(face, face_plan) && face_plan && face_plan->local_owner &&
+        face_plan->flow_kind == BoundaryKind::pressure_outlet;
+    if (!outlet && !boundary.has_thermophysical_inlet_face(face)) continue;
     // Corners extend a single physical face trace with clamped tangential
     // coordinates; do not invent an EOS state by composing inlet mirrors.
     Int3 mirror{std::clamp(cell.x,0,n.x-1),std::clamp(cell.y,0,n.y-1),
@@ -246,7 +252,7 @@ InletFaceCell inlet_face_cell(const BoundaryPlan &boundary,
     if (axis==0U) { mirror.x=source; owner.x=reflected; }
     else if (axis==1U) { mirror.y=source; owner.y=reflected; }
     else { mirror.z=source; owner.z=reflected; }
-    return {true,face,mirror,owner};
+    return {true,face,mirror,owner,outlet};
   }
   return {};
 }
@@ -334,7 +340,7 @@ Status evaluate_cell(
   }
   double perturbation = input.pressure_perturbation.unchecked(cell, 0U);
   double enthalpy = input.enthalpy.unchecked(cell, 0U);
-  const auto inlet=inlet_face_cell(boundary,input.closure_kind,cell,input.enthalpy.interior);
+  const auto inlet=inlet_face_cell(boundary,input.closure_kind,cell,input.enthalpy.interior,true);
   ThermoState owner_thermo;
   if (inlet.selected) {
     const Int3 n=input.enthalpy.interior, owner=inlet.owner;
@@ -350,6 +356,13 @@ Status evaluate_cell(
     const auto spans=boundary.spans();
     for (std::size_t s=0U;s<input.independent_species.size;++s) {
       const auto view=input.independent_species.data[s];
+      if (inlet.pressure_outlet) {
+        // Conditional h/Y mirrors encode either the incoming reservoir or the
+        // extrapolated outgoing owner. Evaluate material at that physical
+        // trace: a Dirichlet stencil extension can lie outside the simplex.
+        composition[s] = 0.5 * (view.unchecked(inlet.mirror, 0U) + composition[s]);
+        continue;
+      }
       bool found=false;
       for (std::size_t j=0U;j<spans.size;++j) {
         const auto &span=spans.data[j];
@@ -444,12 +457,23 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
     const BoundaryPlan &boundary,const ThermodynamicsPlan &thermodynamics,
     const TransportPlan &transport,double pressure_reference,
     ConstFieldView pressure,const BoundaryThermophysicalGhostOutput &output,
-    FieldView effective) noexcept {
+    FieldView effective, ConstFieldView outlet_enthalpy,
+    Span<const ConstFieldView> outlet_species) noexcept {
   const Int3 n=boundary.local_cells(), ghosts=pressure.ghosts;
   if (!finite_positive(pressure_reference) || !valid_scalar_view(pressure,n,ghosts) ||
       thermodynamics.fingerprint()==0U || transport.fingerprint()==0U ||
       thermodynamics.independent_species_count()>kMaximumIndependentSpecies)
     return {StatusCode::invalid_plan,kClosureInput};
+  const bool outlet_state = boundary.pressure_driven_backflow() && outlet_enthalpy.base;
+  if (outlet_state) {
+    if (!valid_scalar_view(outlet_enthalpy, n, ghosts) ||
+        outlet_species.size != thermodynamics.independent_species_count() ||
+        (outlet_species.size && !outlet_species.data))
+      return {StatusCode::invalid_plan, kClosureInput};
+    for (std::size_t i = 0; i < outlet_species.size; ++i)
+      if (!valid_scalar_view(outlet_species.data[i], n, ghosts))
+        return {StatusCode::invalid_plan, kClosureInput};
+  }
   const std::array<FieldView,9U> fields{output.density,output.temperature,
       output.heat_capacity_cp,output.density_pressure_derivative,
       output.density_enthalpy_derivative,output.molecular_viscosity,
@@ -459,6 +483,13 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
     if (!valid_scalar_view(fields[i],n,ghosts) ||
         detail::field_views_overlap(pressure,as_const(fields[i])))
       return {StatusCode::invalid_plan,kClosureInput};
+    if (outlet_state) {
+      if (detail::field_views_overlap(outlet_enthalpy, as_const(fields[i])))
+        return {StatusCode::invalid_plan, kClosureInput};
+      for (std::size_t j = 0; j < outlet_species.size; ++j)
+        if (detail::field_views_overlap(outlet_species.data[j], as_const(fields[i])))
+          return {StatusCode::invalid_plan, kClosureInput};
+    }
     for (std::size_t j=0U;j<i;++j)
       if (fields[j].base!=nullptr && detail::field_views_overlap(as_const(fields[j]),as_const(fields[i])))
         return {StatusCode::invalid_plan,kClosureInput};
@@ -470,11 +501,40 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
   // The first pass validates the whole surface before any output is changed.
   for (unsigned pass=0U;pass<2U;++pass) {
     const Status status=for_each_physical_ghost(n,ghosts,physical,[&](Int3 cell) noexcept {
-      const auto inlet=inlet_face_cell(boundary,BoundaryThermophysicalClosureKind::physical_inlet_face,cell,n);
+      const auto inlet=inlet_face_cell(boundary,BoundaryThermophysicalClosureKind::physical_inlet_face,cell,n,outlet_state);
       if (!inlet.selected) return Status{};
       const auto owner=inlet.owner;
       if (owner.x<0 || owner.y<0 || owner.z<0 || owner.x>=n.x || owner.y>=n.y || owner.z>=n.z)
         return Status{StatusCode::invalid_plan,kClosureInput};
+      if (inlet.pressure_outlet) {
+        std::array<double, kMaximumIndependentSpecies> composition{};
+        std::array<double, kOutputCount> material{};
+        const BoundaryThermophysicalGhostInput input{pressure_reference, pressure,
+            outlet_enthalpy, outlet_species, {},
+            BoundaryThermophysicalClosureKind::physical_inlet_face};
+        auto status = evaluate_cell(boundary, thermodynamics, transport, input,
+                                    cell, composition, material);
+        if (!status) return status;
+        double mu_effective = material[5];
+        if (effective.base) {
+          const double turbulent = effective.unchecked(owner, 0) -
+              output.molecular_viscosity.unchecked(owner, 0);
+          if (!std::isfinite(turbulent) || turbulent < 0)
+            return Status{StatusCode::numerical_failure, kClosureState};
+          mu_effective += turbulent;
+        }
+        if (transport.has_effective_enthalpy_transport()) {
+          status = transport.effective_enthalpy_transport(material[5], mu_effective,
+              material[2], material[6], material[7]);
+          if (!status) return status;
+        }
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+          const double value = i < material.size() ? material[i] : mu_effective;
+          if (!std::isfinite(value)) return Status{StatusCode::numerical_failure, kClosureState};
+          if (pass && fields[i].base) fields[i].unchecked(cell, 0) = value;
+        }
+        return Status{};
+      }
       const BoundaryFacePlan *face=nullptr;
       if (!boundary.face(inlet.face,face) || face==nullptr ||
           face->flow_parameter>=boundary.temperature_targets().size)

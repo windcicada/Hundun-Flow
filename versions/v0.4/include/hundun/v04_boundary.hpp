@@ -223,6 +223,7 @@ class BoundaryPlan {
   Span<const double> mach_limits() const noexcept {
     return {mach_limits_.data(), mach_limits_.size()};
   }
+  bool pressure_driven_backflow() const noexcept { return pressure_driven_backflow_; }
   Span<const std::uint8_t> allow_backflow() const noexcept {
     return {allow_backflow_.data(), allow_backflow_.size()};
   }
@@ -310,6 +311,7 @@ class BoundaryPlan {
   std::vector<double> mass_flow_targets_;
   std::vector<double> relaxation_rates_;
   std::vector<double> mach_limits_;
+  bool pressure_driven_backflow_{};
   std::vector<std::uint8_t> allow_backflow_;
   std::vector<BoundaryParameterRole> parameter_roles_;
   std::vector<ScalarBoundaryKind> scalar_kinds_;
@@ -550,7 +552,9 @@ struct BoundaryThermophysicalGhostUse {
 class BoundaryThermophysicalFaceClosure {
  public:
   // Re-publish fixed inlet material after generic halo/zero-gradient or
-  // turbulence updates. Null output views are omitted. Temperature remains
+  // turbulence updates. Supplying outlet h/Y also refreshes cold static
+  // pressure faces from their resolved primitive traces at both time levels.
+  // Null output views are omitted. Temperature remains
   // 2*T_face-T_owner; material slots contain physical face values. The SGS
   // dynamic-viscosity contribution is extrapolated from the owner separately
   // from molecular viscosity. No reusable density certificate is issued.
@@ -559,7 +563,8 @@ class BoundaryThermophysicalFaceClosure {
       const TransportPlan& transport, double pressure_reference,
       ConstFieldView pressure_perturbation,
       const BoundaryThermophysicalGhostOutput& output,
-      FieldView effective_viscosity = {}) noexcept;
+      FieldView effective_viscosity = {}, ConstFieldView outlet_enthalpy = {},
+      Span<const ConstFieldView> outlet_species = {}) noexcept;
   // Compatibility entry point for the original four-field authority.  It
   // performs the same numeric closure but deliberately publishes no reusable
   // physical-ghost certificate.

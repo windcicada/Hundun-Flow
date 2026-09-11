@@ -472,7 +472,7 @@ bool test_cold_method_admission() {
       "CN/BE rejects a model outside the supported cold mixture contract");
 }
 
-bool test_cold_perry_diffusion_contract(bool reference_stopping) {
+bool test_cold_perry_diffusion_contract(bool reference_stopping, bool static_outlet = false) {
   auto model = test::product_model({7, 7, 7});
   model.time.initial_dt = 9.7088612375381536e-8;
   model.time.scheme = TimeScheme::coast_cn_be;
@@ -480,7 +480,8 @@ bool test_cold_perry_diffusion_contract(bool reference_stopping) {
   model.legacy_time_fingerprint = model.fingerprint + 1U;
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   model.boundaries[0].flow_kind = BoundaryKind::symmetry;
-  model.boundaries[1].flow_kind = BoundaryKind::zero_gradient_mass_outlet;
+  model.boundaries[1].flow_kind = static_outlet ? BoundaryKind::pressure_outlet
+      : BoundaryKind::zero_gradient_mass_outlet;
   model.boundaries[1].pressure = 100000.0;
   model.boundaries[0].scalars.push_back({"air", ScalarBoundaryKind::zero_gradient});
   model.boundaries[1].scalars.push_back({"air", ScalarBoundaryKind::zero_gradient});
@@ -1628,6 +1629,7 @@ int main(int argc, char** argv) {
                       test_cold_method_admission() &&
                       test_cold_perry_diffusion_contract(false) &&
                       test_cold_perry_diffusion_contract(true) &&
+                      test_cold_perry_diffusion_contract(false, true) &&
                       test_freeze() &&
                       test_live_thermal_halo_resource_contract() &&
                       test_pressure_energy_restart_schema() &&
