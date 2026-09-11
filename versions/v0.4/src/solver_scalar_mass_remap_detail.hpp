@@ -718,8 +718,9 @@ class ScalarMassRemap {
       // An explicit uncommitted outer update may use inexact inner solves.
       // Its caller still owns the complete final species/equation audit.
       if (intermediate_coupling && target_solver_ == SpeciesCouplingSolver::dilu &&
-          iteration >= 2U && report.initial_species_residual > 1e-10 &&
-          global[1] <= 0.01 * report.initial_species_residual) return {};
+          iteration >= 2U &&
+          global[1] <= std::max(0.01 * report.initial_species_residual,
+                               64.0 * std::numeric_limits<double>::epsilon())) return {};
       std::size_t i=0U;
       for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x,++i) {
         const Int3 c{x,y,z};

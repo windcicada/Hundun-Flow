@@ -18,7 +18,8 @@ namespace hundun::v04::detail {
 enum class ColdHistoryRevision : std::uint8_t {
   quadratic_pressure,
   fluid_pressure,
-  mach_tvd
+  mach_tvd,
+  pressure_coupled
 };
 
 // Semantic history contract, independent of Git/build/partition identity.
@@ -31,9 +32,9 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
                                  bool inlet_patches = false,
                                  bool cold_unity_lewis = false,
                                  ColdHistoryRevision cold_revision =
-                                     ColdHistoryRevision::mach_tvd) noexcept {
+                                     ColdHistoryRevision::pressure_coupled) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
-  const std::string_view method = scheme == TimeScheme::coast_cn_be
+  const std::string_view method = scheme == TimeScheme::cn_be
       ? "hundun-cold-history-v1;CN-midpoint-momentum-BE-mass-energy-species-v1;"
         "endpoint-rate-history-v1;rho-h-p-v1;scalar-split-v1;"
         "accepted-ibm-thermal-impermeable-v1;molecular-accepted-before-PDF-v1;"
@@ -44,18 +45,26 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
     hash ^= static_cast<unsigned char>(byte);
     hash *= UINT64_C(1099511628211);
   }
-  if (scheme == TimeScheme::coast_cn_be) {
+  if (scheme == TimeScheme::cn_be) {
     if (cold_revision != ColdHistoryRevision::quadratic_pressure)
       for (char byte : std::string_view("coast-ibm-fluid-pressure-delta-v1;")) {
         hash ^= static_cast<unsigned char>(byte);
         hash *= UINT64_C(1099511628211);
       }
-    if (cold_revision == ColdHistoryRevision::mach_tvd)
+    if (cold_revision == ColdHistoryRevision::mach_tvd ||
+        cold_revision == ColdHistoryRevision::pressure_coupled)
       for (char byte : std::string_view("coast-momentum-central-vls-mach06-global-v1;")) {
         hash ^= static_cast<unsigned char>(byte);
         hash *= UINT64_C(1099511628211);
       }
   }
+  if (scheme == TimeScheme::cn_be &&
+      cold_revision == ColdHistoryRevision::pressure_coupled)
+    for (char byte : std::string_view(
+        "cn-midpoint-face-pressure-v1;")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
   for (char byte : std::string_view(
       "thermal-inverse-representable-v1;thermal-inverse-newton-polish-v1;stationary-ibm-placeholder-v1;"
       "simple-fresh-flux-v2;c1-joint-target-v2;open-periodic-flux-v3;"

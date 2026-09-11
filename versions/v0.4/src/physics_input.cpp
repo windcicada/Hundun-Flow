@@ -649,7 +649,7 @@ Status parse_text(std::string_view text, ThermophysicalSpec& out) noexcept {
             !tokens.real(species.prandtl)) {
           return invalid(kSyntax);
         }
-      } else if (tokens.exact("transport_coast_perry")) {
+      } else if (tokens.exact("transport_perry") || tokens.exact("transport_coast_perry")) {
         species.transport_law = TransportLaw::coast_perry;
         species.prandtl = 0.70;
         if (!tokens.real(species.critical_temperature) ||

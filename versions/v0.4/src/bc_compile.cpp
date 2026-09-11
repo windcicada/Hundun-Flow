@@ -507,7 +507,7 @@ Status validate_model(const ValidatedModel& model) noexcept {
     if ((spec.flow_kind == BoundaryKind::pressure_outlet ||
          spec.flow_kind == BoundaryKind::nscbc_outlet) &&
         spec.allow_backflow &&
-        !(model.time.scheme == TimeScheme::coast_cn_be &&
+        !(model.time.scheme == TimeScheme::cn_be &&
           spec.flow_kind == BoundaryKind::pressure_outlet) &&
         !(outward_component(face, spec.backflow_velocity) < 0.0)) {
       return {StatusCode::invalid_plan, kBoundaryClosure};
@@ -1013,7 +1013,7 @@ std::uint64_t semantic_hash(const ValidatedModel& model,
   // callers may construct a ValidatedModel directly. Hash every numerical
   // authority that can alter a compiled kernel or runtime target.
   hash = hash_mix(hash, model.fingerprint);
-  if (model.time.scheme == TimeScheme::coast_cn_be &&
+  if (model.time.scheme == TimeScheme::cn_be &&
       std::any_of(model.boundaries.begin(), model.boundaries.end(),
           [](const BoundaryFaceSpec& face) {
             return face.flow_kind == BoundaryKind::pressure_outlet;
@@ -1323,7 +1323,7 @@ Status BoundaryCompiler::compile(MPI_Comm communicator,
     boundary_candidate.pressure_field_ = boundary_build.pressure_field;
     boundary_candidate.enthalpy_field_ = boundary_build.enthalpy_field;
     boundary_candidate.pressure_driven_backflow_ =
-        model.time.scheme == TimeScheme::coast_cn_be;
+        model.time.scheme == TimeScheme::cn_be;
     boundary_candidate.pressure_reference_ =
         boundary_build.pressure_reference;
     boundary_candidate.local_cells_ = boundary_build.local_cells;

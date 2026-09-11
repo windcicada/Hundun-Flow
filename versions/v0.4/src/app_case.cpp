@@ -661,8 +661,8 @@ bool parse_time_scheme(std::string_view value, TimeScheme& out) noexcept {
     out = TimeScheme::backward_euler;
   } else if (value == "variable_bdf2") {
     out = TimeScheme::variable_bdf2;
-  } else if (value == "coast_cn_be") {
-    out = TimeScheme::coast_cn_be;
+  } else if (value == "cn_be" || value == "coast_cn_be") {
+    out = TimeScheme::cn_be;
   } else {
     return false;
   }
@@ -1445,7 +1445,7 @@ bool valid_time(const TimeControlSpec& time) noexcept {
          static_cast<std::uint8_t>(time.control) <=
              static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) &&
          static_cast<std::uint8_t>(time.scheme) <=
-             static_cast<std::uint8_t>(TimeScheme::coast_cn_be);
+             static_cast<std::uint8_t>(TimeScheme::cn_be);
 }
 
 void hash_boundary(Hash64& hash, const BoundaryFaceSpec& face) noexcept {
@@ -2030,7 +2030,7 @@ void write_solver(WireWriter &writer, const SolverSpec &value, bool extended) {
 }
 
 bool read_cold_stopping(WireReader& reader, ValidatedModel& model) noexcept {
-  if (model.time.scheme != TimeScheme::coast_cn_be) return reader.finished();
+  if (model.time.scheme != TimeScheme::cn_be) return reader.finished();
   std::uint8_t present{};
   if (!reader.byte(present) || present > 1U) return false;
   if (present == 0U) return true;
@@ -2219,7 +2219,7 @@ bool read_time(WireReader& reader, TimeControlSpec& value) noexcept {
   if (!reader.byte(control) ||
       control > static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic) ||
       !reader.byte(scheme) ||
-      scheme > static_cast<std::uint8_t>(TimeScheme::coast_cn_be) ||
+      scheme > static_cast<std::uint8_t>(TimeScheme::cn_be) ||
       !reader.real(value.initial_dt) || !reader.real(value.minimum_dt) ||
       !reader.real(value.maximum_dt) || !reader.real(value.convective_cfl) ||
       !reader.real(value.viscous_cfl) || !reader.real(value.thermal_cfl) ||
@@ -2293,8 +2293,8 @@ Status serialize_model(const ValidatedModel& model,
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
         !valid_solver(model.solver) || !valid_schemes(model.schemes) ||
         !valid_time(model.time) ||
-        (model.solver.cold_stopping && model.time.scheme != TimeScheme::coast_cn_be) ||
-        (model.time.scheme == TimeScheme::coast_cn_be
+        (model.solver.cold_stopping && model.time.scheme != TimeScheme::cn_be) ||
+        (model.time.scheme == TimeScheme::cn_be
              ? model.legacy_time_fingerprint == 0U ||
                    model.legacy_time_fingerprint == model.fingerprint
              : model.legacy_time_fingerprint != 0U) ||
@@ -2468,9 +2468,9 @@ Status serialize_model(const ValidatedModel& model,
       if (model.patch_inlets) write_patch_inlets(writer, *model.patch_inlets);
     }
     writer.u64(model.fingerprint);
-    if (model.time.scheme == TimeScheme::coast_cn_be)
+    if (model.time.scheme == TimeScheme::cn_be)
       writer.u64(model.legacy_time_fingerprint);
-    if (model.time.scheme == TimeScheme::coast_cn_be)
+    if (model.time.scheme == TimeScheme::cn_be)
       writer.byte(model.solver.cold_stopping ? 1U : 0U);
     if (model.solver.cold_stopping) {
       const auto& stopping = *model.solver.cold_stopping;
@@ -2755,7 +2755,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         return invalid_case(detail_wire);
     }
     if (!reader.u64(model.fingerprint) || model.fingerprint == 0U ||
-        (model.time.scheme == TimeScheme::coast_cn_be &&
+        (model.time.scheme == TimeScheme::cn_be &&
          (!reader.u64(model.legacy_time_fingerprint) ||
           model.legacy_time_fingerprint == 0U ||
           model.legacy_time_fingerprint == model.fingerprint)) ||
@@ -2921,7 +2921,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
                 "single_phase_low_mach_compressible")) {
       return invalid_case(detail_json_value);
     }
-    if (*coupling_text == "PISO") {
+    if (*coupling_text == "PISO" || *coupling_text == "CN_BE") {
       model.solver.coupling = CouplingKind::piso;
     } else if (*coupling_text == "SIMPLE") {
       model.solver.coupling = CouplingKind::simple;
@@ -2941,7 +2941,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
     if ((yyjson_obj_get(solver, "pressure_linear") != nullptr &&
          !parse_solver_controls(solver, model.solver)) ||
         !parse_schemes_object(schemes, model.schemes) ||
-        !parse_time_object(time, model.time)) {
+        !parse_time_object(time, model.time) ||
+        (*coupling_text == "CN_BE" && model.time.scheme != TimeScheme::cn_be)) {
       return invalid_case(detail_json_value);
     }
 
@@ -3209,7 +3210,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
     hash_solver(hash, model.solver);
     hash_schemes(hash, model.schemes);
     Hash64 legacy_time_hash = hash;
-    const bool cold_method = model.time.scheme == TimeScheme::coast_cn_be;
+    const bool cold_method = model.time.scheme == TimeScheme::cn_be;
     if (cold_method) {
       TimeControlSpec legacy_time = model.time;
       legacy_time.scheme = TimeScheme::variable_bdf2;
@@ -3591,7 +3592,7 @@ Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
   outlet_change &= all_law(source, TransportLaw::coast_perry) &&
       all_law(target, TransportLaw::coast_perry);
   const bool supported = source.fingerprint != 0U && target.fingerprint != 0U &&
-      source.time.scheme == TimeScheme::coast_cn_be && target.time.scheme == TimeScheme::coast_cn_be &&
+      source.time.scheme == TimeScheme::cn_be && target.time.scheme == TimeScheme::cn_be &&
       source.reaction.mode == ReactionMode::none && target.reaction.mode == ReactionMode::none &&
       !source.spray && !target.spray && (transport_change || outlet_change);
   std::array<std::uint64_t, 3U> minimum{

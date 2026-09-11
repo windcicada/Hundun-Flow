@@ -261,9 +261,9 @@ constexpr std::string_view kCaseJson = R"json({
     "immersed_boundary": null
   },
   "flow": {"model": "single_phase_low_mach_compressible",
-           "pressure_reference": "closed_mass", "reacting": false},
+           "pressure_reference": "boundary_absolute", "reacting": false},
   "solver": {
-    "coupling": "PISO",
+    "coupling": "CN_BE",
     "pressure_correctors": 2,
     "pressure_linear": {
       "absolute_tolerance": 1e-13,
@@ -283,15 +283,15 @@ constexpr std::string_view kCaseJson = R"json({
   "thermophysics": {"data_file": "thermophysics.d"},
   "transported_scalars": [],
   "boundaries": {
-    "x_min": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
-    "x_max": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
+    "x_min": {"flow_kind":"velocity_inlet","thermal_kind":"none","velocity":[1,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
+    "x_max": {"flow_kind":"pressure_outlet","thermal_kind":"none","velocity":[0,0,0],"direction":[1,0,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
     "y_min": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[0,1,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
     "y_max": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[0,1,0],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
     "z_min": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]},
     "z_max": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]}
   },
-  "schemes": {"momentum":"limited_central2","enthalpy":"limited_central2","species":"tvd2","passive_scalar":"tvd2","diffusion":"central2","limiter":1.0},
-  "time": {"control":"adaptive_flow","scheme":"variable_bdf2","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.2,"retry_factor":0.5,"maximum_retries":6,"minimum_bdf_ratio":0.25,"maximum_bdf_ratio":4.0}
+  "schemes": {"momentum":"central2","enthalpy":"limited_central2","species":"tvd2","passive_scalar":"tvd2","diffusion":"central2","limiter":1.0},
+  "time": {"control":"adaptive_flow","scheme":"cn_be","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.2,"retry_factor":0.5,"maximum_retries":6,"minimum_bdf_ratio":0.25,"maximum_bdf_ratio":4.0}
 })json";
 
 constexpr std::string_view kThermophysics = R"data(HUNDUN_THERMOPHYSICS_V1
@@ -362,6 +362,28 @@ bool absolute_normalized(const fs::path& path, fs::path& out) {
 }
 
 }  // namespace
+
+std::vector<double> initial_scalar_values(const ValidatedModel& model) {
+  std::vector<double> values(model.transported_scalars.size(), 0.0);
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    std::optional<double> inlet_value;
+    bool uniform = true;
+    for (const auto& face : model.boundaries) {
+      if (face.flow_kind != BoundaryKind::velocity_inlet &&
+          face.flow_kind != BoundaryKind::mass_flow_inlet &&
+          face.flow_kind != BoundaryKind::static_state_inlet &&
+          face.flow_kind != BoundaryKind::total_state_inlet) continue;
+      for (const auto& scalar : face.scalars) {
+        if (scalar.stable_name != model.transported_scalars[i].stable_name ||
+            scalar.kind != ScalarBoundaryKind::dirichlet) continue;
+        if (inlet_value && *inlet_value != scalar.value) uniform = false;
+        inlet_value = scalar.value;
+      }
+    }
+    if (uniform && inlet_value) values[i] = *inlet_value;
+  }
+  return values;
+}
 
 Status ApplicationService::validate(MPI_Comm communicator,
                                     const std::filesystem::path& case_root,
@@ -557,7 +579,7 @@ static Status run_application(MPI_Comm communicator,
     status = detail::output_collective_stage(communicator, [&] {
       local_allocation_checkpoint(report.failure_phase, rank);
       if (!options.initial_state.has_value())
-        initial_scalars.assign(model.transported_scalars.size(), 0.0);
+        initial_scalars = initial_scalar_values(model);
       return Status{};
     });
     if (!status) return status;
@@ -602,7 +624,7 @@ static Status run_application(MPI_Comm communicator,
   status = detail::runtime_candidate_identity(communicator,
                                               candidate_identity,
                                               options.target_build_manifest,
-                                              model.time.scheme == TimeScheme::coast_cn_be);
+                                              model.time.scheme == TimeScheme::cn_be);
   if (!status) return status;
   const PlanFingerprint build_identity =
       detail::runtime_sha256_fingerprint(
@@ -926,7 +948,7 @@ static Status run_application(MPI_Comm communicator,
       evidence.bdf_order = step.effective_bdf.order;
       evidence.cold = step.piso.cold;
       evidence.coupling = step.piso.cold.active
-                              ? RuntimeCouplingKind::coast_cn_be
+                              ? RuntimeCouplingKind::cn_be
                           : model.solver.coupling == CouplingKind::simple
                               ? RuntimeCouplingKind::simple
                               : RuntimeCouplingKind::piso;
@@ -995,7 +1017,7 @@ static Status run_application(MPI_Comm communicator,
       // contract because zero-RHS exits before any optional linear audit.
       evidence.pressure_solve_contract =
           step.piso.cold.active
-              ? RuntimePressureSolveContract::coast_cn_be
+              ? RuntimePressureSolveContract::cn_be
               : RuntimePressureSolveContract::continuity_energy_coupled;
       evidence.pressure_energy_refinement_solve_calls =
           step.piso.pressure_energy_refinement_solve_calls;

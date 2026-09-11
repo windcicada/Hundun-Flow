@@ -295,6 +295,47 @@ inline Status eliminate_cold_boundaries(
   return {};
 }
 
+// The exact pressure rows use residual per volume. Native MG stores an
+// integrated finite-volume matrix, so apply its inverse to V*r.
+class VolumeScaledPreconditioner final : public LinearPreconditioner {
+ public:
+  VolumeScaledPreconditioner(NativeCartesianMgPlan& mg,
+                            const CartesianKernelPlan& kernels,
+                            FieldView scratch)
+      : mg_(mg), kernels_(kernels), scratch_(scratch) {}
+  LinearPreconditionerCertificate certificate() const noexcept override {
+    return mg_.certificate();
+  }
+  Status prepare_batch(const LinearPreconditionerBatchDescriptor& descriptor,
+                       LinearPreconditionerBatchTicket& ticket) noexcept override {
+    return mg_.prepare_batch(descriptor, ticket);
+  }
+  Status apply_prepared(ConstFieldView residual, FieldView correction,
+                        std::uint32_t iteration,
+                        const LinearPreconditionerBatchTicket& ticket) noexcept override {
+    scale_residual(residual);
+    return mg_.apply_prepared(as_const(scratch_), correction, iteration, ticket);
+  }
+  Status apply(ConstFieldView residual, FieldView correction,
+               std::uint32_t iteration) noexcept override {
+    scale_residual(residual);
+    return mg_.apply(as_const(scratch_), correction, iteration);
+  }
+ private:
+  void scale_residual(ConstFieldView residual) noexcept {
+    const auto cells = residual.interior;
+    for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y)
+      for (int x=0; x<cells.x; ++x) {
+        const Int3 c{x,y,z};
+        scratch_.unchecked(c,0) = residual.unchecked(c,0)*cell_volume(kernels_,c);
+      }
+  }
+
+  NativeCartesianMgPlan& mg_;
+  const CartesianKernelPlan& kernels_;
+  FieldView scratch_;
+};
+
 class ColdPressureOperator final : public LinearOperator {
  public:
   ColdPressureOperator(const std::vector<ColdPressureRow>& rows, Int3 cells,
@@ -511,7 +552,7 @@ inline Status close_cold_momentum_rows(
         for (unsigned component = 0; component < 3; ++component) {
           ColdPressureRow spatial = base;
           double convection_correction{};
-          {
+          if (reference_convection != ConvectionScheme::central2 || coast_momentum_tvd) {
             auto limited_faces = faces;
             for (unsigned f = 0; f < 6; ++f) {
               const unsigned a = f / 2;
@@ -887,6 +928,17 @@ inline bool assemble_midpoint_cold_grid(
                        ds;
               };
               const Int3 before = shift(lo, a, -1), after = shift(hi, a, 1);
+              // Collocated pressure/velocity coupling (d2pds on an orthogonal
+              // mesh). Centre gradients use fluid values only at IBM cuts.
+              // The midpoint mass flux responds with dt/2 to an endpoint
+              // pressure change, matching f.projection in the correction.
+              const double face_gradient = gradient(lo, hi);
+              const double lower_gradient = fluid(before)
+                  ? gradient(before, hi) : face_gradient;
+              const double upper_gradient = fluid(after)
+                  ? gradient(lo, after) : face_gradient;
+              f.mass_flux += 0.5 * dt * area *
+                  (0.5 * (lower_gradient + upper_gradient) - face_gradient);
               // Match vls: the positive-flow branch tests lo,hi,after activity.
               f.limiter_diffusion = cold_pressure_limiter_diffusion(
                   gradient(before, lo), gradient(lo, hi), gradient(hi, after),

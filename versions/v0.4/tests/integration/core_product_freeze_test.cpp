@@ -313,6 +313,34 @@ bool test_cold_momentum_mach_policy() {
                 "COAST momentum TVD uses the strict isothermal Mach threshold");
 }
 
+bool test_cn_pressure_checkerboard() {
+  test::PeriodicPisoFixture fixture;
+  if (!fixture.initialize(8)) return false;
+  const auto cells = fixture.patch.cells;
+  auto u = test::make_field(1, cells, 3, 2, 1, 1);
+  auto rho = test::make_field(0, cells, 1, 2, 1, 2);
+  auto p = test::make_field(2, cells, 1, 2, 1, 3);
+  test::fill(u, 0.0);
+  test::fill(rho, 1.0);
+  bool passed = true;
+  for (int mode = 0; mode < 2; ++mode) {
+    for (int z=-2;z<cells.z+2;++z) for(int y=-2;y<cells.y+2;++y)
+      for(int x=-2;x<cells.x+2;++x)
+        p.view.unchecked({x,y,z},0) = mode == 0 ? (x%2 == 0 ? 1.0 : -1.0) : 1.0;
+    std::vector<detail::ColdPressureRow> rows;
+    std::vector<std::array<detail::ColdPressureFace,6>> faces;
+    detail::ColdGridReport observed;
+    passed &= detail::assemble_midpoint_cold_grid(fixture.equations.kernels(),
+        fixture.patch, fixture.geometry.global_cells(), nullptr, fixture.boundary,
+        as_const(rho.view), as_const(rho.view), as_const(u.view), as_const(u.view),
+        as_const(p.view), 100000.0, 0.01, as_const(fixture.trial_flux), rows, observed, &faces);
+    const auto i = (std::size_t(3)*cells.y+3)*cells.x+2;
+    passed &= mode == 0 ? (faces[i][1].mass_flux > 0.0 && rows[i].rhs < 0.0)
+                       : (faces[i][1].mass_flux == 0.0 && rows[i].rhs == 0.0);
+  }
+  return expect(passed, "CN face pressure coupling damps checkerboard and preserves constant pressure");
+}
+
 bool test_cold_momentum_periodic_translation() {
   test::PeriodicPisoFixture fixture;
   if (!fixture.initialize(8)) return false;
@@ -444,27 +472,39 @@ bool test_method_history_identity() {
   // The cold pressure-gradient change creates a new history contract;
   // retained hf/hj checkpoints require explicit method-history recovery.
   constexpr auto cold = detail::product_method_history_signature(
-      TimeScheme::coast_cn_be, true, false, false, false, false, true);
+      TimeScheme::cn_be, true, false, false, false, false, true);
   constexpr auto bdf = detail::product_method_history_signature(
       TimeScheme::variable_bdf2, true, false, false, false, false, true);
   constexpr auto be = detail::product_method_history_signature(
       TimeScheme::backward_euler, true, false, false, false, false, true);
   constexpr auto quadratic = detail::product_method_history_signature(
-      TimeScheme::coast_cn_be, true, false, false, false, false, true, false,
+      TimeScheme::cn_be, true, false, false, false, false, true, false,
       detail::ColdHistoryRevision::quadratic_pressure);
   constexpr auto fluid = detail::product_method_history_signature(
-      TimeScheme::coast_cn_be, true, false, false, false, false, true, false,
+      TimeScheme::cn_be, true, false, false, false, false, true, false,
       detail::ColdHistoryRevision::fluid_pressure);
+  constexpr auto mach = detail::product_method_history_signature(
+      TimeScheme::cn_be, true, false, false, false, false, true, false,
+      detail::ColdHistoryRevision::mach_tvd);
   return expect(quadratic == UINT64_C(98744320109196643) &&
                     fluid == UINT64_C(2172767200665140607) &&
-                    cold == UINT64_C(16011690793152888057) &&
+                    mach == UINT64_C(16011690793152888057) && cold != mach &&
                     cold != UINT64_C(98744320109196643) && cold != bdf && be == bdf,
       "CN/BE preserves its verified checkpoint signature and separates legacy history");
 }
 
+bool test_default_time_and_bdf2_rejection() {
+  auto model = test::product_model();
+  model.time.scheme = TimeScheme::variable_bdf2;
+  CompiledCasePlan plan;
+  return expect(TimeControlSpec{}.scheme == TimeScheme::cn_be &&
+      !ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan),
+      "default CN/BE and disabled BDF2 production compilation");
+}
+
 bool test_cold_method_admission() {
   auto model = test::product_model();
-  model.time.scheme = TimeScheme::coast_cn_be;
+  model.time.scheme = TimeScheme::cn_be;
   model.legacy_time_fingerprint = model.fingerprint + 1U;
   CompiledCasePlan plan;
   const auto status = ProductCompiler::compile(MPI_COMM_SELF, model, {}, plan);
@@ -475,7 +515,7 @@ bool test_cold_method_admission() {
 bool test_cold_perry_diffusion_contract(bool reference_stopping, bool static_outlet = false) {
   auto model = test::product_model({7, 7, 7});
   model.time.initial_dt = 9.7088612375381536e-8;
-  model.time.scheme = TimeScheme::coast_cn_be;
+  model.time.scheme = TimeScheme::cn_be;
   if (reference_stopping) model.solver.cold_stopping = ColdStoppingSpec{0.001};
   model.legacy_time_fingerprint = model.fingerprint + 1U;
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
@@ -521,7 +561,7 @@ bool test_cold_perry_diffusion_contract(bool reference_stopping, bool static_out
       RestartStorageCompatibility::strict, RestartHistoryPolicy::rebuild_method_history);
   passed &= expect(status && expected.compatible_method_plan == 0U &&
       expected.method_history_signature != detail::product_method_history_signature(
-          TimeScheme::coast_cn_be, true),
+          TimeScheme::cn_be, true),
       "direct h has a distinct history contract and no implicit time-only migration");
   const std::array<double, 1U> composition{0.3};
   DriverInitialState initial;
@@ -1496,8 +1536,9 @@ bool test_product_step_role_matrix() {
            result.recycle_capture_vector_passes == 0U &&
            result.recycle_capture_reduction_calls == 0U &&
            result.recycle_capture_blocking_operations == 0U &&
-           result.recycle_offered_directions == 1U &&
-           (projected_direction || stationary_no_op);
+           ((result.recycle_offered_directions == 1U &&
+             (projected_direction || stationary_no_op)) ||
+            (result.termination == LinearTermination::zero_rhs && stationary_no_op));
   };
   bool uniform_state = restart.fields.size == 3U;
   for (std::size_t field = 0U;
@@ -1625,7 +1666,9 @@ int main(int argc, char** argv) {
                       test_pressure_extrapolation_backoff() &&
                       test_method_history_identity() &&
                       test_cold_momentum_mach_policy() &&
+                      test_cn_pressure_checkerboard() &&
                       test_cold_momentum_periodic_translation() &&
+                      test_default_time_and_bdf2_rejection() &&
                       test_cold_method_admission() &&
                       test_cold_perry_diffusion_contract(false) &&
                       test_cold_perry_diffusion_contract(true) &&

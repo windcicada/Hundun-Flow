@@ -1,5 +1,20 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
+The default production method is `time.scheme: "cn_be"` with
+`solver.coupling: "CN_BE"`: CN momentum, BE mass/enthalpy/species, central
+momentum below the registered Mach threshold and the corresponding TVD
+policy above it. The explicit `backward_euler` method supports compatible
+PISO/SIMPLE configurations. Historical BDF2 metadata remains readable;
+production advancement admits CN/BE and backward Euler.
+
+`examples/minimal` and `hundun init-case` provide the current starter.
+`examples/air.d` supplies O2/N2 NASA thermodynamics and Perry transport;
+use O2 mass fraction 0.23291751145757963 and N2 as the balance species.
+`transport_perry Tc Pc` is the canonical transport token. The historical
+`transport_coast_perry` and `coast_cn_be` input spellings resolve to the
+same current transport and time methods.
+
+
 # HUNDUN-FLOW v0.4 case-input schema
 
 Status: production controls and wire-v9--v18 compatibility, 2026-09-03
@@ -213,7 +228,7 @@ required boundary, scheme, and time-control field are explicit.
   },
   "time": {
     "control": "adaptive_flow",
-    "scheme": "variable_bdf2",
+    "scheme": "backward_euler",
     "initial_dt": 0.0001,
     "minimum_dt": 1e-10,
     "maximum_dt": 0.01,
@@ -305,7 +320,7 @@ These objects are closed and have the following exact fields and values:
 | Object | Exact fields | Accepted values |
 | --- | --- | --- |
 | `flow` | `model`, `pressure_reference`, `reacting` | `model` is `single_phase_low_mach_compressible`; `pressure_reference` is `boundary_absolute` or `closed_mass`; `reacting` is `false` |
-| `solver` | `coupling`, `pressure_correctors`, `pressure_linear`, `terminal_tolerances` | `coupling` is `PISO` or `SIMPLE`; `pressure_correctors` is unsigned integer `2`; the two nested control objects are described below |
+| `solver` | `coupling`, `pressure_correctors`, `pressure_linear`, `terminal_tolerances` | `coupling` is `CN_BE`, `PISO` or `SIMPLE`; `pressure_correctors` is unsigned integer `2`; the two nested control objects are described below |
 | `turbulence` | `model` | Optional object; `model` is `vreman_wall_function`, `wale`, or `none` |
 
 `PISO` performs one momentum-predictor pass followed by two pressure
@@ -531,7 +546,9 @@ name is inspected in the hot boundary or solver path.
 `maximum_bdf_ratio`.
 
 `control` is `fixed`, `adaptive_flow`, or `adaptive_acoustic`; `scheme` is
-`backward_euler` or `variable_bdf2`. All real-valued fields are finite. The
+`cn_be` (default) or `backward_euler` for production advancement. Historical
+`variable_bdf2` input decodes for provenance and its production plan is rejected.
+All real-valued fields are finite. The
 following bounds apply:
 
 - `0 < minimum_dt <= initial_dt <= maximum_dt`;

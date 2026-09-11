@@ -1039,12 +1039,14 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
 
 
 def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
+    if record.get("pressure_solve_contract") == "coast_cn_be":
+        record["pressure_solve_contract"] = "cn_be"
     prefix = f"line {line_number}: V9 CN/BE"
     require_object_fields(record, V3_REQUIRED_FIELDS + V8_COUPLING_FIELDS +
                           V4_REFINEMENT_FIELDS + ("cold",), prefix)
     validate_v3_top_level_types(record, line_number)
     if (record["coupling"] != "CN_BE" or
-            record["pressure_solve_contract"] != "coast_cn_be" or
+            record["pressure_solve_contract"] != "cn_be" or
             record["requested_bdf_order"] != 1 or record["bdf_order"] != 1 or
             record["temporal_method_fallback"] or
             record["pressure_solve_calls"] != 0 or record["pressure"] != [] or
@@ -1063,11 +1065,18 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         "solid_velocity_max", "normalization", "final_momentum",
         "final_pressure", "final_enthalpy"), prefix)
     outer = require_integer(cold["outer_iterations"], prefix, 1, 16)
+    species_count = cold.get("independent_species_count")
+    if species_count is not None:
+        require_integer(species_count, prefix)
     for name in ("momentum", "pressure", "enthalpy", "species"):
-        calls = require_integer(cold[name + "_solve_calls"], prefix, 1)
-        if calls != outer * (3 if name == "momentum" else 1):
+        empty_species = name == "species" and species_count == 0
+        calls = require_integer(cold[name + "_solve_calls"], prefix, 0 if empty_species else 1)
+        expected_calls = 0 if empty_species else outer * (3 if name == "momentum" else 1)
+        if calls != expected_calls:
             raise EvidenceError(f"{prefix} has incoherent {name} call counts")
         require_integer(cold[name + "_iterations"], prefix)
+    if species_count == 0 and (cold["species_iterations"] != 0 or cold["species_residual"] != 0):
+        raise EvidenceError(f"{prefix} reports transport work for zero independent species")
     if record["linear_iterations"] < sum(cold[name + "_iterations"]
             for name in ("momentum", "pressure", "enthalpy", "species")):
         raise EvidenceError(f"{prefix} drops split iterations from the resource total")
@@ -1096,18 +1105,19 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         raise EvidenceError(f"{prefix} has inconsistent iteration totals")
     terminal = require_object_fields(record["terminal_physical_audit"],
                                      V3_TERMINAL_FIELDS, prefix)
-    validate_v3_terminal_audit(terminal, "coast_cn_be", line_number)
+    validate_v3_terminal_audit(terminal, "cn_be", line_number)
     if (terminal["eos_residual"] > 128 * float.fromhex("0x1p-52")):
         raise EvidenceError(f"{prefix} EOS is outside the cold roundoff gate")
     reference_fields = ("reference_time", "reference_tolerances", "reference_residuals",
         "momentum_reference_scale", "enthalpy_reference_scale", "species_reference_scales")
-    if cold["normalization"] == "coast_reference":
+    if cold["normalization"] in ("reference", "coast_reference"):
         require_object_fields(cold, reference_fields, prefix)
         for name in ("reference_time", "momentum_reference_scale", "enthalpy_reference_scale"):
             if require_nonnegative_finite_number(cold[name], prefix) == 0:
                 raise EvidenceError(f"{prefix} has a zero {name}")
         scales = cold["species_reference_scales"]
-        if not isinstance(scales, list) or len(scales) < 2:
+        if (not isinstance(scales, list) or
+                (len(scales) < 2 if species_count is None else len(scales) != species_count + 1)):
             raise EvidenceError(f"{prefix} omits dependent species scale")
         for scale in scales:
             if require_nonnegative_finite_number(scale, prefix) == 0:
@@ -1272,7 +1282,7 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
                 any(require_nonnegative_finite_number(advective[name], prefix) != 0
                     for name in V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS if name != "present")):
             raise EvidenceError(f"{prefix} fabricates a legacy advective certificate")
-        return "coast_cn_be"
+        return "cn_be"
     if not require_boolean(advective["present"],
                            f"{prefix}.advective CFL.present"):
         raise EvidenceError(f"{prefix}.advective CFL must be present")
@@ -3012,7 +3022,7 @@ def self_test() -> None:
         runtime_cold.update({
             "schema": COLD_RUNTIME_SCHEMA, "linear_iterations": 24,
             "candidate_identity": make_candidate_identity("4" * 64, COLD_RUNTIME_SCHEMA),
-            "coupling": "CN_BE", "pressure_solve_contract": "coast_cn_be",
+            "coupling": "CN_BE", "pressure_solve_contract": "cn_be",
             "requested_bdf_order": 1, "bdf_order": 1, "temporal_method_fallback": False,
             "pressure": [], "pressure_solve_calls": 0, "momentum_predictor": [],
             "momentum_predictor_solve_calls": 0, "momentum_predictor_passes": 0,
@@ -3028,7 +3038,7 @@ def self_test() -> None:
             "momentum_iterations": 12, "pressure_iterations": 4,
             "enthalpy_iterations": 4, "species_iterations": 4,
             "momentum_residual": 1e-8, "enthalpy_residual": 1e-8, "species_residual": 1e-9,
-            "solid_velocity_max": 0, "normalization": "coast_reference",
+            "solid_velocity_max": 0, "normalization": "reference",
             "reference_time": 0.001, "reference_tolerances": [1e-4] * 3,
             "reference_residuals": [1e-5] * 3, "momentum_reference_scale": 100,
             "enthalpy_reference_scale": 1000, "species_reference_scales": [1, 2, 3],
@@ -3064,6 +3074,22 @@ def self_test() -> None:
             strict_cold["cold"][field] = 1e-15
         strict_cold["terminal_physical_audit"].update({"energy_residual": 1e-15, "energy_tolerance": 1e-10})
         runtime_path.write_text(json.dumps(strict_cold) + "\n", encoding="utf-8")
+        validate_runtime(runtime_path)
+
+        pure_air = json.loads(json.dumps(strict_cold))
+        pure_air["cold"].update(independent_species_count=0, species_solve_calls=0,
+                                species_iterations=0, species_residual=0)
+        runtime_path.write_text(json.dumps(pure_air) + "\n", encoding="utf-8")
+        validate_runtime(runtime_path)
+        for field in ("species_solve_calls", "species_iterations", "species_residual"):
+            bad = json.loads(json.dumps(pure_air))
+            bad["cold"][field] = 1
+            reject_runtime(bad, "V9 accepted fictitious single-gas transport work")
+        pure_reference = json.loads(json.dumps(runtime_cold))
+        pure_reference["cold"].update(independent_species_count=0, species_solve_calls=0,
+                                      species_iterations=0, species_residual=0,
+                                      species_reference_scales=[1])
+        runtime_path.write_text(json.dumps(pure_reference) + "\n", encoding="utf-8")
         validate_runtime(runtime_path)
 
         runtime_v7 = json.loads(json.dumps(runtime_v8))

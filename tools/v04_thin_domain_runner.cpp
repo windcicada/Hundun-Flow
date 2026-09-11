@@ -57,6 +57,8 @@ constexpr std::string_view kRunMagic =
 constexpr std::string_view kStatisticsMagic =
     "HUNDUN_V04_THIN_DOMAIN_STATISTICS_V1";
 constexpr std::string_view kAccumulatorMagic =
+    "HUNDUN_V04_THIN_DOMAIN_ACCUMULATOR_V3";
+constexpr std::string_view kStepAccumulatorMagic =
     "HUNDUN_V04_THIN_DOMAIN_ACCUMULATOR_V2";
 constexpr std::string_view kLegacyAccumulatorMagic =
     "HUNDUN_V04_THIN_DOMAIN_ACCUMULATOR_V1";
@@ -779,10 +781,11 @@ bool owns(std::int32_t global, std::int32_t begin, std::int32_t cells) {
 }
 
 bool add_sample(const StatisticsSpec& spec, const RuntimeGeometry& runtime,
-                const CommittedOutputSnapshot& snapshot,
+                const CommittedOutputSnapshot& snapshot, double dt,
                 Accumulator& accumulator) {
   const SnapshotFieldView* velocity = find_field(snapshot, "U", 3U);
-  if (velocity == nullptr || snapshot.geometry == nullptr) return false;
+  if (velocity == nullptr || snapshot.geometry == nullptr ||
+      !std::isfinite(dt) || dt <= 0.0) return false;
   const ConstFieldView u = velocity->values;
   const MeshPatch patch = snapshot.patch;
   const Int3 global = snapshot.geometry->global_cells();
@@ -805,7 +808,7 @@ bool add_sample(const StatisticsSpec& spec, const RuntimeGeometry& runtime,
     const std::size_t plane_count = selected.lower == selected.upper ? 1U : 2U;
     for (std::size_t side = 0U; side < plane_count; ++side) {
       const std::int32_t gx = planes[side];
-      const double weight = weights[side];
+      const double weight = dt * weights[side];
       if (weight == 0.0 || !owns(gx, patch.begin.x, patch.cells.x)) continue;
       const std::int32_t lx = gx - patch.begin.x;
       for (std::int32_t lz = 0; lz < patch.cells.z; ++lz) {
@@ -835,7 +838,7 @@ bool add_sample(const StatisticsSpec& spec, const RuntimeGeometry& runtime,
   const std::size_t plane_count = selected.lower == selected.upper ? 1U : 2U;
   for (std::size_t side = 0U; side < plane_count; ++side) {
     const std::int32_t gy = planes[side];
-    const double weight = weights[side];
+    const double weight = dt * weights[side];
     if (weight == 0.0 || !owns(gy, snapshot.patch.begin.y,
                                snapshot.patch.cells.y))
       continue;
@@ -991,9 +994,11 @@ bool decode_accumulator(const fs::path& path, std::uint64_t fingerprint,
   std::ifstream input(path);
   std::string line;
   if (!input || !std::getline(input, line) ||
-      (line != kAccumulatorMagic && line != kLegacyAccumulatorMagic))
+      (line != kAccumulatorMagic && line != kStepAccumulatorMagic &&
+       line != kLegacyAccumulatorMagic))
     return false;
-  const bool has_epoch = line == kAccumulatorMagic;
+  const bool legacy_weights = line != kAccumulatorMagic;
+  const bool has_epoch = line != kLegacyAccumulatorMagic;
   unsigned epoch_fields = 0U;
   if (!has_epoch) accumulator.epoch.reason = StatisticsResetReason::legacy_statistics;
   bool have_spec = false;
@@ -1098,13 +1103,14 @@ bool decode_accumulator(const fs::path& path, std::uint64_t fingerprint,
   const auto& epoch = accumulator.epoch;
   const auto development = std::max(epoch.development_steps, UINT64_C(1));
   const bool reset = epoch.reason == StatisticsResetReason::method_recovery ||
-                     epoch.reason == StatisticsResetReason::missing_history;
+                     epoch.reason == StatisticsResetReason::missing_history ||
+                     epoch.reason == StatisticsResetReason::legacy_statistics;
   const bool source_valid = detail::valid_runtime_sha256(epoch.source_manifest) &&
       std::any_of(epoch.source_manifest.begin(), epoch.source_manifest.end() - 1,
                   [](char c) { return c != '0'; });
   const auto possible_samples = step >= epoch.sampling_start_step
       ? step - epoch.sampling_start_step + 1U : 0U;
-  return (!has_epoch || (epoch_fields == 63U && epoch.start_step <= step &&
+  const bool valid = (!has_epoch || (epoch_fields == 63U && epoch.start_step <= step &&
              development < UINT64_MAX - epoch.start_step &&
              epoch.sampling_start_step == epoch.start_step + development + 1U &&
              accumulator.sample_steps <= possible_samples &&
@@ -1118,6 +1124,9 @@ bool decode_accumulator(const fs::path& path, std::uint64_t fingerprint,
                      [](bool value) { return value; }) &&
          std::all_of(centerline_seen.begin(), centerline_seen.end(),
                      [](bool value) { return value; });
+  if (valid && legacy_weights)
+    accumulator.epoch.reason = StatisticsResetReason::legacy_statistics;
+  return valid;
 }
 
 std::string encode_statistics(const StatisticsSpec& spec,
@@ -1368,7 +1377,7 @@ bool checkpoint(MPI_Comm communicator, int rank, ProductDriver& driver,
 
 DriverInitialState initial_state(const ValidatedModel& model,
                                  std::vector<double>& scalars) {
-  scalars.assign(model.transported_scalars.size(), 0.0);
+  scalars = initial_scalar_values(model);
   DriverInitialState initial;
   initial.transported_scalars = {scalars.data(), scalars.size()};
   for (const BoundaryFaceSpec& boundary : model.boundaries) {
@@ -1722,7 +1731,8 @@ Status append_evidence(
   evidence.time = step.accepted_time;
   evidence.requested_bdf_order = step.proposal.bdf.order;
   evidence.bdf_order = step.effective_bdf.order;
-  evidence.coupling =
+  evidence.cold = step.piso.cold;
+  evidence.coupling = step.piso.cold.active ? RuntimeCouplingKind::cn_be :
       model.solver.coupling == CouplingKind::simple
           ? RuntimeCouplingKind::simple
           : RuntimeCouplingKind::piso;
@@ -1766,8 +1776,9 @@ Status append_evidence(
           : 0U;
   evidence.pressure = step.piso.pressure;
   evidence.pressure_solve_calls = step.piso.pressure_solve_calls;
-  evidence.pressure_solve_contract =
-      RuntimePressureSolveContract::continuity_energy_coupled;
+  evidence.pressure_solve_contract = step.piso.cold.active
+      ? RuntimePressureSolveContract::cn_be
+      : RuntimePressureSolveContract::continuity_energy_coupled;
   evidence.pressure_energy_refinement_solve_calls =
       step.piso.pressure_energy_refinement_solve_calls;
   evidence.pressure_energy_refinement_termination =
@@ -1799,6 +1810,10 @@ Status append_evidence(
       step.piso.energy_residual;
   evidence.terminal_physical_audit.energy_tolerance =
       model.solver.terminal.continuity;
+  if (step.piso.cold.active && step.piso.cold.stopping) {
+    evidence.terminal_physical_audit.energy_residual = step.piso.cold.reference_residual[1];
+    evidence.terminal_physical_audit.energy_tolerance = step.piso.cold.stopping->enthalpy;
+  }
   evidence.momentum_predictor_passes =
       step.momentum_predictor_solve.predictor_passes;
   evidence.terminal_physical_audit.closed_mass_residual =
@@ -1839,9 +1854,10 @@ Status append_evidence(
       step.momentum_predictor_limiter.limited_face_fraction;
   evidence.momentum_predictor_limited =
       step.momentum_predictor_limiter.limited;
-  status = detail::runtime_advective_cfl(
-      communicator, step.momentum_predictor_limiter.advective_cfl,
-      evidence.momentum_advective_cfl);
+  if (!step.piso.cold.active)
+    status = detail::runtime_advective_cfl(
+        communicator, step.momentum_predictor_limiter.advective_cfl,
+        evidence.momentum_advective_cfl);
   if (!status) return status;
   evidence.predictor_theta = step.thermophysical_predictor.theta;
   evidence.predictor_mass_flux_scale =
@@ -1888,13 +1904,17 @@ Status append_evidence(
 
 bool terminal_audit_valid(const ValidatedModel& model,
                           const DriverStepReport& step) {
-  const double energy_tolerance = model.solver.terminal.continuity;
+  const bool reference = step.piso.cold.active && step.piso.cold.stopping.has_value();
+  const double energy_tolerance = reference ? step.piso.cold.stopping->enthalpy
+                                           : model.solver.terminal.continuity;
+  const double energy_residual = reference ? step.piso.cold.reference_residual[1]
+                                          : step.piso.energy_residual;
   const std::array<double, 10U> values{{
       step.piso.eos_residual,
       model.solver.terminal.eos,
       step.piso.continuity_residual,
       model.solver.terminal.continuity,
-      step.piso.energy_residual,
+      energy_residual,
       energy_tolerance,
       step.piso.closed_mass_residual,
       model.solver.terminal.closed_mass,
@@ -1907,11 +1927,11 @@ bool terminal_audit_valid(const ValidatedModel& model,
          step.piso.eos_residual <= model.solver.terminal.eos &&
          step.piso.continuity_residual <=
              model.solver.terminal.continuity &&
-         step.piso.energy_residual <= energy_tolerance &&
+         energy_residual <= energy_tolerance &&
          step.piso.closed_mass_residual <=
              model.solver.terminal.closed_mass &&
          step.piso.gauge_residual <= model.solver.terminal.gauge &&
-         step.momentum_predictor_limiter.advective_cfl.valid() &&
+         (step.piso.cold.active || step.momentum_predictor_limiter.advective_cfl.valid()) &&
          step.piso.committed_convective_cfl.valid();
 }
 
@@ -2122,7 +2142,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
   RuntimeCandidateIdentity candidate_identity;
   status = detail::runtime_candidate_identity(communicator,
                                               candidate_identity,
-                                              HUNDUN_RUNTIME_TARGET_MANIFEST);
+                                              HUNDUN_RUNTIME_TARGET_MANIFEST,
+                                              model.time.scheme == TimeScheme::cn_be);
   if (!status) {
     if (rank == 0)
       std::cerr << "candidate_identity_status="
@@ -2173,7 +2194,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     accumulator.epoch.discarded_samples = epoch[3];
     accumulator.epoch.reason = static_cast<StatisticsResetReason>(epoch[4]);
   }
-  if (restarted && restart_requires_recovery) {
+  if (restarted && (restart_requires_recovery ||
+      accumulator.epoch.reason == StatisticsResetReason::legacy_statistics)) {
     const auto development = options.have_restart_development_steps
         ? options.restart_development_steps : spec.development_steps;
     if (!consensus_u64(communicator, development) ||
@@ -2190,7 +2212,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     accumulator.epoch = {starting_step, development,
         starting_step + std::max(development, UINT64_C(1)) + 1U, discarded,
         options.restart_method_recovery ? StatisticsResetReason::method_recovery
-                                        : StatisticsResetReason::missing_history,
+          : restart_requires_recovery ? StatisticsResetReason::missing_history
+                                      : StatisticsResetReason::legacy_statistics,
         run_start.restart_manifest_sha256};
   }
   if (!consensus_u64(communicator, accumulator.sample_steps)) return 5;
@@ -2216,6 +2239,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
              << "stl " << stl_fingerprint << '\n'
              << "starting_step " << starting_step << '\n'
              << "starting_time " << snapshot.time << '\n'
+             << "statistics_weighting elapsed_time\n"
              << "starting_sample_steps " << accumulator.sample_steps << '\n'
              << "statistics_epoch_start_step " << accumulator.epoch.start_step << '\n'
              << "statistics_development_steps " << accumulator.epoch.development_steps << '\n'
@@ -2474,7 +2498,9 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
     DriverStepReport step;
     if (options.observe_performance && hundun_v04_observe_step)
       hundun_v04_observe_step(starting_step + index + 1U, 1);
-    status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, step);
+    LocalTimeLimits time_limits{1.0, 1.0, 1.0, 1.0, 1.0};
+    status = driver.constrain_convective_time_limit(time_limits);
+    if (status) status = driver.advance(time_limits, step);
     if (options.observe_performance && hundun_v04_observe_step)
       hundun_v04_observe_step(starting_step + index + 1U, 0);
     step_timer.phase(1U);
@@ -2666,9 +2692,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       return 7;
     }
     const bool startup = step.accepted_step == 1U;
-    // Legacy V1 images intentionally take one BE recovery step.  Exact V2
-    // images restore t_n/t_{n-1}, rates and flux history and therefore keep
-    // BDF2 without losing the first sample of every segment.
+    // Exact CN/BE restarts retain the accepted endpoint and flux histories.
     const bool recovery =
         restarted && restart_requires_recovery && index == 0U;
     if ((startup || recovery) && step.effective_bdf.order != 1U) {
@@ -2676,8 +2700,8 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
       return 7;
     }
     if (restarted && !restart_requires_recovery && index == 0U &&
-        (step.proposal.bdf.order != 2U || step.effective_bdf.order != 2U)) {
-      if (rank == 0) std::cerr << "exact_restart_bdf2_provenance_failure\n";
+        (step.proposal.bdf.order != 1U || step.effective_bdf.order != 1U)) {
+      if (rank == 0) std::cerr << "exact_restart_cn_be_provenance_failure\n";
       return 7;
     }
     SurfaceForce surface;
@@ -2717,7 +2741,7 @@ int run(MPI_Comm communicator, int rank, const Options& options) {
         : fallback    ? "temporal_fallback"
                       : "development";
     if (included) {
-      okay = add_sample(spec, runtime, snapshot, accumulator);
+      okay = add_sample(spec, runtime, snapshot, step.proposal.dt, accumulator);
       if (!all_true(communicator, okay)) {
         if (rank == 0) std::cerr << "nonfinite_snapshot_observable\n";
         return 7;
@@ -3075,6 +3099,44 @@ bool self_test(MPI_Comm communicator) {
   std::string parse_error;
   okay = okay && parse_spec(spec_path, parsed, parse_error) &&
          spec_fingerprint(parsed) == fingerprint;
+
+  CartesianMeshSpec mesh;
+  mesh.kind = GeometryKind::uniform;
+  mesh.lower = {0.0, 0.0, 0.0};
+  mesh.upper = {2.0, 2.0, 2.0};
+  mesh.has_exact_cells = true;
+  mesh.exact_cells = {2, 2, 2};
+  mesh.minimum_spacing = {1.0, 1.0, 1.0};
+  mesh.max_growth_ratio = 1.0;
+  mesh.limits = {64U, 1U << 20U};
+  CartesianGeometryPlan geometry;
+  MeshPatch patch;
+  okay = static_cast<bool>(CartesianGeometryCompiler::compile(
+      MPI_COMM_SELF, mesh, {}, geometry, patch)) && okay;
+  std::array<double, 24U> velocity{};
+  ConstFieldView values{velocity.data(), {2, 2, 2}, {}, 3U, 2U, 4U, 8U};
+  const SnapshotFieldView field{"U", values, {}};
+  CommittedOutputSnapshot sample;
+  sample.geometry = &geometry;
+  sample.patch = patch;
+  sample.fields = {&field, 1U};
+  StatisticsSpec sample_spec;
+  sample_spec.station_x_over_d = {0.0};
+  RuntimeGeometry sample_geometry;
+  sample_geometry.station_brackets = {{0, 0, 0.0}};
+  sample_geometry.centerline_bracket = {0, 0, 0.0};
+  Accumulator weighted;
+  weighted.profile.resize(12U);
+  weighted.centerline.resize(6U);
+  std::fill_n(velocity.begin(), 8U, 1.0);
+  okay = add_sample(sample_spec, sample_geometry, sample, 0.1, weighted) && okay;
+  std::fill_n(velocity.begin(), 8U, 3.0);
+  okay = add_sample(sample_spec, sample_geometry, sample, 0.3, weighted) && okay;
+  const bool time_weighted = std::abs(weighted.profile[1] / weighted.profile[0] - 2.5) < 1e-14 &&
+      std::abs(weighted.profile[3] / weighted.profile[0] - 7.0) < 1e-14 &&
+      std::abs(weighted.centerline[1] / weighted.centerline[0] - 2.5) < 1e-14;
+  if (!time_weighted) std::cerr << "FAIL variable-dt time-weighted statistics\n";
+  okay = time_weighted && okay;
 
   Accumulator source;
   source.profile = {1.0, 2.0, 4.0};

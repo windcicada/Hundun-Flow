@@ -817,7 +817,7 @@ bool restart_preserves_direct_flux_lineage() {
   return true;
 }
 
-bool exact_restart_preserves_bdf2_history() {
+bool exact_restart_preserves_be_history() {
   const fs::path restart_root =
       fs::temp_directory_path() /
       ("hundun-v04-exact-restart-" + std::to_string(::getpid()));
@@ -990,12 +990,12 @@ bool exact_restart_preserves_bdf2_history() {
                                       resumed_endpoint.fields);
   const bool passed =
       endpoint_layout && failure_atomic && exact_restore && first.accepted &&
-      second.accepted && second.effective_bdf.order == 2U &&
+      second.accepted && second.effective_bdf.order == 1U &&
       continuous_step.accepted && resumed_step.accepted &&
-      continuous_step.effective_bdf.order == 2U &&
+      continuous_step.effective_bdf.order == 1U &&
       resumed_step.proposal.origin == StepOrigin::restart &&
-      resumed_step.proposal.bdf.order == 2U &&
-      resumed_step.effective_bdf.order == 2U &&
+      resumed_step.proposal.bdf.order == 1U &&
+      resumed_step.effective_bdf.order == 1U &&
       !resumed_step.temporal_method_fallback &&
       resumed_step.proposal.generation ==
           continuous_step.proposal.generation &&
@@ -1606,7 +1606,7 @@ bool retry_consumes_warm_seed_and_restart_starts_cold() {
   }
 
   // Warm-start provenance is an independent lifecycle contract.  Use a stable
-  // Product budget so an accepted-origin BDF2 step is observed directly;
+  // Product budget so an accepted-origin BE step is observed directly;
   // coupling this observation to the intentionally strict retry fixture would
   // only test its work limit a second time.
   ValidatedModel authority_model = test::product_model({17, 11, 7});
@@ -1699,8 +1699,8 @@ bool retry_consumes_warm_seed_and_restart_starts_cold() {
   const bool passed =
       live_physical && live_step.proposal.origin == StepOrigin::accepted &&
       live_step.proposal.attempt == 0U &&
-      live_step.proposal.bdf.order == 2U &&
-      live_step.effective_bdf.order == 2U && observed_live_warm_start &&
+      live_step.proposal.bdf.order == 1U &&
+      live_step.effective_bdf.order == 1U && observed_live_warm_start &&
       live_warm_start.valid &&
       live_warm_start.origin == StepOrigin::accepted &&
       live_warm_start.attempt == 0U &&
@@ -1965,7 +1965,7 @@ int main(int argc, char** argv) {
   check("invalid-restart-rollback",
         reject_invalid_thermodynamic_restart_atomically());
   check("restart-flux-lineage", restart_preserves_direct_flux_lineage());
-  check("exact-restart-BDF2", exact_restart_preserves_bdf2_history());
+  check("exact-restart-BE", exact_restart_preserves_be_history());
   check("open-boundary", run_open_boundary_product());
   check("fixed-provisional-CFL",
         fixed_advective_cfl_gate_rolls_back_product());

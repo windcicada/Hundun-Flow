@@ -546,11 +546,12 @@ bool run_case(const fs::path& root, bool stretched,
   RuntimeEvidenceRecord cold = evidence;
   passed &= static_cast<bool>(detail::runtime_candidate_identity(
       MPI_COMM_SELF, cold.candidate_identity, {}, true));
-  cold.coupling = RuntimeCouplingKind::coast_cn_be;
-  cold.pressure_solve_contract = RuntimePressureSolveContract::coast_cn_be;
+  cold.coupling = RuntimeCouplingKind::cn_be;
+  cold.pressure_solve_contract = RuntimePressureSolveContract::cn_be;
   cold.requested_bdf_order = cold.bdf_order = 1U;
   cold.cold.active = true;
   cold.cold.outer_iterations = 1U;
+  cold.cold.independent_species_count = 2U;
   cold.cold.momentum_solve_calls = 3U;
   cold.cold.pressure_solve_calls = cold.cold.enthalpy_solve_calls =
       cold.cold.species_solve_calls = 1U;
@@ -588,7 +589,7 @@ bool run_case(const fs::path& root, bool stretched,
   passed &= static_cast<bool>(EvidenceWriter::append(MPI_COMM_SELF,
       root / "evidence" / "reference.jsonl", services, reference));
   const auto reference_text = read(root / "evidence" / "reference.jsonl");
-  passed &= reference_text.find("\"normalization\":\"coast_reference\"") != std::string::npos &&
+  passed &= reference_text.find("\"normalization\":\"reference\"") != std::string::npos &&
             reference_text.find("\"species_reference_scales\":[1,2,3]") != std::string::npos;
   for (unsigned mutation = 0; mutation < 8; ++mutation) {
     auto bad = reference;
@@ -604,6 +605,16 @@ bool run_case(const fs::path& root, bool stretched,
         root / "evidence" / "cold-invalid.jsonl", services, bad);
   }
   auto relabelled = cold;
+  auto air = cold;
+  air.cold.independent_species_count = 0U;
+  air.cold.species_solve_calls = 0U;
+  air.cold.species_iterations = 0U;
+  air.cold.species_residual = 0.0;
+  passed &= static_cast<bool>(EvidenceWriter::append(MPI_COMM_SELF,
+      root / "evidence" / "air.jsonl", services, air));
+  air.cold.species_solve_calls = 1U;
+  passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+      root / "evidence" / "cold-invalid.jsonl", services, air);
   relabelled.candidate_identity = evidence.candidate_identity;
   passed &= !EvidenceWriter::append(MPI_COMM_SELF,
       root / "evidence" / "cold-invalid.jsonl", services, relabelled);

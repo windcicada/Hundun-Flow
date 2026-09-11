@@ -93,7 +93,7 @@ enum class TimeScheme : std::uint8_t {
   backward_euler,
   variable_bdf2,
   // CN midpoint momentum; BE mass, species and total energy.
-  coast_cn_be
+  cn_be
 };
 enum class TransportLaw : std::uint8_t {
   constant,
@@ -277,7 +277,7 @@ struct PatchInletsSpec {
 };
 
 struct SchemeSpec {
-  ConvectionScheme momentum{ConvectionScheme::limited_central2};
+  ConvectionScheme momentum{ConvectionScheme::central2};
   ConvectionScheme enthalpy{ConvectionScheme::limited_central2};
   ConvectionScheme species{ConvectionScheme::tvd2};
   ConvectionScheme passive_scalar{ConvectionScheme::tvd2};
@@ -328,7 +328,7 @@ struct SolverSpec {
 
 struct TimeControlSpec {
   TimeControlKind control{TimeControlKind::adaptive_flow};
-  TimeScheme scheme{TimeScheme::variable_bdf2};
+  TimeScheme scheme{TimeScheme::cn_be};
   double initial_dt{1.0e-4};
   double minimum_dt{1.0e-10};
   double maximum_dt{1.0};

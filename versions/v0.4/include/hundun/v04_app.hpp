@@ -32,6 +32,11 @@ struct DriverInitialState {
   double start_time{};
 };
 
+// Seed a uniform inlet composition when all prescribed inflows agree.
+// Cases with distinct inlet compositions retain the explicit initial-state
+// option (and the zero-independent-species default).
+std::vector<double> initial_scalar_values(const ValidatedModel& model);
+
 struct ApplicationRunOptions {
   // Paths must refer to the same logical shared inputs/run/checkpoint across
   // ranks; local mount spellings are not compared as raw bytes. At the cold

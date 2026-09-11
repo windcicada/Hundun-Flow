@@ -2532,6 +2532,7 @@ struct ColdCouplingReport {
   std::uint32_t pressure_solve_calls{};
   std::uint32_t enthalpy_solve_calls{};
   std::uint32_t species_solve_calls{};
+  std::uint32_t independent_species_count{};
   std::uint64_t momentum_iterations{};
   std::uint64_t pressure_iterations{};
   std::uint64_t enthalpy_iterations{};

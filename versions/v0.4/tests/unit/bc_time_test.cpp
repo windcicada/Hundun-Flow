@@ -533,7 +533,7 @@ bool test_state_and_bdf() {
 
 bool test_cold_time_method() {
   TimeSchemePlan plan, bdf_plan;
-  const auto spec = valid_spec(TimeControlKind::fixed, TimeScheme::coast_cn_be);
+  const auto spec = valid_spec(TimeControlKind::fixed, TimeScheme::cn_be);
   bool passed = expect(TimeSchemePlan::compile(spec, plan) &&
       TimeSchemePlan::compile(valid_spec(TimeControlKind::fixed), bdf_plan) &&
       plan.fingerprint() != bdf_plan.fingerprint(),

@@ -1355,9 +1355,37 @@ bool test_signed_residual_minimum() {
                 "negative-alignment correction reduces the independent true residual");
 }
 
+bool test_residual_scale_invariance() {
+  Fixture fixture;
+  if (!expect(fixture.initialize(MgPointSmootherKind::chebyshev_jacobi,
+          MgOperatorClass::symmetric_diagonally_dominant_m_matrix,
+          7.0, 1.0), "residual scaling fixture compiles")) return false;
+  std::fill(fixture.rhs.storage.begin(), fixture.rhs.storage.end(), 1.0);
+  if (!fixture.plan.apply(as_const(fixture.rhs.view), fixture.correction.view, 0U))
+    return false;
+  const auto reference = fixture.correction.storage;
+  constexpr double factor = 1e-12;
+  for (double& value : fixture.rhs.storage) value *= factor;
+  if (!fixture.plan.apply(as_const(fixture.rhs.view), fixture.correction.view, 1U))
+    return false;
+  double error{}, magnitude{};
+  const auto cells = fixture.correction.view.interior;
+  for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y)
+    for (int x=0; x<cells.x; ++x) {
+      const auto offset = &fixture.correction.view.unchecked({x,y,z},0U) -
+                          fixture.correction.storage.data();
+      const double expected = reference[offset];
+      magnitude = std::max(magnitude, std::abs(expected));
+      error = std::max(error, std::abs(fixture.correction.storage[offset]/factor-expected));
+    }
+  return expect(magnitude > 0.0 && error < 1e-12*magnitude,
+      "MG correction preserves scaling for small integrated residuals");
+}
+
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
+  passed &= test_residual_scale_invariance();
   passed &= test_signed_residual_minimum();
   passed &= test_diagonal_shortcut();
   passed &= test_public_contract();

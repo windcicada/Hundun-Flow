@@ -9,10 +9,11 @@
 
 using namespace hundun::v04;
 
-bool run(double speed) {
+bool run(double speed, double composition = 0.3, bool inlet_reference = false) {
   auto model = test::product_model({12, 8, 8});
-  model.time.scheme = TimeScheme::coast_cn_be;
+  model.time.scheme = TimeScheme::cn_be;
   model.time.initial_dt = 9.7088612375381536e-8;
+  if (inlet_reference) model.solver.cold_stopping = ColdStoppingSpec{0.001};
   model.legacy_time_fingerprint = model.fingerprint + 1;
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   auto &inlet = model.boundaries[0];
@@ -46,7 +47,6 @@ bool run(double speed) {
   ProductDriver driver;
   if (status)
     status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
-  const double composition = 0.3;
   DriverInitialState initial;
   initial.pressure_reference = 100100;
   initial.temperature = 300;
@@ -63,6 +63,10 @@ bool run(double speed) {
   if (status)
     status = driver.committed_restart_snapshot(snapshot);
   bool passed = status && report.accepted && snapshot.step == 3;
+  if (inlet_reference)
+    passed &= report.piso.cold.species_reference_scales.size() == 2 &&
+        report.piso.cold.species_reference_scales[0] > 1.0 &&
+        report.piso.cold.reference_residual[2] < model.solver.cold_stopping->species;
   if (status && snapshot.patch.begin.x + snapshot.patch.cells.x == 12) {
     ConstFieldView u, p, h, y;
     for (std::size_t i = 0; i < snapshot.fields.size; ++i) {
@@ -126,9 +130,50 @@ bool run(double speed) {
   return all;
 }
 
+bool run_air() {
+  auto model = test::product_model({12, 8, 8});
+  model.time.scheme = TimeScheme::cn_be;
+  model.time.initial_dt = 1.3808912271980336e-5;
+  model.legacy_time_fingerprint = model.fingerprint + 1;
+  model.pressure_reference = PressureReferenceKind::boundary_absolute;
+  auto &inlet = model.boundaries[0];
+  inlet.flow_kind = BoundaryKind::velocity_inlet;
+  inlet.velocity = {0.1, 0, 0};
+  inlet.direction = {1, 0, 0};
+  inlet.temperature = 300;
+  auto &outlet = model.boundaries[1];
+  outlet.flow_kind = BoundaryKind::pressure_outlet;
+  outlet.pressure = 100000;
+  outlet.backflow_temperature = 300;
+  CompiledCasePlan plan;
+  auto status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
+  ProductDriver driver;
+  if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
+  DriverInitialState initial;
+  initial.pressure_reference = 100000;
+  initial.temperature = 300;
+  initial.velocity = {0.1, 0, 0};
+  if (status) status = driver.initialize(initial);
+  DriverStepReport report;
+  for (int i = 0; i < 3 && status; ++i)
+    status = driver.advance({model.time.initial_dt / model.time.convective_cfl,
+                             1, 1, 1, 1}, report);
+  bool passed = status && report.accepted && report.accepted_step == 3 &&
+      report.piso.cold.active && report.piso.cold.species_solve_calls == 0 &&
+      report.piso.cold.species_iterations == 0 &&
+      report.piso.eos_residual < 1e-12 && report.piso.continuity_residual < 1e-10;
+  if (!passed)
+    std::cerr << "cold_air status=" << unsigned(status.code) << '/'
+              << status.detail << " step=" << report.accepted_step << '\n';
+  int all = passed ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &all, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  return all;
+}
+
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
-  const bool out = run(0.02), back = run(-0.02);
+  const bool out = run(0.02), back = run(-0.02), air = run_air();
+  const bool zero_species = run(0.02, 0.0, true);
   MPI_Finalize();
-  return out && back ? 0 : 1;
+  return out && back && air && zero_species ? 0 : 1;
 }

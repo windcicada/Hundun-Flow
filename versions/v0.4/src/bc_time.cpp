@@ -201,7 +201,7 @@ Status TimeSchemePlan::compile(const TimeControlSpec& spec,
       static_cast<std::uint8_t>(TimeControlKind::adaptive_acoustic);
   const bool valid_scheme =
       static_cast<std::uint8_t>(spec.scheme) <=
-      static_cast<std::uint8_t>(TimeScheme::coast_cn_be);
+      static_cast<std::uint8_t>(TimeScheme::cn_be);
   if (!valid_control || !valid_scheme || !finite_positive(spec.initial_dt) ||
       !finite_positive(spec.minimum_dt) ||
       !finite_positive(spec.maximum_dt) ||

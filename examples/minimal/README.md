@@ -1,14 +1,15 @@
 # 最小运行模板
 
-本目录的 JSON 和物性文件与当前回归夹具逐字节一致。网格为 8×8×8，单相低马赫理想气体、PISO，无 IBM、LES 或输运标量；它不是 Re3900 科学算例。
+本目录与 `hundun init-case` 生成的输入一致：8×8×8 网格、CN/BE 时间推进、中央动量格式、单组分理想气体、速度入口与静压出口。入口速度为 1 m/s，温度为 300 K，出口压力为 101325 Pa。
 
-从仓库根目录运行：
+在仓库根目录执行：
 
 ```sh
-mpirun -n 1 build/release/versions/v0.4/hundun validate examples/minimal --dry-plan
-mpirun -n 1 build/release/versions/v0.4/hundun run examples/minimal \
-  --output run-minimal --steps 10 --output-interval 10 --restart-interval 10 \
-  --initial-state 101325,300,0.1,0,0
+mpirun -n 1 build/versions/v0.4/hundun validate examples/minimal
+mpirun -n 1 build/versions/v0.4/hundun run examples/minimal \
+  --output /tmp/hf-run --steps 10 --output-interval 10 --restart-interval 10
 ```
 
-输出写入 `run-minimal`，不要让不同计算共用该目录。细节见[快速开始](../../docs/user-guide/quick-start.md)。
+每次运行使用独立输出目录。CN/BE 采用 CN 动量与 BE 质量、焓、组分输运；显式 `backward_euler` 用于兼容的 PISO/SIMPLE 配置。重启动保存速度端点、热力学状态、通量及算法历史签名。
+
+[air.d](../air.d) 提供 O2/N2 空气的 NASA 热力学与 Perry 输运数据，O2 独立质量分数为 0.23291751145757963，N2 为补足组分。新算例见 [Re3900](../cyl/README.md)，开发记录见 [cn.md](../../docs/cn.md)。

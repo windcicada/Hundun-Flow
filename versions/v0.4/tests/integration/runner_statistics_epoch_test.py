@@ -38,6 +38,7 @@ def main():
     case = root / "case"
     case.mkdir()
     model = json.loads((data / "case_minimal_valid.json").read_text())
+    model["time"]["scheme"] = "backward_euler"
     model["mesh"]["domain"] = {"lower": [-2, -2, -2], "upper": [2, 2, 2]}
     model["mesh"]["exact_cells"] = [16, 16, 16]
     model["mesh"]["minimum_spacing"] = [.25, .25, .25]
@@ -134,7 +135,7 @@ def main():
     exact, exact_meta, exact_health, exact_stats = run("exact", 2, source)
     assert exact_meta["starting_sample_steps"] == "2"
     assert exact_stats["sample_steps"] == 4
-    assert all(row["bdf_order"] == "2" for row in exact_health)
+    assert all(row["bdf_order"] == "1" for row in exact_health)
     exact_before = inventory(exact)
     recovered, recovered_meta, recovered_health, recovered_stats = run("recovered", 2, exact, True)
     print("epoch source_samples={} exact_samples={} method_start_samples={} method_end_samples={}".format(
@@ -142,7 +143,7 @@ def main():
         recovered_meta["starting_sample_steps"], recovered_stats["sample_steps"]), flush=True)
     assert recovered_meta["starting_sample_steps"] == "0", "method recovery inherited old samples"
     assert recovered_stats["sample_steps"] == 0
-    assert [row["bdf_order"] for row in recovered_health] == ["1", "2"]
+    assert [row["bdf_order"] for row in recovered_health] == ["1", "1"]
     assert recovered_meta["statistics_epoch_start_step"] == "7"
     assert recovered_meta["statistics_sampling_start_step"] == "11"
     assert recovered_meta["statistics_reset_reason"] == "method_recovery"
@@ -151,7 +152,7 @@ def main():
     resumed, resumed_meta, resumed_health, resumed_stats = run("resumed", 3, recovered)
     assert resumed_meta["statistics_epoch_start_step"] == "7"
     assert resumed_meta["statistics_sampling_start_step"] == "11"
-    assert all(row["bdf_order"] == "2" for row in resumed_health)
+    assert all(row["bdf_order"] == "1" for row in resumed_health)
     assert resumed_stats["sample_steps"] == 2, "exact segmentation lost the relative development window"
     validator = Path(__file__).resolve().parents[4] / "tools" / "v04_evidence_validate.py"
     generation = (exact / "Restart" / "current").read_text().strip()

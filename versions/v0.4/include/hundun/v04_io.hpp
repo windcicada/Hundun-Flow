@@ -353,14 +353,14 @@ enum class RuntimePressureSolveContract : std::uint8_t {
   invalid,
   pressure_continuity,
   continuity_energy_coupled,
-  coast_cn_be,
+  cn_be,
 };
 
 enum class RuntimeCouplingKind : std::uint8_t {
   invalid,
   piso,
   simple,
-  coast_cn_be,
+  cn_be,
 };
 
 // Runtime evidence deliberately projects only the rank-invariant part of a

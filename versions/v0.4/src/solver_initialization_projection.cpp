@@ -13,6 +13,7 @@
 #include <atomic>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -2344,12 +2345,11 @@ Status FreshStartKinematicProjectionPlan::prepare(
     mg_spec.correction_scaling = MgCorrectionScaling::residual_minimizing;
     mg_spec.identity = impl.linear_identity;
     mg_spec.coefficients = {impl.numeric_generation, numeric, 0.0};
-    // Identity rows and zero incident coefficients already encode inactive
-    // cells and anchors in the exact numeric graph.  Passing a second
-    // activity mask makes Native MG eliminate those identity rows and changes
-    // the preconditioned problem.  Empty activity therefore means "retain the
-    // complete anchored coefficient graph", not "ignore IBM".
-    mg_spec.activity = {};
+    // Restrict coarse-grid aggregation to the fluid/anchor graph. Solid
+    // identity rows remain in the exact operator; their zero residual needs
+    // zero correction. The preconditioner uses the fluid coefficients at
+    // every level, including narrow passages through a mostly solid domain.
+    mg_spec.activity = impl.mg_activity;
     const MgCoefficientViews coefficients{
         as_const(impl.workspace.diagonal),
         as_const(impl.workspace.x_solver_coefficient),
@@ -2437,11 +2437,17 @@ Status FreshStartKinematicProjectionPlan::solve(
                              *impl.services.solver_workspace,
                              *impl.services.reductions, resources);
   }
+  if (!impl.bypass_no_immersed && impl.rank == 0)
+    std::fprintf(stderr, "fresh_projection status=%u/%u termination=%u iterations=%u initial=%.17g final=%.17g\n",
+        static_cast<unsigned>(result.status.code), result.status.detail,
+        static_cast<unsigned>(result.termination), result.iterations,
+        result.initial_true_residual, result.final_true_residual);
   if (!result.status || (result.termination != LinearTermination::converged &&
-                         result.termination != LinearTermination::zero_rhs))
+                         result.termination != LinearTermination::zero_rhs)) {
     return result.status
                ? Status{StatusCode::rejected_step, kFreshProjectionSolve}
                : result.status;
+  }
   ++impl.chi_generation;
   if (impl.chi_generation == 0U)
     ++impl.chi_generation;

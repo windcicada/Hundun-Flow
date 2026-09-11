@@ -5029,8 +5029,9 @@ Status NativeCartesianMgPlan::apply_impl(ConstFieldView residual,
     }
     return {StatusCode::numerical_failure, kMgApply};
   }
-  const double scale = std::max(1.0, projection[0]);
-  const double tiny = std::numeric_limits<double>::epsilon() * scale;
+  // Both squared norms carry the residual scale, including FV cell volume.
+  // A fixed absolute floor would erase valid small Krylov directions.
+  const double tiny = std::numeric_limits<double>::epsilon() * projection[0];
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
   const bool skip_final_projection = implementation.spec.correction_scaling ==
                                          MgCorrectionScaling::unit_linear ||

@@ -1,0 +1,29 @@
+{
+  "initial_state": "fresh",
+  "Re": 3900,
+  "D": 0.02,
+  "U": 2.89668,
+  "T": 300,
+  "p": 107138.19607708235,
+  "Y_O2": 0.23291751145757963,
+  "mu": 1.840795926911999e-05,
+  "rho": 1.2391952364356427,
+  "grid": [
+    576,
+    320,
+    80
+  ],
+  "CFL": 0.5,
+  "files": {
+    "case.json": "6713dee575e04ee8775c58dda35a99b885e7f396900beb64f5763bfc268b93d2",
+    "axes.dat": "ef9b6b1fdaaef1494924c5a48dff0fcb94fd5a5099653afbebbefff57ae67e1a",
+    "cyl.stl": "627c1301bb4a02f24450329a2b3f7a111b81be51299d9fb4a12c1ce2908ecda0",
+    "air.d": "f16bd97bc3bf95d496c25cf7a78838fd8e02246f07ce98b43e3aa413bfbd91f6"
+  },
+  "air_source": "COAST EXEC/Fuels/air/mechanism O2/N2 NASA7 and Perry data",
+  "minimum_spacing": [
+    0.0003779476619583111,
+    0.00035857560559999016,
+    0.0003926990814499959
+  ]
+}

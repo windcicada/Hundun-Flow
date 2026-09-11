@@ -3029,7 +3029,7 @@ struct CompiledCasePlan::Impl {
   PlanFingerprint legacy_afc_v3_fingerprint{};
   PlanFingerprint legacy_time_fingerprint{};
   PlanFingerprint transport_source_plan{};
-  std::array<PlanFingerprint, 3> transport_source_histories{};
+  std::array<PlanFingerprint, 4> transport_source_histories{};
   std::optional<ColdStoppingSpec> cold_stopping;
   bool unity_lewis_enthalpy{};
   PlanFingerprint cpu_fingerprint{};
@@ -3287,7 +3287,7 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
   previous_pressure_reference = pressure_reference;
   pressure_reference = pending_pressure_reference.value;
   pressure_correction_warm_start_valid =
-      plan.implementation_->time.spec().scheme != TimeScheme::coast_cn_be;
+      plan.implementation_->time.spec().scheme != TimeScheme::cn_be;
   balance_history = pending_balance;
   plan.implementation_->esf.tcr_history.commit();
   if (plan.implementation_->spray.enabled()) {
@@ -3550,10 +3550,11 @@ Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
   to.transport_source_plan = source_plan.fingerprint();
   // Transport migration rebuilds method history explicitly. Bind each known
   // source revision to the validated source model, including its physics flags.
-  constexpr std::array<detail::ColdHistoryRevision, 3> revisions{{
+  constexpr std::array<detail::ColdHistoryRevision, 4> revisions{{
       detail::ColdHistoryRevision::quadratic_pressure,
       detail::ColdHistoryRevision::fluid_pressure,
-      detail::ColdHistoryRevision::mach_tvd}};
+      detail::ColdHistoryRevision::mach_tvd,
+      detail::ColdHistoryRevision::pressure_coupled}};
   for (std::size_t i = 0; i < revisions.size(); ++i)
     to.transport_source_histories[i] = detail::product_method_history_signature(
         from.time.spec().scheme, !from.fields.scalars.empty(), from.reaction.enabled(),
@@ -3575,7 +3576,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   if (communicator == MPI_COMM_NULL) {
     return {StatusCode::invalid_plan, kProductInput};
   }
-  const bool cold_model = model.time.scheme == TimeScheme::coast_cn_be;
+  const bool cold_model = model.time.scheme == TimeScheme::cn_be;
   const bool cold_perry = cold_model && !model.thermophysics.species.empty() &&
       model.thermophysics.species.front().transport_law == TransportLaw::coast_perry;
   const bool incompatible_lewis = cold_perry && std::any_of(
@@ -3596,12 +3597,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     }
   };
   const bool unsupported_cold = cold_model &&
-      (model.legacy_time_fingerprint == 0U ||
-       model.reaction.mode != ReactionMode::none || model.spray ||
+      (model.reaction.mode != ReactionMode::none || model.spray ||
        model.pressure_reference != PressureReferenceKind::boundary_absolute ||
        model.solver.coupling != CouplingKind::piso ||
        model.solver.pressure.algorithm != LinearAlgorithm::fgmres ||
-       model.transported_scalars.empty() ||
        std::any_of(model.transported_scalars.begin(), model.transported_scalars.end(),
            [](const TransportedScalarSpec& scalar) {
              return scalar.role != TransportedScalarRole::species;
@@ -3610,6 +3609,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                     supported_cold_boundary));
   Status status = product_collective_status(
       communicator, model.fingerprint == 0U || out.implementation_ != nullptr ||
+                        model.time.scheme == TimeScheme::variable_bdf2 ||
                         unsupported_cold || incompatible_lewis ||
                         (model.solver.cold_stopping &&
                          (!cold_model || !model.solver.cold_stopping->valid()))
@@ -4404,7 +4404,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   if (status && immersed) {
     candidate->ibm_equations.emplace();
-    const auto pressure_gradient = model.time.scheme == TimeScheme::coast_cn_be
+    const auto pressure_gradient = model.time.scheme == TimeScheme::cn_be
         ? IbmPressureGradientKind::coast_fluid_delta
         : IbmPressureGradientKind::quadratic_neumann;
     if (model.patch_inlets)
@@ -5451,7 +5451,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   // Equation/PISO semantics bind the physical schemes and boundary kinds,
   // which this time-only migration leaves unchanged. Cold Perry changes
   // the h diffusion coordinate too and requires explicit history transfer.
-  if (model.time.scheme == TimeScheme::coast_cn_be && !cold_perry) {
+  if (model.time.scheme == TimeScheme::cn_be && !cold_perry) {
     status = product_local_stage(communicator, [&]() -> Status {
       if (model.legacy_time_fingerprint == 0U)
         return {StatusCode::invalid_plan, kProductInput};
@@ -5696,7 +5696,7 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
             {product.fields.scalars.data(), product.fields.scalars.size()},
             {product.fields.scalar_roles.data(), product.fields.scalar_roles.size()},
             product.schemes.required_ghost_width(),
-            product.time.spec().scheme == TimeScheme::coast_cn_be
+            product.time.spec().scheme == TimeScheme::cn_be
                 ? detail::SpeciesCouplingSolver::dilu
                 : detail::SpeciesCouplingSolver::diagonal);
         if (status && !candidate->species_trial.empty() &&
@@ -6593,7 +6593,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
          product.ibm_equations.has_value() ? &*product.ibm_equations
                                            : nullptr,
          product.ibm_equations.has_value() ? &product.turbulence : nullptr,
-         product.time.spec().scheme == TimeScheme::coast_cn_be
+         product.time.spec().scheme == TimeScheme::cn_be
              ? IbmThermalRateClosure::impermeable
              : IbmThermalRateClosure::reconstructed_zero_normal},
         {enthalpy_rate_trial,
@@ -6796,11 +6796,11 @@ Status ProductDriver::restart_expected(
       product.reaction.enabled(),
       product.esf.enabled(), product.esf.tcr_history.enabled(),
       product.spray.enabled(), !product.patch_inlets.patches.empty(),
-      product.time.spec().scheme == TimeScheme::coast_cn_be && product.unity_lewis_enthalpy);
+      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy);
   if (history_policy == RestartHistoryPolicy::rebuild_method_history)
     out.compatible_method_plan = product.transport_source_plan != 0U
         ? product.transport_source_plan
-        : product.time.spec().scheme == TimeScheme::coast_cn_be
+        : product.time.spec().scheme == TimeScheme::cn_be
             ? product.legacy_time_fingerprint : product.legacy_afc_v3_fingerprint;
   const auto records = product.spray.enabled()
                            ? product.spray.history.snapshot()
@@ -7662,7 +7662,7 @@ Status ProductDriver::initialize_restart(
           product.reaction.enabled(),
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
-      product.time.spec().scheme == TimeScheme::coast_cn_be && product.unity_lewis_enthalpy));
+      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool legacy_identity =
@@ -7678,7 +7678,7 @@ Status ProductDriver::initialize_restart(
                   product.transport_source_histories.end(),
                   image.method_history_signature) != product.transport_source_histories.end()) ||
        (product.transport_source_plan == 0U &&
-        image.plan == (product.time.spec().scheme == TimeScheme::coast_cn_be
+        image.plan == (product.time.spec().scheme == TimeScheme::cn_be
                           ? product.legacy_time_fingerprint
                           : product.legacy_afc_v3_fingerprint))) &&
       image.schema == product.schema_fingerprint;
@@ -8439,7 +8439,7 @@ Status ProductDriver::Impl::execute_attempt(
     const StepTime& step, PisoAttemptReport& report,
     PreparedAttemptFinish& prepared) noexcept {
   CompiledCasePlan::Impl& product = *plan.implementation_;
-  const bool cold_method = product.time.spec().scheme == TimeScheme::coast_cn_be;
+  const bool cold_method = product.time.spec().scheme == TimeScheme::cn_be;
   effective_bdf = step.bdf;
   thermophysical_predictor_calls = 0U;
   scalar_remap_report = {};
@@ -11424,6 +11424,8 @@ Status ProductDriver::Impl::execute_attempt(
   if (cold_method) {
     const auto cold_attempt = [&]() -> Status {
       report.cold.active = true;
+      report.cold.independent_species_count =
+          static_cast<std::uint32_t>(species_trial.size());
       report.cold.stopping = product.cold_stopping;
       // Prerequisite failure can leave the equation histories unbound. Keep
       // its original cause and let the shared finish path prepare rollback.
@@ -11467,6 +11469,61 @@ Status ProductDriver::Impl::execute_attempt(
               local[4 + species_history.size()] = std::max(
                   local[4 + species_history.size()], std::abs(rho * (1.0 - sum)));
             }
+        // Fixed inlet composition is part of the reference state, including
+        // species entering an initially species-free interior. Evaluate the
+        // prescribed face value from the accepted scalar boundary closure.
+        if (reference_stopping) {
+          for (unsigned face_id = 0; face_id < 6U; ++face_id) {
+            const auto face = static_cast<CartesianFace>(face_id);
+            const BoundaryFacePlan* face_plan{};
+            if (!product.boundary.face(face, face_plan) || !face_plan ||
+                !face_plan->local_owner ||
+                !product.boundary.has_thermophysical_inlet_face(face)) continue;
+            const unsigned axis = face_id / 2U;
+            const bool high = (face_id & 1U) != 0U;
+            const int inner_count = axis == 0U ? cells.y : cells.x;
+            const int outer_count = axis == 2U ? cells.y : cells.z;
+            for (int outer = 0; outer < outer_count; ++outer)
+              for (int inner = 0; inner < inner_count; ++inner) {
+                const Int3 owner = boundary_owner_cell(face, cells, inner, outer);
+                if (product.topology && !product.topology->is_fluid_global(
+                    {owner.x + product.patch.begin.x, owner.y + product.patch.begin.y,
+                     owner.z + product.patch.begin.z})) continue;
+                Int3 ghost = owner;
+                if (axis == 0U) ghost.x = high ? cells.x : -1;
+                if (axis == 1U) ghost.y = high ? cells.y : -1;
+                if (axis == 2U) ghost.z = high ? cells.z : -1;
+                const int normal = high ? (axis == 0U ? cells.x : axis == 1U ? cells.y : cells.z) : 0;
+                const double rho = equation_state.density.accepted.unchecked(ghost, 0);
+                double sum{};
+                for (std::size_t j = 0; j < species_history.size(); ++j) {
+                  const auto field = species_history[j].accepted;
+                  const double q = detail::interpolate_face(product.equations.kernels(),
+                      static_cast<CartesianAxis>(axis), normal,
+                      field.unchecked(high ? owner : ghost, 0),
+                      field.unchecked(high ? ghost : owner, 0));
+                  sum += q;
+                  local[4 + j] = std::max(local[4 + j], std::abs(rho * q));
+                }
+                local[4 + species_history.size()] = std::max(
+                    local[4 + species_history.size()], std::abs(rho * (1.0 - sum)));
+              }
+          }
+        }
+        if (reference_stopping) {
+          const auto& inlets = product.patch_inlets;
+          for (std::size_t inlet = 0; inlet < inlets.patches.size(); ++inlet) {
+            const double rho = inlets.inlet_density[inlet];
+            double sum{};
+            for (std::size_t j = 0; j < species_history.size(); ++j) {
+              const double q = inlets.independent_species[inlet][j];
+              sum += q;
+              local[4 + j] = std::max(local[4 + j], std::abs(rho * q));
+            }
+            local[4 + species_history.size()] = std::max(
+                local[4 + species_history.size()], std::abs(rho * (1.0 - sum)));
+          }
+        }
         status = product.reductions.checked_max({local.data(), local.size()},
                                                 {global.data(), global.size()});
         if (!status) return status;
@@ -11483,11 +11540,11 @@ Status ProductDriver::Impl::execute_attempt(
         if (reference_stopping) {
           const double reference_time = product.cold_stopping->reference_time;
           report.cold.momentum_reference_scale =
-              std::max(1e-30, std::hypot(global[0], global[1], global[2])) / reference_time;
-          report.cold.enthalpy_reference_scale = std::max(1e-30, global[3]) / reference_time;
+              std::max(1e-15, std::hypot(global[0], global[1], global[2])) / reference_time;
+          report.cold.enthalpy_reference_scale = std::max(1e-15, global[3]) / reference_time;
           report.cold.species_reference_scales.resize(species_history.size() + 1U);
           for (std::size_t j = 0; j < report.cold.species_reference_scales.size(); ++j)
-            report.cold.species_reference_scales[j] = std::max(1e-30, global[4 + j]) / reference_time;
+            report.cold.species_reference_scales[j] = std::max(1e-15, global[4 + j]) / reference_time;
           const auto finite_scale = [](double value) {
             return std::isfinite(value) && value > 0.0;
           };
@@ -11694,16 +11751,97 @@ Status ProductDriver::Impl::execute_attempt(
             probe_status =
                 detail::eliminate_cold_boundaries(cold_boundary, cells, rows);
           const double assembly = MPI_Wtime() - begin;
+          const auto matrix_revision = detail::product_mix(
+              detail::product_mix(UINT64_C(1469598103934665603),
+                                  step.generation), cold_outer + 1U) | 1U;
           LinearIdentity identity{
-              product.piso.fingerprint(), 0x434f4c4450524f42ULL,
+              product.piso.fingerprint(), matrix_revision,
               product.geometry.fingerprint(),
-              product.krylov_workspace.fingerprint(), 0x434f4c44534f4c56ULL};
-          detail::ColdPressureOperator op(rows, cells, product.krylov_halo,
-                                          identity);
-          detail::ColdPressureDilu pc(rows, cells, identity);
+              product.krylov_workspace.fingerprint(), matrix_revision};
+          detail::ColdPressureOperator op(rows, cells, product.krylov_halo, identity);
+          detail::ColdPressureDilu dilu(rows, cells, identity);
+          detail::VolumeScaledPreconditioner mg(pressure_mg,
+              product.equations.kernels(), pressure_energy_e_p);
+          double local_ratio{};
+          for (const auto& row : rows) {
+            double sum{};
+            for (const double coefficient : row.neighbour) sum += std::abs(coefficient);
+            local_ratio = std::max(local_ratio, sum / row.diagonal);
+          }
+          double global_ratio{};
+          if (probe_status) probe_status = product.reductions.checked_max(
+              {&local_ratio, 1U}, {&global_ratio, 1U});
+          const bool use_mg = global_ratio > 0.5;
           const double setup_begin = MPI_Wtime();
-          if (probe_status)
-            probe_status = pc.prepare();
+          if (probe_status && use_mg) {
+            probe_status = make_pressure_face_views(product.pressure_face_storage,
+                cells, x_coefficient, y_coefficient, z_coefficient);
+            if (probe_status) {
+              std::size_t index{};
+              for (int z=0; z<cells.z; ++z) for(int y=0; y<cells.y; ++y)
+                for(int x=0; x<cells.x; ++x, ++index) {
+                  const Int3 c{x,y,z};
+                  const double volume = detail::cell_volume(product.equations.kernels(),c);
+                  const bool fluid = momentum_activity.cells.size == 0U ||
+                      momentum_activity.cells.data[index] != 0U;
+                  double diagonal = fluid ? volume*trial_density.unchecked(c,0)/
+                      ((attempt_pressure_reference+trial_pressure.unchecked(c,0))*step.dt) : 1.0;
+                  for(unsigned f=0; f<6; ++f) {
+                    auto at = c;
+                    if(f%2) (f/2 == 0 ? at.x : f/2 == 1 ? at.y : at.z)++;
+                    const int coordinate = f/2 == 0 ? at.x+product.patch.begin.x
+                        : f/2 == 1 ? at.y+product.patch.begin.y : at.z+product.patch.begin.z;
+                    const int extent = f/2 == 0 ? product.geometry.global_cells().x
+                        : f/2 == 1 ? product.geometry.global_cells().y : product.geometry.global_cells().z;
+                    const auto& face = faces[index][f];
+                    const bool exterior = (coordinate == 0 || coordinate == extent) &&
+                        product.boundary_specs[f].flow_kind != BoundaryKind::periodic;
+                    const double coefficient = exterior || face.solid_neighbour ? 0.0
+                        : face.projection + 0.5*face.limiter_diffusion;
+                    if (fluid) {
+                      diagonal += coefficient;
+                      if (exterior && product.boundary_specs[f].flow_kind == BoundaryKind::pressure_outlet)
+                        diagonal += 2.0*face.projection;
+                    }
+                    if(f/2 == 0) x_coefficient.unchecked(at) = coefficient;
+                    else if(f/2 == 1) y_coefficient.unchecked(at) = coefficient;
+                    else z_coefficient.unchecked(at) = coefficient;
+                  }
+                  pressure_diagonal.unchecked(c,0) = diagonal;
+                }
+            }
+            const MgCoefficientViews coefficients{as_const(pressure_diagonal),
+                as_const(x_coefficient), as_const(y_coefficient), as_const(z_coefficient)};
+            const MgCoefficientIdentity numeric{matrix_revision, matrix_revision, 0.0};
+            if (probe_status && !pressure_mg_initialized) {
+              NativeCartesianMgSpec spec;
+              spec.communicator = communicator;
+              spec.geometry = &product.geometry;
+              spec.patch = product.patch;
+              spec.identity = identity;
+              spec.coefficients = numeric;
+              spec.policy = detail::production_pressure_mg_policy();
+              spec.operator_class = MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
+              spec.activity = momentum_activity;
+              MgBoundaryKind* kinds[]{&spec.boundaries.x_min, &spec.boundaries.x_max,
+                  &spec.boundaries.y_min, &spec.boundaries.y_max,
+                  &spec.boundaries.z_min, &spec.boundaries.z_max};
+              for(unsigned f=0; f<6; ++f) *kinds[f] =
+                  product.boundary_specs[f].flow_kind == BoundaryKind::periodic
+                      ? MgBoundaryKind::periodic : MgBoundaryKind::neumann;
+              const MgRuntimeServices services{&product.mg_halo, &product.reductions,
+                  &product.mg_workspace, {product.coarse_halo_pointers.data(),
+                                          product.coarse_halo_pointers.size()}};
+              probe_status = NativeCartesianMgPlan::compile(spec, services, coefficients,
+                  pressure_mg, &pressure_mg_counters);
+              if (probe_status) pressure_mg_initialized = true;
+            } else if (probe_status) {
+              probe_status = pressure_mg.update_coefficients(identity, numeric,
+                  coefficients, &pressure_mg_counters);
+            }
+          } else if (probe_status) probe_status = dilu.prepare();
+          LinearPreconditioner& pc = use_mg ? static_cast<LinearPreconditioner&>(mg)
+                                           : static_cast<LinearPreconditioner&>(dilu);
           const double setup = MPI_Wtime() - setup_begin;
           probe_status = product.reductions.consensus(probe_status);
           int rank{};
@@ -11714,6 +11852,8 @@ Status ProductDriver::Impl::execute_attempt(
                            unsigned(probe_status.code), probe_status.detail);
             return probe_status;
           }
+          if (rank == 0) std::fprintf(stdout, "cn_pressure_preconditioner kind=%s face_diagonal_ratio=%.17g\n",
+              use_mg ? "multigrid" : "dilu", global_ratio);
           std::size_t ordinal{};
           for (int z = 0; z < cells.z; ++z)
             for (int y = 0; y < cells.y; ++y)
@@ -12177,7 +12317,7 @@ Status ProductDriver::Impl::execute_attempt(
                 return product.reductions.consensus(assembled);
               };
           cold_energy_context.bdf = {1 / step.dt, -1 / step.dt, 0, 1};
-          {
+          if (!species_trial.empty()) {
             const double species_begin = MPI_Wtime();
             halo_count = 0U;
             append_scalar_halo_views(product.fields, species_trial,
@@ -19534,7 +19674,7 @@ Status ProductDriver::Impl::execute_attempt(
          product.reaction.contributions(), product.ibm_equations.has_value() ? &*product.ibm_equations
                                                : nullptr,
          product.ibm_equations.has_value() ? &product.turbulence : nullptr,
-         product.time.spec().scheme == TimeScheme::coast_cn_be
+         product.time.spec().scheme == TimeScheme::cn_be
              ? IbmThermalRateClosure::impermeable
              : IbmThermalRateClosure::reconstructed_zero_normal},
         {enthalpy_rate_output,
@@ -20320,7 +20460,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
           product.reaction.enabled(),
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
-      product.time.spec().scheme == TimeScheme::coast_cn_be && product.unity_lewis_enthalpy)};
+      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy)};
   out.cell_records = product.spray.enabled()
                          ? product.spray.history.snapshot()
                          : product.esf.tcr_history.snapshot();

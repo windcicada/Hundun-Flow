@@ -55,8 +55,8 @@ std::string_view pressure_solve_contract_name(
       return "pressure_continuity";
     case RuntimePressureSolveContract::continuity_energy_coupled:
       return "continuity_energy_coupled";
-    case RuntimePressureSolveContract::coast_cn_be:
-      return "coast_cn_be";
+    case RuntimePressureSolveContract::cn_be:
+      return "cn_be";
     case RuntimePressureSolveContract::invalid:
       break;
   }
@@ -69,7 +69,7 @@ std::string_view coupling_name(RuntimeCouplingKind coupling) noexcept {
       return "PISO";
     case RuntimeCouplingKind::simple:
       return "SIMPLE";
-    case RuntimeCouplingKind::coast_cn_be:
+    case RuntimeCouplingKind::cn_be:
       return "CN_BE";
     case RuntimeCouplingKind::invalid:
       break;
@@ -136,7 +136,7 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
   if (anchor.transport_source_case != 0U &&
       (anchor.kind != RuntimeRunStartKind::restart || anchor.source_format_version < 3U ||
        anchor.history_policy != RestartHistoryPolicy::rebuild_method_history ||
-       record.coupling != RuntimeCouplingKind::coast_cn_be)) return false;
+       record.coupling != RuntimeCouplingKind::cn_be)) return false;
   if (!std::isfinite(anchor.previous_time) || anchor.previous_time < 0.0 ||
       record.step <= anchor.previous_step)
     return false;
@@ -239,7 +239,7 @@ std::string_view predictor_low_state_name(std::uint8_t low_state) noexcept {
 Status validate_record(const IoServicePlan& services,
                        const RuntimeEvidenceRecord& record) noexcept {
   const bool cold_contract = record.pressure_solve_contract ==
-                             RuntimePressureSolveContract::coast_cn_be;
+                             RuntimePressureSolveContract::cn_be;
   const auto &cold = record.cold;
   const auto accepted_solve = [](const LinearSolveResult &solve) {
     return solve.status &&
@@ -258,7 +258,7 @@ Status validate_record(const IoServicePlan& services,
   const bool valid_reference_stopping = cold.stopping && cold.stopping->valid() &&
       positive_scale(cold.momentum_reference_scale) &&
       positive_scale(cold.enthalpy_reference_scale) &&
-      cold.species_reference_scales.size() >= 2U &&
+      cold.species_reference_scales.size() == cold.independent_species_count + 1U &&
       std::all_of(cold.species_reference_scales.begin(), cold.species_reference_scales.end(),
                   positive_scale) &&
       accepted_terminal_metric(cold.reference_residual[0], cold.stopping->momentum) &&
@@ -282,7 +282,10 @@ Status validate_record(const IoServicePlan& services,
       cold.momentum_solve_calls == 3U * cold.outer_iterations &&
       cold.pressure_solve_calls == cold.outer_iterations &&
       cold.enthalpy_solve_calls == cold.outer_iterations &&
-      cold.species_solve_calls == cold.outer_iterations &&
+      cold.species_solve_calls ==
+          (cold.independent_species_count == 0U ? 0U : cold.outer_iterations) &&
+      (cold.independent_species_count != 0U ||
+       (cold.species_iterations == 0U && cold.species_residual == 0.0)) &&
       std::all_of(cold.final_momentum.begin(), cold.final_momentum.end(),
                   accepted_solve) &&
       accepted_solve(cold.final_pressure) &&
@@ -313,7 +316,7 @@ Status validate_record(const IoServicePlan& services,
       RuntimePressureSolveContract::continuity_energy_coupled;
   const bool valid_coupling =
       cold_contract
-          ? valid_cold && record.coupling == RuntimeCouplingKind::coast_cn_be
+          ? valid_cold && record.coupling == RuntimeCouplingKind::cn_be
           : !cold.active && ((record.coupling == RuntimeCouplingKind::piso &&
                               record.momentum_predictor_passes == 1U) ||
                              (record.coupling == RuntimeCouplingKind::simple &&
@@ -1149,6 +1152,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"pressure_solve_calls\":" << cold.pressure_solve_calls
          << ",\"enthalpy_solve_calls\":" << cold.enthalpy_solve_calls
          << ",\"species_solve_calls\":" << cold.species_solve_calls
+         << ",\"independent_species_count\":" << cold.independent_species_count
          << ",\"momentum_iterations\":" << cold.momentum_iterations
          << ",\"pressure_iterations\":" << cold.pressure_iterations
          << ",\"enthalpy_iterations\":" << cold.enthalpy_iterations
@@ -1157,7 +1161,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"species_residual\":" << cold.species_residual
          << ",\"enthalpy_residual\":" << cold.enthalpy_residual
          << ",\"solid_velocity_max\":" << cold.solid_velocity_max
-         << ",\"normalization\":\"" << (cold.stopping ? "coast_reference" : "local_time") << "\"";
+         << ",\"normalization\":\"" << (cold.stopping ? "reference" : "local_time") << "\"";
     if (cold.stopping) {
       json << ",\"reference_time\":" << cold.stopping->reference_time
            << ",\"reference_tolerances\":[" << cold.stopping->momentum << ','

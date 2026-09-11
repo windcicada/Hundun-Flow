@@ -1410,13 +1410,13 @@ bool test_cold_time_method() {
   ValidatedModel legacy;
   if (!expect(static_cast<bool>(compile(fixture.root(), legacy)),
               "BDF2 migration reference compiles")) return false;
-  replace_once(input, "variable_bdf2", "coast_cn_be");
+  replace_once(input, "variable_bdf2", "cn_be");
   fixture.write("case.json", input);
   ValidatedModel model;
   if (!expect(static_cast<bool>(compile(fixture.root(), model)),
               "CN momentum and BE transport have an explicit case method"))
     return false;
-  bool passed = expect(model.time.scheme == TimeScheme::coast_cn_be &&
+  bool passed = expect(model.time.scheme == TimeScheme::cn_be &&
       model.fingerprint != legacy.fingerprint &&
       model.legacy_time_fingerprint == legacy.fingerprint &&
       legacy.legacy_time_fingerprint == 0U,
@@ -1427,7 +1427,7 @@ bool test_cold_time_method() {
       hundun::v04::detail::serialize_model_for_test(legacy, legacy_wire) &&
       wire.size() == legacy_wire.size() + sizeof(std::uint64_t) + 1U &&
       hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
-      restored.time.scheme == TimeScheme::coast_cn_be &&
+      restored.time.scheme == TimeScheme::cn_be &&
       restored.fingerprint == model.fingerprint &&
       restored.legacy_time_fingerprint == legacy.fingerprint,
       "cold wire carries both identities and leaves the legacy envelope size unchanged");
@@ -1463,7 +1463,7 @@ bool test_cold_time_method() {
   ValidatedModel changed, changed_legacy;
   passed &= expect(static_cast<bool>(compile(fixture.root(), changed)),
                    "changed cold transport data compiles");
-  replace_once(input, "coast_cn_be", "variable_bdf2");
+  replace_once(input, "cn_be", "variable_bdf2");
   fixture.write("case.json", input);
   passed &= expect(compile(fixture.root(), changed_legacy) &&
       changed.fingerprint != model.fingerprint &&
@@ -1477,7 +1477,7 @@ bool test_cold_stopping_configuration() {
   ScratchCase fixture("cold-stop");
   fixture.write("thermophysics.d", kPlaceholderThermophysics);
   std::string input = case_json(kUniformMesh);
-  replace_once(input, "backward_euler", "coast_cn_be");
+  replace_once(input, "backward_euler", "cn_be");
   fixture.write("case.json", input);
   ValidatedModel strict, reference;
   if (!expect(static_cast<bool>(compile(fixture.root(), strict)), "strict cold baseline compiles"))
@@ -1534,7 +1534,7 @@ bool test_cold_stopping_configuration() {
       {"\"species\":1e-4", "\"species\":0"},
       {"\"enthalpy\":1e-4", "\"enthalpy\":1"},
       {"\"momentum\":1e-4", "\"unknown\":1e-4"},
-      {"coast_cn_be", "variable_bdf2"}}) {
+      {"cn_be", "variable_bdf2"}}) {
     auto bad = input;
     replace_once(bad, substitution.first, substitution.second);
     fixture.write("case.json", bad);
@@ -1549,7 +1549,7 @@ bool test_transport_change_compatibility() {
   std::string mesh{kUniformMesh};
   replace_once(mesh, "\"data_files\":[]", "\"data_files\":[\"extra.d\"]");
   std::string input = case_json(mesh);
-  replace_once(input, "backward_euler", "coast_cn_be");
+  replace_once(input, "backward_euler", "cn_be");
   source_case.write("case.json", input);
   target_case.write("case.json", input);
   source_case.write("extra.d", "fixed geometry asset\n");

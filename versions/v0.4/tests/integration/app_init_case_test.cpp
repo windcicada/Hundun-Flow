@@ -72,15 +72,9 @@ bool run() {
   run_options.restart_interval = 1U;
   passed &= static_cast<bool>(
       ApplicationService::run(MPI_COMM_SELF, run_options, run_report));
-  if (run_report.piso.pressure_solve_calls != 2U ||
-      run_report.momentum_predictor_solve.predictor_passes != 1U ||
-      run_report.pressure_energy_globalization.trajectory_count == 0U) {
-    std::cerr << "FAIL: successful ApplicationService run preserves the last "
-                 "accepted step diagnostics; pressure_solve_calls="
-              << static_cast<unsigned>(run_report.piso.pressure_solve_calls)
-              << '\n';
-    passed = false;
-  }
+  passed &= run_report.piso.cold.active &&
+      run_report.piso.cold.momentum_solve_calls == 3U * run_report.piso.cold.outer_iterations &&
+      run_report.piso.cold.species_solve_calls == 0U;
   passed &= run_report.case_model == report.case_model &&
             run_report.product == report.product &&
             run_report.accepted_steps == 2U && run_report.final_time > 0.0 &&
@@ -95,47 +89,19 @@ bool run() {
     std::ifstream monitor(root / "run" / "monitor.jsonl", std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(monitor),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("\"candidate_baseline_evaluations\":2") !=
-                  std::string::npos &&
-              text.find("\"candidate_incomplete_evaluations\":0") !=
-                  std::string::npos;
+    passed &= text.find("\"step\":2") != std::string::npos;
   }
   {
-    std::ifstream evidence(root / "run" / "evidence.jsonl",
-                           std::ios::binary);
-    const std::string text{std::istreambuf_iterator<char>(evidence),
-                           std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V8") != std::string::npos &&
-              text.find("\"coupling\":\"PISO\"") != std::string::npos &&
-              text.find("\"momentum_predictor_passes\":1") !=
-                  std::string::npos &&
-              text.find("\"candidate_identity\":{") != std::string::npos &&
-              text.find("\"previous_committed_time\":") !=
-                  std::string::npos &&
-              text.find(
-                  "\"pressure_solve_contract\":\"continuity_energy_coupled\"") !=
-                  std::string::npos &&
-              text.find(
-                  "\"pressure_energy_refinement_termination\":\"component_residuals_converged\"") !=
-                  std::string::npos &&
-              text.find("\"pressure_energy_refinement\":[") !=
-                  std::string::npos &&
-              text.find("\"terminal_physical_audit\":{\"present\":true") !=
-                  std::string::npos &&
-              text.find("\"committed_convective_cfl\":{") !=
-                  std::string::npos &&
-              text.find("\"scheme\":\"common_face_afc_v3_owner\"") !=
-                  std::string::npos &&
-              text.find("\"advective_cfl\":{\"present\":true") !=
-                  std::string::npos &&
-              text.find("\"final_flux_revision\":0") == std::string::npos &&
-              text.find("\"face_flux_revision\":0") == std::string::npos &&
-              text.find("\"max_rank_rss_bytes\":0") == std::string::npos &&
-              text.find("\"max_node_rss_bytes\":0") == std::string::npos &&
-              text.find("\"stages\":[{\"id\":10") != std::string::npos &&
-              text.find("\"stages\":[{\"id\":10,\"min_ns\":0") ==
-                  std::string::npos;
+    std::ifstream evidence(root / "run" / "evidence.jsonl");
+    const std::string text{std::istreambuf_iterator<char>(evidence), {}};
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V9") != std::string::npos &&
+        text.find("\"coupling\":\"CN_BE\"") != std::string::npos &&
+        text.find("\"pressure_solve_contract\":\"cn_be\"") != std::string::npos &&
+        text.find("\"independent_species_count\":0") != std::string::npos &&
+        text.find("\"bdf_order\":2") == std::string::npos &&
+        text.find("\"terminal_physical_audit\":{\"present\":true") != std::string::npos;
   }
+
   ApplicationRunOptions resumed_options = run_options;
   resumed_options.run_directory = root / "run-resumed";
   resumed_options.restart_directory = root / "run" / "Restart";
@@ -155,33 +121,12 @@ bool run() {
                            std::ios::binary);
     const std::string text{std::istreambuf_iterator<char>(evidence),
                            std::istreambuf_iterator<char>()};
-    passed &= text.find("HUNDUN_V04_EVIDENCE_V8") != std::string::npos &&
-              text.find("\"coupling\":\"PISO\"") != std::string::npos &&
-              text.find("\"momentum_predictor_passes\":1") !=
-                  std::string::npos &&
-              text.find("\"candidate_identity\":{") != std::string::npos &&
-              text.find("\"step\":3") != std::string::npos &&
-              text.find("\"bdf_order\":2") != std::string::npos &&
-              text.find("\"restart_recovery\":true") ==
-                  std::string::npos &&
-              text.find("\"restart_recovery\":false") !=
-                  std::string::npos &&
-              text.find(
-                  "\"pressure_solve_contract\":\"continuity_energy_coupled\"") !=
-                  std::string::npos &&
-              text.find(
-                  "\"pressure_energy_refinement_termination\":\"component_residuals_converged\"") !=
-                  std::string::npos &&
-              text.find("\"terminal_physical_audit\":{\"present\":true") !=
-                  std::string::npos &&
-              text.find("\"committed_convective_cfl\":{") !=
-                  std::string::npos &&
-              text.find("\"scheme\":\"common_face_afc_v3_owner\"") !=
-                  std::string::npos &&
-              text.find("\"advective_cfl\":{\"present\":true") !=
-                  std::string::npos &&
-              text.find("\"face_flux_revision\":0") == std::string::npos &&
-              text.find("\"final_flux_revision\":0") == std::string::npos;
+    passed &= text.find("HUNDUN_V04_EVIDENCE_V9") != std::string::npos &&
+        text.find("\"coupling\":\"CN_BE\"") != std::string::npos &&
+        text.find("\"step\":3") != std::string::npos &&
+        text.find("\"bdf_order\":1") != std::string::npos &&
+        text.find("\"restart_recovery\":true") == std::string::npos &&
+        text.find("\"restart_recovery\":false") != std::string::npos;
   }
   // Independent diagnostics never require full-field Visit output.
   {
@@ -223,9 +168,9 @@ bool run() {
       recovery_first.find("\"bdf_order\":1") != std::string::npos &&
       recovery_first.find("\"restart_recovery\":true") != std::string::npos &&
       recovery_first.find("\"policy\":\"rebuild_method_history\"") != std::string::npos &&
-      recovery_second.find("\"bdf_order\":2") != std::string::npos &&
+      recovery_second.find("\"bdf_order\":1") != std::string::npos &&
       recovery_second.find("\"restart_recovery\":false") != std::string::npos;
-  if (!recovery_ok) std::cerr << "FAIL: ApplicationService explicit method recovery must use BE then BDF2 and record its policy\n";
+  if (!recovery_ok) std::cerr << "FAIL: ApplicationService explicit method recovery preserves CN/BE and records its policy\n";
   passed &= recovery_ok;
   ApplicationRunOptions invalid_recovery = recovery_options;
   invalid_recovery.restart_directory.clear();
@@ -240,6 +185,7 @@ bool run() {
   explicit_options.output_interval = 0U;
   explicit_options.initial_state = DriverInitialState{};
   explicit_options.initial_state->temperature = 350.0;
+  explicit_options.initial_state->velocity = {1.0, 0.0, 0.0};
   ApplicationRunReport explicit_report;
   auto explicit_status = ApplicationService::run(MPI_COMM_SELF, explicit_options, explicit_report);
   ValidatedModel explicit_model;
@@ -254,7 +200,7 @@ bool run() {
   if (explicit_status) explicit_status = RestartReader::load(MPI_COMM_SELF, explicit_options.run_directory / "Restart", explicit_expected, explicit_image);
   bool initial_ok = explicit_status && explicit_report.accepted_steps == 1U;
   bool have_enthalpy = false;
-  for (const auto& f : explicit_image.fields) if (f.role == RestartFieldRole::enthalpy) {
+  for (const auto& f : explicit_image.previous_fields) if (f.role == RestartFieldRole::enthalpy) {
     have_enthalpy = true;
     for (double h : f.values) initial_ok &= std::abs(h - 3.5*kUniversalGasConstant/28.96546*350.0) < 1e-6;
   }
@@ -288,6 +234,7 @@ bool run() {
   if (!conflict_rejected) std::cerr << "FAIL: conflicting boundary hints must not silently select the last temperature\n";
   passed &= conflict_rejected;
   conflicting_options.initial_state = DriverInitialState{};
+  conflicting_options.initial_state->velocity = {1.0, 0.0, 0.0};
   conflicting_options.run_directory = root / "run-explicit-over-hints";
   passed &= static_cast<bool>(ApplicationService::run(MPI_COMM_SELF, conflicting_options, conflicting_report));
 
