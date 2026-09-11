@@ -9,14 +9,14 @@
   "mu": 1.840795926911999e-05,
   "rho": 1.2391952364356427,
   "grid": [
-    576,
-    320,
-    80
+    448,
+    280,
+    40
   ],
-  "CFL": 0.5,
+  "CFL": 0.3,
   "files": {
-    "case.json": "6713dee575e04ee8775c58dda35a99b885e7f396900beb64f5763bfc268b93d2",
-    "axes.dat": "ef9b6b1fdaaef1494924c5a48dff0fcb94fd5a5099653afbebbefff57ae67e1a",
+    "case.json": "48e4c25c1d40534f42a68eb39d4c51fe967dddef12cfc0834566f7a7b3dcbee9",
+    "axes.dat": "3667b7e0d281a25f57793e14914e0ef9cc21f5c00b1f196b208ba47f862bacf1",
     "cyl.stl": "627c1301bb4a02f24450329a2b3f7a111b81be51299d9fb4a12c1ce2908ecda0",
     "air.d": "f16bd97bc3bf95d496c25cf7a78838fd8e02246f07ce98b43e3aa413bfbd91f6"
   },
@@ -24,6 +24,22 @@
   "minimum_spacing": [
     0.0003779476619583111,
     0.00035857560559999016,
-    0.0003926990814499959
+    0.0007853981629000022
+  ],
+  "protected_region": {
+    "x": [
+      -0.012384551794125,
+      0.09005071176899998
+    ],
+    "y": [
+      -0.0301642348402,
+      0.030127229114
+    ],
+    "spanwise": "40 cells, every second original node"
+  },
+  "mesh_source": "174db3d examples/cyl/axes.dat",
+  "CFL_band": [
+    0.25,
+    0.35
   ]
 }

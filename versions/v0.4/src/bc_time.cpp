@@ -208,6 +208,10 @@ Status TimeSchemePlan::compile(const TimeControlSpec& spec,
       spec.minimum_dt > spec.initial_dt ||
       spec.initial_dt > spec.maximum_dt ||
       !finite_positive(spec.convective_cfl) ||
+      !std::isfinite(spec.convective_cfl_margin) ||
+      spec.convective_cfl_margin < 0.0 ||
+      spec.convective_cfl_margin >= spec.convective_cfl ||
+      !std::isfinite(spec.convective_cfl_limit()) ||
       !finite_positive(spec.viscous_cfl) ||
       !finite_positive(spec.thermal_cfl) ||
       !finite_positive(spec.species_cfl) ||
@@ -239,9 +243,23 @@ Status TimeSchemePlan::compile(const TimeControlSpec& spec,
   hash = hash_mix(hash, spec.maximum_retries);
   hash = hash_mix(hash, double_bits(spec.minimum_bdf_ratio));
   hash = hash_mix(hash, double_bits(spec.maximum_bdf_ratio));
+  if (spec.convective_cfl_margin > 0.0) {
+    hash = hash_mix(hash, UINT64_C(0x43464c42414e4431));
+    hash = hash_mix(hash, double_bits(spec.convective_cfl_margin));
+  }
   candidate.fingerprint_ = hash == 0U ? 1U : hash;
   out = candidate;
   return {};
+}
+
+double TimeSchemePlan::convective_scale(double maximum_rate,
+                                        double previous_dt) const noexcept {
+  const double courant = maximum_rate * previous_dt;
+  if (spec_.convective_cfl_margin > 0.0 && previous_dt > 0.0 &&
+      courant >= spec_.convective_cfl - spec_.convective_cfl_margin &&
+      courant <= spec_.convective_cfl_limit())
+    return previous_dt / spec_.convective_cfl;
+  return 1.0 / maximum_rate;
 }
 
 Status TimeSchemePlan::local_candidate(LocalTimeLimits limits, double& dt,

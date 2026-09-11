@@ -193,6 +193,12 @@ add_test(NAME v04_runner_cfl_mpi_2
     --native "$<TARGET_FILE:hundun>" --runner "$<TARGET_FILE:v04_thin_domain_runner>"
     --mpi "${MPIEXEC_EXECUTABLE}")
 set_tests_properties(v04_runner_cfl_mpi_2 PROPERTIES PROCESSORS 2 TIMEOUT 180)
+add_test(NAME v04_runner_cfl_band_mpi_2
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/runner_cfl_cli_test.py"
+    --native "$<TARGET_FILE:hundun>" --runner "$<TARGET_FILE:v04_thin_domain_runner>"
+    --mpi "${MPIEXEC_EXECUTABLE}" --cfl-band)
+set_tests_properties(v04_runner_cfl_band_mpi_2 PROPERTIES PROCESSORS 2 TIMEOUT 180)
 
 add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"

@@ -217,6 +217,39 @@ LocalTimeLimits loose_limits() {
   return {infinity, infinity, infinity, infinity, infinity};
 }
 
+bool test_cfl_band() {
+  TimeControlSpec spec;
+  spec.convective_cfl = .3;
+  spec.convective_cfl_margin = .05;
+  TimeSchemePlan plan;
+  bool passed = expect(static_cast<bool>(TimeSchemePlan::compile(spec, plan)),
+                       "compile convective CFL deadband");
+  for (double rate : {.26, .30, .34})
+    passed &= expect(close(.3 * plan.convective_scale(rate, 1.), 1.),
+                     "retain dt inside the CFL band");
+  passed &= expect(close(.3 * plan.convective_scale(.2, 1.), 1.5) &&
+                   close(.3 * plan.convective_scale(.4, 1.), .75) &&
+                   close(.3 * plan.convective_scale(.4, 0.), .75),
+                   "retarget low, high and fresh CFL to 0.30");
+  int rank{}, size{};
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  for (double maximum : {.2, .32, .4}) {
+    const double rate = rank == size - 1 ? maximum : .1;
+    double local = .3 * plan.convective_scale(rate, 1.), global{};
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    const double expected = maximum == .32 ? 1. : .3 / maximum;
+    passed &= expect(close(global, expected), "global maximum CFL controls uneven MPI ranks");
+  }
+  spec.convective_cfl_margin = 0;
+  passed &= expect(TimeSchemePlan::compile(spec, plan) &&
+                   close(.3 * plan.convective_scale(.32, 1.), .3 / .32),
+                   "zero margin retains exact-target control");
+  spec.convective_cfl_margin = .3;
+  passed &= expect(!TimeSchemePlan::compile(spec, plan), "band preserves a positive lower threshold");
+  return passed;
+}
+
 bool test_compile_and_local_limits() {
   bool passed = true;
   TimeSchemePlan retained;
@@ -1316,6 +1349,7 @@ int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
   passed &= test_compile_and_local_limits();
+  passed &= test_cfl_band();
   passed &= test_state_and_bdf();
   passed &= test_cold_time_method();
   passed &= test_prepare_then_commit_time_finish();

@@ -14,6 +14,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--native', type=Path, required=True)
 p.add_argument('--runner', type=Path, required=True)
 p.add_argument('--mpi', required=True)
+p.add_argument('--cfl-band', action='store_true')
 a = p.parse_args()
 repo = Path(__file__).resolve().parents[4]
 with tempfile.TemporaryDirectory(prefix='hf-cfl-') as tmp:
@@ -27,6 +28,8 @@ with tempfile.TemporaryDirectory(prefix='hf-cfl-') as tmp:
                            'reconstruction_policy': 'adaptive_order'})
     m['mesh']['limits'].update(max_global_cells=4096, max_memory_bytes_per_rank=1073741824)
     m['time'].update(initial_dt=1., maximum_dt=1., convective_cfl=.002)
+    if a.cfl_band:
+        m['time']['convective_cfl_margin'] = .002 / 6
     m['solver']['cold_stopping'] = dict(reference_time=.002, momentum=1e-4, enthalpy=1e-4, species=1e-4)
     (case / 'case.json').write_text(json.dumps(m))
     shutil.copyfile(repo / 'examples/minimal/thermophysics.d', case / 'thermophysics.d')
@@ -63,5 +66,9 @@ with tempfile.TemporaryDirectory(prefix='hf-cfl-') as tmp:
         assert actual['cold']['solid_velocity_max'] == 0
     assert len(native) == 4 and len(stats + resumed) == 4
     assert native[0]['time'] < .001  # Initial dt=1 is actually reduced by the field CFL.
-    assert native[1]['time'] - native[0]['time'] != native[0]['time']
+    if a.cfl_band:
+        assert native[1]['time'] - native[0]['time'] == native[0]['time']
+        assert native[-1]['terminal_physical_audit']['committed_convective_cfl']['limit'] == .002 * 7 / 6
+    else:
+        assert native[1]['time'] - native[0]['time'] != native[0]['time']
     print('PASS shared CFL, CN/BE, IBM, variable dt and exact statistics continuation')

@@ -59,6 +59,7 @@ constexpr std::uint8_t kSprayWireFlag = 64U;
 // An envelope around an unchanged base case wire, followed by explicit import
 // geometry and inlet-patch extensions. Existing case wires remain unchanged.
 constexpr std::uint8_t kPatchInletsWireVersion = 19U;
+constexpr std::uint8_t kCflBandWireVersion = 20U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -828,14 +829,23 @@ bool parse_schemes_object(yyjson_val* value, SchemeSpec& out) noexcept {
 }
 
 bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
-  if (!object_has_exact_keys(
+  const bool base_keys = object_has_exact_keys(
           value, {"control", "scheme", "initial_dt", "minimum_dt",
                   "maximum_dt", "convective_cfl", "viscous_cfl",
                   "thermal_cfl", "species_cfl", "acoustic_cfl",
                   "maximum_growth", "retry_factor", "maximum_retries",
-                  "minimum_bdf_ratio", "maximum_bdf_ratio"})) {
+                  "minimum_bdf_ratio", "maximum_bdf_ratio"});
+  if (!base_keys && !object_has_exact_keys(
+          value, {"control", "scheme", "initial_dt", "minimum_dt",
+                  "maximum_dt", "convective_cfl", "viscous_cfl",
+                  "thermal_cfl", "species_cfl", "acoustic_cfl",
+                  "maximum_growth", "retry_factor", "maximum_retries",
+                  "minimum_bdf_ratio", "maximum_bdf_ratio",
+                  "convective_cfl_margin"})) {
     return false;
   }
+  if (!base_keys && !finite_real(yyjson_obj_get(value, "convective_cfl_margin"),
+                                out.convective_cfl_margin)) return false;
   const auto control = string_value(value, "control");
   const auto scheme = string_value(value, "scheme");
   return control && scheme && parse_time_control(*control, out.control) &&
@@ -1426,6 +1436,8 @@ bool valid_time(const TimeControlSpec& time) noexcept {
       std::isfinite(time.initial_dt) && std::isfinite(time.minimum_dt) &&
       std::isfinite(time.maximum_dt) &&
       std::isfinite(time.convective_cfl) &&
+      std::isfinite(time.convective_cfl_margin) &&
+      std::isfinite(time.convective_cfl_limit()) &&
       std::isfinite(time.viscous_cfl) && std::isfinite(time.thermal_cfl) &&
       std::isfinite(time.species_cfl) && std::isfinite(time.acoustic_cfl) &&
       std::isfinite(time.maximum_growth) &&
@@ -1436,6 +1448,8 @@ bool valid_time(const TimeControlSpec& time) noexcept {
          time.maximum_dt >= time.minimum_dt &&
          time.initial_dt >= time.minimum_dt &&
          time.initial_dt <= time.maximum_dt && time.convective_cfl > 0.0 &&
+         time.convective_cfl_margin >= 0.0 &&
+         time.convective_cfl_margin < time.convective_cfl &&
          time.viscous_cfl > 0.0 && time.thermal_cfl > 0.0 &&
          time.species_cfl > 0.0 && time.acoustic_cfl > 0.0 &&
          time.maximum_growth >= 1.0 && time.retry_factor > 0.0 &&
@@ -1518,6 +1532,10 @@ void hash_time(Hash64& hash, const TimeControlSpec& value) noexcept {
   hash.integer(value.maximum_retries);
   hash.real(value.minimum_bdf_ratio);
   hash.real(value.maximum_bdf_ratio);
+  if (value.convective_cfl_margin > 0.0) {
+    hash.integer(UINT64_C(0x43464c42414e4431));
+    hash.real(value.convective_cfl_margin);
+  }
 }
 
 bool valid_direct_name(std::string_view text, std::string_view extension,
@@ -2030,7 +2048,7 @@ void write_solver(WireWriter &writer, const SolverSpec &value, bool extended) {
 }
 
 bool read_cold_stopping(WireReader& reader, ValidatedModel& model) noexcept {
-  if (model.time.scheme != TimeScheme::cn_be) return reader.finished();
+  if (model.time.scheme != TimeScheme::cn_be) return true;
   std::uint8_t present{};
   if (!reader.byte(present) || present > 1U) return false;
   if (present == 0U) return true;
@@ -2042,6 +2060,13 @@ bool read_cold_stopping(WireReader& reader, ValidatedModel& model) noexcept {
       !stopping.valid()) return false;
   model.solver.cold_stopping = stopping;
   return true;
+}
+
+bool read_cfl_band(WireReader& reader, TimeControlSpec& time) noexcept {
+  std::uint64_t tag{};
+  return reader.u64(tag) && tag == UINT64_C(0x43464c42414e4431) &&
+      reader.real(time.convective_cfl_margin) &&
+      time.convective_cfl_margin > 0.0 && valid_time(time);
 }
 
 bool read_solver(WireReader &reader, SolverSpec &value,
@@ -2349,6 +2374,7 @@ Status serialize_model(const ValidatedModel& model,
         model.solver.pressure.mg_correction_scaling !=
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
+    if (model.time.convective_cfl_margin > 0.0) writer.byte(kCflBandWireVersion);
     const bool simple = model.solver.coupling == CouplingKind::simple;
     const bool coast_axes =
         model.mesh.kind == GeometryKind::coast_runtime_axes_v1;
@@ -2480,6 +2506,10 @@ Status serialize_model(const ValidatedModel& model,
       writer.real(stopping.enthalpy);
       writer.real(stopping.species);
     }
+    if (model.time.convective_cfl_margin > 0.0) {
+      writer.u64(UINT64_C(0x43464c42414e4431));
+      writer.real(model.time.convective_cfl_margin);
+    }
     std::vector<std::uint8_t> candidate = std::move(writer).take();
     if (candidate.empty() || candidate.size() > detail::kMaxWireBytes) {
       return invalid_case(detail_wire);
@@ -2507,6 +2537,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
     if (!reader.byte(version)) return invalid_case(detail_wire);
+    const bool cfl_band_wire = version == kCflBandWireVersion;
+    if (cfl_band_wire && !reader.byte(version)) return invalid_case(detail_wire);
     const bool patch_wire = version == kPatchInletsWireVersion;
     if (patch_wire && !reader.byte(version)) return invalid_case(detail_wire);
     const bool has_reaction = (version & kReactionWireFlag) != 0U;
@@ -2760,6 +2792,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
           model.legacy_time_fingerprint == 0U ||
           model.legacy_time_fingerprint == model.fingerprint)) ||
         !read_cold_stopping(reader, model) ||
+        (cfl_band_wire && !read_cfl_band(reader, model.time)) ||
         !unique_reference_paths(model) ||
         model.data_files.size() + (model.spray ? 1U : 0U) +
                 (model.patch_inlets ? 1U : 0U) +

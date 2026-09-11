@@ -1544,6 +1544,42 @@ bool test_cold_stopping_configuration() {
   return passed;
 }
 
+bool test_cfl_band_configuration() {
+  ScratchCase fixture("cfl-band");
+  auto input = case_json(kUniformMesh);
+  fixture.write("thermophysics.d", kPlaceholderThermophysics);
+  fixture.write("case.json", input);
+  ValidatedModel original, band, restored;
+  if (!compile(fixture.root(), original)) return false;
+  replace_once(input, "\"convective_cfl\":0.8",
+      "\"convective_cfl\":0.3,\"convective_cfl_margin\":0.05");
+  fixture.write("case.json", input);
+  if (!expect(static_cast<bool>(compile(fixture.root(), band)),
+              "CFL target and floating band compile")) return false;
+  std::vector<std::uint8_t> wire;
+  bool passed = expect(band.fingerprint != original.fingerprint &&
+      hundun::v04::detail::serialize_model_for_test(band, wire) &&
+      hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
+      restored.fingerprint == band.fingerprint &&
+      restored.time.convective_cfl_margin == 0.05 &&
+      restored.time.convective_cfl_limit() == 0.35,
+      "CFL band survives the distributed case wire");
+  for (unsigned cut = 1; cut <= 16; ++cut) {
+    auto truncated = wire;
+    truncated.resize(truncated.size() - cut);
+    passed &= expect(!hundun::v04::detail::deserialize_model_for_test(truncated, restored),
+                     "CFL band wire requires its complete tagged payload");
+  }
+  for (const auto* value : {"-0.01", "0.3", "0.4", "1e309"}) {
+    auto bad = input;
+    replace_once(bad, "\"convective_cfl_margin\":0.05",
+        std::string("\"convective_cfl_margin\":") + value);
+    fixture.write("case.json", bad);
+    passed &= expect(!compile(fixture.root(), restored), "CFL band is finite and narrower than its target");
+  }
+  return passed;
+}
+
 bool test_transport_change_compatibility() {
   ScratchCase source_case("transport-source"), target_case("transport-target");
   std::string mesh{kUniformMesh};
@@ -2161,6 +2197,7 @@ int main(int argc, char** argv) {
   passed &= test_defaults_and_enums();
   passed &= test_cold_time_method();
   passed &= test_cold_stopping_configuration();
+  passed &= test_cfl_band_configuration();
   passed &= test_coast_perry_transport();
   passed &= test_transport_change_compatibility();
   passed &= test_immersed_reconstruction_policy_is_typed_and_hashed();

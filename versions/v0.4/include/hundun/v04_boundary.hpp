@@ -680,6 +680,7 @@ class TimeSchemePlan {
                         TimeSchemePlan& out) noexcept;
   Status local_candidate(LocalTimeLimits limits, double& dt,
                          TimeLimit& active_limit) const noexcept;
+  double convective_scale(double maximum_rate, double previous_dt) const noexcept;
   const TimeControlSpec& spec() const noexcept { return spec_; }
   bool acoustic_hard_limit() const noexcept {
     return spec_.control == TimeControlKind::adaptive_acoustic;

@@ -1052,6 +1052,10 @@ std::uint64_t semantic_hash(const ValidatedModel& model,
   hash = hash_mix(hash, model.time.maximum_retries);
   hash = hash_mix(hash, double_bits(model.time.minimum_bdf_ratio));
   hash = hash_mix(hash, double_bits(model.time.maximum_bdf_ratio));
+  if (model.time.convective_cfl_margin > 0.0) {
+    hash = hash_mix(hash, UINT64_C(0x43464c42414e4431));
+    hash = hash_mix(hash, double_bits(model.time.convective_cfl_margin));
+  }
   for (const BoundaryFaceSpec& face : model.boundaries) {
     hash = hash_mix(hash, static_cast<std::uint8_t>(face.flow_kind));
     hash = hash_mix(hash, static_cast<std::uint8_t>(face.thermal_kind));

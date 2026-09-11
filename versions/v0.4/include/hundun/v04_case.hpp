@@ -342,6 +342,13 @@ struct TimeControlSpec {
   std::uint32_t maximum_retries{8U};
   double minimum_bdf_ratio{0.2};
   double maximum_bdf_ratio{5.0};
+  // Optional symmetric deadband around the convective target. Zero retains
+  // exact-target stepping; positive values keep dt while CFL is in the band.
+  double convective_cfl_margin{};
+
+  double convective_cfl_limit() const noexcept {
+    return convective_cfl + convective_cfl_margin;
+  }
 };
 
 struct SpeciesThermophysicalSpec {

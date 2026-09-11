@@ -17,19 +17,19 @@
       ]
     },
     "exact_cells": [
-      576,
-      320,
-      80
+      448,
+      280,
+      40
     ],
     "base_spacing": [
-      0.0010278911333334029,
-      0.001033588221600018,
-      0.00039269908210000024
+      0.005880510360562807,
+      0.002889210752313298,
+      0.0007853981639000009
     ],
     "minimum_spacing": [
       0.0003779476619583111,
       0.00035857560559999016,
-      0.0003926990814499959
+      0.0007853981629000022
     ],
     "max_growth_ratio": 1.06,
     "focus_regions": [
@@ -47,7 +47,7 @@
         "target_spacing": [
           0.00037841666666666666,
           0.0003608,
-          0.00039269908169872416
+          0.0007853981633974483
         ]
       },
       {
@@ -64,12 +64,12 @@
         "target_spacing": [
           0.0005277777777777778,
           0.0005333333333333334,
-          0.00039269908169872416
+          0.0007853981633974483
         ]
       }
     ],
     "limits": {
-      "max_global_cells": 14745600,
+      "max_global_cells": 5017600,
       "max_memory_bytes_per_rank": 4294967296
     },
     "data_files": [],
@@ -346,18 +346,19 @@
   "time": {
     "control": "adaptive_flow",
     "scheme": "cn_be",
-    "initial_dt": 6.523807634227997e-05,
+    "initial_dt": 3.914284580536798e-05,
     "minimum_dt": 1e-10,
     "maximum_dt": 1.0,
-    "convective_cfl": 0.5,
+    "convective_cfl": 0.3,
     "viscous_cfl": 0.5,
     "thermal_cfl": 0.5,
     "species_cfl": 0.5,
     "acoustic_cfl": 0.8,
-    "maximum_growth": 1.2,
-    "retry_factor": 0.5,
+    "maximum_growth": 1.1,
+    "retry_factor": 0.85,
     "maximum_retries": 6,
     "minimum_bdf_ratio": 0.25,
-    "maximum_bdf_ratio": 4.0
+    "maximum_bdf_ratio": 4.0,
+    "convective_cfl_margin": 0.05
   }
 }

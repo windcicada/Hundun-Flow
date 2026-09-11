@@ -10737,7 +10737,7 @@ Status ProductDriver::Impl::execute_attempt(
               communicator, product.equations.momentum(), product.boundary,
               product.patch, momentum_certificate, as_const(trial_velocity),
               as_const(trial_density), step.dt,
-              product.time.spec().convective_cfl, as_const(provisional_flux),
+              product.time.spec().convective_cfl_limit(), as_const(provisional_flux),
               momentum_activity, momentum_system,
               {momentum_low_order_rhs_delta, momentum_limiter_faces,
                momentum_limiter_alpha,
@@ -10762,7 +10762,7 @@ Status ProductDriver::Impl::execute_attempt(
                   momentum_activity.collective_fingerprint ||
               cfl.dt != momentum_certificate.dt ||
               momentum_certificate.dt != step.dt ||
-              cfl.limit != product.time.spec().convective_cfl) {
+              cfl.limit != product.time.spec().convective_cfl_limit()) {
             prerequisite = {StatusCode::invalid_plan,
                             kProductConvectiveCfl};
           } else {
@@ -13498,7 +13498,7 @@ Status ProductDriver::Impl::execute_attempt(
           cfl_certificate.dt = step.dt;
           cfl_certificate.out_max = global_cfl[0U].value;
           cfl_certificate.absolute_max = global_cfl[1U].value;
-          cfl_certificate.limit = product.time.spec().convective_cfl;
+          cfl_certificate.limit = product.time.spec().convective_cfl_limit();
           cfl_certificate.out_winner = cfl_witness(global_cfl[0U]);
           cfl_certificate.absolute_winner = cfl_witness(global_cfl[1U]);
           if (cfl_certificate.out_max >
@@ -19285,7 +19285,7 @@ Status ProductDriver::Impl::execute_attempt(
           : as_const(compressibility);
   audit.bdf = effective_bdf;
   audit.step_dt = step.dt;
-  audit.convective_cfl_limit = product.time.spec().convective_cfl;
+  audit.convective_cfl_limit = product.time.spec().convective_cfl_limit();
   audit.mass_source = coupled_mass_source;
   audit.closed_mass_target = attempt_closed_mass_target;
   audit.boundary_closure_residual = local_boundary_closure_residual;
@@ -19896,10 +19896,13 @@ Status ProductDriver::constrain_convective_time_limit(
         }
     local = product.reductions.consensus(local);
     if (!local) return local;
-    // No outflow means no additional convective restriction.  Propose applies
-    // the target CFL once, and performs the existing global minimum reduction.
+    // Each rank returns dt/target inside the configured deadband, or 1/rate
+    // outside it. The global minimum therefore retains dt exactly when the
+    // global maximum CFL lies in the band, including nonuniform rank loads.
     if (maximum_rate > 0.0)
-      limits.convective = std::min(limits.convective, 1.0 / maximum_rate);
+      limits.convective = std::min(limits.convective,
+          product.time.convective_scale(maximum_rate,
+              implementation_->time.last_accepted_dt()));
   }
   return {};
 }
