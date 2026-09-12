@@ -3371,7 +3371,10 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
                                   ? cells.x
                                   : (axis == CartesianAxis::y ? cells.y
                                                               : cells.z);
-  if (extent < 2 || extent > static_cast<std::int32_t>(
+  // A one-cell local line is a valid Thomas solve with both endpoint values
+  // supplied by the halo. Keeping the line route also keeps exchange stages
+  // identical across odd partitions whose neighbours own two cells.
+  if (extent < 1 || extent > static_cast<std::int32_t>(
                                  implementation.spec.policy
                                      .line_relaxation_maximum_extent)) {
     return point_smooth(implementation, level_index, sweeps, reverse, false,

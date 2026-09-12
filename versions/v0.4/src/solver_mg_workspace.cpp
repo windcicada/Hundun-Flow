@@ -134,6 +134,10 @@ std::uint8_t strategy_mask(const CartesianGeometryPlan& geometry,
     }
   }
   const std::uint8_t all = kAxisX | kAxisY | kAxisZ;
+  // Alternating line relaxation treats multiple strong directions together.
+  // Coarsen those directions as well: retaining a strong plane until the
+  // remaining axis reaches its minimum leaves a large terminal problem.
+  if ((line_mask & (line_mask - 1U)) != 0U) return all;
   const std::uint8_t candidate = static_cast<std::uint8_t>(all & ~line_mask);
   return candidate == 0U ? all : candidate;
 }

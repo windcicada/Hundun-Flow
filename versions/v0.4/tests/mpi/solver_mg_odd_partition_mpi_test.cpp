@@ -301,12 +301,14 @@ void independent_residual(ConstFieldView old_residual,
   }
 }
 
-bool test_odd_partition_transfer(int rank) {
+bool test_odd_partition_transfer(int rank, bool strong_plane = false) {
   CartesianGeometryPlan geometry;
   MeshPatch patch{};
+  auto mesh = mesh_spec();
+  if (strong_plane) mesh.upper.z = 8.0;
   bool passed = expect(
       static_cast<bool>(CartesianGeometryCompiler::compile(
-          MPI_COMM_WORLD, mesh_spec(), GeometryBudget{}, geometry, patch)),
+          MPI_COMM_WORLD, mesh, GeometryBudget{}, geometry, patch)),
       rank, "odd global Cartesian geometry compiles");
   if (!all_true(passed)) {
     return false;
@@ -487,6 +489,7 @@ int main(int argc, char** argv) {
   bool passed = expect(size == 2 || size == 4, rank,
                        "odd-partition RED runs at 2 or 4 ranks");
   passed &= test_odd_partition_transfer(rank);
+  passed &= test_odd_partition_transfer(rank, true);
   passed = all_true(passed);
   const int finalized = MPI_Finalize();
   return passed && finalized == MPI_SUCCESS ? 0 : 1;

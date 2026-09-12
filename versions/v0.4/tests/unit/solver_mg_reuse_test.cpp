@@ -443,6 +443,28 @@ bool test_coarsening_selection() {
   passed &= expect(semi.finest_coarsening() == CoarseningKind::semi_yz &&
                        semi.line_axis_mask() == kXMask,
                    "strong x stretching stays uncoarsened and selects x lines");
+
+  // Two strong axes must reduce with alternating line relaxation. Keeping
+  // both at their finest extent leaves a large distributed terminal plane.
+  CartesianMeshSpec plane_mesh = uniform_mesh();
+  plane_mesh.exact_cells = {64, 48, 8};
+  plane_mesh.upper = {1.0, 1.0, 4.0};
+  CartesianGeometryPlan plane_geometry;
+  MeshPatch plane_patch;
+  Status status = CartesianGeometryCompiler::compile(
+      MPI_COMM_SELF, plane_mesh, GeometryBudget{}, plane_geometry, plane_patch);
+  MgWorkspaceRequirements plane;
+  if (status) status = make_mg_workspace_requirements(
+      MPI_COMM_SELF, plane_geometry, plane_patch,
+      MgHierarchyPolicy{}, 1U, plane);
+  passed &= expect(static_cast<bool>(status), "strong-plane workspace compiles");
+  if (status) {
+    const auto& coarse = plane.levels[plane.level_count - 1U];
+    passed &= expect(plane.levels[0].line_axis_mask == 3U &&
+                         plane.levels[0].coarsening == CoarseningKind::full_xyz &&
+                         coarse.global_shape.x <= 3 && coarse.global_shape.y <= 3,
+                     "alternating XY lines accompany coarsening to a small terminal grid");
+  }
   return passed;
 }
 
