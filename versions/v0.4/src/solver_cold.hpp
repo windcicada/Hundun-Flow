@@ -1018,6 +1018,17 @@ inline bool assemble_midpoint_cold_grid(
                        (1 - f.owner_lower_weight) * uh[a]);
                   continue;
                 }
+                if (rule->flow_kind == BoundaryKind::velocity_inlet) {
+                  // The exterior density is the current physical p/T/Y
+                  // inlet state. Refresh the prescribed flux on each outer
+                  // solve as pressure changes; accepted phi is only history.
+                  const Int3 exterior = global_face == 0 ? lo : hi;
+                  f.prescribed_mass_flux = true;
+                  f.mass_flux = rho.unchecked(exterior, 0) * area *
+                      (f.owner_lower_weight * velocity.unchecked(lo, a) +
+                       (1 - f.owner_lower_weight) * velocity.unchecked(hi, a));
+                  continue;
+                }
                 if (!rule->periodic &&
                     rule->flow_kind !=
                         BoundaryKind::zero_gradient_mass_outlet &&

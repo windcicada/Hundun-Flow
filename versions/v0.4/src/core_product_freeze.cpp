@@ -3773,8 +3773,14 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     ImmersedDomainBoundaryPolicy boundary_policy;
     for (std::size_t face = 0U; face < model.boundaries.size(); ++face) {
       const BoundaryKind kind = model.boundaries[face].flow_kind;
+      // At an open-face/wall intersection the existing quadratic fit uses
+      // interior fluid donors.  The open face retains its boundary mass-flux
+      // authority while IBM supplies the intersecting wall reconstruction.
       boundary_policy.allow_one_sided_quadratic[face] =
-          kind == BoundaryKind::symmetry || kind == BoundaryKind::slip;
+          kind == BoundaryKind::symmetry || kind == BoundaryKind::slip ||
+          kind == BoundaryKind::velocity_inlet ||
+          kind == BoundaryKind::mass_flow_inlet ||
+          kind == BoundaryKind::pressure_outlet;
     }
     // Case validation already requires paired periodic faces.  Re-derive
     // the authority here from both faces so an IBM policy can never acquire

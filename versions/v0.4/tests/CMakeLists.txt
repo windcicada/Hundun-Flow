@@ -2397,7 +2397,16 @@ add_executable(v04_heat_wall_test mpi/heat_wall_test.cpp)
 target_link_libraries(v04_heat_wall_test PRIVATE hundun_v04_core MPI::MPI_C)
 target_compile_definitions(v04_heat_wall_test PRIVATE
   HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_executable(v04_ibm_open_test mpi/ibm_open_test.cpp)
+target_link_libraries(v04_ibm_open_test PRIVATE hundun_v04_core MPI::MPI_C)
+target_compile_definitions(v04_ibm_open_test PRIVATE
+  HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
 foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_ibm_open_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_ibm_open_test>")
+  set_tests_properties(v04_ibm_open_mpi_${rank_count}
+    PROPERTIES PROCESSORS ${rank_count} TIMEOUT 120 LABELS "v04_focused")
   add_test(NAME v04_heat_wall_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
       "$<TARGET_FILE:v04_heat_wall_test>")
