@@ -1249,6 +1249,10 @@ bool test_ibm_species_matrix(bool passive = false, bool periodic = false) {
   // transported scalars. A solid placeholder carries no physical pressure.
   auto pressure=make_field(kPressure,cells,1U,2U,620U);
   auto velocity=make_field(kVelocity,cells,3U,2U,621U);
+  auto mass_source=make_field(40U,cells,1U,0U,622U);
+  for(int z=0;z<n;++z) for(int y=0;y<n;++y) for(int x=0;x<n;++x)
+    mass_source.view.unchecked({x,y,z},0)=topology.is_fluid_global({x,y,z})
+        ? 1.25 : std::numeric_limits<double>::quiet_NaN();
   for (unsigned axis=0; axis<3; ++axis) for (double sign : {-1.0,1.0}) {
     fill_field(velocity,0.0);
     for (int z=-2;z<n+2;++z) for(int y=-2;y<n+2;++y)
@@ -1271,6 +1275,25 @@ bool test_ibm_species_matrix(bool passive = false, bool periodic = false) {
           100000.0,0.01,as_const(flux),rows,report);
       passed &= expect(assembled,"IBM pressure matrix prepares for both flow directions");
       if (!assembled) return false;
+      std::vector<detail::ColdPressureRow> sourced;
+      detail::ColdGridReport sourced_report;
+      const bool source_ok=detail::assemble_midpoint_cold_grid(
+          fixture.equations.kernels(),fixture.patch,fixture.geometry.global_cells(),
+          &topology,fixture.boundary,as_const(rho.view),as_const(rho.view),
+          as_const(velocity.view),as_const(velocity.view),as_const(pressure.view),
+          100000.0,0.01,as_const(flux),sourced,sourced_report,nullptr,
+          {as_const(mass_source.view),71U,623U},623U);
+      passed &= expect(source_ok && sourced.size()==rows.size(),
+          "IBM mass-source pressure grid prepares");
+      if(!source_ok || sourced.size()!=rows.size())return false;
+      for(int z=0;z<n;++z) for(int y=0;y<n;++y) for(int x=0;x<n;++x) {
+        const auto i=std::size_t(x+n*(y+n*z));
+        const bool active=topology.is_fluid_global({x,y,z});
+        passed &= expect(sourced[i].diagonal==rows[i].diagonal &&
+            sourced[i].neighbour==rows[i].neighbour &&
+            close(sourced[i].rhs,rows[i].rhs+(active ? 1.25 : 0.)),
+            "IBM mass exchange affects fluid RHS while solid rows retain their identity");
+      }
       if (baseline.empty()) baseline=rows;
       else {
         bool same=true;

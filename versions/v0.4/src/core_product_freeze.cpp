@@ -13336,7 +13336,7 @@ Status ProductDriver::Impl::execute_attempt(
                   vol;
               const double continuity =
                   (rho - rho_history.accepted.unchecked(c, 0)) / step.dt +
-                  div;
+                  div - detail::mass_source_rate(coupled_mass_source,c);
               thermal_final[0] += continuity * vol;
               thermal_final[1] = std::max(
                   thermal_final[1], std::abs(continuity) / (rho / step.dt));
@@ -13565,7 +13565,8 @@ Status ProductDriver::Impl::execute_attempt(
                   rho_history.accepted, as_const(trial_velocity),
                   velocity_history.accepted, as_const(trial_pressure),
                   attempt_pressure_reference, step.dt,
-                  as_const(provisional_flux), rows, observed, &faces))
+                  as_const(provisional_flux), rows, observed, &faces,
+                  coupled_mass_source,step.generation))
             probe_status = {StatusCode::invalid_plan, 17778};
           PressureCorrectionBoundaryPlan cold_boundary;
           if (probe_status)
@@ -13775,13 +13776,15 @@ Status ProductDriver::Impl::execute_attempt(
                   double ax = row.diagonal * center;
                   double continuity =
                       (rho - rho_history.accepted.unchecked(c, 0)) / step.dt +
-                      derivative * center / step.dt;
+                      derivative * center / step.dt -
+                      detail::mass_source_rate(coupled_mass_source,c);
                   double scale =
                       std::abs(row.rhs) + std::abs(row.diagonal * center);
                   double physical_scale =
                       std::abs((rho - rho_history.accepted.unchecked(c, 0)) /
                                step.dt) +
-                      std::abs(derivative * center / step.dt);
+                      std::abs(derivative * center / step.dt) +
+                      std::abs(detail::mass_source_rate(coupled_mass_source,c));
                   for (unsigned f = 0; f < 6; ++f) {
                     if (row.neighbour[f] != 0) {
                       ax -= row.neighbour[f] * dp.unchecked(nb[f], 0);
@@ -14005,7 +14008,7 @@ Status ProductDriver::Impl::execute_attempt(
                       (trial_density.unchecked(c, 0) -
                        rho_history.accepted.unchecked(c, 0)) /
                           step.dt +
-                      div / volume;
+                      div / volume - detail::mass_source_rate(coupled_mass_source,c);
                   local_update[3] =
                       std::max(local_update[3], std::abs(residual));
                   local_update[4] += residual * volume;
@@ -14697,7 +14700,8 @@ Status ProductDriver::Impl::execute_attempt(
                          equation_state.density.accepted.unchecked(c, 0)) / step.dt +
                         (provisional_flux.x.unchecked({x+1,y,z}) - provisional_flux.x.unchecked(c) +
                          provisional_flux.y.unchecked({x,y+1,z}) - provisional_flux.y.unchecked(c) +
-                         provisional_flux.z.unchecked({x,y,z+1}) - provisional_flux.z.unchecked(c)) / volume;
+                         provisional_flux.z.unchecked({x,y,z+1}) - provisional_flux.z.unchecked(c)) / volume -
+                        detail::mass_source_rate(coupled_mass_source,c);
                     const double dependent_residual = mass_residual -
                         independent_residual_sum[(std::size_t(z) * cells.y + y) * cells.x + x];
                     if (!std::isfinite(dependent_residual)) final_local[5] = 1;
@@ -14990,7 +14994,7 @@ Status ProductDriver::Impl::execute_attempt(
                     (rho - equation_state.density.accepted.unchecked(c, 0U)) *
                         volume / step.dt +
                     fluxes[1] - fluxes[0] + fluxes[3] - fluxes[2] + fluxes[5] -
-                    fluxes[4];
+                    fluxes[4] - volume*detail::mass_source_rate(coupled_mass_source,c);
                 local_continuity =
                     std::max(local_continuity,
                              std::abs(continuity) * step.dt / (rho * volume));

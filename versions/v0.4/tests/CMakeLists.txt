@@ -631,6 +631,10 @@ target_link_libraries(v04_solver_species_conservation_test PRIVATE
 add_test(NAME v04_solver_species_conservation
   COMMAND v04_solver_species_conservation_test)
 set_tests_properties(v04_solver_species_conservation PROPERTIES TIMEOUT 120)
+add_executable(v04_solver_mass_exchange_test numerical/solver_mass_exchange_test.cpp)
+target_link_libraries(v04_solver_mass_exchange_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+add_test(NAME v04_solver_mass_exchange COMMAND v04_solver_mass_exchange_test)
+set_tests_properties(v04_solver_mass_exchange PROPERTIES TIMEOUT 60)
 add_executable(v04_composition_balance_mpi_test mpi/composition_balance_mpi_test.cpp)
 target_link_libraries(v04_composition_balance_mpi_test PRIVATE hundun_v04_core MPI::MPI_C)
 foreach(rank_count IN ITEMS 1 2 4)

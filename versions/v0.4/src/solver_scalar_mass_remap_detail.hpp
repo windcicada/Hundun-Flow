@@ -549,6 +549,9 @@ class ScalarMassRemap {
     Status local;
     const auto& kernels=equations.kernels();
     const auto& species=equations.species();
+    if (!valid_mass_source(state.mass_source,state.mass_source.identity,
+                           context.time,cells_))
+      local={StatusCode::invalid_plan,kInvalid};
     // COAST's advective BE row is R_Y-Y*R_mass with old-density storage.
     // This row operation supplies an uncommitted coupling guess. The public
     // target-time assembler and final conservation audit retain R_Y itself.
@@ -669,7 +672,8 @@ class ScalarMassRemap {
                   context.mass_flux.y.unchecked(c)+context.mass_flux.z.unchecked({x,y,z+1})-
                   context.mass_flux.z.unchecked(c))/cell_volume(kernels,c);
               const double continuity=(state.density.trial.unchecked(c,0)-
-                  state.density.accepted.unchecked(c,0))/context.dt+divergence;
+                  state.density.accepted.unchecked(c,0))/context.dt+divergence-
+                  mass_source_rate(state.mass_source,c);
               scratch.diagonal.unchecked(c,0)-=continuity;
               scratch.residual.unchecked(c,0)-=views_[slot].unchecked(c,0)*continuity;
             }

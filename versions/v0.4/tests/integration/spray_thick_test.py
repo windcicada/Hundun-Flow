@@ -78,6 +78,10 @@ end
 
     def run(label, ranks, count, restart=None):
         output = work.with_name(work.name + label)
+        # The CLI appends evidence for real continuation. Each independent
+        # test invocation owns fresh output; restart inputs are other labels.
+        if output.exists():
+            shutil.rmtree(str(output))
         args = [mpi, "--oversubscribe", "--bind-to", "none", "-n", str(ranks),
                 binary, "run", work, "--output", output, "--steps", str(count),
                 "--max-dt", "1e-9", "--output-interval", "0",

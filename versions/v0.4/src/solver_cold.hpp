@@ -15,6 +15,7 @@
 #include "hundun/v04_linear.hpp"
 #include "hundun/v04_mpi_runtime.hpp"
 #include "solver_cartesian_detail.hpp"
+#include "solver_mass_source_detail.hpp"
 
 namespace hundun::v04::detail {
 
@@ -572,6 +573,9 @@ inline Status close_cold_momentum_rows(
     ColdMomentumClosureReport& report, ConvectionScheme reference_convection,
     bool coast_momentum_tvd) {
   const auto cells = patch.cells;
+  if (!valid_mass_source(state.mass_source,state.mass_source.identity,
+                         context.time,cells))
+    return {StatusCode::invalid_plan,17810};
   const auto count = std::size_t(cells.x) * cells.y * cells.z;
   for (auto& r : rows) r.resize(count);
   const auto coord = [](Int3 c, unsigned a) {
@@ -698,6 +702,11 @@ inline Status close_cold_momentum_rows(
               reference.diagonal.unchecked(c, component) -
               context.bdf.a0 * rho * volume - diffusion_sum - outgoing;
           spatial.diagonal += wall_source_diagonal / volume;
+          // With mass exchange, conservative CN momentum contains
+          // U_mid*S_mass. Centre this frozen coefficient with the spatial
+          // action, retaining the full physical momentum-source RHS.
+          const double mass_rate = mass_source_rate(state.mass_source,c);
+          spatial.diagonal += mass_rate;
           for (unsigned f = 0; f < 6; ++f)
             if (!fluid(nb[f])) spatial.neighbour[f] = 0;
           double action = spatial.diagonal * value;
@@ -707,7 +716,7 @@ inline Status close_cold_momentum_rows(
                         state.velocity.trial.unchecked(nb[f], component);
           const double advective_residual =
               reference.residual.unchecked(c, component) / volume - unsteady -
-              value * div + convection_correction;
+              value * (div - mass_rate) + convection_correction;
           spatial.rhs = action - advective_residual;
           for (unsigned f = 0; f < 6; ++f) {
             unsigned a = f / 2;
@@ -792,6 +801,9 @@ inline Status close_cold_enthalpy_rows(
     const EquationSystemView& reference, std::vector<ColdPressureRow>& rows,
     bool continuity_reduced = true) {
   auto cells = patch.cells;
+  if (!valid_mass_source(state.mass_source,state.mass_source.identity,
+                         context.time,cells))
+    return {StatusCode::invalid_plan,17814};
   rows.resize(std::size_t(cells.x) * cells.y * cells.z);
   const auto coord = [](Int3 c, unsigned a) {
     return a == 0 ? c.x : a == 1 ? c.y : c.z;
@@ -899,7 +911,9 @@ inline Status close_cold_enthalpy_rows(
         // formation-enthalpy offset in h and in the absolute-state RHS.
         // This is rhs - A*h, using the conservative residual directly to
         // retain accuracy when the two absolute-state terms nearly cancel.
-        const double continuity=(rho-rho_old)/context.dt+div;
+        const double mass_rate=mass_source_rate(state.mass_source,c);
+        const double continuity=(rho-rho_old)/context.dt+div-mass_rate;
+        rows[index].diagonal+=mass_rate;
         rows[index].rhs=-reference.residual.unchecked(c,0)/volume;
         if (continuity_reduced) {
           rows[index].rhs+=h*continuity;
@@ -907,9 +921,10 @@ inline Status close_cold_enthalpy_rows(
           // Undo the advective mass row operation for the conservative
           // defect solve, including its diagonal derivative at fixed rho.
           rows[index].diagonal+=continuity;
-          if (!std::isfinite(rows[index].diagonal) || rows[index].diagonal<=0)
-            return {StatusCode::numerical_failure,17816};
         }
+        if (!std::isfinite(rows[index].diagonal) || rows[index].diagonal<=0 ||
+            !std::isfinite(rows[index].rhs))
+          return {StatusCode::numerical_failure,17816};
       }
   return {};
 }
@@ -921,13 +936,15 @@ inline bool assemble_midpoint_cold_grid(
     ConstFieldView old_velocity, ConstFieldView pressure,
     double reference_pressure, double dt, ConstFaceFluxView prescribed_flux,
     std::vector<ColdPressureRow>& rows, ColdGridReport& report,
-    std::vector<std::array<ColdPressureFace, 6>>* saved_faces = nullptr) {
+    std::vector<std::array<ColdPressureFace, 6>>* saved_faces = nullptr,
+    ConservativeMassSourceView mass_source = {}, RevisionToken time = 0) {
   const auto cells = patch.cells;
   if (!valid_cell_view(rho, cells, 0, 1, 1) ||
       !valid_cell_view(old_rho, cells, 0, 1, 1) ||
       !valid_cell_view(velocity, cells, 0, 3, 1) ||
       !valid_cell_view(old_velocity, cells, 0, 3, 1) ||
-      !valid_cell_view(pressure, cells, 0, 1, 2))
+      !valid_cell_view(pressure, cells, 0, 1, 2) ||
+      !valid_mass_source(mass_source,mass_source.identity,time,cells))
     return false;
   rows.resize(std::size_t(cells.x) * cells.y * cells.z);
   if (saved_faces) saved_faces->resize(rows.size());
@@ -1092,7 +1109,8 @@ inline bool assemble_midpoint_cold_grid(
         const double volume = cell_volume(kernels, cell);
         const double d = active ? derivative(cell) : 0;
         const double rate =
-            active ? (rho.unchecked(cell, 0) - old_rho.unchecked(cell, 0)) / dt
+            active ? (rho.unchecked(cell, 0) - old_rho.unchecked(cell, 0)) / dt -
+                         mass_source_rate(mass_source,cell)
                    : 0;
         if (!assemble_cold_pressure_row(volume, dt, d, rate, faces, active,
                                         rows[ordinal]))
