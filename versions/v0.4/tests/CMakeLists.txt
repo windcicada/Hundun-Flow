@@ -1074,13 +1074,13 @@ foreach(rank_count IN ITEMS 1 2 4)
             ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_scalar_catalog_order_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 60)
-  add_test(NAME v04_core_temporal_fallback_mpi_${rank_count}
+  add_test(NAME v04_core_temporal_guard_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
             ${MPIEXEC_PREFLAGS}
             "$<TARGET_FILE:v04_core_product_freeze_mpi_test>"
-            "--temporal-fallback-only"
+            "--temporal-guard-only"
             ${MPIEXEC_POSTFLAGS})
-  set_tests_properties(v04_core_temporal_fallback_mpi_${rank_count} PROPERTIES
+  set_tests_properties(v04_core_temporal_guard_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}"
     TIMEOUT 120)
   add_test(NAME v04_core_candidate_globalization_red_mpi_${rank_count}

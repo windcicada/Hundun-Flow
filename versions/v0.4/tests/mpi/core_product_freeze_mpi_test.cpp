@@ -940,7 +940,7 @@ bool valid_momentum_solve(
   return true;
 }
 
-bool run_temporal_method_fallback_product(int rank) {
+bool run_temporal_method_guard_product(int rank) {
   int size = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   // Keep one global physical/discrete fixture and change decomposition only.
@@ -951,6 +951,11 @@ bool run_temporal_method_fallback_product(int rank) {
   model.time.maximum_dt = 1.0e-3;
   model.time.maximum_growth = 1.0;
   model.time.maximum_retries = 1U;
+  ValidatedModel legacy_model = model;
+  legacy_model.time.scheme = TimeScheme::variable_bdf2;
+  CompiledCasePlan legacy_plan;
+  const Status legacy_status =
+      ProductCompiler::compile(MPI_COMM_WORLD, legacy_model, {}, legacy_plan);
   CompiledCasePlan plan;
   Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);
   ProductDriver driver;
@@ -963,6 +968,8 @@ bool run_temporal_method_fallback_product(int rank) {
   DriverStepReport first;
   if (status)
     status = driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, first);
+  // The historical fault applies only to a BDF2 predictor. Keep it armed
+  // across the next accepted target to catch accidental method promotion.
   if (status)
     detail::arm_low_bdf_source_base_failure_once_for_test();
   DriverStepReport second;
@@ -971,20 +978,21 @@ bool run_temporal_method_fallback_product(int rank) {
   detail::clear_low_bdf_source_base_failure_for_test();
 
   const bool passed =
+      legacy_status.code == StatusCode::invalid_plan &&
       status && first.accepted && first.attempts == 1U &&
       first.proposal.bdf.order == 1U && first.effective_bdf.order == 1U &&
       first.thermophysical_predictor_calls == 1U &&
       !first.temporal_method_fallback &&
       first.piso.pressure_solve_calls == 2U &&
       second.accepted && second.attempts == 1U &&
-      second.proposal.bdf.order == 2U && second.effective_bdf.order == 1U &&
-      second.thermophysical_predictor_calls == 2U &&
-      second.temporal_method_fallback &&
+      second.proposal.bdf.order == 1U && second.effective_bdf.order == 1U &&
+      second.thermophysical_predictor_calls == 1U &&
+      !second.temporal_method_fallback &&
       second.failure.code == StatusCode::ok &&
       second.piso.pressure_solve_calls == 2U && second.accepted_step == 2U &&
       std::abs(second.accepted_time - 2.0e-3) <= 1.0e-16;
   if (!passed)
-    std::cerr << "rank " << rank << " temporal-fallback="
+    std::cerr << "rank " << rank << " temporal-guard="
               << static_cast<unsigned>(status.code) << '/' << status.detail
               << " first=" << first.accepted << '/'
               << static_cast<unsigned>(first.proposal.bdf.order) << '/'
@@ -1696,7 +1704,11 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
     if (rank == 0) {
       for (std::size_t index = 0U; index < reported_sample_count; ++index) {
         const auto& sample = diagnostic.samples[index];
+        const Status evaluation =
+            step.pressure_energy_globalization.candidate_evaluation_status[index];
         std::cerr << "  ladder[" << index << "] alpha=" << sample.alpha
+                  << " evaluation=" << static_cast<unsigned>(evaluation.code)
+                  << '/' << evaluation.detail
                   << " admissible=" << sample.admissible
                   << " finite=" << sample.state_and_flux_finite
                   << " RC/RE=" << sample.normalized_continuity << '/'
@@ -1923,9 +1935,8 @@ bool run_mass_flow_product(int rank) {
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   ValidatedModel model = test::product_model({17, 11, 7});
   // Retry recovery is covered by the dedicated driver test.  This product
-  // baseline must remain a one-transaction BE -> BDF2 advance after the
-  // BDF-history-aware pressure-energy normalization removed the former false
-  // terminal-energy rejection.
+  // baseline keeps the configured BE method on each accepted target, with
+  // pressure-energy normalization and history bound to that method.
   model.time.initial_dt = kBaselineDt;
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   for (BoundaryFaceSpec& face : model.boundaries) {
@@ -2048,7 +2059,7 @@ bool run_mass_flow_product(int rank) {
       second.piso.pressure_solve_calls == 2U && capture_role(bdf_c1) &&
       projection_role(bdf_c2, bdf_c1.recycle_cycle_corrections);
   // Bind semantic resource relationships instead of a brittle count
-  // snapshot.  The BDF2 transaction includes momentum work beyond its two
+  // snapshot.  The second transaction includes momentum work beyond its two
   // pressure solves, while open flow remains free of IBM traffic.
   const bool bdf_resource_relationship =
       second.resources.structured_exchanges > 0U &&
@@ -2212,7 +2223,7 @@ bool run_mass_flow_product(int rank) {
       second.failure.code == StatusCode::ok && second.failed_stage == 0U &&
       second.proposal.origin == StepOrigin::accepted &&
       second.proposal.attempt == 0U && second.proposal.dt > 0.0 &&
-      second.proposal.bdf.order == 2U && second.effective_bdf.order == 2U &&
+      second.proposal.bdf.order == 1U && second.effective_bdf.order == 1U &&
       std::abs(second.accepted_time -
                (first.accepted_time + second.proposal.dt)) <=
           16.0 * std::numeric_limits<double>::epsilon() *
@@ -2237,7 +2248,7 @@ bool run_mass_flow_product(int rank) {
               << mass_c2.recycle_operator_applies << '/'
               << mass_c2.recycle_reduction_calls << '\n'
               << "rank " << rank
-              << " BDF2 C1 init/iter/op/pre/red/capture="
+              << " second-BE C1 init/iter/op/pre/red/capture="
               << bdf_c1.initial_true_residual << '/' << bdf_c1.iterations
               << '/' << bdf_c1.operator_applies << '/'
               << bdf_c1.preconditioner_applies << '/'
@@ -2491,6 +2502,13 @@ bool run_multispecies_open_product(int rank) {
   }
   const bool scalar_roles =
       local_species_fields == 2U && local_passive_fields == 1U;
+  // The perturbation enters through a physical boundary. At this short dt,
+  // remote slabs can retain their uniform state to machine precision.
+  const int local_changed = local_scalar_changed ? 1 : 0;
+  int global_changed = 0;
+  if (MPI_Allreduce(&local_changed, &global_changed, 1, MPI_INT, MPI_MAX,
+                    MPI_COMM_WORLD) != MPI_SUCCESS)
+    status = {StatusCode::mpi_failure, 1U};
   const bool terminal =
       status && std::isfinite(step.piso.eos_residual) &&
       step.piso.eos_residual <= summary.terminal_eos_tolerance &&
@@ -2524,10 +2542,10 @@ bool run_multispecies_open_product(int rank) {
       status && step.accepted && terminal && final_boundary && boundary_flux &&
       linear_target_parity &&
       scalar_roles && local_scalars_finite_and_bounded &&
-      local_scalar_changed && restart.final_mass_flux.certificate.valid();
-  if (!passed && rank == 0) {
+      global_changed != 0 && restart.final_mass_flux.certificate.valid();
+  if (!passed) {
     std::cerr << std::setprecision(17)
-              << "multispecies-open status="
+              << "rank " << rank << " multispecies-open status="
               << static_cast<unsigned>(status.code) << '/' << status.detail
               << " accepted/attempts/stage=" << step.accepted << '/'
               << step.attempts << '/' << step.failed_stage
@@ -2757,18 +2775,20 @@ bool run_fresh_open_boundary_eos_flux_case(int rank,
 
   const bool selected_outlet =
       selected == FreshOpenFluxCase::pressure_outlet_backflow;
-  const BoundaryFaceSpec& expected_boundary = selected_outlet ? outlet : inlet;
+  // The static-pressure outlet carries the initialized mechanical mass flux.
+  // Its reservoir supplies incoming thermal/composition values; it does not
+  // prescribe the normal velocity or rebuild phi from that reservoir density.
   const std::array<double, 2U> expected_composition{{
-      selected_outlet ? outlet.scalars[0U].backflow_value
+      selected_outlet ? initial_scalars[0U]
                       : inlet.scalars[0U].value,
-      selected_outlet ? outlet.scalars[1U].backflow_value
+      selected_outlet ? initial_scalars[1U]
                       : inlet.scalars[1U].value,
   }};
   const double expected_temperature = selected_outlet
-                                          ? outlet.backflow_temperature
+                                          ? initial.temperature
                                           : inlet.temperature;
   const Real3 expected_velocity =
-      selected_outlet ? outlet.backflow_velocity : inlet.velocity;
+      selected_outlet ? initial.velocity : inlet.velocity;
   double expected_enthalpy = 0.0;
   double expected_cp = 0.0;
   double expected_gas = 0.0;
@@ -2812,7 +2832,7 @@ bool run_fresh_open_boundary_eos_flux_case(int rank,
         }
         const double absolute_pressure =
             selected_outlet
-                ? expected_boundary.pressure
+                ? initial.pressure_reference
                 : initial.pressure_reference +
                       pressure->values.unchecked({owner_x, y, z}, 0U);
         ThermoState expected;
@@ -3512,16 +3532,20 @@ bool run_rank_change_product(int rank) {
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0 && phase == 1U) {
       std::ifstream evidence(output / "evidence.jsonl", std::ios::binary);
-      const std::string text{std::istreambuf_iterator<char>(evidence),
-                             std::istreambuf_iterator<char>()};
-      passed &= text.find("\"step\":3") != std::string::npos &&
-                text.find("\"bdf_order\":2") != std::string::npos &&
-                text.find("\"step\":4") != std::string::npos &&
-                text.find("\"bdf_order\":2") != std::string::npos &&
-                text.find("\"restart_recovery\":true") ==
-                    std::string::npos &&
-                text.find("\"restart_recovery\":false") !=
-                    std::string::npos;
+      std::array<bool, 2U> continued{};
+      std::string line;
+      while (std::getline(evidence, line)) {
+        for (std::size_t index = 0U; index < continued.size(); ++index) {
+          const std::string step = "\"step\":" +
+                                   std::to_string(index + 3U) + ',';
+          if (line.find(step) == std::string::npos) continue;
+          continued[index] =
+              line.find("\"bdf_order\":1") != std::string::npos &&
+              line.find("\"requested_bdf_order\":1") != std::string::npos &&
+              line.find("\"restart_recovery\":false") != std::string::npos;
+        }
+      }
+      passed &= continued[0U] && continued[1U];
     }
     passed = collective(passed, MPI_COMM_WORLD);
     restart = output / "Restart";
@@ -3810,9 +3834,9 @@ int main(int argc, char** argv) {
     return passed ? 0 : 1;
   }
   if (argc == 2 &&
-      std::strcmp(argv[1], "--temporal-fallback-only") == 0) {
+      std::strcmp(argv[1], "--temporal-guard-only") == 0) {
     const bool passed = collective(
-        run_temporal_method_fallback_product(rank), MPI_COMM_WORLD);
+        run_temporal_method_guard_product(rank), MPI_COMM_WORLD);
     MPI_Finalize();
     return passed ? 0 : 1;
   }
@@ -3971,8 +3995,14 @@ int main(int argc, char** argv) {
       // product contract is that the coupled solve converges without an audit
       // rejection and that any recycled/captured direction has a complete,
       // internally consistent accounting trail.
+      const bool zero_rhs = result.termination == LinearTermination::zero_rhs;
       return result.status &&
-             result.termination == LinearTermination::converged &&
+             (result.termination == LinearTermination::converged || zero_rhs) &&
+             (!zero_rhs ||
+              (result.iterations == 0U && result.operator_applies == 0U &&
+               result.preconditioner_applies == 0U &&
+               result.initial_true_residual == 0.0 &&
+               result.final_true_residual == 0.0)) &&
              result.convergence_rejections == 0U &&
              result.recycle_retained_directions <=
                  result.recycle_offered_directions &&
@@ -3995,8 +4025,8 @@ int main(int argc, char** argv) {
                          first.effective_bdf.order == 1U &&
                          first.thermophysical_predictor_calls == 1U &&
                          !first.temporal_method_fallback &&
-                         second.proposal.bdf.order == 2U &&
-                         second.effective_bdf.order == 2U &&
+                         second.proposal.bdf.order == 1U &&
+                         second.effective_bdf.order == 1U &&
                          second.thermophysical_predictor_calls == 1U &&
                          !second.temporal_method_fallback &&
                          first.piso.pressure_solve_calls == 2U &&
@@ -4028,7 +4058,7 @@ int main(int argc, char** argv) {
                          committed.final_mass_flux.revision ==
                              second.piso.final_flux_revision,
                      rank,
-                     "nondivisible product advances BE then BDF2 collectively");
+                     "nondivisible product keeps BE across accepted targets collectively");
     if (!runtime)
       std::cerr << "rank " << rank << " runtime="
                 << static_cast<unsigned>(runtime.code) << "/"
@@ -4049,8 +4079,8 @@ int main(int argc, char** argv) {
                    "flow state exactly, and retires the fatal controller "
                    "ticket");
   passed &= expect(
-      run_temporal_method_fallback_product(rank), rank,
-      "BDF2 low-base failure falls back to BE within one attempt");
+      run_temporal_method_guard_product(rank), rank,
+      "BE history preserves its selected method and BDF2 is rejected at compilation");
   passed &= expect(
       run_warm_start_lifecycle_product(rank), rank,
       "accepted C2 seed is available and consumed on the next C1 while an "
