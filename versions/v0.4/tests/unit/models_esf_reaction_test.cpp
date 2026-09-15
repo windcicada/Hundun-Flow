@@ -29,24 +29,29 @@ struct Analytic final : portable::GasAdvanceProvider {
     return *identity;
   }
   unsigned calls{}, fail_on{};
-  bool bad_heat{}, bad_identity{}, bad_elements{};
+  std::array<double, 8> starts{}, durations{};
+  bool bad_heat{}, bad_identity{}, bad_elements{}, variable_density{};
   portable::Status
   advance_gas(const portable::GasAdvanceQuery &q,
               portable::GasAdvanceOutput &o) noexcept override {
+    if (calls < starts.size()) {
+      starts[calls] = q.start_time_s; durations[calls] = q.duration_s;
+    }
     if (++calls == fail_on)
       return portable::Status::provider_failure;
+    const double density=variable_density ? q.state.pressure_pa/1e5 : 1;
     const double a = q.state.mass_fractions[0] * std::exp(-q.duration_s);
     o.final_mass_fractions[0] = a;
     o.final_mass_fractions[1] = 1 - a;
     o.integrated_species_density_delta_kg_per_m3[0] =
-        a - q.state.mass_fractions[0];
+        density * (a - q.state.mass_fractions[0]);
     o.integrated_species_density_delta_kg_per_m3[1] =
-        q.state.mass_fractions[0] - a;
+        density * (q.state.mass_fractions[0] - a);
     o.final_sample = {q.state.revision,
                       q.state.composition_fingerprint,
                       q.state.pressure_pa,
                       300,
-                      1,
+                      density,
                       q.state.enthalpy_j_per_kg,
                       1000,
                       1e-5,
@@ -77,10 +82,12 @@ int main() {
   Analytic backend;
   backend.identity = &gas;
   auto r = workspace.react(q, backend);
-  if (r.status != portable::Status::success || r.chemistry_call_count != 8 ||
-      backend.calls != 8 || !near(r.candidate.values[0], 0.07357588823428846) ||
+  if (r.status != portable::Status::success || r.chemistry_call_count != 4 ||
+      backend.calls != 4 || !near(r.candidate.values[0], 0.07357588823428846) ||
       r.candidate.values[2] != 100)
     return 1;
+  for (unsigned i=0;i<4;++i)
+    if (backend.starts[i]!=0 || backend.durations[i]!=1) return 11;
   if (!near(r.ensemble_heat_release_j_per_m3, 3.1606027941427884, 1e-12, 1e-13))
     return 2;
   if (!r.mean_integrated_species_density_delta_kg_per_m3 ||
@@ -89,17 +96,31 @@ int main() {
             r.mean_integrated_species_density_delta_kg_per_m3[1], 0.0) ||
       !near(-10 * r.mean_integrated_species_density_delta_kg_per_m3[0],
             r.ensemble_heat_release_j_per_m3)) return 10;
+  // Two contiguous intervals are an explicit chemistry refinement. For
+  // this constant-density analytic reactor the endpoint and source agree.
+  const double reference_delta=r.mean_integrated_species_density_delta_kg_per_m3[0];
+  const auto full_identity=r.model_identity;
+  q.intervals=esf::detail::ReactionIntervals::two_halves;
+  backend.calls=0;
+  r=workspace.react(q,backend);
+  if (r.status!=portable::Status::success || r.chemistry_call_count!=8 ||
+      r.model_identity==full_identity ||
+      !near(r.mean_integrated_species_density_delta_kg_per_m3[0],reference_delta) ||
+      !near(r.candidate.values[0],.2*std::exp(-1.))) return 12;
+  for (unsigned i=0;i<8;++i)
+    if (backend.starts[i]!=.5*(i%2) || backend.durations[i]!=.5) return 13;
+  q.intervals=esf::detail::ReactionIntervals::full;
   backend.calls = 0;
   backend.fail_on = 3;
   auto failed = workspace.react(q, backend);
   if (failed.status != portable::Status::provider_failure ||
-      failed.candidate.values || failed.mean_integrated_species_density_delta_kg_per_m3 || values[0] != 0.2 ||
+      failed.candidate.values || failed.mean_integrated_species_density_delta_kg_per_m3 || failed.mean_integrated_mass_fraction_delta || values[0] != 0.2 ||
       workspace.valid(r.candidate))
     return 3;
   backend.calls = 0;
   backend.fail_on = 0;
   q.accepted.fields = 2;
-  if (workspace.react(q, backend).chemistry_call_count != 4)
+  if (workspace.react(q, backend).chemistry_call_count != 2)
     return 4;
   auto allocations = allocation_count;
   backend.calls = 0;
@@ -107,6 +128,32 @@ int main() {
   if (repeat.status != portable::Status::success ||
       allocation_count != allocations)
     return 5;
+  backend.calls=0;
+  q.intervals=static_cast<esf::detail::ReactionIntervals>(255);
+  auto invalid=workspace.react(q,backend);
+  if (invalid.status!=portable::Status::invalid_input || backend.calls ||
+      invalid.candidate.values || workspace.valid(repeat.candidate)) return 14;
+  q.intervals=esf::detail::ReactionIntervals::full;
+  // Equal-weight Favre chemistry increments are independent of the
+  // separate EOS density used by each reactor. The carrier multiplies once.
+  backend.variable_density=true;
+  for(unsigned f=0;f<4;++f) {rho[f]=f+1;p[f]=1e5*rho[f];}
+  for(unsigned n : {2U,4U}) for(auto intervals : {esf::detail::ReactionIntervals::full,
+      esf::detail::ReactionIntervals::two_halves}) {
+    q.accepted.fields=n;q.intervals=intervals;backend.calls=0;
+    const auto count=allocation_count;
+    auto varied=workspace.react(q,backend);
+    if(varied.status!=portable::Status::success || allocation_count!=count ||
+        !varied.mean_integrated_mass_fraction_delta ||
+        !near(varied.mean_integrated_mass_fraction_delta[0],reference_delta) ||
+        !near(varied.mean_integrated_mass_fraction_delta[0]+varied.mean_integrated_mass_fraction_delta[1],0) ||
+        near(varied.mean_integrated_species_density_delta_kg_per_m3[0],reference_delta)) return 15;
+    const double carrier=2.5;
+    if(!near(carrier*varied.mean_integrated_mass_fraction_delta[0],
+        carrier*(.5*std::exp(-1.)-.5))) return 16;
+  }
+  backend.variable_density=false;q.intervals=esf::detail::ReactionIntervals::full;
+  q.accepted.fields=2;for(unsigned f=0;f<4;++f){rho[f]=1;p[f]=1e5;}
   backend.bad_heat = true;
   if (workspace.react(q, backend).status !=
       portable::Status::conservation_failure)

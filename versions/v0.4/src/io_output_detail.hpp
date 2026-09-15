@@ -78,7 +78,8 @@ inline Status validate_output_snapshot(
       snapshot.geometry == nullptr || snapshot.plan == 0U ||
       snapshot.schema == 0U || !snapshot.committed ||
       snapshot.fields.data == nullptr ||
-      snapshot.fields.size != plan.snapshot_fields().size ||
+      (snapshot.fields.size != plan.primary_field_count() &&
+       snapshot.fields.size != plan.snapshot_fields().size) ||
       snapshot.patch.cells.x <= 0 || snapshot.patch.cells.y <= 0 ||
       snapshot.patch.cells.z <= 0)
     return {StatusCode::invalid_plan, kOutputInput};
@@ -97,6 +98,7 @@ inline Status validate_output_snapshot(
     const SnapshotFieldView field = snapshot.fields.data[index];
     FieldStorageInterval interval{};
     if (field.stable_name.empty() || field.values.field != sealed.field ||
+        field.source != sealed.source ||
         field.values.components != sealed.components ||
         field.accepted_revision == 0U ||
         field.accepted_revision != field.values.revision ||

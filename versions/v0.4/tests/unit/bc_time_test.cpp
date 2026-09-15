@@ -200,6 +200,7 @@ TimeControlSpec valid_spec(TimeControlKind control =
   spec.minimum_dt = 1.0e-6;
   spec.maximum_dt = 10.0;
   spec.convective_cfl = 0.8;
+  spec.convective_cfl_margin = 0.0;
   spec.viscous_cfl = 0.5;
   spec.thermal_cfl = 0.4;
   spec.species_cfl = 0.3;
@@ -219,12 +220,11 @@ LocalTimeLimits loose_limits() {
 
 bool test_cfl_band() {
   TimeControlSpec spec;
-  spec.convective_cfl = .3;
-  spec.convective_cfl_margin = .05;
   TimeSchemePlan plan;
-  bool passed = expect(static_cast<bool>(TimeSchemePlan::compile(spec, plan)),
+  bool passed = expect(spec.convective_cfl == .3 && spec.convective_cfl_margin == .05 &&
+                       static_cast<bool>(TimeSchemePlan::compile(spec, plan)),
                        "compile convective CFL deadband");
-  for (double rate : {.26, .30, .34})
+  for (double rate : {.25, .26, .30, .34, .35})
     passed &= expect(close(.3 * plan.convective_scale(rate, 1.), 1.),
                      "retain dt inside the CFL band");
   passed &= expect(close(.3 * plan.convective_scale(.2, 1.), 1.5) &&

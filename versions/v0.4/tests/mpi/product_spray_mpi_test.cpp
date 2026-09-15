@@ -128,6 +128,48 @@ std::vector<double> snapshot(const RestartSnapshot &s,
     v.push_back(s.cell_records.variable_cell_bytes.data[i]);
   return v;
 }
+bool sgs_output(ProductDriver& driver, std::vector<double>& values) {
+  CommittedOutputSnapshot output;
+  const auto status = driver.committed_sgs_output_snapshot(output);
+  if (!agree(bool(status))) return false;
+  const char* names[]{"nu_sgs", "k_sgs", "eps_sgs_volume", "eps_sgs_specific"};
+  std::array<ConstFieldView,4> fields{};
+  ConstFieldView pressure, enthalpy, species;
+  for (std::size_t i=0;i<output.fields.size;++i) {
+    const auto& f=output.fields.data[i];
+    for (unsigned q=0;q<4;++q) if (f.stable_name==names[q]) fields[q]=f.values;
+    if (f.stable_name=="pi") pressure=f.values;
+    if (f.stable_name=="h") enthalpy=f.values;
+  }
+  RestartSnapshot restart;
+  const auto rs=driver.committed_restart_snapshot(restart);
+  if (rs) for (std::size_t i=0;i<restart.fields.size;++i)
+    if (restart.fields.data[i].role==RestartFieldRole::independent_species)
+      species=restart.fields.data[i].values;
+  bool ok=rs && pressure.base && enthalpy.base && species.base;
+  for (auto f:fields) ok &= f.base && f.components==1;
+  if (!agree(ok)) {std::cerr<<"SGS output fields missing\n";return false;}
+  values.clear();
+  std::size_t flat=0;
+  for (int z=0;z<output.patch.cells.z;++z)
+    for (int y=0;y<output.patch.cells.y;++y)
+      for (int x=0;x<output.patch.cells.x;++x,++flat) {
+        const Int3 cell{x,y,z};
+        const bool fluid=output.cell_activity.size==0 || output.cell_activity.data[flat];
+        for (auto f:fields) {
+          const double value=f.unchecked(cell,0);
+          values.push_back(value);
+          ok &= std::isfinite(value) && value>=0 && (fluid || value==0);
+        }
+        if (fluid) {
+          const double T=298.15+(enthalpy.unchecked(cell,0)-1e5*species.unchecked(cell,0))/1000;
+          const double rho=(driver.pressure_reference()+pressure.unchecked(cell,0))*28/(kUniversalGasConstant*T);
+          const double volume=fields[2].unchecked(cell,0),specific=fields[3].unchecked(cell,0);
+          ok &= std::abs(volume-rho*specific)<=1e-11*std::max(1e-300,volume);
+        }
+      }
+  return agree(ok);
+}
 bool inventory(const RestartSnapshot &s, int rank, bool wall, bool ibm,
                bool turbulent) {
   ConstFieldView h, p, u, Y, passive, cache;
@@ -387,6 +429,8 @@ int main(int argc, char **argv) {
       RestartSnapshot before;
       status = retry.committed_restart_snapshot(before);
       auto saved = snapshot(before);
+      std::vector<double> saved_sgs;
+      if (model.turbulence != TurbulenceKind::none && !sgs_output(retry,saved_sgs)) MPI_Abort(MPI_COMM_WORLD,3);
       retry_gas.calls = 0;
       retry_gas.fail_at = rank == 0 ? reference_gas.calls - 1 : 0;
       status = retry.advance({1, 1, 1, 1, 1}, report);
@@ -412,6 +456,11 @@ int main(int argc, char **argv) {
         ok = agree(bool(status) && same);
       }
       retry_gas.fail_at = 0;
+      if (ok && model.turbulence != TurbulenceKind::none) {
+        std::vector<double> after_sgs;
+        ok=sgs_output(retry,after_sgs) && agree(after_sgs==saved_sgs);
+        if (!ok) std::cerr<<"SGS accepted output changed after rejection\n";
+      }
     }
     if (ok) {
       status = retry.advance({1, 1, 1, 1, 1}, report);
@@ -518,6 +567,25 @@ int main(int argc, char **argv) {
           status = restored.committed_restart_snapshot(actual);
         if (ok)
           ok = agree(bool(status) && snapshot(actual) == snapshot(accepted));
+      }
+      if (ok && model.turbulence != TurbulenceKind::none) {
+        std::vector<double> a,b;
+        ok=sgs_output(reference,a) && sgs_output(restored,b);
+        std::array<double,4> errors{},global_errors{};
+        bool same=a.size()==b.size();
+        for (std::size_t i=0;i<std::min(a.size(),b.size());++i) {
+          errors[i%4]=std::max(errors[i%4],std::abs(a[i]-b[i])/std::max({1e-300,std::abs(a[i]),std::abs(b[i])}));
+          // Restart rebuilds density and material properties from p/h/Y.
+          // Pure kinematic quantities retain their exact velocity origin.
+          if (i%4<2) same &= a[i]==b[i];
+        }
+        MPI_Allreduce(errors.data(),global_errors.data(),4,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+        same &= global_errors[2]<=1e-11 && global_errors[3]<=1e-11;
+        ok=agree(ok && same);
+        if (rank==0) {
+          std::cerr.precision(17);
+          std::cerr<<"SGS restart relative="<<global_errors[0]<<","<<global_errors[1]<<","<<global_errors[2]<<","<<global_errors[3]<<"\n";
+        }
       }
       if (ok && model.reaction.esf) {
         const auto saved = snapshot(accepted);

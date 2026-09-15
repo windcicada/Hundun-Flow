@@ -27,7 +27,163 @@ bool fraction_tuple(const double *y, std::size_t n) noexcept {
   }
   return std::abs(sum - 1) <= 2e-12;
 }
+bool auxiliary_tuple(const double* y,std::size_t n) noexcept {
+  long double sum=0;
+  for (std::size_t i=0;i<n;++i) {
+    if (!std::isfinite(y[i])) return false;
+    sum+=y[i];
+  }
+  return std::abs(sum-1)<=2e-12 && std::isfinite(y[n]);
+}
 } // namespace
+AuxiliaryCoordinatesReport auxiliary_eos_coordinates(const View& raw,
+    portable::Revision expected,double* y,std::size_t capacity) noexcept {
+  AuxiliaryCoordinatesReport report;
+  if ((raw.owner && !raw.owner->valid(raw)) || raw.revision!=expected ||
+      raw.revision.algorithm_version!=1) {
+    report.status=portable::Status::stale_revision;return report;
+  }
+  const auto ns=raw.species;
+  if (!ns || ns>std::numeric_limits<std::size_t>::max()/sizeof(double)-1 ||
+      raw.fields!=1 || !raw.values || !y) return report;
+  if (capacity<ns) {report.status=portable::Status::capacity_exceeded;return report;}
+  const auto input=reinterpret_cast<std::uintptr_t>(raw.values);
+  const auto output=reinterpret_cast<std::uintptr_t>(y);
+  const auto bytes=ns*sizeof(double);
+  if (input>UINTPTR_MAX-bytes-sizeof(double) || output>UINTPTR_MAX-bytes ||
+      (input<output+bytes && output<input+bytes+sizeof(double)) ||
+      !auxiliary_tuple(raw.values,ns)) return report;
+  long double positive=0,added=0;
+  for (std::size_t s=0;s<ns;++s) {
+    if (raw.values[s]>0) positive+=raw.values[s];
+    else added-=raw.values[s];
+  }
+  const double weight=static_cast<double>(positive);
+  const double change=static_cast<double>(added);
+  const double h=static_cast<double>(raw.values[ns]/positive);
+  if (!std::isfinite(weight) || weight<=0 || !std::isfinite(change) || !std::isfinite(h))
+    return report;
+  for (std::size_t s=0;s<ns;++s)
+    y[s]=static_cast<double>(std::max(0.,raw.values[s])/positive);
+  report.positive_weight_sum=weight;
+  report.added_positive_weight=change;
+  report.query_enthalpy_j_per_kg=h;
+  report.revision=raw.revision;
+  report.status=portable::Status::success;
+  return report;
+}
+portable::Status auxiliary_pressure_state(const AuxiliaryCoordinatesReport& coordinates,
+    const portable::GasSample& sample,portable::Revision expected,
+    std::uint64_t composition,AuxiliaryPressureState& out) noexcept {
+  if(coordinates.status!=portable::Status::success)
+    return portable::Status::invalid_input;
+  if(sample.revision!=expected || coordinates.revision!=expected || expected.algorithm_version!=1)
+    return portable::Status::stale_revision;
+  if(sample.composition_fingerprint!=composition)
+    return portable::Status::identity_mismatch;
+  const double weight=coordinates.positive_weight_sum;
+  if(coordinates.status!=portable::Status::success || !std::isfinite(weight) || weight<=0 ||
+     !std::isfinite(coordinates.query_enthalpy_j_per_kg) ||
+     !std::isfinite(sample.enthalpy_j_per_kg) ||
+     std::abs(sample.enthalpy_j_per_kg-coordinates.query_enthalpy_j_per_kg)>
+         1e-10*std::max(1.,std::abs(coordinates.query_enthalpy_j_per_kg)) ||
+     !std::isfinite(sample.density_kg_per_m3) || sample.density_kg_per_m3<=0 ||
+     !std::isfinite(sample.pressure_pa) || sample.pressure_pa<=0 ||
+     !std::isfinite(sample.temperature_k) || sample.temperature_k<=0 ||
+     !std::isfinite(sample.cp_j_per_kg_k) || sample.cp_j_per_kg_k<=0)
+    return portable::Status::invalid_input;
+  AuxiliaryPressureState candidate;
+  candidate.revision=expected;candidate.composition_fingerprint=composition;
+  candidate.density_kg_per_m3=sample.density_kg_per_m3/weight;
+  candidate.density_pressure_derivative=candidate.density_kg_per_m3/sample.pressure_pa;
+  // rho0=rhoq/M and hq=h0/M: both density scaling and the enthalpy
+  // coordinate contribute a factor 1/M to this derivative.
+  candidate.density_enthalpy_derivative=-candidate.density_kg_per_m3/weight/
+      sample.cp_j_per_kg_k/sample.temperature_k;
+  if(!std::isfinite(candidate.density_kg_per_m3) || candidate.density_kg_per_m3<=0 ||
+     !std::isfinite(candidate.density_pressure_derivative) || candidate.density_pressure_derivative<=0 ||
+     !std::isfinite(candidate.density_enthalpy_derivative) || candidate.density_enthalpy_derivative>=0)
+    return portable::Status::invalid_input;
+  out=candidate;
+  return portable::Status::success;
+}
+DualStateReport dual_state_moments(const DualStateRequest& q,
+                                  DualStateOutput out) noexcept {
+  DualStateReport report;
+  const auto& a=q.stochastic;
+  const auto& b=q.auxiliary;
+  if ((a.owner && !a.owner->valid(a)) || (b.owner && !b.owner->valid(b)) ||
+      a.revision!=q.expected_revision || b.revision!=q.expected_revision ||
+      a.revision.algorithm_version!=1) {
+    report.status=portable::Status::stale_revision;return report;
+  }
+  if (a.composition_fingerprint!=b.composition_fingerprint) {
+    report.status=portable::Status::identity_mismatch;return report;
+  }
+  const auto ns=a.species,n=a.fields;
+  if (!ns || ns>std::numeric_limits<std::size_t>::max()/(4*sizeof(double))-1 ||
+      (n!=2 && n!=4) || b.fields!=1 || b.species!=ns ||
+      !a.values || !b.values || !q.stochastic_densities_kg_per_m3 ||
+      !out.physical_mean || !out.physical_variance ||
+      !std::isfinite(q.auxiliary_density_kg_per_m3) ||
+      q.auxiliary_density_kg_per_m3<=0) return report;
+  const auto stride=ns+1,bytes=stride*sizeof(double);
+  if (out.capacity<stride) {
+    report.status=portable::Status::capacity_exceeded;return report;
+  }
+  const auto overlaps=[](const double* p,std::size_t pb,
+                         const double* r,std::size_t rb) noexcept {
+    const auto x=reinterpret_cast<std::uintptr_t>(p);
+    const auto y=reinterpret_cast<std::uintptr_t>(r);
+    return x>UINTPTR_MAX-pb || y>UINTPTR_MAX-rb || (x<y+rb && y<x+pb);
+  };
+  if (overlaps(out.physical_mean,bytes,out.physical_variance,bytes)) return report;
+  for (const auto* output:{out.physical_mean,out.physical_variance})
+    if (overlaps(output,bytes,a.values,n*bytes) ||
+        overlaps(output,bytes,b.values,bytes) ||
+        overlaps(output,bytes,q.stochastic_densities_kg_per_m3,n*sizeof(double)))
+      return report;
+  if (!auxiliary_tuple(b.values,ns)) return report;
+  long double specific_volume=0;
+  for (std::size_t f=0;f<n;++f) {
+    const double rho=q.stochastic_densities_kg_per_m3[f];
+    if (!fraction_tuple(a.values+f*stride,ns) ||
+        !std::isfinite(a.values[f*stride+ns]) || !std::isfinite(rho) || rho<=0)
+      return report;
+    specific_volume+=(1.L/rho)/n;
+  }
+  const double density=static_cast<double>(1.L/specific_volume);
+  if (!std::isfinite(density) || density<=0) return report;
+  const auto moments=[&](std::size_t c,double& mean,double& variance) noexcept {
+    long double average=0,spread=0;
+    for (std::size_t f=0;f<n;++f) average+=static_cast<long double>(a.values[f*stride+c])/n;
+    for (std::size_t f=0;f<n;++f) {
+      const long double delta=static_cast<long double>(a.values[f*stride+c])-average;
+      spread+=delta*delta/n;
+    }
+    mean=static_cast<double>(average);variance=static_cast<double>(spread);
+    return std::isfinite(mean) && std::isfinite(variance);
+  };
+  double gap=0;
+  // Complete arithmetic preflight also covers very large enthalpy variance.
+  for (std::size_t c=0;c<stride;++c) {
+    double mean,variance;
+    if (!moments(c,mean,variance)) return report;
+    const double difference=mean-b.values[c];
+    if (!std::isfinite(difference)) return report;
+    if (c<ns) gap=std::max(gap,std::abs(difference));
+    else report.enthalpy_mean_gap_j_per_kg=difference;
+  }
+  for (std::size_t c=0;c<stride;++c)
+    moments(c,out.physical_mean[c],out.physical_variance[c]);
+  report.revision=a.revision;
+  report.composition_fingerprint=a.composition_fingerprint;
+  report.statistical_density_kg_per_m3=density;
+  report.pressure_density_kg_per_m3=q.auxiliary_density_kg_per_m3;
+  report.max_species_mean_gap=gap;
+  report.status=portable::Status::success;
+  return report;
+}
 std::array<std::uint32_t, 4>
 philox_words(std::array<std::uint32_t, 4> c,
              std::array<std::uint32_t, 2> k) noexcept {
@@ -81,6 +237,22 @@ portable::Status iem_factor(double dt, double tau, double control,
   return std::isfinite(f) ? portable::Status::success
                           : portable::Status::invalid_input;
 }
+portable::Status iem_source(double volume, double molecular, double turbulent,
+    double cd, double control, double mean, IemSource& out) noexcept {
+  if (!std::isfinite(volume) || volume <= 0 || !std::isfinite(molecular) ||
+      molecular < 0 || !std::isfinite(turbulent) || turbulent < 0 ||
+      !std::isfinite(cd) || cd < 0 || !std::isfinite(control) || control < 0 ||
+      !std::isfinite(mean))
+    return portable::Status::invalid_input;
+  const double beta = cd == 0 || control == 0 ? 0 :
+      .5 * cd * std::cbrt(control) * (molecular + turbulent) /
+          std::pow(volume, 2. / 3.);
+  const double source = beta * mean;
+  if (!std::isfinite(beta) || !std::isfinite(source))
+    return portable::Status::invalid_input;
+  out = {source, beta};
+  return portable::Status::success;
+}
 portable::Status correct_species_flux(const double *y, const double *raw,
                                       std::size_t n, double *out) noexcept {
   if (!y || !raw || !out || n == 0 || !fraction_tuple(y, n))
@@ -101,10 +273,86 @@ portable::Status correct_species_flux(const double *y, const double *raw,
     out[i] = raw[i] - y[i] * sum;
   return portable::Status::success;
 }
+StochasticSourceReport stochastic_source(const StochasticSourceRequest& q,
+    double* out) noexcept {
+  StochasticSourceReport report;
+  if (!q.values || !q.gradients || !q.lower || !q.upper || !out || !q.components ||
+      q.components>std::numeric_limits<std::size_t>::max()/(3*sizeof(double)) ||
+      !std::isfinite(q.density) || q.density<=0 ||
+      !std::isfinite(q.molecular_viscosity) || q.molecular_viscosity<0 ||
+      !std::isfinite(q.turbulent_viscosity) || q.turbulent_viscosity<0 ||
+      !std::isfinite(q.molecular_schmidt) || q.molecular_schmidt<=0 ||
+      !std::isfinite(q.turbulent_schmidt) || q.turbulent_schmidt<=0 ||
+      !std::isfinite(q.dt) || q.dt<=0) return report;
+  const auto output_begin=reinterpret_cast<std::uintptr_t>(out);
+  const auto bytes=q.components*sizeof(double);
+  if(output_begin>UINTPTR_MAX-bytes) return report;
+  const auto overlaps=[&](const double* input,std::size_t input_bytes) noexcept {
+    const auto begin=reinterpret_cast<std::uintptr_t>(input);
+    return begin>UINTPTR_MAX-input_bytes ||
+        (begin<output_begin+bytes && output_begin<begin+input_bytes);
+  };
+  if(overlaps(q.values,bytes) || overlaps(q.gradients,3*bytes) ||
+     overlaps(q.lower,bytes) || overlaps(q.upper,bytes)) return report;
+  for (double value:q.wiener) if (!std::isfinite(value)) return report;
+  const double gamma=q.turbulent_viscosity/q.turbulent_schmidt+
+      q.molecular_viscosity/q.molecular_schmidt;
+  const double amplitude=std::sqrt(2*gamma/q.density);
+  const double density_rate=q.density/q.dt;
+  if (!std::isfinite(amplitude) || !std::isfinite(density_rate)) return report;
+  const auto increment=[&](std::size_t c) noexcept {
+    double value=0;
+    for (unsigned d=0;d<3;++d)
+      value+=amplitude*q.wiener[d]*q.gradients[3*c+d];
+    return value;
+  };
+  const auto resolution=[&](std::size_t c) noexcept {
+    return 32*std::numeric_limits<double>::epsilon()*
+        std::max({1.,std::abs(q.lower[c]),std::abs(q.upper[c])});
+  };
+  const auto within_bounds=[&](std::size_t c) noexcept {
+    return q.values[c]>=q.lower[c] && q.values[c]<=q.upper[c];
+  };
+  const auto canonical_increment=[&](std::size_t c,double delta) noexcept {
+    // Trace-species gradient roundoff can otherwise switch the whole Y/h
+    // source between full strength and zero. Keep the original state bounds.
+    return q.canonicalize_roundoff && within_bounds(c) &&
+        std::abs(delta)<=resolution(c) ? 0. : delta;
+  };
+  const auto available_distance=[&](std::size_t c,double distance) noexcept {
+    // A remaining distance at roundoff scale carries little reliable relative
+    // precision. It cannot set a resolvable change in every other component.
+    // Zero capacity gives a conservative common factor and preserves Y itself.
+    return q.canonicalize_roundoff && within_bounds(c) &&
+        distance<=resolution(c) ? 0. : distance;
+  };
+  // Preflight the complete tuple before publishing a component. An outward
+  // increment from a state already beyond its bound is attenuated to zero;
+  // the accepted state itself is preserved for the caller's state audit.
+  for (std::size_t c=0;c<q.components;++c) {
+    if (!std::isfinite(q.values[c]) || !std::isfinite(q.lower[c]) ||
+        !std::isfinite(q.upper[c]) || q.lower[c]>q.upper[c]) return report;
+    for(unsigned d=0;d<3;++d)
+      if(!std::isfinite(q.gradients[3*c+d])) return report;
+    const double raw=increment(c);
+    if(!std::isfinite(raw) || !std::isfinite(raw*density_rate)) return report;
+    const double delta=canonical_increment(c,raw);
+    if(delta>0 && q.values[c]+delta>q.upper[c])
+      report.attenuation=std::min(report.attenuation,
+          std::max(0.,available_distance(c,q.upper[c]-q.values[c])/delta));
+    else if(delta<0 && q.values[c]+delta<q.lower[c])
+      report.attenuation=std::min(report.attenuation,
+          std::max(0.,available_distance(c,q.values[c]-q.lower[c])/(-delta)));
+  }
+  for(std::size_t c=0;c<q.components;++c)
+    out[c]=report.attenuation*canonical_increment(c,increment(c))*density_rate;
+  report.status=portable::Status::success;
+  return report;
+}
 Workspace::Workspace(std::size_t ns)
     : capacity_(checked_capacity(ns)), candidate_(4 * (ns + 1)),
       transported_(4 * (ns + 1)), means_(ns + 1), variances_(ns + 1),
-      next_y_(ns), species_delta_(ns), mean_species_delta_(ns) {}
+      next_y_(ns), species_delta_(ns), mean_species_delta_(ns), mean_fraction_delta_(ns) {}
 Report Workspace::advance(const Request &q) noexcept {
   Report r;
   const auto &a = q.accepted;
@@ -231,10 +479,71 @@ Report Workspace::advance(const Request &q) noexcept {
   r.variances = variances_.data();
   return r;
 }
+Report Workspace::recenter(const View& input,const double* target) noexcept {
+  Report report;
+  report.model_identity=0x4553465245430001ULL;
+  const bool borrowed=!input.owner || input.owner->valid(input);
+  ++generation_;
+  if(!borrowed || input.revision.algorithm_version!=1) {
+    report.status=portable::Status::stale_revision;return report;
+  }
+  const auto ns=input.species,n=input.fields,stride=ns+1;
+  if(ns>capacity_) {report.status=portable::Status::capacity_exceeded;return report;}
+  if(!ns || (n!=2 && n!=4) || !input.values || !target ||
+      !fraction_tuple(target,ns) || !std::isfinite(target[ns])) return report;
+  for(std::size_t f=0;f<n;++f)
+    if(!fraction_tuple(input.values+f*stride,ns) ||
+        !std::isfinite(input.values[f*stride+ns])) return report;
+  const double target_h=target[ns];
+  std::copy_n(target,ns,next_y_.begin());
+  const auto target_value=[&](std::size_t c) noexcept {
+    return c==ns ? target_h : next_y_[c];
+  };
+  for(std::size_t c=0;c<stride;++c) {
+    double mean=0;
+    for(std::size_t f=0;f<n;++f) mean+=input.values[f*stride+c]/double(n);
+    if(!std::isfinite(mean)) return report;
+    means_[c]=mean;
+  }
+  double factor=1;
+  for(std::size_t f=0;f<n;++f) for(std::size_t c=0;c<ns;++c) {
+    const double deviation=input.values[f*stride+c]-means_[c];
+    if(deviation<0 && target_value(c)+deviation<0)
+      factor=std::min(factor,target_value(c)/(-deviation));
+    else if(deviation>0 && target_value(c)+deviation>1)
+      factor=std::min(factor,(1-target_value(c))/deviation);
+  }
+  if(factor>0 && factor<1) factor=std::nextafter(factor,0.);
+  report.relaxation_factor=factor;
+  for(std::size_t c=0;c<stride;++c) {
+    double mean=0,variance=0;
+    for(std::size_t f=0;f<n;++f) {
+      const auto i=f*stride+c;
+      const double value=std::fma(factor,input.values[i]-means_[c],target_value(c));
+      if(!std::isfinite(value)) return report;
+      candidate_[i]=value;mean+=value/double(n);
+      variance+=(value-target_value(c))*(value-target_value(c))/double(n);
+    }
+    report.max_mean_residual=std::max(report.max_mean_residual,std::abs(mean-target_value(c)));
+    if(!std::isfinite(variance) || std::abs(mean-target_value(c))>2e-12*std::max(1.,std::abs(target_value(c)))) {
+      report.status=portable::Status::conservation_failure;return report;
+    }
+    means_[c]=mean;variances_[c]=variance;
+  }
+  for(std::size_t f=0;f<n;++f) if(!fraction_tuple(candidate_.data()+f*stride,ns)) {
+    report.status=portable::Status::conservation_failure;return report;
+  }
+  report.status=portable::Status::success;
+  report.candidate=input;report.candidate.values=candidate_.data();
+  report.candidate.owner=this;report.candidate.generation=generation_;
+  report.means=means_.data();report.variances=variances_.data();
+  return report;
+}
 Report Workspace::react(const ReactionRequest &q,
                         portable::GasAdvanceProvider &provider) noexcept {
   Report r;
-  r.model_identity = 0x4553465245410001ULL;
+  r.model_identity = q.intervals == ReactionIntervals::full
+      ? 0x4553465245410002ULL : 0x4553465245410001ULL;
   const auto &a = q.accepted;
   const auto ns = a.species, n = a.fields, c = ns + 1;
   const bool valid_borrow = !a.owner || a.owner->valid(a);
@@ -252,8 +561,14 @@ Report Workspace::react(const ReactionRequest &q,
       !q.gas_identity || !q.pressures_pa || !q.initial_densities_kg_per_m3 ||
       !std::isfinite(q.start_time_s) || q.start_time_s < 0 ||
       !std::isfinite(q.duration_s) || q.duration_s <= 0 ||
-      !std::isfinite(q.start_time_s + q.duration_s) || q.duration_s / 2 <= 0 ||
-      q.start_time_s + q.duration_s / 2 <= q.start_time_s)
+      !std::isfinite(q.start_time_s + q.duration_s) ||
+      q.start_time_s + q.duration_s <= q.start_time_s ||
+      (q.intervals != ReactionIntervals::full &&
+       q.intervals != ReactionIntervals::two_halves))
+    return r;
+  const unsigned intervals = q.intervals == ReactionIntervals::full ? 1 : 2;
+  const double interval = q.duration_s / intervals;
+  if (!(interval > 0) || q.start_time_s + interval <= q.start_time_s)
     return r;
   const auto &id = *q.chemistry_identity;
   const auto &gas = *q.gas_identity;
@@ -309,13 +624,12 @@ Report Workspace::react(const ReactionRequest &q,
   for (std::size_t f = 0; f < n; ++f) {
     r.failure_field = f;
     double density = q.initial_densities_kg_per_m3[f];
-    for (unsigned half = 0; half < 2; ++half) {
+    for (unsigned part = 0; part < intervals; ++part) {
       portable::GasAdvanceQuery advance{
           {a.revision, gas.composition_fingerprint,
            portable::GasStateCoordinates::pressure_enthalpy, q.pressures_pa[f],
            transported_[f * c + ns], 0, transported_.data() + f * c, ns},
-          q.start_time_s + double(half) * q.duration_s / 2,
-          q.duration_s / 2};
+          q.start_time_s + double(part) * interval, interval};
       portable::GasAdvanceOutput out{
           {}, next_y_.data(), species_delta_.data(), ns};
       ++r.chemistry_call_count;
@@ -404,7 +718,14 @@ Report Workspace::react(const ReactionRequest &q,
   r.candidate.generation = generation_;
   r.means = means_.data();
   r.variances = variances_.data();
+  for (std::size_t s=0; s<ns; ++s) {
+    long double delta=0;
+    for (std::size_t f=0; f<n; ++f)
+      delta+=(static_cast<long double>(candidate_[f*c+s])-a.values[f*c+s])/n;
+    mean_fraction_delta_[s]=static_cast<double>(delta);
+  }
   r.mean_integrated_species_density_delta_kg_per_m3 = mean_species_delta_.data();
+  r.mean_integrated_mass_fraction_delta = mean_fraction_delta_.data();
   return r;
 }
 } // namespace hundun::v04::esf::detail

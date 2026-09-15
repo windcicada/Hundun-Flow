@@ -18,7 +18,7 @@
 
 namespace hundun::v04 {
 
-namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; }
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; }
 
 class IbmEquationInterfacePlan;
 class EBTopology;
@@ -238,6 +238,11 @@ struct EquationAssemblyContext {
   KernelCounters* counters{};
   const IbmEquationInterfacePlan* immersed_interface{};
   const TurbulencePlan* wall_treatment{};
+  const MixtureTransportFaces* mixture_transport{};
+  // BE transport/reactor split: scalar.trial owns the spatial stage;
+  // this endpoint owns the additional reaction storage at the same density.
+  // Empty for an unsplit equation. The physical chemical source is retained.
+  ConstFieldView reaction_endpoint{};
 };
 
 struct EquationSystemView {
@@ -634,6 +639,14 @@ struct ThermophysicalPredictorInput {
   ConstFieldView temperature_accepted{};
   ConstFieldView temperature_previous{};
   ThermophysicalGhostHistory temperature_ghosts{};
+  // Seed an implicit scalar solve from accepted h/Y while predicting the
+  // paired conservative density and mass flux.
+  bool implicit_scalar_seed{};
+  // Optional BE common-face transport for a normalized mixture. The physical
+  // diffusivity is shared by h and Y. Current model sources retain their
+  // separate rate/revision authority and are still applied exactly once.
+  const MixtureTransportFaces* mixture_transport{};
+  ConstFieldView mixture_mass_diffusivity{};
 };
 
 struct ThermophysicalPredictorOutput {
@@ -1118,12 +1131,20 @@ class EnthalpyEquationPlan {
   Int3 cells() const noexcept { return cells_; }
   bool unity_lewis_total_enthalpy() const noexcept { return unity_lewis_total_enthalpy_; }
   bool conservative_total_energy() const noexcept { return conservative_total_energy_; }
+  bool prescribed_heat_flux(CartesianFace face, double& outward_flux) const noexcept {
+    const auto index = static_cast<unsigned>(face);
+    if (index >= 6U || (heat_flux_mask_ & (1U << index)) == 0U) return false;
+    outward_flux = heat_flux_[index];
+    return true;
+  }
+  bool has_prescribed_heat_flux() const noexcept { return heat_flux_mask_ != 0U; }
   ConvectionScheme kinetic_convection() const noexcept { return kinetic_convection_; }
 
  private:
   friend class EquationPlanSet;
   friend class detail::MixtureEnthalpyDiffusion;
   friend class detail::MixtureEnthalpyConvection;
+  friend class detail::StatisticalEnthalpy;
   friend Status assemble_enthalpy(
       const EnthalpyEquationPlan&, const EquationStateView&,
       const EquationMaterialView&, ConstFieldView,
@@ -1146,6 +1167,8 @@ class EnthalpyEquationPlan {
   const CartesianKernelPlan* kernels_{};
   ThermodynamicsPlan thermodynamics_;
   std::vector<ScalarEquationSpec> species_specs_;
+  std::array<double, 6U> heat_flux_{};
+  std::uint8_t heat_flux_mask_{};
   Int3 cells_{};
   bool unity_lewis_total_enthalpy_{};
   FieldId density_{};
@@ -1210,6 +1233,11 @@ class SpeciesEquationPlan {
       const EquationMaterialView&, Span<const EquationContributionView>,
       const EquationAssemblyContext&, EquationSystemView,
       EquationAssemblyCertificate&, bool, bool, bool, bool) noexcept;
+  friend Status assemble_species_impl(
+      const SpeciesEquationPlan&, std::size_t, const EquationStateView&,
+      const EquationMaterialView&, Span<const EquationContributionView>,
+      const EquationAssemblyContext&, EquationSystemView,
+      EquationAssemblyCertificate&, bool, bool, bool, bool, bool) noexcept;
   friend Status evaluate_thermophysical_rates(
       const EquationPlanSet&, const ThermophysicalRateInput&,
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;
@@ -1436,7 +1464,7 @@ class EquationPlanSet {
 };
 
 // Thermodynamic part of the target-time continuity/energy Jacobian.  The
-// density derivatives come from ThermodynamicsPlan; this helper only forms
+// density derivatives come from the selected EOS closure; this helper forms
 // the derivatives of q=rho*h-p_abs used by the coupled energy residual.
 struct PressureEnergyThermoJacobian {
   double density{};
@@ -1448,6 +1476,13 @@ struct PressureEnergyThermoJacobian {
 
 Status form_pressure_energy_thermo_jacobian(
     double pressure_absolute, double enthalpy, const ThermoState& state,
+    PressureEnergyThermoJacobian& jacobian) noexcept;
+// A separate density closure supplies rho and derivatives with respect to
+// the coupled pressure/physical-enthalpy unknowns. The caller owns any map
+// from auxiliary h0 to physical h. Ideal-gas pressure scaling is checked.
+Status form_pressure_energy_density_jacobian(
+    double pressure_absolute, double physical_enthalpy,
+    const PressureThermoState& density,
     PressureEnergyThermoJacobian& jacobian) noexcept;
 
 struct PressureEnergyTemporalPoint {
@@ -2523,15 +2558,20 @@ struct PisoPressureEnergyRefinementSolveReport {
   }
 };
 
-// Counts include every CN/BE outer sweep. Legacy C1/C2 arrays keep their
+// Counts include every CN/BE outer sweep and endpoint closure. Legacy C1/C2 arrays keep their
 // own meaning; the split method reports its actual linear solves here.
 struct ColdCouplingReport {
+  static constexpr std::uint32_t maximum_outer_iterations = 64U;
   bool active{};
   std::uint32_t outer_iterations{};
   std::uint32_t momentum_solve_calls{};
   std::uint32_t pressure_solve_calls{};
   std::uint32_t enthalpy_solve_calls{};
+  std::uint32_t enthalpy_retained_calls{};
   std::uint32_t species_solve_calls{};
+  // Subset of species_solve_calls: physical ESF remaps after pressure updates
+  // before candidate acceptance audits, including candidates refined again.
+  std::uint32_t species_endpoint_solve_calls{};
   std::uint32_t independent_species_count{};
   std::uint64_t momentum_iterations{};
   std::uint64_t pressure_iterations{};
@@ -2548,6 +2588,9 @@ struct ColdCouplingReport {
   // species_reference_scales includes the dependent species as its last entry.
   std::optional<ColdStoppingSpec> stopping;
   double momentum_reference_scale{};
+  // A quiescent accepted field seeds this scale once from its first nonzero
+  // flow corrector; established-flow reference scales retain accepted values.
+  bool momentum_reference_from_corrector{};
   double enthalpy_reference_scale{};
   std::vector<double> species_reference_scales;
   std::array<double, 3U> reference_residual{};

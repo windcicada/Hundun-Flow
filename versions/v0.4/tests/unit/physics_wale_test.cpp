@@ -62,6 +62,27 @@ bool test_wale_invariants_and_wall_order() {
   return passed;
 }
 
+bool test_wale_extreme_gradient_homogeneity() {
+  VelocityGradient base;
+  base.value={-.4790626295258791,-.7462343196310129,-.7462343196428688,
+      -.7462342811282508,-.8628602528057304,-.9667364729625159,
+      -.7462342809447147,-.9667364727093880,-.8628602526061815};
+  double reference{};
+  if (!expect(bool(wale_kinematic_viscosity(base,.0625,.325,reference)) && reference>0.,
+              "captured WALE gradient has positive reference viscosity")) return false;
+  bool passed=true;
+  for(double scale : {1e-300,1e-100,1e-68,1e68,1e100,1e300}) {
+    VelocityGradient gradient=base;
+    for(auto& value:gradient.value)value*=scale;
+    double viscosity=-1.;
+    const auto status=wale_kinematic_viscosity(gradient,.0625,.325,viscosity);
+    passed &= expect(status && viscosity>0. &&
+        std::abs(viscosity/(reference*scale)-1.)<1e-13,
+        "WALE preserves first-degree homogeneity through extreme finite gradients");
+  }
+  return passed;
+}
+
 bool test_wale_plan_lifecycle(GeometryKind kind) {
   TurbulencePlanSpec spec;
   spec.kind = TurbulenceKind::wale;
@@ -120,6 +141,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   bool passed = test_wale_invariants_and_wall_order();
+  passed &= test_wale_extreme_gradient_homogeneity();
   passed &= test_wale_plan_lifecycle(GeometryKind::uniform);
   passed &= test_wale_plan_lifecycle(GeometryKind::tensor_stretched);
   MPI_Finalize();

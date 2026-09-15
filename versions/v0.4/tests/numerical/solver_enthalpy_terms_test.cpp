@@ -3,6 +3,7 @@
 
 #include "hundun/v04_flow.hpp"
 #include "core_conservation_detail.hpp"
+#include "solver_statistical_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -184,7 +185,8 @@ struct Fixture {
 
 bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
                   bool unity_lewis = false, bool current_source = false,
-                  bool boundary_heat = false) {
+                  bool boundary_heat = false,
+                  double prescribed_flux = std::numeric_limits<double>::quiet_NaN()) {
   const CartesianMeshSpec mesh = mesh_spec(n, stretched);
   ValidatedModel model;
   model.mesh = mesh;
@@ -197,6 +199,10 @@ bool make_fixture(std::int32_t n, Fixture &out, bool stretched = false,
       face.flow_kind = BoundaryKind::no_slip_wall;
       face.thermal_kind = BoundaryKind::isothermal_wall;
       face.temperature = 300.0;
+      if (std::isfinite(prescribed_flux)) {
+        face.thermal_kind = BoundaryKind::heat_flux_wall;
+        face.heat_flux = prescribed_flux;
+      }
     }
   }
   model.schemes.momentum = ConvectionScheme::central2;
@@ -348,9 +354,12 @@ double local_volume(const CartesianGeometryPlan& geometry, Int3 cell) {
 }
 
 double run_enthalpy_mms(std::int32_t n, bool stretched,
-                        bool pressure_only) {
+                        bool pressure_only,
+                        double prescribed_flux = std::numeric_limits<double>::quiet_NaN(),
+                        bool statistical=false) {
+  const bool flux_wall = std::isfinite(prescribed_flux);
   Fixture fixture;
-  if (!make_fixture(n, fixture, stretched)) {
+  if (!make_fixture(n, fixture, stretched, false, false, flux_wall, prescribed_flux)) {
     return HUGE_VAL;
   }
   const Int3 cells = fixture.patch.cells;
@@ -371,12 +380,12 @@ double run_enthalpy_mms(std::int32_t n, bool stretched,
   OwnedFaceField ay = make_face_field(CartesianAxis::y, cells, 2015U);
   OwnedFaceField az = make_face_field(CartesianAxis::z, cells, 2016U);
 
-  constexpr double velocity_x = 0.4;
-  constexpr double pressure_amplitude = 0.3;
-  constexpr double temperature_amplitude = 5.0;
+  const double velocity_x = flux_wall ? 0.0 : 0.4;
+  const double pressure_amplitude = flux_wall ? 0.0 : 0.3;
+  const double temperature_amplitude = flux_wall ? 0.0 : 5.0;
   constexpr double heat_capacity = 4.0;
   constexpr double conductivity = 2.0;
-  constexpr double enthalpy_amplitude =
+  const double enthalpy_amplitude =
       heat_capacity * temperature_amplitude;
   constexpr double wave = 2.0 * kPi;
   for (std::int32_t k = -2; k < cells.z + 2; ++k) {
@@ -406,6 +415,13 @@ double run_enthalpy_mms(std::int32_t n, bool stretched,
           cp.view.unchecked(cell, 0U) = heat_capacity;
           lambda_over_cp.view.unchecked(cell, 0U) =
               conductivity / heat_capacity;
+          if (flux_wall) {
+            const double coefficient = 0.5 + 0.01 * (i + 2 * j + 3 * k + 6);
+            lambda.view.unchecked(cell, 0U) = coefficient;
+            lambda_over_cp.view.unchecked(cell, 0U) = coefficient / heat_capacity;
+            if (i < 0 || i >= cells.x || j < 0 || j >= cells.y || k < 0 || k >= cells.z)
+              temperature.view.unchecked(cell, 0U) = 285.0 + i + j + k;
+          }
         }
       }
     }
@@ -456,9 +472,12 @@ double run_enthalpy_mms(std::int32_t n, bool stretched,
   EquationSystemView system{diagonal.view, rhs.view, residual.view,
                             ax.view, ay.view, az.view};
   EquationAssemblyCertificate certificate;
-  if (!assemble_enthalpy(fixture.equations.enthalpy(), state, material,
-                         as_const(gradients.view), {}, context, system,
-                         certificate)) {
+  const auto assembled = statistical
+      ? detail::StatisticalEnthalpy::assemble(fixture.equations.enthalpy(),state,
+            as_const(lambda_over_cp.view),{},context,system,certificate)
+      : assemble_enthalpy(fixture.equations.enthalpy(),state,material,
+            as_const(gradients.view),{},context,system,certificate);
+  if (!assembled) {
     return HUGE_VAL;
   }
 
@@ -480,8 +499,14 @@ double run_enthalpy_mms(std::int32_t n, bool stretched,
                 : velocity_x * enthalpy_amplitude * wave * c -
                       pressure_work +
                       conductivity * temperature_amplitude * wave * wave * s;
-        const double expected = expected_density *
-                                local_volume(fixture.geometry, cell);
+        double expected = expected_density * local_volume(fixture.geometry, cell);
+        if (flux_wall) {
+          const double volume = local_volume(fixture.geometry, cell);
+          expected = prescribed_flux * volume * (
+              ((i == 0) + (i == cells.x - 1)) / fixture.geometry.x().widths().data[i] +
+              ((j == 0) + (j == cells.y - 1)) / fixture.geometry.y().widths().data[j] +
+              ((k == 0) + (k == cells.z - 1)) / fixture.geometry.z().widths().data[k]);
+        }
         const double difference =
             residual.view.unchecked(cell, 0U) - expected;
         error += difference * difference;
@@ -489,7 +514,11 @@ double run_enthalpy_mms(std::int32_t n, bool stretched,
       }
     }
   }
-  return std::sqrt(static_cast<double>(error / measure));
+  const double normalized_error = std::sqrt(static_cast<double>(
+      error / (flux_wall ? std::max(1.0L, measure) : measure)));
+  if (flux_wall) std::cout << "heat_operator stretched=" << stretched
+      << " q=" << prescribed_flux << " statistical=" << statistical << " normalized_error=" << normalized_error << '\n';
+  return normalized_error;
 }
 
 double observed_order(double coarse, double fine) {
@@ -539,6 +568,21 @@ bool test_pressure_material_derivative_oracle() {
                    "pressure work kills the div(pU) mutation");
   passed &= expect(!close(mutation, 49.0),
                    "pressure work excludes p_abs times div(U)");
+  // A one-ULP acoustic pressure change on the atmospheric reference must
+  // retain the represented increment before multiplication by inverse dt.
+  PressureWorkPoint small{};
+  small.accepted_pressure = 101325.0;
+  small.pressure = std::nextafter(small.accepted_pressure,
+                                  std::numeric_limits<double>::infinity());
+  small.previous_pressure = small.accepted_pressure;
+  const BdfCoefficients be{1e5, -1e5, 0.0, 1U};
+  const double expected = static_cast<double>(
+      (static_cast<long double>(small.pressure) - small.accepted_pressure) *
+      static_cast<long double>(be.a0));
+  double increment{};
+  passed &= expect(static_cast<bool>(evaluate_pressure_material_derivative(
+                       be, small, increment)) && increment == expected,
+                   "BE pressure work retains a represented small increment");
   return passed;
 }
 
@@ -776,6 +820,21 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
   std::fill(h_trial.bytes.begin(), h_trial.bytes.end(), 300002.0);
   EquationAssemblyCertificate certificate = assemble_and_check(
       20.0 * volume, "unsteady enthalpy isolates in production assembler");
+
+  // A represented one-ULP enthalpy change remains observable after BE
+  // storage assembly at the original stiff-reaction timestep.
+  reset_fields();
+  context.dt=1e-5; context.bdf={1/context.dt,-1/context.dt,0,1U};
+  for(auto* field : {&rho_trial,&rho_accepted,&rho_previous})
+    std::fill(field->bytes.begin(),field->bytes.end(),.213389);
+  const double changed_h=std::nextafter(300000.0,400000.0);
+  std::fill(h_trial.bytes.begin(),h_trial.bytes.end(),changed_h);
+  const double increment_oracle=static_cast<double>(static_cast<long double>(.213389)*
+      (static_cast<long double>(changed_h)-300000.0)*context.bdf.a0*volume);
+  certificate=assemble_and_check(increment_oracle,"one ULP enthalpy storage assembles");
+  passed &= expect(std::abs(residual.view.unchecked(oracle_cell,0)-increment_oracle)<=
+      2e-13*std::abs(increment_oracle),"BE enthalpy storage retains the represented increment");
+  context.dt=.1; context.bdf={10.,-10.,0.,1U};
 
   // div(mdot*h): Ux=4 m/s and dh/dx=3 J/(kg m), giving +12 W/m^3.
   reset_fields();
@@ -1316,6 +1375,11 @@ int main(int argc, char** argv) {
   }
   bool passed = test_pressure_material_derivative_oracle();
   passed &= test_enthalpy_and_pressure_work_mms_orders();
+  for (bool stretched : {false, true})
+    for (double flux : {-0.25, 0.0, 0.25})
+      for (bool statistical : {false,true})
+        passed &= expect(run_enthalpy_mms(8, stretched, true, flux,statistical) <= 1e-11,
+            "mean and statistical heat fluxes use physical boundary sources with variable coefficients and arbitrary ghosts");
   passed &= test_energy_term_signs_and_units();
   passed &= test_viscous_dissipation_uses_complete_tau();
   passed &= test_production_enthalpy_assembly_oracle();

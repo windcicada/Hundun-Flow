@@ -31,9 +31,20 @@ enum class RuntimeServiceKind : std::uint8_t {
   evidence
 };
 
+enum class SnapshotSource : std::uint8_t {
+  registered_field,
+  sgs_kinematic_viscosity,
+  sgs_kinetic_energy,
+  sgs_dissipation_volume,
+  sgs_dissipation_specific
+};
+
 struct SnapshotFieldSpec {
   FieldId field{};
   std::uint8_t components{};
+  // Derived fields identify their registered velocity origin. They form an
+  // optional complete suffix; the primary prefix remains a valid snapshot.
+  SnapshotSource source{SnapshotSource::registered_field};
 };
 
 struct RuntimeServiceCapacity {
@@ -54,6 +65,9 @@ class IoServicePlan {
   Span<const SnapshotFieldSpec> snapshot_fields() const noexcept {
     return {snapshot_fields_.data(), snapshot_field_count_};
   }
+  std::size_t primary_field_count() const noexcept {
+    return primary_field_count_;
+  }
   Span<const RuntimeServiceCapacity> services() const noexcept {
     return {services_.data(), service_count_};
   }
@@ -68,6 +82,7 @@ class IoServicePlan {
   std::array<SnapshotFieldSpec, kMaximumSnapshotFields> snapshot_fields_{};
   std::array<RuntimeServiceCapacity, kMaximumServices> services_{};
   std::size_t snapshot_field_count_{};
+  std::size_t primary_field_count_{};
   std::size_t service_count_{};
   std::size_t maximum_staging_bytes_{};
   PlanFingerprint fingerprint_{};
@@ -83,7 +98,8 @@ enum class RestartFieldRole : std::uint8_t {
   enthalpy_nonadvective_rate,
   scalar_nonadvective_rate,
   stochastic_field,
-  stochastic_transport
+  stochastic_transport,
+  stochastic_auxiliary
 };
 
 struct RestartFieldView {
@@ -216,7 +232,8 @@ enum class RestartStorageCompatibility : std::uint8_t {
 // A caller policy, not a statement about what the source file contains.
 enum class RestartHistoryPolicy : std::uint8_t {
   require_compatible,
-  rebuild_method_history
+  rebuild_method_history,
+  refine_chemistry
 };
 
 enum class RestartHistoryCompatibility : std::uint8_t {
@@ -235,10 +252,13 @@ struct RestartExpected {
   PlanFingerprint compatible_storage_schema{};
   PlanFingerprint method_history_signature{};
   // Read-only, known historical method identity. Populated only for explicit
-  // method recovery; geometry, physical configuration and storage still match.
+  // method recovery; geometry and all stored physical field contracts still match.
   PlanFingerprint compatible_method_plan{};
   PlanFingerprint cell_record_identity{};
   std::uint32_t cell_record_bytes{};
+  // Exact source schema admitted by a validated method migration. Zero uses
+  // the target schema; physical field and geometry checks remain mandatory.
+  PlanFingerprint compatible_method_schema{};
 };
 
 struct RestartImageField {
@@ -322,6 +342,7 @@ struct SnapshotFieldView {
   std::string_view stable_name;
   ConstFieldView values{};
   RevisionToken accepted_revision{};
+  SnapshotSource source{SnapshotSource::registered_field};
 };
 
 // Borrowed metadata and fields, not an owning image or a checked epoch lease.
@@ -478,6 +499,13 @@ struct RuntimeRunStartAnchor {
 
 struct RuntimeEvidenceRecord {
   ColdCouplingReport cold{};
+  // New producers report the time formula and executed schedule separately.
+  // Historical V8/V9 records retain their original combined coupling field.
+  struct Algorithm {
+    bool present{};
+    TimeScheme time_scheme{TimeScheme::backward_euler};
+    CouplingKind coupling{CouplingKind::piso};
+  } algorithm{};
   PlanFingerprint build{};
   PlanFingerprint binary{};
   RuntimeCandidateIdentity candidate_identity{};

@@ -3,6 +3,7 @@
 // windcicada | Year.M: 2026.09
 
 #include "models_spray_properties_detail.hpp"
+#include "physics_kerosene_detail.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +28,8 @@ LiquidPropertyReport liquid_failure(LiquidPropertyStatus status) noexcept {
 
 bool evaluate_temperature_correlation(const TemperatureCorrelation &law,
                                       double temperature_k,
-                                      double &value) noexcept {
+                                      double &value,
+                                      bool density = false) noexcept {
   value = 0.0;
   if (!std::isfinite(temperature_k) || !(temperature_k > 0.0))
     return false;
@@ -51,6 +53,13 @@ bool evaluate_temperature_correlation(const TemperatureCorrelation &law,
             law.c[0U];
     return true;
   }
+  case TemperatureCorrelationKind::kerosene_density_v1:
+    if (!density || temperature_k >= 684.26 ||
+        !std::isfinite(law.reference_temperature_k) || law.reference_temperature_k <= 0 ||
+        std::any_of(law.c.begin(), law.c.end(), [](double c) { return c != 0; }))
+      return false;
+    value = hundun::v04::detail::kerosene_liquid_density(temperature_k);
+    return std::isfinite(value) && value > 0;
   }
   return false;
 }
@@ -223,6 +232,8 @@ LiquidAssetReport load_liquid_asset(const std::filesystem::path &path,
         law.kind = TemperatureCorrelationKind::constant;
       else if (token == "cubic")
         law.kind = TemperatureCorrelationKind::polynomial_cubic;
+      else if (token == "kerosene_density_v1" && std::string_view(name) == "density")
+        law.kind = TemperatureCorrelationKind::kerosene_density_v1;
       else
         throw std::invalid_argument("unknown liquid correlation");
       input >> law.reference_temperature_k;
@@ -236,6 +247,9 @@ LiquidAssetReport load_liquid_asset(const std::filesystem::path &path,
       if (law.kind == TemperatureCorrelationKind::constant &&
           (law.c[1] != 0 || law.c[2] != 0 || law.c[3] != 0))
         throw std::invalid_argument("unused nonzero constant coefficient");
+      if (law.kind == TemperatureCorrelationKind::kerosene_density_v1 &&
+          std::any_of(law.c.begin(), law.c.end(), [](double c) { return c != 0; }))
+        throw std::invalid_argument("fixed kerosene density coefficients");
     };
     correlation("density", pack.density_kg_per_m3);
     correlation("cp", pack.cp_j_per_kg_k);
@@ -356,6 +370,168 @@ LiquidEnthalpyReport evaluate_liquid_enthalpy(const LiquidAsset &asset,
   return out;
 }
 
+KerosenePhaseReport evaluate_kerosene_phase(double t, double p,
+                                           double reference) noexcept {
+  KerosenePhaseReport out;
+  constexpr double critical = 684.26, shift = 43.0, junction = 477.95;
+  constexpr double low_a = 20.4274903, low_b = 3877.38996;
+  constexpr double high_a = 21.3176792, high_b = 4264.57762;
+  constexpr double cp_a = 1.7664045e2, cp_b = 7.4680836;
+  constexpr double cp_c = -4.2123987e-3, cp_d = 1.4948931e4;
+  if (!std::isfinite(t) || !std::isfinite(p) || !std::isfinite(reference) ||
+      t <= shift || t >= critical || reference <= shift ||
+      reference >= critical || p <= 0.0)
+    return out;
+  // Preserve the reference branch tests, including their rounded junction.
+  const bool high_temperature = t >= junction;
+  const double ps = std::exp((high_temperature ? high_a : low_a) -
+                            (high_temperature ? high_b : low_b) / (t - shift));
+  const bool high_pressure = p > std::exp(low_a - low_b / (junction - shift));
+  const double denominator = (high_pressure ? high_a : low_a) - std::log(p);
+  if (!std::isfinite(denominator) || denominator <= 0.0) return out;
+  const double boiling = shift + (high_pressure ? high_b : low_b) / denominator;
+  if (!std::isfinite(boiling) || boiling <= shift || boiling >= critical)
+    return out;
+  const double cp = cp_a + cp_b * t + cp_c * t * t + cp_d / (critical - t);
+  const double latent = 2.50183e5 * std::pow((critical - t) / (critical - 483.15), .38);
+  const double lower = std::min(t, reference), upper = std::max(t, reference);
+  const double span = upper - lower;
+  // Integrate in a canonical positive direction. This retains small dT
+  // precision and avoids cancellation of 1 + negative_ratio near critical T.
+  const double magnitude = span * (cp_a + .5 * cp_b * (lower + upper) +
+      cp_c / 3.0 * (lower * lower + lower * upper + upper * upper)) +
+      cp_d * std::log1p(span / (critical - upper));
+  const double increment = t < reference ? -magnitude : magnitude;
+  if (!std::isfinite(ps) || !std::isfinite(cp) || cp <= 0.0 ||
+      !std::isfinite(latent) || latent <= 0.0 || !std::isfinite(increment))
+    return out;
+  out.status = portable::Status::success;
+  out.saturation_pressure_pa = std::min(ps, .999 * p);
+  out.boiling_temperature_k = boiling;
+  out.liquid_density_kg_per_m3 = hundun::v04::detail::kerosene_liquid_density(t);
+  out.liquid_cp_j_per_kg_k = cp;
+  out.latent_heat_j_per_kg = latent;
+  out.sensible_enthalpy_increment_j_per_kg = increment;
+  out.available = true;
+  return out;
+}
+
+KeroseneFilmWorkspace::KeroseneFilmWorkspace(std::size_t n)
+    : pure_y_(n), d_(n), h_(n), w_(n) {
+  if (!n) throw std::invalid_argument("kerosene film workspace needs species");
+}
+std::size_t KeroseneFilmWorkspace::owned_payload_bytes() const noexcept {
+  return sizeof(double) * (pure_y_.capacity()+d_.capacity()+h_.capacity()+w_.capacity());
+}
+KeroseneFilmReport KeroseneFilmWorkspace::query(const LiquidAsset& asset,
+    portable::GasQueryProvider& provider, const KeroseneFilmInput& input) noexcept {
+  const auto failure = [](portable::Status status) {
+    KeroseneFilmReport out; out.status = status; return out;
+  };
+  const auto& gas = provider.gas_identity();
+  const auto& far = input.far_gas;
+  const auto n = gas.species_names.size(), vapor = asset.vapor_species_index;
+  if (far.revision != input.expected_revision ||
+      input.transport_revision != input.expected_revision)
+    return failure(portable::Status::stale_revision);
+  if (!portable::same_gas_identity(gas, asset.gas_identity) ||
+      far.composition_fingerprint != gas.composition_fingerprint ||
+      gas.molecular_weights_kg_per_kmol.size() != n || vapor >= n ||
+      asset.vapor_species_name != gas.species_names[vapor] ||
+      asset.vapor_molecular_weight_kg_per_kmol != gas.molecular_weights_kg_per_kmol[vapor])
+    return failure(portable::Status::identity_mismatch);
+  if (n != pure_y_.size()) return failure(portable::Status::capacity_exceeded);
+  const double t = input.surface_temperature_k, mu = input.far_dynamic_viscosity_pa_s;
+  if (far.coordinates != portable::GasStateCoordinates::pressure_enthalpy ||
+      far.species_count != n || !far.mass_fractions ||
+      !std::isfinite(far.pressure_pa) || far.pressure_pa <= 0. ||
+      !std::isfinite(far.enthalpy_j_per_kg) || !std::isfinite(mu) || mu <= 0. ||
+      !std::isfinite(asset.pack.minimum_temperature_k) ||
+      !std::isfinite(asset.pack.maximum_temperature_k) ||
+      asset.pack.minimum_temperature_k <= 0. ||
+      asset.pack.maximum_temperature_k < asset.pack.minimum_temperature_k ||
+      t < asset.pack.minimum_temperature_k || t > asset.pack.maximum_temperature_k)
+    return failure(portable::Status::invalid_input);
+  long double sum{};
+  double carrier_mass{}, carrier_moles{};
+  for (std::size_t i = 0; i < n; ++i) {
+    const double y = far.mass_fractions[i], mw = gas.molecular_weights_kg_per_kmol[i];
+    if (!std::isfinite(y) || y < 0. || y > 1. || !std::isfinite(mw) || mw <= 0.)
+      return failure(portable::Status::invalid_input);
+    sum += y;
+    if (i != vapor) { carrier_mass += y; carrier_moles += y / mw; }
+  }
+  if (std::abs(sum - 1.L) > 2e-12L || carrier_mass <= 0. || carrier_moles <= 0.)
+    return failure(portable::Status::invalid_input);
+  const auto phase = evaluate_kerosene_phase(t, far.pressure_pa, t);
+  if (!phase.available) return failure(phase.status);
+  portable::GasQueryOutput response{{},d_.data(),h_.data(),w_.data(),n};
+  const auto call = [&](const portable::GasQuery& q) {
+    response.sample = {};
+    auto status = provider.query_gas(q, response);
+    if (status != portable::Status::success) return status;
+    const auto& state = response.sample;
+    if (state.revision != input.expected_revision) return portable::Status::stale_revision;
+    if (state.composition_fingerprint != gas.composition_fingerprint)
+      return portable::Status::identity_mismatch;
+    if (!std::isfinite(state.temperature_k) || state.temperature_k <= 0. ||
+        !std::isfinite(state.pressure_pa) || state.pressure_pa <= 0. ||
+        !std::isfinite(state.cp_j_per_kg_k) || state.cp_j_per_kg_k <= 0. ||
+        !std::isfinite(state.enthalpy_j_per_kg) ||
+        std::abs(state.pressure_pa-q.pressure_pa) > 2e-12*std::max(state.pressure_pa,q.pressure_pa) ||
+        (q.coordinates == portable::GasStateCoordinates::pressure_temperature &&
+         std::abs(state.temperature_k-q.temperature_k) > 2e-12*std::max(state.temperature_k,q.temperature_k)))
+      return portable::Status::provider_failure;
+    return portable::Status::success;
+  };
+  auto status = call(far);
+  if (status != portable::Status::success) return failure(status);
+  const double far_t = response.sample.temperature_k;
+  const double film_t = t + (far_t-t)/3.;
+  std::fill(pure_y_.begin(),pure_y_.end(),0.); pure_y_[vapor] = 1.;
+  auto query = far;
+  query.coordinates = portable::GasStateCoordinates::pressure_temperature;
+  query.mass_fractions = pure_y_.data(); query.temperature_k = 298.15;
+  status = call(query);
+  if (status != portable::Status::success) return failure(status);
+  const double vapor_mw = gas.molecular_weights_kg_per_kmol[vapor];
+  const double cp_standard_molar = response.sample.cp_j_per_kg_k * vapor_mw;
+  query.temperature_k = t;
+  status = call(query);
+  if (status != portable::Status::success) return failure(status);
+  const double vapor_cp = response.sample.cp_j_per_kg_k, vapor_h = h_[vapor];
+  if (!std::isfinite(vapor_h) || std::abs(vapor_h-response.sample.enthalpy_j_per_kg) >
+      2e-12*std::max({1.,std::abs(vapor_h),std::abs(response.sample.enthalpy_j_per_kg)}))
+    return failure(portable::Status::provider_failure);
+  query.mass_fractions = far.mass_fractions; query.temperature_k = film_t;
+  status = call(query);
+  if (status != portable::Status::success) return failure(status);
+  const double carrier_mw = carrier_mass / carrier_moles;
+  const double ps = phase.saturation_pressure_pa;
+  const double ys = ps*vapor_mw / (ps*vapor_mw+(far.pressure_pa-ps)*carrier_mw);
+  const double xs = ys*carrier_mw / (vapor_mw-ys*(vapor_mw-carrier_mw));
+  const double vapor_mu = ::hundun::v04::detail::kerosene_vapor_viscosity(t);
+  const double vapor_k = 6.953965e-3*(cp_standard_molar-1.518602e6/t-2.132759e4)*vapor_mu;
+  const double surface_mu = xs*vapor_mu+(1.-xs)*mu*std::sqrt(t/far_t);
+  const double film_mu = surface_mu+(mu-surface_mu)/3.;
+  if (!std::isfinite(vapor_k) || vapor_k <= 0.)
+    return failure(portable::Status::unavailable);
+  const double prandtl = vapor_cp*vapor_mu/vapor_k;
+  if (!std::isfinite(ys) || ys < 0. || ys >= 1. || !std::isfinite(xs) ||
+      xs < 0. || xs > 1. || !std::isfinite(vapor_mu) || vapor_mu <= 0. ||
+      !std::isfinite(film_mu) || film_mu <= 0. ||
+      !std::isfinite(prandtl) || prandtl <= 0.)
+    return failure(portable::Status::unavailable);
+  KeroseneFilmReport out;
+  out.status = portable::Status::success; out.revision = input.expected_revision;
+  out.liquid = phase; out.far_temperature_k = far_t; out.film_temperature_k = film_t;
+  out.gas_cp_j_per_kg_k = response.sample.cp_j_per_kg_k;
+  out.gas_dynamic_viscosity_pa_s = film_mu; out.vapor_cp_j_per_kg_k = vapor_cp;
+  out.vapor_prandtl_number = prandtl; out.vapor_absolute_enthalpy_j_per_kg = vapor_h;
+  out.surface_vapor_mass_fraction = ys; out.available = true;
+  return out;
+}
+
 FilmQueryWorkspace::FilmQueryWorkspace(std::size_t n)
     : film_y_(n), surface_y_(n), pure_y_(n), d_(n), h_(n), w_(n) {
   if (!n)
@@ -377,16 +553,7 @@ FilmQueryWorkspace::query(const LiquidAsset &asset,
     out.status = portable::Status::stale_revision;
     return out;
   }
-  if (id.mechanism_sha256 != expected.mechanism_sha256 ||
-      id.phase != expected.phase ||
-      id.species_names != expected.species_names ||
-      id.element_names != expected.element_names ||
-      id.element_counts != expected.element_counts ||
-      id.molecular_weights_kg_per_kmol !=
-          expected.molecular_weights_kg_per_kmol ||
-      id.enthalpy_reference != expected.enthalpy_reference ||
-      id.composition_fingerprint != expected.composition_fingerprint ||
-      id.closure_fingerprint != expected.closure_fingerprint ||
+  if (!portable::same_gas_identity(id, expected) ||
       input.far_gas.composition_fingerprint != id.composition_fingerprint) {
     out.status = portable::Status::identity_mismatch;
     return out;
@@ -555,7 +722,7 @@ LiquidPropertyReport LiquidPropertyService::evaluate(
   LiquidProperties properties;
   bool evaluated = evaluate_temperature_correlation(
       selected->density_kg_per_m3, query.temperature_k,
-      properties.density_kg_per_m3);
+      properties.density_kg_per_m3, true);
   evaluated &= evaluate_temperature_correlation(
       selected->cp_j_per_kg_k, query.temperature_k, properties.cp_j_per_kg_k);
   evaluated &= evaluate_temperature_correlation(

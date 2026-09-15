@@ -682,6 +682,84 @@ bool validate_narrow_partition_forwarding(
   return all_true(passed);
 }
 
+bool validate_periodic_region(int rank, int size) {
+  bool passed = true;
+  // The second mesh includes one-cell MPI slabs and self-periodic axes
+  // spanning exactly the four-cell material halo.
+  for (const Int3 shape : {Int3{8, 8, 8}, Int3{4, 4, 4}}) {
+    auto spec = mesh_spec();
+    spec.exact_cells = shape;
+    CartesianGeometryPlan geometry;
+    MeshPatch automatic_patch;
+    passed &= expect(static_cast<bool>(CartesianGeometryCompiler::compile(
+        MPI_COMM_WORLD, spec, GeometryBudget{}, geometry, automatic_patch)),
+        rank, "periodic material geometry compiles");
+    const MeshPatch patch{{rank * (shape.x / size), 0, 0},
+        {shape.x / size, shape.y, shape.z}, {size, 1, 1}, {rank, 0, 0}};
+    const auto triangles = cube_triangles();
+    StlScanPlan scan;
+    passed &= expect(static_cast<bool>(StlScanCompiler::compile_triangles(
+        geometry, patch, {triangles.data(), triangles.size()},
+        CartesianAxis::y, kScanBudget, scan)), rank, "periodic scan compiles");
+    ImmersedSurfacePlan surface;
+    passed &= expect(static_cast<bool>(ImmersedSurfaceCompiler::compile(
+        scan, surface)), rank, "periodic surface compiles");
+    if (!all_true(passed)) return false;
+    ImmersedPlanLimits limits;
+    limits.maximum_persistent_bytes_per_rank = UINT64_C(1048576);
+    limits.maximum_peak_bytes_per_rank = UINT64_C(2097152);
+    limits.maximum_local_links = 1024U;
+    ImmersedDomainBoundaryPolicy policy;
+    policy.allow_periodic_images.fill(true);
+    EBTopology topology;
+    passed &= expect(static_cast<bool>(EBTopologyCompiler::compile(
+        MPI_COMM_WORLD, geometry, patch, scan, surface,
+        ImmersedFluidSide::outside, limits, topology, policy)),
+        rank, "periodic material topology compiles");
+    if (!all_true(passed)) return false;
+    std::size_t mismatches = 0;
+    const auto wrap = [](int value, int extent) {
+      return (value % extent + extent) % extent;
+    };
+    for (int z = -4; z < patch.cells.z + 4; ++z)
+      for (int y = -4; y < patch.cells.y + 4; ++y)
+        for (int x = -4; x < patch.cells.x + 4; ++x) {
+          const Int3 image{x + patch.begin.x, y, z};
+          const Int3 c{wrap(image.x, shape.x), wrap(y, shape.y), wrap(z, shape.z)};
+          const bool solid = c.x >= shape.x / 4 && c.x < 3 * shape.x / 4 &&
+              c.y >= shape.y / 4 && c.y < 3 * shape.y / 4 &&
+              c.z >= shape.z / 4 && c.z < 3 * shape.z / 4;
+          mismatches += topology.is_fluid_global(image) == solid;
+        }
+    passed &= expect(mismatches == 0, rank,
+        "periodic material halo agrees with wrapped geometry including corners");
+    const auto retained = topology.fingerprint();
+    auto half_pair = policy;
+    if (rank == size - 1) half_pair.allow_periodic_images[1] = false;
+    const auto rejected = EBTopologyCompiler::compile(MPI_COMM_WORLD,
+        geometry, patch, scan, surface, ImmersedFluidSide::outside,
+        limits, topology, half_pair);
+    passed &= expect(rejected.code == StatusCode::invalid_plan &&
+        identical(packed(rejected)) && topology.fingerprint() == retained &&
+        topology.lowest_failing_rank() == size - 1, rank,
+        "half periodic material pair rejects collectively and preserves topology");
+    if (size > 1) {
+      auto mismatched = policy;
+      if (rank == size - 1) {
+        mismatched.allow_periodic_images[0] = false;
+        mismatched.allow_periodic_images[1] = false;
+      }
+      const auto status = EBTopologyCompiler::compile(MPI_COMM_WORLD,
+          geometry, patch, scan, surface, ImmersedFluidSide::outside,
+          limits, topology, mismatched);
+      passed &= expect(status.code == StatusCode::invalid_plan &&
+          identical(packed(status)) && topology.fingerprint() == retained,
+          rank, "periodic material contract agrees across ranks");
+    }
+  }
+  return all_true(passed);
+}
+
 bool run(int rank, int size) {
   CartesianGeometryPlan geometry;
   MeshPatch patch;
@@ -813,6 +891,7 @@ int main(int argc, char** argv) {
   bool passed = expect(size == 1 || size == 2 || size == 4, rank,
                        "EB topology MPI test runs at 1, 2, or 4 ranks");
   passed &= run(rank, size);
+  passed &= validate_periodic_region(rank, size);
   passed = all_true(passed);
   const int finalized = MPI_Finalize();
   return passed && finalized == MPI_SUCCESS ? 0 : 1;

@@ -73,6 +73,8 @@ struct ApplicationRunOptions {
   // Optional small committed-state ledger, independent of Visit output.
   // Zero preserves the historical application output behavior.
   std::uint64_t diagnostics_interval{};
+  // Optional MG phase observation, reported after the timed advance.
+  bool observe_mg_cost{};
 };
 
 inline constexpr std::size_t kNumericalFailureMassFractionCapacity = 64U;
@@ -504,6 +506,15 @@ struct DriverTerminalEquationReport {
 // All rates are positive outwards except heat/stress input (positive inwards).
 // The cumulative defects compare inventory with a BDF-integrated boundary
 // ledger. A restart starts a new explicitly labelled observation epoch.
+struct DriverCompositionBalance {
+  std::string name;
+  // Species use kg and kg/s; elements use kmol(atoms) and kmol(atoms)/s.
+  double accepted_inventory{}, current_inventory{}, temporal_rate{};
+  double transport_outflow{}, pressure_outflow{};
+  double noise_source{}, mixing_source{}, chemistry_source{};
+  double defect{}, relative_defect{};
+};
+
 struct DriverConservationReport {
   bool valid{};
   std::uint64_t epoch_start_step{};
@@ -513,12 +524,19 @@ struct DriverConservationReport {
   double conductive_heat_input{};        // W, physical boundary faces
   double species_enthalpy_diffusion_input{};  // W, species-carried boundary heat
   double viscous_work_input{};           // W, including prescribed IBM inlets
+  double statistical_enthalpy_outflow{}; // W, realized statistical face correction
+  double statistical_enthalpy_source{};  // W, realized noise and implicit mixing
   double mass_bdf_rate{};                // kg/s
   double total_energy_bdf_rate{};        // W
   double mass_balance_defect{};          // kg/s
   double total_energy_balance_defect{};  // W
   double cumulative_mass_defect{};       // kg since epoch_start_step
   double cumulative_energy_defect{};     // J since epoch_start_step
+  bool composition_valid{};
+  RevisionToken composition_revision{};
+  double composition_duration{};
+  bool composition_after_parcel_exchange{};
+  std::vector<DriverCompositionBalance> species_balance, element_balance;
 };
 
 struct DriverScalarTransportReport {
@@ -650,6 +668,10 @@ class ProductDriver {
   // assignment invalidates snapshots of the destination's former storage.
   // Asynchronous use requires a separately owned, budgeted copy of ALL data.
   Status committed_output_snapshot(CommittedOutputSnapshot& out) noexcept;
+  // Collective on the driver's communicator at a quiescent boundary. Rebuilds
+  // algebraic SGS output from accepted primitives, including boundary/IBM
+  // gradients. The ordinary snapshot above stays rank-local and inexpensive.
+  Status committed_sgs_output_snapshot(CommittedOutputSnapshot& out) noexcept;
   Status committed_restart_snapshot(RestartSnapshot& out) noexcept;
   Status committed_surface_force(SurfaceForce& force,
                                  FinalForceCertificate& certificate) const
@@ -659,6 +681,9 @@ class ProductDriver {
   // Production Restart remains unavailable until at least one step commits.
   Status committed_final_mass_flux_for_test(ConstFaceFluxView& out) const
       noexcept;
+  // Accepted thermophysical storage for EOS/restart parity checks.
+  Status committed_thermo_for_test(StateRole role, ConstFieldView& density,
+                                  ConstFieldView& temperature) const noexcept;
 #endif
   bool initialized() const noexcept;
   double pressure_reference() const noexcept;

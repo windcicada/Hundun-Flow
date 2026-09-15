@@ -243,7 +243,8 @@ double face_area(const CartesianGeometryPlan& geometry, Int3 fluid,
   return width(geometry, fluid, 0U) * width(geometry, fluid, 1U);
 }
 
-int neighbor_rank(const MeshPatch& patch, int axis, int sign) noexcept {
+int neighbor_rank(const MeshPatch& patch, int axis, int sign,
+                  bool periodic) noexcept {
   Int3 coordinate = patch.process_coord;
   std::int32_t* selected =
       axis == 0 ? &coordinate.x : (axis == 1 ? &coordinate.y : &coordinate.z);
@@ -252,21 +253,22 @@ int neighbor_rank(const MeshPatch& patch, int axis, int sign) noexcept {
                 : (axis == 1 ? patch.process_grid.y : patch.process_grid.z);
   *selected += sign;
   if (*selected < 0 || *selected >= extent) {
-    return MPI_PROC_NULL;
+    if (!periodic) return MPI_PROC_NULL;
+    *selected = (*selected + extent) % extent;
   }
   return coordinate.x + patch.process_grid.x *
                             (coordinate.y + patch.process_grid.y * coordinate.z);
 }
 
 bool exchange_buffer_elements(const MeshPatch& patch, Int3 global, int axis,
-                              Int3 shape, std::uint64_t& out) noexcept {
+                              Int3 shape, bool periodic, std::uint64_t& out) noexcept {
   const int h = static_cast<int>(kRegionHalo);
   const std::int32_t global_extent =
       axis == 0 ? global.x : (axis == 1 ? global.y : global.z);
   const std::int32_t process_extent =
       axis == 0 ? patch.process_grid.x
                 : (axis == 1 ? patch.process_grid.y : patch.process_grid.z);
-  if (process_extent == 1) {
+  if (process_extent == 1 && !periodic) {
     out = 0U;
     return true;
   }
@@ -289,15 +291,15 @@ std::uint8_t& halo_at(std::vector<std::uint8_t>& halo, Int3 shape,
 }
 
 Status exchange_axis(MPI_Comm communicator, const MeshPatch& patch,
-                     Int3 global, int axis, Int3 shape,
+                     Int3 global, int axis, Int3 shape, bool periodic,
                      std::vector<std::uint8_t>& halo,
                      std::vector<std::uint8_t>& send_lower,
                      std::vector<std::uint8_t>& send_upper,
                      std::vector<std::uint8_t>& receive_lower,
                      std::vector<std::uint8_t>& receive_upper) {
   const int h = static_cast<int>(kRegionHalo);
-  const int lower = neighbor_rank(patch, axis, -1);
-  const int upper = neighbor_rank(patch, axis, 1);
+  const int lower = neighbor_rank(patch, axis, -1, periodic);
+  const int upper = neighbor_rank(patch, axis, 1, periodic);
   const std::int32_t local_extent =
       axis == 0 ? patch.cells.x : (axis == 1 ? patch.cells.y : patch.cells.z);
   const std::int32_t global_extent =
@@ -305,7 +307,7 @@ Status exchange_axis(MPI_Comm communicator, const MeshPatch& patch,
   const std::int32_t process_extent =
       axis == 0 ? patch.process_grid.x
                 : (axis == 1 ? patch.process_grid.y : patch.process_grid.z);
-  if (process_extent == 1) {
+  if (process_extent == 1 && !periodic) {
     return {};
   }
   Int3 begin{0, 0, 0};
@@ -507,7 +509,8 @@ PlanFingerprint topology_fingerprint(const CartesianGeometryPlan& geometry,
                                      ImmersedFluidSide side,
                                      std::uint64_t global_count,
                                      std::uint64_t region_xor,
-                                     std::uint64_t region_sum) noexcept {
+                                     std::uint64_t region_sum,
+                                     ImmersedDomainBoundaryPolicy policy) noexcept {
   Hash64 hash;
   hash.integer(geometry.fingerprint());
   hash.integer(surface.fingerprint());
@@ -517,6 +520,12 @@ PlanFingerprint topology_fingerprint(const CartesianGeometryPlan& geometry,
   hash.integer(global_count);
   hash.integer(region_xor);
   hash.integer(region_sum);
+  if (policy.allow_periodic_images[0] || policy.allow_periodic_images[2] ||
+      policy.allow_periodic_images[4]) {
+    hash.integer(UINT64_C(0x706572696f646963));
+    for (const bool periodic : policy.allow_periodic_images)
+      hash.integer(static_cast<std::uint8_t>(periodic));
+  }
   return hash.finish();
 }
 
@@ -524,7 +533,8 @@ PlanFingerprint compile_contract(const CartesianGeometryPlan& geometry,
                                  const MeshPatch& patch,
                                  const ImmersedSurfacePlan& surface,
                                  ImmersedFluidSide side,
-                                 ImmersedPlanLimits limits) noexcept {
+                                 ImmersedPlanLimits limits,
+                                 ImmersedDomainBoundaryPolicy policy) noexcept {
   Hash64 hash;
   hash.integer(geometry.fingerprint());
   hash.integer(geometry.topology_revision());
@@ -536,13 +546,22 @@ PlanFingerprint compile_contract(const CartesianGeometryPlan& geometry,
   hash.integer(limits.maximum_persistent_bytes_per_rank);
   hash.integer(limits.maximum_peak_bytes_per_rank);
   hash.integer(limits.maximum_local_links);
+  if (policy.allow_periodic_images[0] || policy.allow_periodic_images[2] ||
+      policy.allow_periodic_images[4]) {
+    hash.integer(UINT64_C(0x706572696f646963));
+    for (const bool periodic : policy.allow_periodic_images)
+      hash.integer(static_cast<std::uint8_t>(periodic));
+  }
   return hash.finish();
 }
 
 }  // namespace
 
 bool EBTopology::is_fluid_global(Int3 global_index) const noexcept {
-  if (fingerprint_ == 0U || !inside(global_index, global_cells_)) {
+  if (fingerprint_ == 0U ||
+      ((!periodic_axes_[0] && (global_index.x < 0 || global_index.x >= global_cells_.x)) ||
+       (!periodic_axes_[1] && (global_index.y < 0 || global_index.y >= global_cells_.y)) ||
+       (!periodic_axes_[2] && (global_index.z < 0 || global_index.z >= global_cells_.z)))) {
     return false;
   }
   const int h = static_cast<int>(region_halo_width_);
@@ -563,11 +582,23 @@ bool EBTopology::is_fluid_global(Int3 global_index) const noexcept {
          halo_region_[offset] == static_cast<std::uint8_t>(RegionFlag::fluid);
 }
 
+bool EBTopology::is_fluid_stencil(Int3 index) const noexcept {
+  if (fingerprint_ == 0U) return false;
+  // A physical ghost is supplied by the ordinary boundary closure. Periodic
+  // ghosts carry the same material authority as an internal MPI interface.
+  if ((!periodic_axes_[0] && (index.x < 0 || index.x >= global_cells_.x)) ||
+      (!periodic_axes_[1] && (index.y < 0 || index.y >= global_cells_.y)) ||
+      (!periodic_axes_[2] && (index.z < 0 || index.z >= global_cells_.z)))
+    return true;
+  return is_fluid_global(index);
+}
+
 Status EBTopologyCompiler::compile(
     MPI_Comm communicator, const CartesianGeometryPlan& geometry,
     const MeshPatch& patch, const StlScanPlan& scan,
     const ImmersedSurfacePlan& surface, ImmersedFluidSide fluid_side,
-    ImmersedPlanLimits limits, EBTopology& out) noexcept {
+    ImmersedPlanLimits limits, EBTopology& out,
+    ImmersedDomainBoundaryPolicy boundary_policy) noexcept {
   if (!mpi_live() || communicator == MPI_COMM_NULL) {
     return {StatusCode::invalid_plan, kTopologyInput};
   }
@@ -603,6 +634,10 @@ Status EBTopologyCompiler::compile(
               local_count > std::numeric_limits<std::size_t>::max()
           ? Status{StatusCode::invalid_plan, kTopologyInput}
           : Status{};
+  for (unsigned axis = 0; axis < 3; ++axis)
+    if (boundary_policy.allow_periodic_images[2 * axis] !=
+        boundary_policy.allow_periodic_images[2 * axis + 1])
+      local = {StatusCode::invalid_plan, kTopologyInput};
   Status agreed = consensus(communicator, rank, size, local, lowest);
   if (!agreed) {
     out.lowest_failing_rank_ = lowest;
@@ -610,7 +645,7 @@ Status EBTopologyCompiler::compile(
   }
 
   const PlanFingerprint contract =
-      compile_contract(geometry, patch, surface, fluid_side, limits);
+      compile_contract(geometry, patch, surface, fluid_side, limits, boundary_policy);
   PlanFingerprint root_contract = contract;
   if (MPI_Bcast(&root_contract, 1, MPI_UINT64_T, 0, communicator) !=
       MPI_SUCCESS) {
@@ -624,6 +659,8 @@ Status EBTopologyCompiler::compile(
     return agreed;
   }
   EBTopology candidate;
+  for (unsigned axis = 0; axis < 3; ++axis)
+    candidate.periodic_axes_[axis] = boundary_policy.allow_periodic_images[2 * axis];
   const std::int64_t halo_x =
       static_cast<std::int64_t>(patch.cells.x) + 2 * kRegionHalo;
   const std::int64_t halo_y =
@@ -646,7 +683,7 @@ Status EBTopologyCompiler::compile(
     for (int axis = 0; axis < 3; ++axis) {
       std::uint64_t axis_elements{};
       if (!exchange_buffer_elements(patch, global, axis, halo_shape,
-                                    axis_elements)) {
+                                    candidate.periodic_axes_[axis], axis_elements)) {
         local = {StatusCode::invalid_plan, kTopologyRegion};
         break;
       }
@@ -735,7 +772,7 @@ Status EBTopologyCompiler::compile(
   try {
     for (int axis = 0; axis < 3 && local; ++axis) {
       local = exchange_axis(communicator, patch, global, axis, halo_shape,
-                            candidate.halo_region_, send_lower, send_upper,
+                            candidate.periodic_axes_[axis], candidate.halo_region_, send_lower, send_upper,
                             receive_lower, receive_upper);
     }
   } catch (const std::bad_alloc&) {
@@ -951,7 +988,7 @@ Status EBTopologyCompiler::compile(
   candidate.geometry_fingerprint_ = geometry.fingerprint();
   candidate.surface_fingerprint_ = surface.fingerprint();
   candidate.fingerprint_ = topology_fingerprint(
-      geometry, surface, fluid_side, global_count, global_xor, global_sum);
+      geometry, surface, fluid_side, global_count, global_xor, global_sum, boundary_policy);
   local = IbmInterfaceMetricCompiler::compile_with_resident_storage(
       communicator, geometry, patch, surface, candidate, limits,
       full_persistent_bytes, candidate.interface_metric_);

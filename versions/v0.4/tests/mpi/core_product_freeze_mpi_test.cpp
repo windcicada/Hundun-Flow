@@ -2998,6 +2998,7 @@ bool run_warm_start_lifecycle_product(int rank) {
   int size = 0;
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   ValidatedModel model = test::product_model({8, 7, 6});
+  model.time.scheme = TimeScheme::backward_euler;
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   model.time.initial_dt = 1.0e-5;
   for (BoundaryFaceSpec& face : model.boundaries) {
@@ -3138,7 +3139,8 @@ bool run_warm_start_lifecycle_product(int rank) {
       second.resources.ibm_bytes == 0U;
   const bool passed =
       status && first.accepted && first.attempts == 1U && second.accepted &&
-      second.attempts == 1U && second.proposal.bdf.order == 2U &&
+      second.attempts == 1U && first.proposal.bdf.order == 1U &&
+      second.proposal.bdf.order == 1U &&
       second.piso.pressure_solve_calls == 2U && warm_seed_consumed &&
       independent_cold_comparison && c1_semantic && c2_semantic &&
       resources_semantic &&

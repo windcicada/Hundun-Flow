@@ -60,6 +60,7 @@ constexpr std::uint8_t kSprayWireFlag = 64U;
 // geometry and inlet-patch extensions. Existing case wires remain unchanged.
 constexpr std::uint8_t kPatchInletsWireVersion = 19U;
 constexpr std::uint8_t kCflBandWireVersion = 20U;
+constexpr std::uint8_t kSmagorinskyWireVersion = 21U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -530,6 +531,10 @@ bool parse_turbulence(std::string_view value, TurbulenceKind& out) noexcept {
     out = TurbulenceKind::vreman_wall_function;
     return true;
   }
+  if (value == "smagorinsky") {
+    out = TurbulenceKind::smagorinsky;
+    return true;
+  }
   if (value == "vreman") {
     out = TurbulenceKind::vreman;
     return true;
@@ -844,6 +849,9 @@ bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
                   "convective_cfl_margin"})) {
     return false;
   }
+  // Existing explicit targets retain exact-target stepping when the band
+  // field is absent. New generated cases write both target and band.
+  out.convective_cfl_margin = 0.0;
   if (!base_keys && !finite_real(yyjson_obj_get(value, "convective_cfl_margin"),
                                 out.convective_cfl_margin)) return false;
   const auto control = string_value(value, "control");
@@ -1412,7 +1420,8 @@ bool valid_solver(const SolverSpec& solver) noexcept {
           ? pressure.krylov_restart >= 2U && pressure.krylov_restart <= 64U
           : pressure.krylov_restart == 0U;
   const bool valid_coupling = solver.coupling == CouplingKind::piso ||
-                              solver.coupling == CouplingKind::simple;
+                              solver.coupling == CouplingKind::simple ||
+                              solver.coupling == CouplingKind::outer_corrected;
   return (!solver.cold_stopping || solver.cold_stopping->valid()) &&
          finite && valid_coupling && valid_algorithm && valid_scaling &&
          valid_pair && valid_restart && pressure.absolute_tolerance > 0.0 &&
@@ -2219,7 +2228,7 @@ bool read_thermophysics(WireReader& reader, std::uint8_t wire_version,
       }
     }
     if (!reader.byte(law) ||
-        law > static_cast<std::uint8_t>(TransportLaw::coast_perry) ||
+        law > static_cast<std::uint8_t>(TransportLaw::kerosene_vapor) ||
         !transport_law_wire_compatible(wire_version,
                                        static_cast<TransportLaw>(law)) ||
         !reader.real(species.viscosity_reference) ||
@@ -2239,6 +2248,8 @@ bool read_thermophysics(WireReader& reader, std::uint8_t wire_version,
 }
 
 bool read_time(WireReader& reader, TimeControlSpec& value) noexcept {
+  // The base wire predates the optional tagged CFL band extension.
+  value.convective_cfl_margin = 0.0;
   std::uint8_t control = 0U;
   std::uint8_t scheme = 0U;
   if (!reader.byte(control) ||
@@ -2318,6 +2329,8 @@ Status serialize_model(const ValidatedModel& model,
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass) ||
         !valid_solver(model.solver) || !valid_schemes(model.schemes) ||
         !valid_time(model.time) ||
+        (model.solver.coupling == CouplingKind::outer_corrected &&
+         model.time.scheme != TimeScheme::cn_be) ||
         (model.solver.cold_stopping && model.time.scheme != TimeScheme::cn_be) ||
         (model.time.scheme == TimeScheme::cn_be
              ? model.legacy_time_fingerprint == 0U ||
@@ -2374,6 +2387,12 @@ Status serialize_model(const ValidatedModel& model,
         model.solver.pressure.mg_correction_scaling !=
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
+    if (model.turbulence == TurbulenceKind::smagorinsky) {
+      if (!std::isfinite(model.smagorinsky_coefficient) || model.smagorinsky_coefficient < 0.0)
+        return invalid_case(detail_wire);
+      writer.byte(kSmagorinskyWireVersion);
+      writer.real(model.smagorinsky_coefficient);
+    }
     if (model.time.convective_cfl_margin > 0.0) writer.byte(kCflBandWireVersion);
     const bool simple = model.solver.coupling == CouplingKind::simple;
     const bool coast_axes =
@@ -2537,6 +2556,12 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
     if (!reader.byte(version)) return invalid_case(detail_wire);
+    const bool smagorinsky_wire = version == kSmagorinskyWireVersion;
+    double smagorinsky_coefficient = 0.17;
+    if (smagorinsky_wire &&
+        (!reader.real(smagorinsky_coefficient) || !std::isfinite(smagorinsky_coefficient) ||
+         smagorinsky_coefficient < 0.0 || !reader.byte(version)))
+      return invalid_case(detail_wire);
     const bool cfl_band_wire = version == kCflBandWireVersion;
     if (cfl_band_wire && !reader.byte(version)) return invalid_case(detail_wire);
     const bool patch_wire = version == kPatchInletsWireVersion;
@@ -2562,7 +2587,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
                           GeometryKind::coast_runtime_axes_v1))) ||
         !reader.byte(turbulence) ||
         turbulence >
-            static_cast<std::uint8_t>(TurbulenceKind::vreman) ||
+            static_cast<std::uint8_t>(TurbulenceKind::smagorinsky) ||
         !reader.byte(pressure_reference) ||
         pressure_reference >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass)) {
@@ -2574,6 +2599,9 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
                                                   : CouplingKind::piso;
     model.mesh.kind = static_cast<GeometryKind>(geometry);
     model.turbulence = static_cast<TurbulenceKind>(turbulence);
+    if (smagorinsky_wire != (model.turbulence == TurbulenceKind::smagorinsky))
+      return invalid_case(detail_wire);
+    model.smagorinsky_coefficient = smagorinsky_coefficient;
     model.pressure_reference =
         static_cast<PressureReferenceKind>(pressure_reference);
     if (!reader.real3(model.mesh.lower) || !reader.real3(model.mesh.upper) ||
@@ -2807,6 +2835,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         !reader.finished()) {
       return invalid_case(detail_wire);
     }
+    model.solver.coupling = effective_coupling(model.time.scheme, model.solver.coupling);
     out = std::move(model);
     return {};
   } catch (...) {
@@ -2818,7 +2847,9 @@ Status compile_on_root(const fs::path& case_root, int rank,
                        ValidatedModel& model,
                        std::vector<std::uint8_t>& payload,
                        PlanFingerprint* transport_base = nullptr,
-                       const std::array<BoundaryFaceSpec, 6U>* fingerprint_boundaries = nullptr) {
+                       const std::array<BoundaryFaceSpec, 6U>* fingerprint_boundaries = nullptr,
+                       const SolverSpec* fingerprint_solver = nullptr,
+                       const ReactionSpec* fingerprint_reaction = nullptr) {
   try {
     std::error_code error;
     const fs::path canonical_root = fs::canonical(case_root, error);
@@ -2922,7 +2953,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
         !yyjson_is_arr(transported_scalars) ||
         yyjson_arr_size(transported_scalars) > kMaxTransportedScalars ||
         (turbulence != nullptr &&
-         !object_has_exact_keys(turbulence, {"model"}))) {
+         !object_has_exact_keys(turbulence, {"model"}) &&
+         !object_has_exact_keys(turbulence, {"model", "coefficient"}))) {
       return invalid_case(detail_json_schema);
     }
 
@@ -2954,10 +2986,18 @@ Status compile_on_root(const fs::path& case_root, int rank,
                 "single_phase_low_mach_compressible")) {
       return invalid_case(detail_json_value);
     }
+    if (turbulence && yyjson_obj_get(turbulence, "coefficient")) {
+      if (model.turbulence != TurbulenceKind::smagorinsky ||
+          !finite_real(yyjson_obj_get(turbulence, "coefficient"), model.smagorinsky_coefficient) ||
+          model.smagorinsky_coefficient < 0.0)
+        return invalid_case(detail_json_value);
+    }
     if (*coupling_text == "PISO" || *coupling_text == "CN_BE") {
       model.solver.coupling = CouplingKind::piso;
     } else if (*coupling_text == "SIMPLE") {
       model.solver.coupling = CouplingKind::simple;
+    } else if (*coupling_text == "outer_corrected") {
+      model.solver.coupling = CouplingKind::outer_corrected;
     } else {
       return invalid_case(detail_json_value);
     }
@@ -2975,9 +3015,11 @@ Status compile_on_root(const fs::path& case_root, int rank,
          !parse_solver_controls(solver, model.solver)) ||
         !parse_schemes_object(schemes, model.schemes) ||
         !parse_time_object(time, model.time) ||
-        (*coupling_text == "CN_BE" && model.time.scheme != TimeScheme::cn_be)) {
+        ((*coupling_text == "CN_BE" || *coupling_text == "outer_corrected") &&
+         model.time.scheme != TimeScheme::cn_be)) {
       return invalid_case(detail_json_value);
     }
+    model.solver.coupling = effective_coupling(model.time.scheme, model.solver.coupling);
 
     model.transported_scalars.reserve(
         yyjson_arr_size(transported_scalars));
@@ -3224,9 +3266,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
 
     Hash64 hash;
-    hash.text(model.solver.coupling == CouplingKind::piso
-                  ? kSemanticContract
-                  : kSimpleSemanticContract);
+    // The explicit name preserves the already-executed CN/BE algorithm and
+    // its native restart identity. SIMPLE retains its distinct wire contract.
+    hash.text(model.solver.coupling == CouplingKind::simple
+                  ? kSimpleSemanticContract : kSemanticContract);
     hash_mesh(hash, model.mesh);
     if (coast_axes_schema) {
       hash.text("coast-runtime-axes-source-v1");
@@ -3234,13 +3277,15 @@ Status compile_on_root(const fs::path& case_root, int rank,
       hash.bytes(axes_source.data(), axes_source.size());
     }
     hash.integer(static_cast<std::uint8_t>(model.turbulence));
+    if (model.turbulence == TurbulenceKind::smagorinsky)
+      hash.real(model.smagorinsky_coefficient);
     hash.integer(static_cast<std::uint8_t>(model.pressure_reference));
     hash_transported_scalars(hash, model.transported_scalars);
     for (const BoundaryFaceSpec& face :
          fingerprint_boundaries ? *fingerprint_boundaries : model.boundaries) {
       hash_boundary(hash, face);
     }
-    hash_solver(hash, model.solver);
+    hash_solver(hash, fingerprint_solver ? *fingerprint_solver : model.solver);
     hash_schemes(hash, model.schemes);
     Hash64 legacy_time_hash = hash;
     const bool cold_method = model.time.scheme == TimeScheme::cn_be;
@@ -3398,7 +3443,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
     }
 
     if (model.reaction.mode != ReactionMode::none) {
-      const auto& r = model.reaction;
+      const auto& r = fingerprint_reaction ? *fingerprint_reaction : model.reaction;
       hash.text("reaction-case-v1");
       hash.integer(static_cast<std::uint8_t>(r.mode));
       hash.integer(static_cast<std::uint8_t>(r.representation));
@@ -3602,6 +3647,61 @@ Status deserialize_model_for_test(const std::vector<std::uint8_t>& bytes,
 
 }  // namespace detail
 
+Status CaseCompiler::validate_chemistry_refinement(MPI_Comm communicator,
+    const fs::path& source_root, const ValidatedModel& source,
+    const fs::path& target_root, const ValidatedModel& target) {
+  if (communicator == MPI_COMM_NULL)
+    return {StatusCode::invalid_plan, detail_collective};
+  const auto eligible=[](const ValidatedModel& source,const ValidatedModel& target) {
+    const auto& a=source.reaction;
+    const auto& b=target.reaction;
+    return source.fingerprint && target.fingerprint &&
+      a.mode!=ReactionMode::none && b.mode==a.mode &&
+      a.representation==ReactionSpec::Representation::direct_cantera &&
+      b.representation==a.representation &&
+      b.relative_tolerance<=a.relative_tolerance &&
+      b.absolute_tolerance<=a.absolute_tolerance &&
+      b.maximum_internal_steps>=a.maximum_internal_steps &&
+      (b.relative_tolerance<a.relative_tolerance || b.absolute_tolerance<a.absolute_tolerance);
+  };
+  const bool supported=eligible(source,target);
+  std::array<std::uint64_t,3> minimum{source.fingerprint,target.fingerprint,supported ? 1U : 0U},maximum=minimum;
+  if (MPI_Allreduce(MPI_IN_PLACE,minimum.data(),3,MPI_UINT64_T,MPI_MIN,communicator)!=MPI_SUCCESS ||
+      MPI_Allreduce(MPI_IN_PLACE,maximum.data(),3,MPI_UINT64_T,MPI_MAX,communicator)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,detail_collective};
+  if (minimum!=maximum || !minimum[2]) return invalid_case(detail_json_value);
+  int rank{};
+  if (MPI_Comm_rank(communicator,&rank)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,detail_collective};
+  std::array<std::uint64_t,4> header{};
+  if (!rank) try {
+    ValidatedModel actual_source,actual_target,witness;
+    std::vector<std::uint8_t> payload;
+    auto status=compile_on_root(source_root,rank,actual_source,payload);
+    if (status) status=compile_on_root(target_root,rank,actual_target,payload);
+    if (status && (actual_source.fingerprint!=source.fingerprint || actual_target.fingerprint!=target.fingerprint))
+      status=invalid_case(detail_json_value);
+    if (status && !eligible(actual_source,actual_target)) status=invalid_case(detail_json_value);
+    if (status) {
+      auto normalized=actual_target.reaction;
+      normalized.relative_tolerance=actual_source.reaction.relative_tolerance;
+      normalized.absolute_tolerance=actual_source.reaction.absolute_tolerance;
+      normalized.maximum_internal_steps=actual_source.reaction.maximum_internal_steps;
+      status=compile_on_root(target_root,rank,witness,payload,nullptr,nullptr,nullptr,&normalized);
+      if (status && witness.fingerprint!=actual_source.fingerprint)
+        status=invalid_case(detail_json_value);
+    }
+    header[0]=static_cast<std::uint64_t>(status.code);header[1]=status.detail;
+  } catch (const std::bad_alloc&) {
+    header[0]=static_cast<std::uint64_t>(StatusCode::allocation_failure);header[1]=detail_json_value;
+  } catch (...) {
+    header[0]=static_cast<std::uint64_t>(StatusCode::invalid_case);header[1]=detail_json_value;
+  }
+  const auto status=bcast_header(header,communicator);
+  if (!status) return status;
+  return {static_cast<StatusCode>(header[0]),static_cast<std::uint32_t>(header[1])};
+}
+
 Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
     const fs::path& source_root, const ValidatedModel& source,
     const fs::path& target_root, const ValidatedModel& target) {
@@ -3624,10 +3724,11 @@ Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
   }
   outlet_change &= all_law(source, TransportLaw::coast_perry) &&
       all_law(target, TransportLaw::coast_perry);
+  const bool solver_change = source.solver.pressure.algorithm != target.solver.pressure.algorithm;
   const bool supported = source.fingerprint != 0U && target.fingerprint != 0U &&
       source.time.scheme == TimeScheme::cn_be && target.time.scheme == TimeScheme::cn_be &&
       source.reaction.mode == ReactionMode::none && target.reaction.mode == ReactionMode::none &&
-      !source.spray && !target.spray && (transport_change || outlet_change);
+      !source.spray && !target.spray && (transport_change || outlet_change || solver_change);
   std::array<std::uint64_t, 3U> minimum{
       source.fingerprint, target.fingerprint, supported ? 1U : 0U}, maximum = minimum;
   if (MPI_Allreduce(MPI_IN_PLACE, minimum.data(), 3, MPI_UINT64_T, MPI_MIN, communicator) != MPI_SUCCESS ||
@@ -3664,6 +3765,16 @@ Status CaseCompiler::validate_transport_change(MPI_Comm communicator,
       }
       ValidatedModel witness;
       status = compile_on_root(target_root, rank, witness, payload, nullptr, &normalized);
+      source_base = actual_source.fingerprint;
+      target_base = witness.fingerprint;
+    }
+    if (status && solver_change) {
+      auto normalized = actual_target.solver;
+      normalized.pressure.algorithm = actual_source.solver.pressure.algorithm;
+      normalized.pressure.krylov_restart = actual_source.solver.pressure.krylov_restart;
+      normalized.pressure.mg_correction_scaling = actual_source.solver.pressure.mg_correction_scaling;
+      ValidatedModel witness;
+      status = compile_on_root(target_root,rank,witness,payload,nullptr,nullptr,&normalized);
       source_base = actual_source.fingerprint;
       target_base = witness.fingerprint;
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "app_reaction_detail.hpp"
+#include "core_response.hpp"
 #include "hundun/v04_product.hpp"
 #include "models_chemistry_adapter_detail.hpp"
 #include "solver_cartesian_detail.hpp"
@@ -14,8 +15,8 @@
 #include <vector>
 
 namespace hundun::v04::detail {
-// The finite-rate derivative joins the existing conservative BDF/EX2 rate
-// history. It is not a second flow driver or an implicit chemistry integrator.
+// Mean-rate sources enter the conservative species equations and accepted
+// nonadvective history; the common driver owns their time-step transaction.
 class ProductReactionSources {
 public:
   Status configure(const ValidatedModel &model,
@@ -56,6 +57,9 @@ public:
                  ReactionSpec::Representation::direct_cantera) {
 #if defined(HUNDUN_V04_REACTING_CANTERA)
         chemistry::CanteraBackendConfig config;
+        config.continuous_enthalpy = true;
+        config.minimum_temperature=model.thermophysics.minimum_temperature;
+        config.maximum_temperature=model.thermophysics.maximum_temperature;
         config.mechanism = {case_root / r.mechanism_file, r.mechanism_sha256,
                             r.phase};
         config.chemistry = {r.relative_tolerance, r.absolute_tolerance,
@@ -116,6 +120,17 @@ public:
       advance_provider_ = bindings.gas_advance;
       closure_ = *bindings.chemistry_identity;
     }
+    interval_enabled_ = model.time.scheme == TimeScheme::cn_be &&
+        mode_ == ReactionMode::finite_rate_mean && advance_provider_ != nullptr;
+    response_enabled_ = interval_enabled_ && owned_provider_ &&
+        model.reaction.representation == ReactionSpec::Representation::direct_cantera;
+    // Reserve one tenth of the primitive composition coupling tolerance for
+    // lagging an interval response. The gas integrator keeps its own controls.
+    response_relative_ = 0.1 * std::min(1e-10, model.solver.cold_stopping
+        ? model.solver.cold_stopping->species : 1e-10);
+    response_reference_time_ = model.solver.cold_stopping
+        ? model.solver.cold_stopping->reference_time : 0.0;
+    response_absolute_ = std::min(model.reaction.absolute_tolerance, response_relative_);
     identity_ = gas;
     for (const auto &s : model.transported_scalars)
       if (s.role == TransportedScalarRole::species) {
@@ -136,6 +151,8 @@ public:
     diffusion_.resize(ns);
     enthalpies_.resize(ns);
     rates_.resize(ns);
+    final_y_.resize(ns);
+    integrated_delta_.resize(ns);
     outputs_.resize(ns - 1);
     views_.resize(ns - 1);
     std::uint64_t h = UINT64_C(1469598103934665603);
@@ -151,7 +168,15 @@ public:
     string(gas.mechanism_sha256);
     string(gas.phase);
     string(gas.enthalpy_reference);
+    if (!gas.thermodynamic_model.empty()) string(gas.thermodynamic_model);
     integer(static_cast<unsigned>(model.reaction.mode));
+    if (interval_enabled_) string("mean-transport-reactor-cnbe-v1");
+    if (response_enabled_) {
+      string("bounded-interval-response-reference-time-v2");
+      for(double value : {response_relative_,response_absolute_,response_reference_time_}) {
+        std::uint64_t bits{}; std::memcpy(&bits,&value,sizeof(bits)); integer(bits);
+      }
+    }
     integer(gas.composition_fingerprint);
     integer(gas.closure_fingerprint);
     for (const auto &n : gas.species_names)
@@ -178,6 +203,21 @@ public:
     }
     if (mode_ == ReactionMode::esf_tpdf) {
       const auto &spec = *model.reaction.esf;
+      string("esf-mu-mut-iem-v1;transport-full-reactor-v1");
+      string("esf-molecular-stochastic-tuple-bounds-v1");
+      const bool dual_pressure = spec.tcr.mode!=TcrMode::experimental &&
+          effective_coupling(model.time.scheme,model.solver.coupling)==CouplingKind::outer_corrected;
+      string(dual_pressure ? "esf-dual-physical-mean-field0-pressure-v1;whole-tuple-flux-correction-v1;realized-statistical-transport-ledger-v1;statistical-face-energy-ledger-v1;thermal-frozen-transport-v1"
+                           : "esf-bounded-mean-recenter-v1");
+      string("esf-global-transport-then-chemistry-v1");
+      string("esf-ibm-complete-scalar-flux-v1");
+      if (spec.tcr.mode!=TcrMode::experimental) {
+        string("esf-mean-first-joint-implicit-iem-pressure-v2");
+        string("esf-frozen-transport-mass-chemical-increment-v1");
+      }
+      if (model.schemes.species == ConvectionScheme::tvd2 ||
+          model.schemes.species == ConvectionScheme::limited_central2)
+        string("esf-common-mixture-face-v1;mean-predictor-v1");
       integer(spec.fields);
       integer(spec.seed);
       for (double value : spec.initial_species_offsets) {
@@ -207,6 +247,24 @@ public:
     return {};
   }
   bool enabled() const noexcept { return provider_ != nullptr; }
+  bool interval_enabled() const noexcept { return interval_enabled_; }
+  std::string_view reaction_model() const noexcept {
+    if (!enabled()) return "none";
+#if defined(HUNDUN_V04_REACTING_CANTERA)
+    if (cantera_runtime_) return cantera_runtime_->reaction_model();
+#endif
+    return owned_provider_ ? "analytic_isomer" : "external";
+  }
+  std::size_t interval_workspace_bytes() const noexcept {
+    return sizeof(double)*(interval_h_.capacity()+interval_p_.capacity()+interval_density_.capacity()) + response_.bytes();
+  }
+  double interval_response_tolerance() const noexcept { return response_enabled_ ? response_relative_ : 0.0; }
+  double interval_response_absolute_tolerance() const noexcept { return response_enabled_ ? response_absolute_ : 0.0; }
+  double interval_response_error() const noexcept { return response_error_; }
+  std::uint64_t interval_response_reused_cells() const noexcept { return response_reused_; }
+  bool mixing_enabled() const noexcept {
+    return mode_ == ReactionMode::pasr_algebraic_v1;
+  }
   bool esf_enabled() const noexcept { return mode_ == ReactionMode::esf_tpdf; }
   portable::GasQueryProvider *gas_query() const noexcept { return provider_; }
   portable::GasAdvanceProvider *gas_advance() const noexcept {
@@ -229,11 +287,27 @@ public:
   PlanFingerprint fold_identity() const noexcept { return fold_identity_; }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
   Status bind(Span<const FieldId> conserved,
-              Span<const FieldId> source) noexcept {
+              Span<const FieldId> source, std::size_t local_cells) noexcept {
     if (!enabled())
       return conserved.size == 0 && source.size == 0 ? Status{} : invalid();
     if (conserved.size != views_.size() || source.size != views_.size())
       return invalid();
+    if (interval_enabled_) {
+      const auto scalars = 3U + (response_enabled_ ? y_.size() : 0U);
+      if(local_cells==0 || scalars>SIZE_MAX/sizeof(double)-1 ||
+         local_cells>SIZE_MAX/(scalars*sizeof(double)+(response_enabled_ ? 1U : 0U))) return invalid();
+      try {
+        interval_h_.resize(local_cells);
+        interval_p_.resize(local_cells);
+        interval_density_.resize(local_cells);
+        if(response_enabled_) {
+          auto status=response_.prepare(local_cells,y_.size(),dependent_,response_relative_,response_absolute_);
+          if(!status) return status;
+        }
+      } catch(const std::bad_alloc&) {
+        return {StatusCode::allocation_failure,10240};
+      }
+    }
     for (std::size_t i = 0; i < views_.size(); ++i) {
       auto &v = views_[i];
       v.conserved_quantity = conserved.data[i];
@@ -251,6 +325,231 @@ public:
                          : Span<const EquationContributionView>{views_.data(),
                                                                 views_.size()};
   }
+  // The mean BE species solve consumes the integrated stochastic chemistry
+  // as a current-step source. Stored EX2 rates keep using contributions(),
+  // which excludes this interval source from the transport history.
+  Span<const EquationContributionView> coupling_contributions() const noexcept {
+    return esf_enabled() && !esf_sources_ready_ ? Span<const EquationContributionView>{}
+        : Span<const EquationContributionView>{views_.data(),views_.size()};
+  }
+  StageId coupling_source_stage() const noexcept {
+    return esf_enabled() ? 2U : enabled() ? 1U : 177U;
+  }
+  Status publish_esf_sources(Span<const FieldView> sources) noexcept {
+    if (!esf_enabled() || sources.size!=views_.size() || !sources.data) return invalid();
+    for(std::size_t s=0;s<sources.size;++s) {
+      const auto& field=sources.data[s];
+      if(field.field!=views_[s].explicit_source_field || !field.base ||
+          field.components!=1 || field.revision==0) return invalid();
+    }
+    for(std::size_t s=0;s<sources.size;++s)
+      views_[s].explicit_source_density=as_const(sources.data[s]);
+    esf_sources_ready_=true;
+    return {};
+  }
+  Status clear_interval(StateLayers& layers, Int3 cells, bool begin_attempt = false) noexcept {
+    if(begin_attempt) response_.reset();
+    if (!interval_enabled_) return invalid();
+    const auto count=std::size_t(cells.x)*cells.y*cells.z;
+    if(interval_h_.size()!=count || interval_p_.size()!=count ||
+       interval_density_.size()!=count) return invalid();
+    for (std::size_t s = 0; s < outputs_.size(); ++s) {
+      auto status = layers.revise_runtime(FieldLifetime::persistent_workspace,
+                                          views_[s].explicit_source_field);
+      if (status) status = layers.runtime_view(FieldLifetime::persistent_workspace,
+          views_[s].explicit_source_field, outputs_[s]);
+      if (!status) return status;
+      views_[s].explicit_source_density = as_const(outputs_[s]);
+      for (int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x)
+        outputs_[s].unchecked({x,y,z},0)=0;
+    }
+    return {};
+  }
+
+  // Integrate the retained pre-reaction transport state over this same
+  // physical interval. Final species storage uses the reacted state, while
+  // the final transport audit uses the retained transport state.
+  Status advance_transport(const EquationStateView& state,
+      const ThermodynamicsPlan& thermo, StateLayers& layers,
+      Span<const FieldView> candidate, Int3 cells, Span<const std::uint8_t> activity,
+      double start, double dt, RevisionToken step, RevisionToken generation,
+      double& maximum_change, std::uint64_t& chemistry_steps) noexcept {
+    maximum_change=0; chemistry_steps=0;
+    response_error_=0; response_reused_=0;
+    if (!interval_enabled_ || candidate.size != species_.size() ||
+        !candidate.data || !(dt>0) || !std::isfinite(dt) ||
+        !std::isfinite(start) || start<0 || !(start+dt>start) ||
+        !portable::same_gas_identity(identity_,advance_provider_->gas_identity()))
+      return {StatusCode::invalid_plan,10240};
+    for (std::size_t s=0;s<outputs_.size();++s) {
+      auto status=layers.revise_runtime(FieldLifetime::persistent_workspace,
+                                       views_[s].explicit_source_field);
+      if (status) status=layers.runtime_view(FieldLifetime::persistent_workspace,
+          views_[s].explicit_source_field,outputs_[s]);
+      if (!status) return status;
+      views_[s].explicit_source_density=as_const(outputs_[s]);
+    }
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+      const Int3 cell{x,y,z};
+      const auto flat=(std::size_t(z)*cells.y+y)*cells.x+x;
+      if(activity.size && activity.data[flat]==0) continue;
+      const double storage_density=state.density.trial.unchecked(cell,0);
+      if (!(storage_density>0) || !std::isfinite(storage_density))
+        return {StatusCode::numerical_failure,10241};
+      long double sum=0;
+      for(std::size_t s=0;s<species_.size();++s) {
+        const double value=candidate.data[s].unchecked(cell,0);
+        const long double transported=value;
+        if(!std::isfinite(transported) || transported<0 || transported>1)
+          return {StatusCode::rejected_step,10242};
+        independent_[s]=double(transported);
+        y_[species_[s]]=independent_[s];
+        sum+=independent_[s];
+      }
+      if(sum>1) return {StatusCode::rejected_step,10242};
+      y_[dependent_]=double(1-sum);
+      portable::GasQuery query{{step,generation,1},identity_.composition_fingerprint,
+          portable::GasStateCoordinates::pressure_enthalpy,
+          state.pressure_reference+state.pressure_perturbation.trial.unchecked(cell,0),
+          state.enthalpy.trial.unchecked(cell,0),0,y_.data(),y_.size()};
+      interval_density_[flat]=storage_density;
+      interval_h_[flat]=query.enthalpy_j_per_kg;
+      interval_p_[flat]=query.pressure_pa;
+      ThermoState transported;
+      auto status=thermo.evaluate(query.pressure_pa,query.enthalpy_j_per_kg,
+          {independent_.data(),independent_.size()},{},transported);
+      if(!status) return status;
+      query.temperature_k=transported.temperature;
+      portable::GasAdvanceOutput output{{},final_y_.data(),integrated_delta_.data(),y_.size()};
+      const auto result=advance_provider_->advance_gas({query,start,dt},output);
+      if(result!=portable::Status::success)
+        return {StatusCode::numerical_failure,10250U+std::uint32_t(result)};
+      const auto close=[](double a,double b) {
+        return std::isfinite(a)&&std::isfinite(b)&&
+            std::abs(a-b)<=1e-8*std::max({1.,std::abs(a),std::abs(b)});
+      };
+      if(output.final_mass_fractions!=final_y_.data() ||
+          output.integrated_species_density_delta_kg_per_m3!=integrated_delta_.data() ||
+          output.capacity!=y_.size() || output.completed_duration_s!=dt ||
+          output.final_sample.revision!=query.revision ||
+          output.final_sample.composition_fingerprint!=query.composition_fingerprint ||
+          !close(output.final_sample.enthalpy_j_per_kg,query.enthalpy_j_per_kg) ||
+          !close(output.final_sample.pressure_pa,query.pressure_pa))
+        return {StatusCode::numerical_failure,10243};
+      const auto check_response = [&](bool provider_delta) -> Status {
+        double mass=0,scale=0;
+        for(std::size_t j=0;j<y_.size();++j) {
+          const double delta=transported.rho*(final_y_[j]-y_[j]);
+          if(!std::isfinite(final_y_[j]) || final_y_[j]<0 || final_y_[j]>1 ||
+              (provider_delta && !close(delta,integrated_delta_[j])))
+            return {StatusCode::numerical_failure,10244};
+          const double physical_delta=storage_density*(final_y_[j]-y_[j]);
+          mass+=physical_delta; scale+=std::abs(physical_delta);
+        }
+        if(std::abs(mass)>1e-12+1e-10*scale)
+          return {StatusCode::numerical_failure,10245};
+        for(std::size_t e=0;e<identity_.element_names.size();++e) {
+          double residual=0,magnitude=0;
+          for(std::size_t j=0;j<y_.size();++j) {
+            const double value=storage_density*(final_y_[j]-y_[j])*
+                identity_.element_counts[j*identity_.element_names.size()+e]/
+                identity_.molecular_weights_kg_per_kmol[j];
+            residual+=value; magnitude+=std::abs(value);
+          }
+          if(std::abs(residual)>1e-12+1e-10*magnitude)
+            return {StatusCode::numerical_failure,10246};
+        }
+        return {};
+      };
+      status=check_response(true);
+      if(!status) return status;
+      if(response_enabled_) {
+        IntervalReactionResponse::Report response;
+        // The cache stores a dimensionless interval increment. Reference
+        // equation residuals measure rates over reference_time, so their
+        // permissible increment scales with this physical interval's dt.
+        const double interval_scale = response_reference_time_ > 0
+            ? std::min(1.0, dt / response_reference_time_) : 1.0;
+        status=response_.select(flat,{y_.data(),y_.size()},
+            {final_y_.data(),final_y_.size()},response,interval_scale);
+        if(!status) return status;
+        if(response.reused) {
+          status=check_response(false);
+          if(!status) return status;
+          ++response_reused_;
+          response_error_=std::max(response_error_,response.error_ratio);
+        }
+      }
+      for(std::size_t j=0;j<species_.size();++j) {
+        maximum_change=std::max(maximum_change,std::abs(
+            final_y_[species_[j]]-candidate.data[j].unchecked(cell,0)));
+        outputs_[j].unchecked(cell,0)=storage_density*
+            (final_y_[species_[j]]-y_[species_[j]])/dt;
+        candidate.data[j].unchecked(cell,0)=final_y_[species_[j]];
+      }
+      chemistry_steps+=output.internal_step_count;
+    }
+    return {};
+  }
+
+  // Chemistry changes mass fractions within the cell's target mass. Pressure
+  // corrections update that mass; apply the common density factor to every
+  // species source while retaining the integrated specific increment.
+  Status reweight_interval(const EquationStateView& state, StateLayers& layers,
+      Int3 cells, Span<const std::uint8_t> activity,
+      Span<const PrimitiveHistory> transported, Span<const FieldView> reacted,
+      double dt) noexcept {
+    if (transported.size!=outputs_.size() || reacted.size!=outputs_.size() ||
+        !transported.data || !reacted.data || !(dt>0) || !std::isfinite(dt))
+      return {StatusCode::invalid_plan,10247};
+    for(std::size_t s=0;s<outputs_.size();++s) {
+      auto status=layers.revise_runtime(FieldLifetime::persistent_workspace,
+          views_[s].explicit_source_field);
+      if(status) status=layers.runtime_view(FieldLifetime::persistent_workspace,
+          views_[s].explicit_source_field,outputs_[s]);
+      if(!status) return status;
+      views_[s].explicit_source_density=as_const(outputs_[s]);
+    }
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+      const auto i=(std::size_t(z)*cells.y+y)*cells.x+x;
+      if(activity.size && activity.data[i]==0) continue;
+      const Int3 c{x,y,z};
+      const double density=state.density.trial.unchecked(c,0);
+      const double ratio=density/interval_density_[i];
+      if(!(ratio>0) || !std::isfinite(ratio))
+        return {StatusCode::numerical_failure,10247};
+      for(std::size_t j=0;j<outputs_.size();++j) {
+        const double increment=reacted.data[j].unchecked(c,0)-
+            transported.data[j].trial.unchecked(c,0);
+        const double original=interval_density_[i]*increment/dt;
+        if(outputs_[j].unchecked(c,0)!=original)
+          return {StatusCode::numerical_failure,10248};
+        outputs_[j].unchecked(c,0)=density*increment/dt;
+      }
+      interval_density_[i]=density;
+    }
+    return {};
+  }
+
+  double interval_input_residual(const EquationStateView& state,
+      ConstFieldView cp, Int3 cells, Span<const std::uint8_t> activity) const noexcept {
+    double maximum=0;
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+      const auto i=(std::size_t(z)*cells.y+y)*cells.x+x;
+      if(activity.size && activity.data[i]==0) continue;
+      const Int3 c{x,y,z};
+      const double pressure=state.pressure_reference+
+          state.pressure_perturbation.trial.unchecked(c,0);
+      const double h_scale=std::max(1.,cp.unchecked(c,0)*state.temperature.trial.unchecked(c,0));
+      const double error=std::max(
+          std::abs(state.enthalpy.trial.unchecked(c,0)-interval_h_[i])/h_scale,
+          std::abs(pressure-interval_p_[i])/std::max(1.,pressure));
+      if(!std::isfinite(error)) return std::numeric_limits<double>::infinity();
+      maximum=std::max(maximum,error);
+    }
+    return maximum;
+  }
+
   Status prepare(const EquationStateView &state,
                  const ThermodynamicsPlan &thermodynamics,
                  const EquationMaterialView &material,
@@ -308,6 +607,7 @@ public:
           q.pressure_pa = state.pressure_reference +
                           state.pressure_perturbation.trial.unchecked(cell, 0);
           q.enthalpy_j_per_kg = state.enthalpy.trial.unchecked(cell, 0);
+          q.temperature_k = state.temperature.trial.unchecked(cell, 0);
           q.mass_fractions = y_.data();
           q.species_count = y_.size();
           portable::GasQueryOutput out{{},
@@ -384,8 +684,15 @@ public:
             const double mu_eff =
                 material.effective_viscosity.unchecked(cell, 0);
             if (!std::isfinite(mu) || !std::isfinite(mu_eff) || mu <= 0 ||
-                mu_eff < mu || consumption <= 0)
+                mu_eff < mu)
               return numerical();
+            // Zero net chemistry preserves its state, as in COAST's inactive
+            // progress branch. A chemical timescale is needed for active rates.
+            if (scale == 0.0) {
+              for (auto &output : outputs_) output.unchecked(cell, 0) = 0.0;
+              continue;
+            }
+            if (consumption <= 0) return numerical();
             const auto mixing = combustion::evaluate_mixing_time(
                 {std::cbrt(detail::cell_volume(kernels, cell)), diffusion,
                  (mu_eff - mu) / out.sample.density_kg_per_m3,
@@ -423,10 +730,18 @@ private:
   const ProductTcrFoldProvider *fold_provider_{};
   PlanFingerprint fold_identity_{};
   ReactionMode mode_{ReactionMode::none};
+  bool interval_enabled_{};
+  bool esf_sources_ready_{};
+  bool response_enabled_{};
+  double response_reference_time_{};
+  double response_relative_{}, response_absolute_{}, response_error_{};
+  std::uint64_t response_reused_{};
+  IntervalReactionResponse response_;
   double mixing_c_z_{1.0}, turbulent_schmidt_{0.7};
   std::size_t dependent_{};
   std::vector<std::size_t> species_;
   std::vector<double> independent_, y_, diffusion_, enthalpies_, rates_;
+  std::vector<double> final_y_, integrated_delta_, interval_h_, interval_p_, interval_density_;
   std::vector<FieldView> outputs_;
   std::vector<EquationContributionView> views_;
 };

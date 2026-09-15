@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "hundun/v04_cantera.hpp"
+#include "physics_nasa_detail.hpp"
+#include "models_orders_detail.hpp"
+#include "models_roundoff_detail.hpp"
+#include "models_kerosene_cantera_detail.hpp"
 
 #include "cantera/base/Solution.h"
 #include "cantera/kinetics/Kinetics.h"
 #include "cantera/thermo/ThermoPhase.h"
+#include "cantera/thermo/NasaPoly2.h"
+#include "cantera/thermo/Species.h"
 #include "cantera/transport/Transport.h"
 #include "cantera/zeroD/IdealGasConstPressureReactor.h"
 #include "cantera/zeroD/Reactor.h"
@@ -205,17 +211,62 @@ struct Workspace final {
   std::shared_ptr<Cantera::Transport> transport;
   std::shared_ptr<Cantera::Reactor> reactor;
   std::unique_ptr<Cantera::ReactorNet> network;
+  std::unique_ptr<detail::KeroseneMaterial> kerosene;
   std::vector<double> query_diffusion, query_enthalpies, query_rates;
   std::vector<double> advance_fractions, advance_delta;
 };
 
+void continue_enthalpy(Cantera::ThermoPhase& thermo) {
+  for (std::size_t i = 0; i < thermo.nSpecies(); ++i) {
+    auto species = thermo.species(i);
+    const auto nasa = std::dynamic_pointer_cast<Cantera::NasaPoly2>(species->thermo);
+    if (!nasa) continue;
+    std::array<double, 15> coefficients{};
+    std::size_t index{};
+    int type{};
+    double low_temperature{}, high_temperature{}, pressure{};
+    nasa->reportParameters(index, type, low_temperature, high_temperature,
+                           pressure, coefficients.data());
+    std::array<double, 7> low{}, high{};
+    std::copy_n(coefficients.data() + 1, 7, high.data());
+    std::copy_n(coefficients.data() + 8, 7, low.data());
+    coefficients[6] = hundun::v04::detail::nasa_high_enthalpy_constant(
+        coefficients[0], low, high);
+    species->thermo = std::make_shared<Cantera::NasaPoly2>(
+        low_temperature, high_temperature, pressure, coefficients.data());
+    thermo.modifySpecies(i, species);
+  }
+}
+
+// Cantera's relative HP stopping criterion can leave a residual above the
+// public absolute-h gate near the enthalpy reference zero. Finish against
+// that same gate with fixed-composition Newton corrections.
+void solve_pressure_enthalpy(Cantera::ThermoPhase& thermo,double target,double pressure) {
+  thermo.setState_HP(target,pressure,1e-12);
+  const double tolerance=1e-10*std::max(1.,std::abs(target));
+  for(unsigned correction=0;correction<4;++correction) {
+    const double residual=target-thermo.enthalpy_mass();
+    if(std::isfinite(residual) && std::abs(residual)<=tolerance)return;
+    const double cp=thermo.cp_mass();
+    const double temperature=thermo.temperature()+residual/cp;
+    if(!std::isfinite(cp) || cp<=0 || !std::isfinite(temperature) || temperature<=0)
+      throw std::runtime_error("invalid PH correction");
+    thermo.setState_TP(temperature,pressure);
+  }
+  if(std::abs(target-thermo.enthalpy_mass())>tolerance)
+    throw std::runtime_error("PH correction residual exceeds query tolerance");
+}
+
 Workspace make_workspace(const std::filesystem::path &mechanism,
-                         const std::string &phase) {
+                         const std::string &phase, bool continuous_enthalpy) {
   Workspace result;
   result.solution =
       Cantera::newSolution(mechanism.string(), phase, "mixture-averaged");
   result.thermo = result.solution->thermo();
+  if (continuous_enthalpy) continue_enthalpy(*result.thermo);
+  detail::install_order_rates(result.solution);
   result.kinetics = result.solution->kinetics();
+  result.kerosene = detail::kerosene_material(result.solution);
   result.transport = result.solution->transport();
   result.reactor = std::make_shared<Cantera::IdealGasConstPressureReactor>(
       result.solution, false);
@@ -234,6 +285,9 @@ struct CanteraBackendRuntime::Impl final {
   std::filesystem::path mechanism;
   std::string sha256;
   std::string phase;
+  std::string_view reaction_model;
+  bool continuous_enthalpy{};
+  double minimum_temperature{}, maximum_temperature{};
   CompositionIdentity composition;
   portable::GasIdentity gas_identity;
   combustion::ChemistryIdentity closure_identity;
@@ -262,8 +316,20 @@ CanteraBackendRuntime::CanteraBackendRuntime(const CanteraBackendConfig &config)
     throw std::invalid_argument("reacting mechanism SHA-256 mismatch");
   }
   impl_->phase = config.mechanism.phase;
+  impl_->continuous_enthalpy = config.continuous_enthalpy;
+  const bool source_interval = config.minimum_temperature == 0 && config.maximum_temperature == 0;
+  if (!source_interval && (!std::isfinite(config.minimum_temperature) ||
+      !std::isfinite(config.maximum_temperature) || config.minimum_temperature<=0 ||
+      config.maximum_temperature<=config.minimum_temperature))
+    throw std::invalid_argument("invalid thermodynamic admission interval");
+  impl_->minimum_temperature=config.minimum_temperature;
+  impl_->maximum_temperature=config.maximum_temperature;
   auto probe = Cantera::newSolution(impl_->mechanism.string(), impl_->phase,
                                     "mixture-averaged");
+  if (impl_->continuous_enthalpy) continue_enthalpy(*probe->thermo());
+  detail::install_order_rates(probe);
+  const auto kerosene = detail::kerosene_material(probe);
+  impl_->reaction_model = kerosene ? detail::KeroseneMaterial::model : "mechanism_defined_v1";
   impl_->composition = chemistry::composition(*probe->thermo());
   if (probe->thermo()->type() != "ideal-gas")
     throw std::invalid_argument(
@@ -272,6 +338,14 @@ CanteraBackendRuntime::CanteraBackendRuntime(const CanteraBackendConfig &config)
   gas.mechanism_sha256 = impl_->sha256;
   gas.phase = impl_->phase;
   gas.enthalpy_reference = "absolute-standard-formation-298.15K-v1";
+  gas.thermodynamic_model = impl_->continuous_enthalpy
+      ? "continuous-nasa7-v1" : "source-thermo-v1";
+  if (!source_interval) {
+    std::uint64_t lower{}, upper{};
+    std::memcpy(&lower,&config.minimum_temperature,sizeof(lower));
+    std::memcpy(&upper,&config.maximum_temperature,sizeof(upper));
+    gas.thermodynamic_model += "/admission-v1:"+std::to_string(lower)+":"+std::to_string(upper);
+  }
   gas.element_names = impl_->composition.element_names;
   gas.composition_fingerprint = impl_->composition.fingerprint;
   auto &closure = impl_->closure_identity;
@@ -319,10 +393,17 @@ std::string_view CanteraBackendRuntime::mechanism_phase() const noexcept {
   return impl_->phase;
 }
 
+std::string_view CanteraBackendRuntime::reaction_model() const noexcept {
+  return impl_->reaction_model;
+}
+
 bool CanteraBackendRuntime::matches(const CanteraBackendConfig &config) const {
   if (config.mechanism.file != impl_->mechanism ||
       config.mechanism.sha256 != impl_->sha256 ||
       config.mechanism.phase != impl_->phase ||
+      config.continuous_enthalpy != impl_->continuous_enthalpy ||
+      config.minimum_temperature != impl_->minimum_temperature ||
+      config.maximum_temperature != impl_->maximum_temperature ||
       config.species_names.size() != impl_->composition.species.size()) {
     return false;
   }
@@ -346,7 +427,8 @@ CanteraWorkspacePool::CanteraWorkspacePool(
   impl_->workspaces.reserve(workspace_count);
   for (std::size_t index = 0; index < workspace_count; ++index) {
     impl_->workspaces.push_back(
-        make_workspace(runtime->impl_->mechanism, runtime->impl_->phase));
+        make_workspace(runtime->impl_->mechanism, runtime->impl_->phase,
+                       runtime->impl_->continuous_enthalpy));
   }
 }
 
@@ -367,7 +449,8 @@ bool CanteraWorkspacePool::workspaces_are_distinct() const noexcept {
           a.kinetics.get() == b.kinetics.get() ||
           a.transport.get() == b.transport.get() ||
           a.reactor.get() == b.reactor.get() ||
-          a.network.get() == b.network.get()) {
+          a.network.get() == b.network.get() ||
+          (a.kerosene && a.kerosene.get() == b.kerosene.get())) {
         return false;
       }
     }
@@ -440,19 +523,29 @@ CanteraBackend::query_gas(const portable::GasQuery &q,
     return portable::Status::invalid_input;
   auto &w = impl_->pool->workspaces[impl_->lane];
   auto &thermo = *w.thermo;
+  const auto& config=*impl_->runtime->impl_;
+  const double minimum=config.minimum_temperature>0?config.minimum_temperature:thermo.minTemp();
+  const double maximum=config.maximum_temperature>0?config.maximum_temperature:thermo.maxTemp();
   try {
     thermo.setMassFractions_NoNorm(q.mass_fractions);
     if (q.coordinates == portable::GasStateCoordinates::pressure_temperature) {
       if (!std::isfinite(q.temperature_k) ||
-          q.temperature_k < thermo.minTemp() ||
-          q.temperature_k > thermo.maxTemp())
+          q.temperature_k < minimum ||
+          q.temperature_k > maximum)
         return portable::Status::invalid_input;
       thermo.setState_TP(q.temperature_k, q.pressure_pa);
     } else if (q.coordinates ==
                portable::GasStateCoordinates::pressure_enthalpy) {
       if (!std::isfinite(q.enthalpy_j_per_kg))
         return portable::Status::invalid_input;
-      thermo.setState_HP(q.enthalpy_j_per_kg, q.pressure_pa);
+      // A cell query starts from its own hint (or a fixed reference), rather
+      // than the previous cell's reactor endpoint. PH remains authoritative.
+      const double seed = std::isfinite(q.temperature_k) &&
+          q.temperature_k >= minimum && q.temperature_k <= maximum
+          ? q.temperature_k : std::clamp(298.15, minimum, maximum);
+      thermo.setState_TP(seed, q.pressure_pa);
+      // Resolve PH more tightly than the public query conservation gate.
+      solve_pressure_enthalpy(thermo, q.enthalpy_j_per_kg, q.pressure_pa);
     } else
       return portable::Status::invalid_input;
     portable::GasSample sample{q.revision,
@@ -465,8 +558,8 @@ CanteraBackend::query_gas(const portable::GasQuery &q,
                                w.transport->viscosity(),
                                w.transport->thermalConductivity()};
     if (!std::isfinite(sample.temperature_k) ||
-        sample.temperature_k < thermo.minTemp() ||
-        sample.temperature_k > thermo.maxTemp())
+        sample.temperature_k < minimum ||
+        sample.temperature_k > maximum)
       return portable::Status::invalid_input;
     if (!std::isfinite(sample.density_kg_per_m3) ||
         sample.density_kg_per_m3 <= 0 ||
@@ -484,7 +577,8 @@ CanteraBackend::query_gas(const portable::GasQuery &q,
       return portable::Status::provider_failure;
     w.transport->getMixDiffCoeffs(w.query_diffusion.data());
     thermo.getPartialMolarEnthalpies(w.query_enthalpies.data());
-    w.kinetics->getNetProductionRates(w.query_rates.data());
+    if (w.kerosene) w.kerosene->molar_rates(thermo, w.query_rates.data());
+    else w.kinetics->getNetProductionRates(w.query_rates.data());
     for (std::size_t i = 0; i < n; ++i) {
       const auto mw = composition().species[i].molecular_weight_kg_per_kmol;
       // Cantera molar units are kmol: J/kmol -> J/kg and kmol/m3/s -> kg/m3/s.
@@ -518,16 +612,20 @@ CanteraBackend::evaluate(const ThermochemicalPoint &point) const {
     throw std::runtime_error("Cantera workspace pool expired");
   validate_point(point, composition().species.size());
   auto &thermo = *impl_->pool->workspaces[impl_->lane].thermo;
+  const auto& config=*impl_->runtime->impl_;
+  const double minimum=config.minimum_temperature>0?config.minimum_temperature:thermo.minTemp();
+  const double maximum=config.maximum_temperature>0?config.maximum_temperature:thermo.maxTemp();
   try {
     thermo.setMassFractions_NoNorm(point.mass_fractions.data());
-    thermo.setState_HP(point.h_tc_j_per_kg, point.p0_pa);
+    thermo.setState_TP(std::clamp(298.15, minimum, maximum), point.p0_pa);
+    solve_pressure_enthalpy(thermo, point.h_tc_j_per_kg, point.p0_pa);
   } catch (const std::exception &) {
     throw std::runtime_error("Cantera thermodynamic state inversion failed");
   }
   ThermodynamicProperties result{thermo.temperature(), thermo.density(),
                                  thermo.cp_mass(),
                                  thermo.meanMolecularWeight()};
-  if (!std::isfinite(result.temperature_k) || result.temperature_k <= 0.0 ||
+  if (!std::isfinite(result.temperature_k) || result.temperature_k < minimum || result.temperature_k > maximum ||
       !std::isfinite(result.density_kg_per_m3) ||
       result.density_kg_per_m3 <= 0.0 || !std::isfinite(result.cp_j_per_kg_k) ||
       result.cp_j_per_kg_k <= 0.0 ||
@@ -569,87 +667,158 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
       !std::isfinite(r.start_time_s + r.duration_s))
     return portable::Status::invalid_input;
   auto &w = impl_->pool->workspaces[impl_->lane];
-  portable::GasQueryOutput sample{{},
-                                  w.query_diffusion.data(),
-                                  w.query_enthalpies.data(),
-                                  w.query_rates.data(),
-                                  n};
-  auto status = query_gas(r.state, sample);
-  if (status != portable::Status::success)
-    return status;
-  const double initial_rho = sample.sample.density_kg_per_m3;
-  std::uint32_t steps = 0;
-  try {
-    if (r.duration_s > 0) {
-      w.reactor->setEnergyEnabled(true);
-      w.reactor->syncState();
-      w.network->setInitialTime(r.start_time_s);
-      w.network->setTolerances(impl_->controls.relative_tolerance,
-                               impl_->controls.absolute_tolerance);
-      w.network->setMaxSteps(impl_->controls.maximum_internal_steps);
-      w.network->reinitialize();
-      w.network->advance(r.start_time_s + r.duration_s);
-      // ReactorNet and its telemetry AnyMap may allocate internally. This
-      // provider guarantees only fixed HUNDUN-owned scratch, not zero
-      // allocation.
-      const auto count = w.network->solverStats()["steps"].asInt();
-      if (count <= 0 || static_cast<unsigned long>(count) >
-                            std::numeric_limits<std::uint32_t>::max())
-        return portable::Status::provider_failure;
-      steps = static_cast<std::uint32_t>(count);
-      auto thermo = w.reactor->phase()->thermo();
-      if (std::abs(thermo->enthalpy_mass() - r.state.enthalpy_j_per_kg) >
-          1e-8 * std::max(1., std::abs(r.state.enthalpy_j_per_kg)))
-        return portable::Status::conservation_failure;
-      thermo->getMassFractions(w.advance_fractions.data());
-    } else
-      std::copy(r.state.mass_fractions, r.state.mass_fractions + n,
-                w.advance_fractions.begin());
-    double mass = 0, scale = 0, heat = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-      const double y = w.advance_fractions[i];
-      if (!std::isfinite(y) || y < 0 || y > 1)
-        return portable::Status::provider_failure;
-      const double delta = initial_rho * (y - r.state.mass_fractions[i]);
-      w.advance_delta[i] = delta;
-      mass += delta;
-      scale += std::abs(delta);
-      heat -= closure_identity().species[i].formation_enthalpy_j_per_kg * delta;
-    }
-    if (!std::isfinite(heat) || std::abs(mass) > 1e-12 + 1e-9 * scale)
-      return portable::Status::conservation_failure;
-    for (std::size_t e = 0; e < composition().element_names.size(); ++e) {
-      double residual = 0, element_scale = 0;
-      for (std::size_t i = 0; i < n; ++i) {
-        const auto &species = composition().species[i];
-        const double term = w.advance_delta[i] * species.element_counts[e] /
-                            species.molecular_weight_kg_per_kmol;
-        residual += term;
-        element_scale += std::abs(term);
-      }
-      if (std::abs(residual) > 1e-12 + 1e-9 * element_scale)
-        return portable::Status::conservation_failure;
-    }
-    auto final_query = r.state;
-    final_query.mass_fractions = w.advance_fractions.data();
-    status = query_gas(final_query, sample);
+  // Each retry starts from the same PH/Y authority. Solver tolerances are
+  // upper error limits; conservation determines whether an interval publishes.
+  unsigned total_steps = 0;
+  const auto attempt = [&](double relative_tolerance,
+                           double absolute_tolerance) noexcept {
+    bool integration_started = false, steps_recorded = false;
+    portable::GasQueryOutput sample{{},
+                                    w.query_diffusion.data(),
+                                    w.query_enthalpies.data(),
+                                    w.query_rates.data(),
+                                    n};
+    auto status = query_gas(r.state, sample);
     if (status != portable::Status::success)
       return status;
-    std::copy(w.advance_fractions.begin(), w.advance_fractions.end(),
-              out.final_mass_fractions);
-    std::copy(w.advance_delta.begin(), w.advance_delta.end(),
-              out.integrated_species_density_delta_kg_per_m3);
-    out.final_sample = sample.sample;
-    out.completed_duration_s = r.duration_s;
-    out.final_sample.enthalpy_j_per_kg = r.state.enthalpy_j_per_kg;
-    out.internal_step_count = steps;
-    out.integrated_heat_release_j_per_m3 = heat;
-    return portable::Status::success;
-  } catch (const std::bad_alloc &) {
-    return portable::Status::capacity_exceeded;
-  } catch (...) {
-    return portable::Status::provider_failure;
+    const double initial_rho = sample.sample.density_kg_per_m3;
+    std::uint32_t steps = 0;
+    try {
+      if (r.duration_s > 0) {
+        long count = 0;
+        if (w.kerosene) {
+          integration_started = true;
+          w.kerosene->integrate(*w.thermo, r.duration_s, relative_tolerance,
+              absolute_tolerance, impl_->controls.maximum_internal_steps - total_steps,
+              w.advance_fractions);
+          count = w.kerosene->steps();
+        } else {
+          // Independent cell intervals share storage, not reactor volume history.
+          w.reactor->setInitialVolume(1.0);
+          w.reactor->setEnergyEnabled(true);
+          w.reactor->syncState();
+          w.network->setInitialTime(0.0);
+          w.network->setTolerances(relative_tolerance, absolute_tolerance);
+          w.network->setMaxSteps(impl_->controls.maximum_internal_steps - total_steps);
+          w.network->reinitialize();
+          integration_started = true;
+          w.network->advance(r.duration_s);
+          count = w.network->solverStats()["steps"].asInt();
+          auto thermo = w.reactor->phase()->thermo();
+          thermo->getMassFractions(w.advance_fractions.data());
+        }
+        if (count <= 0 || static_cast<unsigned long>(count) >
+                              std::numeric_limits<std::uint32_t>::max()) {
+          if (count < 0) total_steps = impl_->controls.maximum_internal_steps;
+          return portable::Status::provider_failure;
+        }
+        steps = static_cast<std::uint32_t>(count);
+        total_steps += steps;
+        steps_recorded = true;
+        if (!w.kerosene && std::abs(w.thermo->enthalpy_mass() - r.state.enthalpy_j_per_kg) >
+            1e-8 * std::max(1., std::abs(r.state.enthalpy_j_per_kg)))
+          return portable::Status::conservation_failure;
+        if (!detail::bound_chemistry_roundoff(
+                w.advance_fractions, impl_->controls.absolute_tolerance))
+          return portable::Status::provider_failure;
+      } else
+        std::copy(r.state.mass_fractions, r.state.mass_fractions + n,
+                  w.advance_fractions.begin());
+      // Publish complete compositions at the same closure tolerance used by
+      // ESF. Reintegrate an inaccurate endpoint; retain every elemental
+      // inventory.
+      const double fraction_sum = std::accumulate(
+          w.advance_fractions.begin(), w.advance_fractions.end(), 0.);
+      if (!std::isfinite(fraction_sum) || std::abs(fraction_sum - 1) > 2e-12)
+        return portable::Status::conservation_failure;
+      double mass = 0, scale = 0, heat = 0;
+      for (std::size_t i = 0; i < n; ++i) {
+        const double y = w.advance_fractions[i];
+        if (!std::isfinite(y) || y < 0 || y > 1)
+          return portable::Status::provider_failure;
+        const double delta = initial_rho * (y - r.state.mass_fractions[i]);
+        w.advance_delta[i] = delta;
+        mass += delta;
+        scale += std::abs(delta);
+        heat -=
+            closure_identity().species[i].formation_enthalpy_j_per_kg * delta;
+      }
+      if (!std::isfinite(heat) || std::abs(mass) > 1e-12 + 1e-9 * scale)
+        return portable::Status::conservation_failure;
+      for (std::size_t e = 0; e < composition().element_names.size(); ++e) {
+        double residual = 0, element_scale = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+          const auto &species = composition().species[i];
+          const double term = w.advance_delta[i] * species.element_counts[e] /
+                              species.molecular_weight_kg_per_kmol;
+          residual += term;
+          element_scale += std::abs(term);
+        }
+        if (std::abs(residual) > 1e-12 + 1e-9 * element_scale)
+          return portable::Status::conservation_failure;
+      }
+      auto final_query = r.state;
+      final_query.mass_fractions = w.advance_fractions.data();
+      status = query_gas(final_query, sample);
+      if (status != portable::Status::success)
+        return status;
+      std::copy(w.advance_fractions.begin(), w.advance_fractions.end(),
+                out.final_mass_fractions);
+      std::copy(w.advance_delta.begin(), w.advance_delta.end(),
+                out.integrated_species_density_delta_kg_per_m3);
+      out.final_sample = sample.sample;
+      out.completed_duration_s = r.duration_s;
+      out.final_sample.enthalpy_j_per_kg = r.state.enthalpy_j_per_kg;
+      out.internal_step_count = steps;
+      out.integrated_heat_release_j_per_m3 = heat;
+      return portable::Status::success;
+    } catch (const std::bad_alloc &) {
+      return portable::Status::capacity_exceeded;
+    } catch (...) {
+      if (integration_started && !steps_recorded) {
+        try {
+          const auto count = w.kerosene ? w.kerosene->steps() :
+              w.network->solverStats()["steps"].asInt();
+          if (count < 0) total_steps = impl_->controls.maximum_internal_steps;
+          else total_steps += static_cast<unsigned>(count);
+        } catch (...) {
+          total_steps =
+              static_cast<unsigned>(impl_->controls.maximum_internal_steps);
+        }
+      }
+      return portable::Status::provider_failure;
+    }
+  };
+  double relative = impl_->controls.relative_tolerance;
+  double absolute = impl_->controls.absolute_tolerance;
+  // Keep four bounded refinement opportunities when a caller already uses
+  // a tighter absolute tolerance than the legacy 1e-18 refinement floor.
+  // Admission retains the original caller tolerance throughout the retries.
+  const double absolute_floor = absolute < 1e-18
+      ? std::max(std::numeric_limits<double>::min(), absolute * 1e-4) : 1e-18;
+  auto result = portable::Status::provider_failure;
+  for (unsigned refinement = 0; refinement < 5; ++refinement) {
+    if (total_steps >=
+        static_cast<unsigned>(impl_->controls.maximum_internal_steps))
+      break;
+    result = attempt(relative, absolute);
+    if (result == portable::Status::success) {
+      out.internal_step_count = total_steps;
+      return result;
+    }
+    if (result != portable::Status::conservation_failure &&
+        result != portable::Status::provider_failure)
+      return result;
+    const double next_relative =
+        std::min(relative, std::max(1e-13, relative * .1));
+    const double next_absolute =
+        std::min(absolute, std::max(absolute_floor, absolute * .1));
+    if (next_relative == relative && next_absolute == absolute)
+      break;
+    relative = next_relative;
+    absolute = next_absolute;
   }
+  return result;
 }
 
 TransportProperties
@@ -724,6 +893,34 @@ CanteraBackend::integrate(const ChemistryIntervalRequest &request) {
   }
 
   auto &workspace = impl_->pool->workspaces[impl_->lane];
+  if (workspace.kerosene) {
+    // Both public chemistry interfaces share the PH/Y retry and conservation
+    // transaction. Legacy callers keep their existing request/report types.
+    auto result = failure(ChemistryStatus::integration_failure);
+    portable::GasAdvanceQuery query;
+    query.state.revision.algorithm_version = 1;
+    query.state.composition_fingerprint = composition().fingerprint;
+    query.state.pressure_pa = request.state.p0_pa;
+    query.state.enthalpy_j_per_kg = request.state.h_tc_j_per_kg;
+    query.state.mass_fractions = request.state.mass_fractions.data();
+    query.state.species_count = request.state.mass_fractions.size();
+    query.start_time_s = request.start_time_s;
+    query.duration_s = request.duration_s;
+    portable::GasAdvanceOutput output{{}, result.final_state.mass_fractions.data(),
+        result.integrated_rho_y_delta_kg_per_m3.data(), query.state.species_count};
+    const auto status = advance_gas(query, output);
+    if (status != portable::Status::success) {
+      if (status == portable::Status::conservation_failure)
+        return failure(ChemistryStatus::conservation_failure);
+      if (status == portable::Status::invalid_input)
+        return failure(ChemistryStatus::invalid_input);
+      return failure(ChemistryStatus::integration_failure);
+    }
+    result.status = ChemistryStatus::success;
+    result.completed_duration_s = output.completed_duration_s;
+    result.internal_step_count = output.internal_step_count;
+    return result;
+  }
   ThermodynamicProperties initial;
   try {
     initial = evaluate(request.state);
@@ -731,14 +928,15 @@ CanteraBackend::integrate(const ChemistryIntervalRequest &request) {
     return failure(ChemistryStatus::state_inversion_failure);
   }
   try {
+    workspace.reactor->setInitialVolume(1.0);
     workspace.reactor->setEnergyEnabled(true);
     workspace.reactor->syncState();
-    workspace.network->setInitialTime(request.start_time_s);
+    workspace.network->setInitialTime(0.0);
     workspace.network->setTolerances(impl_->controls.relative_tolerance,
                                      impl_->controls.absolute_tolerance);
     workspace.network->setMaxSteps(impl_->controls.maximum_internal_steps);
     workspace.network->reinitialize();
-    workspace.network->advance(request.start_time_s + request.duration_s);
+    workspace.network->advance(request.duration_s);
   } catch (const std::exception &) {
     return failure(ChemistryStatus::integration_failure);
   }
@@ -746,6 +944,9 @@ CanteraBackend::integrate(const ChemistryIntervalRequest &request) {
   const auto final_thermo = workspace.reactor->phase()->thermo();
   std::vector<double> final_fractions(final_thermo->nSpecies());
   final_thermo->getMassFractions(final_fractions.data());
+  if (!detail::bound_chemistry_roundoff(final_fractions,
+                                       impl_->controls.absolute_tolerance))
+    return failure(ChemistryStatus::non_finite_output);
   const bool finite = std::all_of(
       final_fractions.begin(), final_fractions.end(),
       [](double value) { return std::isfinite(value) && value >= 0.0; });

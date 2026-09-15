@@ -6,6 +6,7 @@
 #include "../support/turbulence_fixture.hpp"
 #include "../../src/solver_ibm_scalar_transport_detail.hpp"
 #include "../../src/solver_equation_detail.hpp"
+#include "../../src/solver_esf_flux_detail.hpp"
 
 #include <mpi.h>
 
@@ -267,6 +268,51 @@ bool test_prescribed_interface_mass_flux() {
   }
   passed &= expect(interface.validate_interface_flux(as_const(flux)),
                    "prescribed and sealed interface flux validates");
+  // The post-reactor tuple correction keeps this fixed physical inlet.
+  // Its base and final mass flux agree, so every fluid tuple is unchanged.
+  {
+    auto seed=make_force_field(271,cells,4,0,271,7271);
+    auto iterate=make_force_field(272,cells,4,1,272,7272);
+    auto next=make_force_field(273,cells,4,0,273,7273);
+    auto rho=make_force_field(274,cells,1,1,274,7274);
+    auto velocity=make_force_field(275,cells,3,1,275,7275);
+    std::fill(rho.storage.begin(),rho.storage.end(),1.0);
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+      const Int3 c{x,y,z};
+      seed.view.unchecked(c,0)=.2;seed.view.unchecked(c,1)=.3;
+      seed.view.unchecked(c,2)=.5;seed.view.unchecked(c,3)=300000;
+    }
+    HaloEngine halo;ReductionEngine reductions;
+    const HaloFieldSpec spec{272,1,4};
+    auto status=halo.reserve(MPI_COMM_SELF,fixture.patch,{&spec,1},physical_boundary.halo_topology());
+    if(status)status=ReductionEngine::compile(MPI_COMM_SELF,ReductionMode::mpi_allreduce,4,reductions);
+    detail::StatisticalFluxReport report;
+    const auto solve=[&](const IbmEquationInterfacePlan* inlet) {
+      return detail::correct_statistical_flux(kernels,as_const(rho.view),as_const(seed.view),
+          as_const(flux),as_const(flux),1e-7,fixture.topology.region(),false,
+          physical_boundary,as_const(velocity.view),iterate.view,next.view,halo,178,reductions,
+          [](FieldView){return Status{};},report,{},false,inlet);
+    };
+    passed &= expect(status,"statistical inlet correction workspace compiles");
+    if(!status)return false;
+    passed &= expect(!solve(nullptr) && report.failure_reason==2,
+        "prescribed IBM flux requires its source authority");
+    status=solve(&interface);
+    passed &= expect(status && report.convergence_residual==0,
+        "statistical correction preserves the prescribed inlet mass flux");
+    if(status)for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+      for(unsigned c=0;c<4;++c)passed &= expect(iterate.view.unchecked({x,y,z},c)==seed.view.unchecked({x,y,z},c),
+          "zero pressure-flux increment keeps each tuple");
+    const auto& link=links.data[source_index];
+    auto face=select(flux,link.direction);
+    face.unchecked(face_index(link))=0;
+    passed &= expect(!solve(&interface) && report.failure_reason==5,
+        "statistical correction detects a missing prescribed source");
+    face.unchecked(face_index(link))=prescribed_phi*2;
+    passed &= expect(!solve(&interface) && report.failure_reason==5,
+        "statistical correction detects a changed prescribed source");
+    face.unchecked(face_index(link))=prescribed_phi;
+  }
   double queried_phi = -1.0;
   const ImmersedLink& source_link = links.data[source_index];
   const CartesianAxis source_axis =

@@ -28,3 +28,7 @@ checked("coupled resumed CLI 1-to-4 ranks" "${MPIEXEC}" "${NUMPROC_FLAG}" 4 "${P
   --steps 2 --output-interval 1 --restart-interval 1)
 checked("resumed evidence" "${PYTHON}" "${VALIDATOR}" runtime
   "${PROBE_ROOT}/resumed/evidence.jsonl" --run-start-manifest "${manifest}")
+if(CASE_ROOT MATCHES "/smag$")
+  checked("native SGS output" "${PYTHON}"
+    "${CMAKE_CURRENT_LIST_DIR}/sgs_output_test.py" "${PROBE_ROOT}" "${CASE_ROOT}")
+endif()

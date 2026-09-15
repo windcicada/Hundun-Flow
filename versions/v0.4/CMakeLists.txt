@@ -300,6 +300,8 @@ set(hundun_v04_core_sources
   src/physics_transport.cpp
   src/physics_vreman.cpp
   src/physics_wale.cpp
+  src/physics_smag.cpp
+  src/physics_sgs.cpp
   src/physics_wall_function.cpp
   src/io_service_plan.cpp
   src/io_restart.cpp
@@ -382,6 +384,10 @@ target_include_directories(v04_thin_domain_runner PRIVATE
 add_executable(v04_coast_restart_import
   "${hundun_repository_root}/tools/v04_coast_restart_import.cpp")
 target_link_libraries(v04_coast_restart_import PRIVATE hundun_v04_core)
+
+# Full stochastic current-state migration with explicit method recovery.
+add_executable(v04_pdf_import "${hundun_repository_root}/tools/v04_pdf_import.cpp")
+target_link_libraries(v04_pdf_import PRIVATE hundun_v04_core)
 
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the

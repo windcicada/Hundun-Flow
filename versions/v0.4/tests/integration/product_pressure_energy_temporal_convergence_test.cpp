@@ -32,9 +32,12 @@ constexpr double kBaseTemperature = 320.0;
 constexpr double kPressureAmplitude = 50.0;
 constexpr double kStreamwiseVelocity = 0.50;
 constexpr double kCrossflowAmplitude = 0.20;
-constexpr double kCoarseDt = 1.25e-4;
+// Sixteen coarse steps place both BE startup controls in their asymptotic
+// range; the analytic branch has one fewer integrated step at each level.
+constexpr double kCoarseDt = 6.25e-5;
 constexpr double kEvolutionTime = 1.0e-3;
 constexpr double kPressureLinearTolerance = 1.0e-13;
+constexpr double kMinimumTimeOrder = 0.9;
 constexpr std::array<double, 3U> kRefinement{{1.0, 2.0, 4.0}};
 constexpr double kMolecularWeight = 28.96546;
 constexpr double kGasConstant = kUniversalGasConstant / kMolecularWeight;
@@ -59,12 +62,6 @@ bool backward_euler_coefficients(BdfCoefficients bdf, double dt) noexcept {
   return bdf.order == 1U && close_coefficient(bdf.a0, 1.0 / dt) &&
          close_coefficient(bdf.a1, -1.0 / dt) &&
          close_coefficient(bdf.a2, 0.0);
-}
-
-bool constant_bdf2_coefficients(BdfCoefficients bdf, double dt) noexcept {
-  return bdf.order == 2U && close_coefficient(bdf.a0, 1.5 / dt) &&
-         close_coefficient(bdf.a1, -2.0 / dt) &&
-         close_coefficient(bdf.a2, 0.5 / dt);
 }
 
 std::size_t cell_offset(Int3 cells, Int3 cell,
@@ -93,6 +90,7 @@ ValidatedModel temporal_model() {
   model.turbulence = TurbulenceKind::none;
   model.schemes.momentum = ConvectionScheme::central2;
   model.schemes.enthalpy = ConvectionScheme::central2;
+  model.time.scheme = TimeScheme::backward_euler;
   model.time.initial_dt = kCoarseDt;
   model.time.minimum_dt = kCoarseDt / 16.0;
   model.time.maximum_dt = kCoarseDt;
@@ -612,6 +610,7 @@ bool physical_step(const ValidatedModel& model, const DriverStepReport& report,
 
 struct StepAudit {
   double time{};
+  double dt{};
   BdfCoefficients bdf{};
   StepOrigin origin{StepOrigin::fresh_start};
   std::uint32_t attempts{};
@@ -637,6 +636,7 @@ struct StepAudit {
 StepAudit audit_step(const DriverStepReport& report) {
   StepAudit audit;
   audit.time = report.accepted_time;
+  audit.dt = report.proposal.dt;
   audit.bdf = report.effective_bdf;
   audit.origin = report.proposal.origin;
   audit.attempts = report.attempts;
@@ -740,10 +740,8 @@ bool run_level(const ValidatedModel& model, double dt, Trajectory& out) {
   previous = accepted;
   accepted = current;
 
-  // Each refinement starts from the same exact Restart state, takes exactly
-  // one BE recovery step at its own dt, then uses constant-step BDF2.  The BE
-  // state has O(dt^2) error and therefore supplies a second-order-consistent
-  // starting value without a large variable-ratio jump.
+  // Each refinement starts from the same exact Restart state and uses
+  // constant-step BE throughout recovery and accepted production steps.
   for (std::uint64_t step_index = 1U; step_index < step_count; ++step_index) {
     DriverStepReport report;
     status = driver.advance(limits, report);
@@ -752,7 +750,7 @@ bool run_level(const ValidatedModel& model, double dt, Trajectory& out) {
       status = {StatusCode::invalid_plan, 0U};
     passed = static_cast<bool>(status) && report.accepted &&
              report.proposal.origin == StepOrigin::accepted &&
-             constant_bdf2_coefficients(report.effective_bdf, dt) &&
+             backward_euler_coefficients(report.effective_bdf, dt) &&
              report.proposal.dt == dt &&
              physical_step(model, report, current, accepted, previous,
                            out.physical);
@@ -1123,12 +1121,10 @@ ConvergenceMetric metric(std::string_view name, double coarse_fine,
 }
 
 bool advance_ode(const std::vector<StepAudit>& steps, double decay_rate,
-                 double& previous, double& accepted,
-                 bool require_bdf2 = false) {
+                 double& previous, double& accepted) {
   for (const StepAudit& step : steps) {
     const BdfCoefficients bdf = step.bdf;
-    if ((require_bdf2 && bdf.order != 2U) ||
-        (!require_bdf2 && bdf.order != 1U && bdf.order != 2U) ||
+    if (!backward_euler_coefficients(bdf, step.dt) ||
         !std::isfinite(bdf.a0) || !std::isfinite(bdf.a1) ||
         !std::isfinite(bdf.a2) || !(bdf.a0 + decay_rate > 0.0))
       return false;
@@ -1148,14 +1144,13 @@ double mirror_history_ode_terminal(const Trajectory& trajectory,
       trajectory.production_steps.empty() || !(decay_rate > 0.0))
     return std::numeric_limits<double>::infinity();
   // Exactly mirror the Restart path: y(0) is duplicated into n and n-1,
-  // then the recorded level-dt BE recovery and production BDF2 coefficients
-  // are replayed.  Any startup/history pollution in the Product fixture is
-  // therefore also present in this scalar control.
+  // then the recorded BE coefficients are replayed. Any startup/history
+  // error in the Product fixture is also present in this scalar control.
   double previous = 1.0;
   double accepted = 1.0;
   if (!advance_ode(trajectory.common_steps, decay_rate, previous, accepted) ||
       !advance_ode(trajectory.production_steps, decay_rate, previous,
-                   accepted, true))
+                   accepted))
     return std::numeric_limits<double>::infinity();
   return accepted;
 }
@@ -1165,16 +1160,14 @@ double exact_branch_history_ode_terminal(const Trajectory& trajectory,
   if (trajectory.common_steps.empty() || trajectory.production_steps.empty() ||
       !(decay_rate > 0.0))
     return std::numeric_limits<double>::infinity();
-  // Replace the branch operands by the analytic solution at the exact two
-  // history times, then replay only Product's production BDF coefficients.
-  // This removes all Restart/BE state error without changing the constant-dt
-  // time-coefficient path under test.
+  // Initialize the branch operands from the analytic solution at their
+  // history times, then replay Product's production BE coefficients.
   const double accepted_time = trajectory.common_steps.back().time;
   const double previous_time = trajectory.common_start.time;
   double previous = std::exp(-decay_rate * previous_time);
   double accepted = std::exp(-decay_rate * accepted_time);
   if (!advance_ode(trajectory.production_steps, decay_rate, previous,
-                   accepted, true))
+                   accepted))
     return std::numeric_limits<double>::infinity();
   return accepted;
 }
@@ -1191,7 +1184,7 @@ bool ode_self_convergence(std::string_view label,
       std::all_of(terminals.begin(), terminals.end(), [](double value) {
         return std::isfinite(value);
       }) &&
-      std::isfinite(order) && order >= 1.8;
+      std::isfinite(order) && order >= kMinimumTimeOrder;
   std::cerr << std::setprecision(12) << label << " ODE terminals="
             << terminals[0U] << ',' << terminals[1U] << ','
             << terminals[2U] << " differences=" << coarse_fine << ','
@@ -1252,7 +1245,7 @@ void dump_step_diagnostics(const std::array<Trajectory, 3U>& trajectories) {
       }
     };
     dump("startup", trajectories[level].common_steps);
-    dump("BDF2", trajectories[level].production_steps);
+    dump("BE production", trajectories[level].production_steps);
   }
 }
 
@@ -1301,7 +1294,7 @@ void dump_gate_summaries(const std::array<Trajectory, 3U>& trajectories) {
               << " dt/N=" << kCoarseDt / kRefinement[level] << '/'
               << trajectory.common_steps.size() +
                      trajectory.production_steps.size()
-              << " BE/BDF2=" << trajectory.common_steps.size() << '/'
+              << " BE recovery/production=" << trajectory.common_steps.size() << '/'
               << trajectory.production_steps.size()
               << " max-terminal(eos,C,E,mass,gauge)=" << gate.maximum_eos
               << ',' << gate.maximum_continuity << ',' << gate.maximum_energy
@@ -1395,8 +1388,8 @@ bool test_scalar_splitting_observation() {
                                             trajectories[2U].terminal.passive[1U]);
   const double solution_order = std::log(coarse_fine / fine_quarter) / std::log(2.0);
   std::cerr << "scalar-conservative solution-order=" << solution_order << '\n';
-  passed &= expect(std::isfinite(solution_order) && solution_order >= 1.8,
-                   "smooth passive solution retains second-order time convergence");
+  passed &= expect(std::isfinite(solution_order) && solution_order >= kMinimumTimeOrder,
+                   "smooth passive solution retains first-order BE time convergence");
   return passed;
 }
 
@@ -1416,8 +1409,7 @@ bool test_product_pressure_energy_temporal_convergence(CouplingKind coupling) {
       "face-local limiter reports remain coherent without global collapse");
 
   // The physical Restart fields are bitwise identical.  Only the Restart dt
-  // metadata differs, so every level performs its own one-step BE recovery
-  // followed by an entirely constant-step BDF2 trajectory.
+  // metadata differs; each level performs a constant-step BE trajectory.
   const auto exact_vector = [](const std::vector<double>& left,
                                const std::vector<double>& right) {
     return left == right;
@@ -1472,9 +1464,9 @@ bool test_product_pressure_energy_temporal_convergence(CouplingKind coupling) {
                            value.fine_quarter > 64.0 *
                                                     std::numeric_limits<double>::
                                                         epsilon() &&
-                           std::isfinite(value.order) && value.order >= 1.8;
+                           std::isfinite(value.order) && value.order >= kMinimumTimeOrder;
     endpoint_converged &= converged;
-    passed &= expect(converged, "endpoint field converges at order >= 1.8");
+    passed &= expect(converged, "endpoint field converges at BE order >= 0.9");
     std::cerr << std::setprecision(12) << value.name
               << " E(dt,dt/2)=" << value.coarse_fine
               << " E(dt/2,dt/4)=" << value.fine_quarter
@@ -1485,7 +1477,7 @@ bool test_product_pressure_energy_temporal_convergence(CouplingKind coupling) {
   const bool ode_converged = bdf_history_ode_oracle(trajectories);
   passed &= expect(ode_converged,
                    "mirror-startup and analytic-history ODE controls with "
-                   "ProductDriver BDF sequences are second order");
+                   "ProductDriver BE sequences are first order");
   if (!endpoint_converged || !ode_converged)
     dump_step_diagnostics(trajectories);
 
@@ -1595,8 +1587,8 @@ bool test_method_recovery_mass_target() {
   if (status) status = exact.initialize_restart(signed_image);
   DriverStepReport exact_step;
   if (status) status = exact.advance(limits, exact_step);
-  passed &= expect(status && exact_step.accepted && exact_step.effective_bdf.order == 2U,
-      "same-method exact continuation retains BDF2");
+  passed &= expect(status && exact_step.accepted && backward_euler_coefficients(exact_step.effective_bdf, exact_step.proposal.dt),
+      "same-method exact continuation retains BE coefficients");
   const auto& momentum = exact_step.terminal_equations;
   passed &= expect(momentum.momentum_normalization_valid && momentum.momentum_reference_velocity > 0.0 &&
       momentum.momentum_region_cells[0] == 0U && momentum.momentum_region_cells[1] == kCellCount,
@@ -1660,9 +1652,9 @@ bool test_method_recovery_mass_target() {
   DriverStepReport first_recovery, second_recovery;
   if (local) local = rebuilt.advance(limits, first_recovery);
   if (local) local = rebuilt.advance(limits, second_recovery);
-  passed &= expect(local && first_recovery.effective_bdf.order == 1U &&
-      second_recovery.effective_bdf.order == 2U && rebuilt.closed_mass_target() == saved.closed_mass_target,
-      "method recovery inserts one BE step then BDF2 without redefining physical mass");
+  passed &= expect(local && backward_euler_coefficients(first_recovery.effective_bdf, first_recovery.proposal.dt) &&
+      backward_euler_coefficients(second_recovery.effective_bdf, second_recovery.proposal.dt) && rebuilt.closed_mass_target() == saved.closed_mass_target,
+      "method recovery retains BE coefficients and the physical mass target");
   RestartSnapshot new_method;
   if (local) local = rebuilt.committed_restart_snapshot(new_method);
   const auto new_method_root = directory / "rebuilt-method";
@@ -1678,9 +1670,9 @@ bool test_method_recovery_mass_target() {
       "exact restart after method recovery inherits the rebuilt method's rates");
   DriverStepReport exact_again;
   if (local) local = exact_after_recovery.advance(limits, exact_again);
-  passed &= expect(local && exact_again.accepted && exact_again.effective_bdf.order == 2U &&
+  passed &= expect(local && exact_again.accepted && backward_euler_coefficients(exact_again.effective_bdf, exact_again.proposal.dt) &&
       exact_after_recovery.closed_mass_target() == saved.closed_mass_target,
-      "complete chain ends with exact BDF2 and the original physical mass target");
+      "complete chain ends with exact BE history and the original physical mass target");
   std::cerr << "method_history unsigned_rejected=" << rejected_unknown
             << " signed_exact_bdf=" << unsigned(exact_step.effective_bdf.order)
             << " method_recovery_bdf=" << unsigned(first_recovery.effective_bdf.order)

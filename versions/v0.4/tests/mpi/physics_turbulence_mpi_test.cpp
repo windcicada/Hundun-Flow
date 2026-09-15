@@ -114,7 +114,7 @@ TurbulenceOwnedField gradient_field(const TurbulenceFixture& fixture,
   return result;
 }
 
-bool test_collective_binding_and_hot_update(int rank, int size) {
+bool test_collective_binding_and_hot_update(int rank, int size, TurbulenceKind kind) {
   CartesianGeometryPlan geometry;
   MeshPatch patch;
   bool passed = expect(static_cast<bool>(CartesianGeometryCompiler::compile(
@@ -128,8 +128,10 @@ bool test_collective_binding_and_hot_update(int rank, int size) {
                        {fields.data(), fields.size()})),
                    rank, "divergent registry configures");
   TurbulencePlanSpec divergent_spec;
+  divergent_spec.kind = kind;
   if (size > 1 && rank == 1) {
-    divergent_spec.kind = TurbulenceKind::wale;
+    if (kind == TurbulenceKind::smagorinsky) divergent_spec.smagorinsky_coefficient = .18;
+    else divergent_spec.kind = TurbulenceKind::wale;
   }
   TurbulencePlan rejected;
   const Status divergent = TurbulencePlan::compile(
@@ -142,7 +144,9 @@ bool test_collective_binding_and_hot_update(int rank, int size) {
   }
 
   TurbulenceFixture fixture;
-  passed &= expect(fixture.initialize(TurbulencePlanSpec{},
+  TurbulencePlanSpec spec;
+  spec.kind = kind;
+  passed &= expect(fixture.initialize(spec,
                                       GeometryKind::uniform, MPI_COMM_WORLD,
                                       5),
                    rank, "default distributed Vreman plan compiles");
@@ -224,6 +228,30 @@ bool test_collective_binding_and_hot_update(int rank, int size) {
                    "distributed candidate evaluation is exact, stateless, "
                    "and allocation-free");
 
+  std::vector<SgsState> sgs(fixture.gradients.size());
+  Status sgs_status;
+  {
+    allocation_observer::Guard guard;
+    sgs_status = fixture.plan.evaluate_sgs_state(candidate_input,{sgs.data(),sgs.size()});
+  }
+  passed &= expect(sgs_status && allocation_observer::count.load(std::memory_order_relaxed)==0U &&
+      fixture.plan.update_count()==count_before,rank,"distributed SGS state query is allocation-free and stateless");
+  for(std::size_t cell=0;cell<sgs.size();++cell)
+    passed &= expect(candidate_molecular.storage[cell]+candidate_density.storage[cell]*
+        sgs[cell].kinematic_viscosity_m2_s==live_before[cell] && sgs[cell].kinetic_energy_m2_s2>0. &&
+        std::abs(sgs[cell].dissipation_w_m3/candidate_density.storage[cell]-
+                 sgs[cell].specific_dissipation_m2_s3)<1e-14,
+        rank,"distributed SGS quantities use model viscosity and density units");
+  double maximum_k=0.,minimum_k=sgs.front().kinetic_energy_m2_s2;
+  for(const auto& state:sgs) {
+    maximum_k=std::max(maximum_k,state.kinetic_energy_m2_s2);
+    minimum_k=std::min(minimum_k,state.kinetic_energy_m2_s2);
+  }
+  MPI_Allreduce(MPI_IN_PLACE,&maximum_k,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE,&minimum_k,1,MPI_DOUBLE,MPI_MIN,MPI_COMM_WORLD);
+  passed &= expect(std::abs(maximum_k-minimum_k)<1e-14*maximum_k,rank,
+                   "odd decomposition preserves the homogeneous SGS state");
+
   std::fill(candidate_effective.storage.begin(),
             candidate_effective.storage.end(), -19.0);
   const std::vector<double> poison_sentinel = candidate_effective.storage;
@@ -271,7 +299,8 @@ int main(int argc, char** argv) {
   int size = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  const bool passed = test_collective_binding_and_hot_update(rank, size);
+  bool passed = test_collective_binding_and_hot_update(rank, size, TurbulenceKind::vreman_wall_function);
+  passed &= test_collective_binding_and_hot_update(rank, size, TurbulenceKind::smagorinsky);
   MPI_Finalize();
   return passed ? 0 : 1;
 }

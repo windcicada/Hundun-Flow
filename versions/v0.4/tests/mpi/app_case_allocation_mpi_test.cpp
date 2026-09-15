@@ -85,6 +85,14 @@ int main(int argc, char** argv) {
     fs::create_directories(root);
     std::ifstream input(data / "case_minimal_valid.json");
     std::string json{std::istreambuf_iterator<char>(input), {}};
+    // This fixture exercises allocation/identity with a passive scalar. Use
+    // the supported BE/PISO runtime; the source parser fixture also retains
+    // the historical BDF2 spelling for its separate input tests.
+    const std::string legacy_time = "\"scheme\": \"variable_bdf2\"";
+    const auto legacy_position = json.find(legacy_time);
+    if (legacy_position != std::string::npos)
+      json.replace(legacy_position, legacy_time.size(),
+                   "\"scheme\": \"backward_euler\"");
     const std::string empty = "\"scalars\": []";
     const std::string scalar =
         R"json("scalars": [{"stable_name":"tracer","kind":"zero_gradient","value":0,"backflow_kind":"zero_gradient","backflow_value":0}])json";

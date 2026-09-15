@@ -18,7 +18,7 @@
 namespace hundun::v04 {
 
 enum class LinearAlgorithm : std::uint8_t { pcg, fgmres, bicgstab };
-enum class CouplingKind : std::uint8_t { piso, simple };
+enum class CouplingKind : std::uint8_t { piso, simple, outer_corrected };
 enum class MgCorrectionScaling : std::uint8_t {
   residual_minimizing,
   unit_linear
@@ -33,7 +33,8 @@ enum class TurbulenceKind : std::uint8_t {
   none,
   wale,
   vreman_wall_function,
-  vreman
+  vreman,
+  smagorinsky
 };
 enum class TimeControlKind : std::uint8_t {
   fixed,
@@ -95,12 +96,26 @@ enum class TimeScheme : std::uint8_t {
   // CN midpoint momentum; BE mass, species and total energy.
   cn_be
 };
+
+// Historical CN/BE inputs spelled their external correction schedule PISO.
+// Canonicalize the actual schedule once at input/plan boundaries; the time
+// coefficients and the shared pressure kernel retain independent identities.
+constexpr CouplingKind effective_coupling(TimeScheme time,
+                                         CouplingKind coupling) noexcept {
+  return time == TimeScheme::cn_be && coupling == CouplingKind::piso
+             ? CouplingKind::outer_corrected : coupling;
+}
 enum class TransportLaw : std::uint8_t {
   constant,
   sutherland,
   coast_native_air,
-  coast_perry
+  coast_perry,
+  kerosene_vapor
 };
+
+constexpr bool coast_mixture_transport(TransportLaw law) noexcept {
+  return law == TransportLaw::coast_perry || law == TransportLaw::kerosene_vapor;
+}
 enum class ImmersedFluidSide : std::uint8_t { outside, inside };
 enum class IbmReconstructionPolicy : std::uint8_t {
   strict_quadratic,
@@ -332,7 +347,7 @@ struct TimeControlSpec {
   double initial_dt{1.0e-4};
   double minimum_dt{1.0e-10};
   double maximum_dt{1.0};
-  double convective_cfl{0.8};
+  double convective_cfl{0.30};
   double viscous_cfl{0.5};
   double thermal_cfl{0.5};
   double species_cfl{0.5};
@@ -344,7 +359,7 @@ struct TimeControlSpec {
   double maximum_bdf_ratio{5.0};
   // Optional symmetric deadband around the convective target. Zero retains
   // exact-target stepping; positive values keep dt while CFL is in the band.
-  double convective_cfl_margin{};
+  double convective_cfl_margin{0.05};
 
   double convective_cfl_limit() const noexcept {
     return convective_cfl + convective_cfl_margin;
@@ -382,6 +397,7 @@ struct ThermophysicalSpec {
 struct ValidatedModel {
   CartesianMeshSpec mesh;
   TurbulenceKind turbulence{TurbulenceKind::vreman_wall_function};
+  double smagorinsky_coefficient{0.17};
   PressureReferenceKind pressure_reference{
       PressureReferenceKind::boundary_absolute};
   std::array<BoundaryFaceSpec, 6U> boundaries;
@@ -410,6 +426,10 @@ class CaseCompiler {
   // zero-gradient outlet -> static-pressure outlet with backflow transition.
   // The selected change preserves every other control and referenced byte.
   static Status validate_transport_change(MPI_Comm communicator,
+      const std::filesystem::path& source_root, const ValidatedModel& source,
+      const std::filesystem::path& target_root, const ValidatedModel& target);
+  // Tighter chemistry error limits preserve every physical input and asset.
+  static Status validate_chemistry_refinement(MPI_Comm communicator,
       const std::filesystem::path& source_root, const ValidatedModel& source,
       const std::filesystem::path& target_root, const ValidatedModel& target);
 };

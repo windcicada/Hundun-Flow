@@ -46,6 +46,8 @@ struct GasIdentity {
   std::string enthalpy_reference;
   std::uint64_t composition_fingerprint{};
   std::uint64_t closure_fingerprint{};
+  // Caloric representation is distinct from the formation-enthalpy origin.
+  std::string thermodynamic_model;
 };
 inline bool same_gas_identity(const GasIdentity &a,
                               const GasIdentity &b) noexcept {
@@ -56,7 +58,8 @@ inline bool same_gas_identity(const GasIdentity &a,
          a.molecular_weights_kg_per_kmol == b.molecular_weights_kg_per_kmol &&
          a.enthalpy_reference == b.enthalpy_reference &&
          a.composition_fingerprint == b.composition_fingerprint &&
-         a.closure_fingerprint == b.closure_fingerprint;
+         a.closure_fingerprint == b.closure_fingerprint &&
+         a.thermodynamic_model == b.thermodynamic_model;
 }
 
 enum class GasStateCoordinates : std::uint8_t {

@@ -43,6 +43,41 @@ bool checked_align(std::size_t value, std::size_t& out) noexcept {
   return detail::checked_align(value, detail::kDoublesPerCacheLine, out);
 }
 
+struct FaceStorageLayout {
+  Int3 extents[3]{};
+  std::size_t stride_y[3]{}, stride_z[3]{}, offsets[3]{};
+  std::size_t replica_stride{}, doubles{}, bytes{};
+};
+
+bool face_storage_layout(Int3 cells, std::size_t replicas,
+                         FaceStorageLayout& out) noexcept {
+  if (!detail::valid_cells(cells) || replicas == 0U ||
+      cells.x == std::numeric_limits<std::int32_t>::max() ||
+      cells.y == std::numeric_limits<std::int32_t>::max() ||
+      cells.z == std::numeric_limits<std::int32_t>::max()) return false;
+  FaceStorageLayout candidate;
+  candidate.extents[0] = {cells.x + 1, cells.y, cells.z};
+  candidate.extents[1] = {cells.x, cells.y + 1, cells.z};
+  candidate.extents[2] = {cells.x, cells.y, cells.z + 1};
+  std::size_t cursor{};
+  for (unsigned axis = 0; axis < 3; ++axis) {
+    std::size_t block{};
+    const auto extent = candidate.extents[axis];
+    if (!detail::valid_cells(extent) ||
+        !checked_align(static_cast<std::size_t>(extent.x), candidate.stride_y[axis]) ||
+        !checked_multiply(candidate.stride_y[axis], static_cast<std::size_t>(extent.y), candidate.stride_z[axis]) ||
+        !checked_align(cursor, candidate.offsets[axis]) ||
+        !checked_multiply(candidate.stride_z[axis], static_cast<std::size_t>(extent.z), block) ||
+        !checked_add(candidate.offsets[axis], block, cursor)) return false;
+  }
+  if (!checked_align(cursor, candidate.replica_stride) ||
+      !checked_multiply(candidate.replica_stride, replicas, candidate.doubles) ||
+      !checked_multiply(candidate.doubles, sizeof(double), candidate.bytes) ||
+      candidate.bytes == 0U) return false;
+  out = candidate;
+  return true;
+}
+
 template <class T>
 BasicFaceFieldView<T> make_axis_view(
     T* data, Int3 extents, std::size_t stride_y, std::size_t stride_z,
@@ -360,44 +395,21 @@ Status FaceFluxStorage::allocate_impl(Int3 cells, std::size_t replicas,
       cells.z == std::numeric_limits<std::int32_t>::max()) {
     return {StatusCode::invalid_plan, kFaceExtent};
   }
-  const Int3 extents[3]{{cells.x + 1, cells.y, cells.z},
-                        {cells.x, cells.y + 1, cells.z},
-                        {cells.x, cells.y, cells.z + 1}};
-  if (!detail::valid_cells(extents[0]) || !detail::valid_cells(extents[1]) ||
-      !detail::valid_cells(extents[2])) {
+  FaceStorageLayout layout;
+  if (!face_storage_layout(cells, replicas, layout))
     return {StatusCode::invalid_plan, kFaceExtent};
-  }
   try {
     FaceFluxStorage candidate;
     candidate.cells_ = cells;
     candidate.final_storage_ = final_storage;
-    std::size_t cursor = 0U;
     for (std::size_t axis = 0U; axis < 3U; ++axis) {
-      candidate.extents_[axis] = extents[axis];
-      if (!checked_align(static_cast<std::size_t>(extents[axis].x),
-                         candidate.stride_y_[axis]) ||
-          !checked_multiply(candidate.stride_y_[axis],
-                            static_cast<std::size_t>(extents[axis].y),
-                            candidate.stride_z_[axis]) ||
-          !checked_align(cursor, candidate.offsets_[axis])) {
-        return {StatusCode::invalid_plan, kFaceExtent};
-      }
-      std::size_t block = 0U;
-      if (!checked_multiply(candidate.stride_z_[axis],
-                            static_cast<std::size_t>(extents[axis].z), block) ||
-          !checked_add(candidate.offsets_[axis], block, cursor)) {
-        return {StatusCode::invalid_plan, kFaceExtent};
-      }
+      candidate.extents_[axis] = layout.extents[axis];
+      candidate.stride_y_[axis] = layout.stride_y[axis];
+      candidate.stride_z_[axis] = layout.stride_z[axis];
+      candidate.offsets_[axis] = layout.offsets[axis];
     }
-    if (!checked_align(cursor, candidate.replica_stride_)) {
-      return {StatusCode::invalid_plan, kFaceExtent};
-    }
-    std::size_t doubles = 0U;
-    std::size_t bytes = 0U;
-    if (!checked_multiply(candidate.replica_stride_, replicas, doubles) ||
-        !checked_multiply(doubles, sizeof(double), bytes) || bytes == 0U) {
-      return {StatusCode::invalid_plan, kFaceExtent};
-    }
+    candidate.replica_stride_ = layout.replica_stride;
+    const auto bytes = layout.bytes, doubles = layout.doubles;
     candidate.data_ = static_cast<double*>(::operator new(
         bytes, std::align_val_t{detail::kCacheLineBytes}));
     std::uninitialized_fill_n(candidate.data_, doubles, 0.0);
@@ -421,6 +433,16 @@ Status FaceFluxStorage::allocate_impl(Int3 cells, std::size_t replicas,
   } catch (...) {
     return {StatusCode::invalid_plan, kFaceStorage};
   }
+}
+
+Status FaceFluxStorage::workspace_bytes(Int3 cells, std::size_t replicas,
+                                        std::size_t& bytes) noexcept {
+  bytes = 0U;
+  FaceStorageLayout layout;
+  if (!face_storage_layout(cells, replicas, layout))
+    return {StatusCode::invalid_plan, kFaceExtent};
+  bytes = layout.bytes;
+  return {};
 }
 
 Status FaceFluxStorage::allocate_workspace(Int3 cells, std::size_t replicas,

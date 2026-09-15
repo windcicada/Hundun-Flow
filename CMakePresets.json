@@ -22,11 +22,20 @@
     },
     {
       "name": "release",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/release",
+      "displayName": "Clang Release with Cantera",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/b3",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "HUNDUN_BUILD_TESTS": "OFF"
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_FLAGS": "-ffp-contract=off -flto=thin",
+        "CMAKE_CXX_FLAGS": "-stdlib=libstdc++ -D_GLIBCXX_USE_CXX11_ABI=1 -ffp-contract=off -flto=thin",
+        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
+        "HUNDUN_BUILD_TESTS": "ON",
+        "HUNDUN_ENABLE_REACTING_CANTERA": "ON",
+        "HUNDUN_CANTERA_PACKAGE_ROOT": "$env{HUNDUN_CANTERA_ROOT}"
       }
     },
     {
@@ -57,7 +66,8 @@
     },
     {
       "name": "release",
-      "configurePreset": "release"
+      "configurePreset": "release",
+      "targets": ["hundun"]
     },
     {
       "name": "asan",

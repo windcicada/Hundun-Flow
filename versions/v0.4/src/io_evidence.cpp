@@ -133,10 +133,12 @@ bool valid_runtime_cfl_winner(const RuntimeConvectiveCflWinner& winner,
 
 bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
   const RuntimeRunStartAnchor& anchor = record.run_start;
+  const bool refinement = anchor.history_policy == RestartHistoryPolicy::refine_chemistry;
   if (anchor.transport_source_case != 0U &&
       (anchor.kind != RuntimeRunStartKind::restart || anchor.source_format_version < 3U ||
-       anchor.history_policy != RestartHistoryPolicy::rebuild_method_history ||
-       record.coupling != RuntimeCouplingKind::cn_be)) return false;
+       (!refinement && (anchor.history_policy != RestartHistoryPolicy::rebuild_method_history ||
+                       record.coupling != RuntimeCouplingKind::cn_be)))) return false;
+  if (refinement && anchor.transport_source_case == 0U) return false;
   if (!std::isfinite(anchor.previous_time) || anchor.previous_time < 0.0 ||
       record.step <= anchor.previous_step)
     return false;
@@ -177,7 +179,7 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
                ? anchor.source_history_signature != 0U
                : anchor.source_history_signature == 0U) ||
           (!rebuild &&
-           anchor.history_policy != RestartHistoryPolicy::require_compatible) ||
+           anchor.history_policy != RestartHistoryPolicy::require_compatible && !refinement) ||
           (!rebuild && !missing &&
            anchor.source_history_signature !=
                anchor.target_history_signature) ||
@@ -273,19 +275,26 @@ Status validate_record(const IoServicePlan& services,
         accepted_terminal_metric(cold.enthalpy_residual, 1e-10) &&
         accepted_terminal_metric(cold.species_residual,
                                   128.0 * std::numeric_limits<double>::epsilon()) &&
-        cold.momentum_reference_scale == 0.0 && cold.enthalpy_reference_scale == 0.0 &&
+        cold.momentum_reference_scale == 0.0 && !cold.momentum_reference_from_corrector &&
+        cold.enthalpy_reference_scale == 0.0 &&
         cold.species_reference_scales.empty() &&
         cold.reference_residual == std::array<double, 3U>{};
   const bool valid_cold =
       cold.active && cold.outer_iterations > 0U &&
-      cold.outer_iterations <= 16U &&
+      cold.outer_iterations <= ColdCouplingReport::maximum_outer_iterations &&
       cold.momentum_solve_calls == 3U * cold.outer_iterations &&
       cold.pressure_solve_calls == cold.outer_iterations &&
-      cold.enthalpy_solve_calls == cold.outer_iterations &&
+      cold.enthalpy_solve_calls > 0U &&
+      cold.enthalpy_solve_calls <= cold.outer_iterations &&
+      cold.enthalpy_retained_calls <= cold.outer_iterations &&
+      cold.enthalpy_solve_calls + cold.enthalpy_retained_calls == cold.outer_iterations &&
+      cold.species_endpoint_solve_calls <= cold.outer_iterations &&
       cold.species_solve_calls ==
-          (cold.independent_species_count == 0U ? 0U : cold.outer_iterations) &&
+          (cold.independent_species_count == 0U ? 0U
+              : cold.outer_iterations + cold.species_endpoint_solve_calls) &&
       (cold.independent_species_count != 0U ||
-       (cold.species_iterations == 0U && cold.species_residual == 0.0)) &&
+       (cold.species_endpoint_solve_calls == 0U &&
+        cold.species_iterations == 0U && cold.species_residual == 0.0)) &&
       std::all_of(cold.final_momentum.begin(), cold.final_momentum.end(),
                   accepted_solve) &&
       accepted_solve(cold.final_pressure) &&
@@ -321,6 +330,17 @@ Status validate_record(const IoServicePlan& services,
                               record.momentum_predictor_passes == 1U) ||
                              (record.coupling == RuntimeCouplingKind::simple &&
                               record.momentum_predictor_passes == 2U));
+  const auto& algorithm = record.algorithm;
+  const bool valid_algorithm = !algorithm.present ||
+      (record.requested_bdf_order == 1U && record.bdf_order == 1U &&
+       (cold_contract
+            ? algorithm.time_scheme == TimeScheme::cn_be &&
+              algorithm.coupling == CouplingKind::outer_corrected
+            : algorithm.time_scheme == TimeScheme::backward_euler &&
+              ((algorithm.coupling == CouplingKind::piso &&
+                record.coupling == RuntimeCouplingKind::piso) ||
+               (algorithm.coupling == CouplingKind::simple &&
+                record.coupling == RuntimeCouplingKind::simple))));
   const RuntimeTerminalPhysicalAudit& terminal =
       record.terminal_physical_audit;
   constexpr double kConvectiveCflComparisonSlack =
@@ -583,6 +603,7 @@ Status validate_record(const IoServicePlan& services,
           nullptr ||
       record.build == 0U || record.binary == 0U || record.case_model == 0U ||
       record.product == 0U || record.step == 0U ||
+      !valid_algorithm ||
       record.candidate_identity.cold_schema != cold_contract ||
       !detail::valid_runtime_candidate_identity(record.candidate_identity) ||
       record.build != detail::runtime_sha256_fingerprint(
@@ -776,8 +797,16 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << ",\"case\":" << record.case_model
        << ",\"stl\":" << record.stl
        << ",\"product\":" << record.product
-       << ",\"cpu_plan\":" << record.cpu_plan
-       << ",\"run_start\":{\"kind\":\""
+       << ",\"cpu_plan\":" << record.cpu_plan;
+  if (record.algorithm.present) {
+    json << ",\"algorithm\":{\"time_scheme\":\""
+         << (record.algorithm.time_scheme == TimeScheme::cn_be ? "cn_be" : "backward_euler")
+         << "\",\"coupling\":\""
+         << (record.algorithm.coupling == CouplingKind::outer_corrected ? "outer_corrected"
+             : record.algorithm.coupling == CouplingKind::simple ? "SIMPLE" : "PISO")
+         << "\"}";
+  }
+  json << ",\"run_start\":{\"kind\":\""
        << (record.run_start.kind == RuntimeRunStartKind::restart
                ? "restart"
                : "fresh")
@@ -795,9 +824,13 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"target_signature\":" << record.run_start.target_history_signature
          << ",\"policy\":\""
          << (record.run_start.history_policy == RestartHistoryPolicy::rebuild_method_history
-                 ? "rebuild_method_history" : "require_compatible") << "\"";
+                 ? "rebuild_method_history"
+                 : record.run_start.history_policy == RestartHistoryPolicy::refine_chemistry
+                     ? "refine_chemistry" : "require_compatible") << "\"";
     if (record.run_start.transport_source_case != 0U)
-      json << ",\"transport_source_case\":" << record.run_start.transport_source_case;
+      json << (record.run_start.history_policy == RestartHistoryPolicy::refine_chemistry
+          ? ",\"chemistry_source_case\":" : ",\"transport_source_case\":")
+           << record.run_start.transport_source_case;
     json << '}';
   }
   json << '}'
@@ -1151,7 +1184,9 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"momentum_solve_calls\":" << cold.momentum_solve_calls
          << ",\"pressure_solve_calls\":" << cold.pressure_solve_calls
          << ",\"enthalpy_solve_calls\":" << cold.enthalpy_solve_calls
+         << ",\"enthalpy_retained_calls\":" << cold.enthalpy_retained_calls
          << ",\"species_solve_calls\":" << cold.species_solve_calls
+         << ",\"species_endpoint_solve_calls\":" << cold.species_endpoint_solve_calls
          << ",\"independent_species_count\":" << cold.independent_species_count
          << ",\"momentum_iterations\":" << cold.momentum_iterations
          << ",\"pressure_iterations\":" << cold.pressure_iterations
@@ -1176,6 +1211,8 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
         json << cold.species_reference_scales[j];
       }
       json << ']';
+      if (cold.momentum_reference_from_corrector)
+        json << ",\"momentum_reference_origin\":\"first_corrector\"";
     }
     const auto write_final_solve = [&](const LinearSolveResult& solve) {
       json << "{\"status_code\":" << unsigned(solve.status.code)

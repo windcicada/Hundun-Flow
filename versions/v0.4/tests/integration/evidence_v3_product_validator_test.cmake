@@ -17,8 +17,8 @@ import sys
 path = pathlib.Path(sys.argv[1])
 scenario = sys.argv[2]
 expected = {
-    "fresh": ((1, 1, 1, True, False), (2, 2, 2, False, False)),
-    "restart": ((3, 2, 2, False, False), (4, 2, 2, False, False)),
+    "fresh": ((1, 1, 1, True, False), (2, 1, 1, False, False)),
+    "restart": ((3, 1, 1, False, False), (4, 1, 1, False, False)),
 }
 if scenario not in expected:
     raise SystemExit("unknown V8 producer scenario: " + scenario)
@@ -236,6 +236,17 @@ execute_process(
 if(NOT init_status EQUAL 0)
   message(FATAL_ERROR
     "V8 producer init failed (${init_status}): ${init_output}${init_error}")
+endif()
+
+# Exercise the public BE/PISO producer explicitly. The default CN/BE producer
+# and its method-history chain are covered by app_restart_policy_cli_test.py.
+execute_process(
+  COMMAND "${PYTHON}" -c
+    "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); c=json.loads(p.read_text()); c['time']['scheme']='backward_euler'; c['solver']['coupling']='PISO'; p.write_text(json.dumps(c))"
+    "${PROBE_ROOT}/case/case.json"
+  RESULT_VARIABLE configure_status)
+if(NOT configure_status EQUAL 0)
+  message(FATAL_ERROR "BE/PISO producer configuration failed")
 endif()
 
 execute_process(

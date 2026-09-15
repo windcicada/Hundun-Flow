@@ -314,6 +314,9 @@ class FaceFluxStorage {
 
   static Status allocate_workspace(Int3 cells, std::size_t replicas,
                                    FaceFluxStorage& out);
+  // Aligned numeric payload, using the same layout as allocate_workspace.
+  static Status workspace_bytes(Int3 cells, std::size_t replicas,
+                                std::size_t& bytes) noexcept;
   static Status allocate_final(Int3 cells, FaceFluxStorage& out);
   Status workspace_view(std::size_t replica, RevisionToken revision,
                         FaceFluxView& out) noexcept;
@@ -380,6 +383,12 @@ struct KernelInvocation {
 
 namespace detail {
 
+struct CartesianFaceMetric {
+  double left_distance{};
+  double right_distance{};
+  double inverse_distance{};
+};
+
 struct CartesianMetricPacket {
   const double* faces{};
   const double* centres{};
@@ -391,6 +400,7 @@ struct CartesianMetricPacket {
   double local_centre_origin{};
   double uniform_width{};
   double uniform_inverse_width{};
+  const CartesianFaceMetric* face_geometry{};
 };
 
 }  // namespace detail
@@ -462,6 +472,7 @@ class CartesianKernelPlan {
   std::vector<double> metric_centres_[3];
   std::vector<double> metric_widths_[3];
   std::vector<double> metric_inverse_widths_[3];
+  std::vector<detail::CartesianFaceMetric> metric_face_geometry_[3];
   detail::CartesianMetricPacket metrics_[3]{};
 };
 
@@ -489,6 +500,64 @@ Status reconstruct_cartesian_convection_face(
     const CartesianKernelPlan& plan, ConvectionScheme scheme,
     ConstFieldView transported, std::uint8_t component, CartesianAxis axis,
     Int3 face, double mass_rate, double& value) noexcept;
+
+// Common COAST VLS conductance for a normalized mixture. The dependent
+// species participates through 1-sum(Y). Conductances are integrated kg/s;
+// lower_weight carries only the artificial part, leaving physical diffusion
+// with its existing conservative authority. thermal_coordinate is optional.
+struct MixtureFaceTransport {
+  double lower_weight{};
+  double diffusion{};
+  double extra_diffusion{};
+};
+enum class MixtureFlatStencilPolicy : std::uint8_t {
+  ignore_roundoff,
+  upwind_constraint
+};
+Status prepare_cartesian_mixture_face(
+    const CartesianKernelPlan& plan, Span<const ConstFieldView> independent,
+    ConstFieldView thermal_coordinate, CartesianAxis axis, Int3 face,
+    double mass_rate, double physical_diffusion, MixtureFaceTransport& out,
+    bool allow_upwind = true,
+    MixtureFlatStencilPolicy flat = MixtureFlatStencilPolicy::ignore_roundoff) noexcept;
+
+// Frozen common artificial conductance [kg/s], shared by h and every Y.
+// Physical diffusion remains in the equation's material operator. A closure
+// freezes these coefficients through an inner solve and refreshes them when
+// the outer state or its mass flux changes.
+struct MixtureTransportFaces {
+  ConstFaceFieldView x{}, y{}, z{};
+  RevisionToken face_flux{}, linearization{};
+};
+class IbmEquationInterfacePlan;
+Status prepare_cartesian_mixture_transport(
+    const CartesianKernelPlan& plan, Span<const ConstFieldView> independent,
+    ConstFieldView thermal_coordinate, ConstFieldView mass_diffusivity,
+    ConstFaceFluxView flux, FaceFluxView workspace,
+    RevisionToken linearization, MixtureTransportFaces& out,
+    const IbmEquationInterfacePlan* immersed = nullptr,
+    MixtureFlatStencilPolicy flat = MixtureFlatStencilPolicy::ignore_roundoff) noexcept;
+Status cartesian_mixture_convection(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFaceFluxView flux, const KernelInvocation& invocation) noexcept;
+// Divergence of convection minus physical diffusion on the same faces.
+// Evaluates the combined conductance once, preserving zero trace-species
+// fluxes when the VLS coefficient selects the upwind limit.
+Status cartesian_mixture_transport(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFieldView mass_diffusivity, ConstFaceFluxView flux,
+    const KernelInvocation& invocation) noexcept;
+// Integrated Cartesian scalar transport on each oriented face [kg*q/s].
+// Shares the combined convection/diffusion evaluator with the divergence
+// kernel. Caller-owned output is attempt-local scratch; its successful values
+// can be frozen before chemistry for a statistical transport ledger. Physical
+// boundary traces are supplied in scalar ghosts. IBM interface corrections
+// retain their separate equation-interface authority at the caller.
+Status form_cartesian_mixture_transport_flux(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFieldView mass_diffusivity, ConstFaceFluxView mass_flux,
+    ConstFieldView scalar, std::array<FaceFieldView,3> output) noexcept;
+
 // Conservative target-layer divergence using an attempt-local, deliberately
 // uncommitted flux.  This is distinct from both predictor semantics and the
 // final published-flux authority boundary.

@@ -196,6 +196,7 @@ std::uint64_t predictor_state_hash(
   hash = hash_mix(hash, double_bits(input.bdf.a1));
   hash = hash_mix(hash, double_bits(input.bdf.a2));
   hash = hash_mix(hash, input.bdf.order);
+  if (input.implicit_scalar_seed) hash=hash_mix(hash,0x494d504c53454544ULL);
   if (input.cell_activity.size != 0U) {
     hash = hash_mix(hash, input.cell_activity.size);
     hash = hash_mix(hash, reinterpret_cast<std::uintptr_t>(input.cell_activity.data));
@@ -481,14 +482,16 @@ Status collective_status(MPI_Comm communicator, Status local, int rank,
 Status collective_high_state(
     MPI_Comm communicator, Status local, bool locally_admissible, int rank,
     int size, PlanFingerprint source_identity, RevisionToken source_time,
+    RevisionToken mixture_time,
     bool &globally_admissible, ThermophysicalPredictorFailure &local_failure,
     ThermophysicalPredictorFailure &selected_failure) noexcept {
   // Pack source-state agreement into the existing high-state collective.
   // Complemented lanes recover both extrema without another MPI operation.
-  std::array<std::uint64_t, 6U> values{
+  std::array<std::uint64_t, 8U> values{
       {std::uint64_t(local ? size : rank),
        locally_admissible ? UINT64_C(1) : UINT64_C(0), source_identity,
-       UINT64_MAX - source_identity, source_time, UINT64_MAX - source_time}};
+       UINT64_MAX - source_identity, source_time, UINT64_MAX - source_time,
+       mixture_time, UINT64_MAX - mixture_time}};
   if (MPI_Allreduce(MPI_IN_PLACE, values.data(),
                     static_cast<int>(values.size()), MPI_UINT64_T, MPI_MIN,
                     communicator) != MPI_SUCCESS) {
@@ -514,7 +517,8 @@ Status collective_high_state(
     return published;
   }
   if (values[2] != UINT64_MAX - values[3] ||
-      values[4] != UINT64_MAX - values[5])
+      values[4] != UINT64_MAX - values[5] ||
+      values[6] != UINT64_MAX - values[7])
     return {StatusCode::invalid_plan, kPredictorPlan};
   globally_admissible = values[1U] != 0;
   return {};
@@ -826,6 +830,7 @@ Status ThermophysicalPredictorPlan::predict(
                 return false;
               }
               double dependent_density = rho;
+              long double fraction_sum=0.0L;
               double lower = rho * dependent_enthalpy_minimum_;
               double upper = rho * dependent_enthalpy_maximum_;
               for (std::size_t index = 0U; index < species_count; ++index) {
@@ -842,6 +847,7 @@ Status ThermophysicalPredictorPlan::predict(
                   return false;
                 }
                 dependent_density -= species_density;
+                fraction_sum+=value;
                 lower += species_density *
                          (species_enthalpy_minimum_[index] -
                           dependent_enthalpy_minimum_);
@@ -849,6 +855,8 @@ Status ThermophysicalPredictorPlan::predict(
                          (species_enthalpy_maximum_[index] -
                           dependent_enthalpy_maximum_);
               }
+              if (!conserved_quantities)
+                dependent_density=static_cast<double>(rho*(1.0L-fraction_sum));
               const double density_enthalpy =
                   conserved_quantities ? stored_h : rho * h;
               if (!std::isfinite(dependent_density) ||
@@ -888,6 +896,7 @@ Status ThermophysicalPredictorPlan::predict(
               const double rho = density.unchecked(cell, 0U);
               if (!std::isfinite(rho) || !(rho > 0.0)) return false;
               double dependent_density = rho;
+              long double fraction_sum=0.0L;
               for (std::size_t index = 0U; index < species_count; ++index) {
                 const double value =
                     independent_species.data[index].unchecked(cell, 0U);
@@ -898,7 +907,9 @@ Status ThermophysicalPredictorPlan::predict(
                   return false;
                 }
                 dependent_density -= species_density;
+                fraction_sum+=value;
               }
+              dependent_density=static_cast<double>(rho*(1.0L-fraction_sum));
               if (!std::isfinite(dependent_density) ||
                   dependent_density < 0.0) {
                 return false;
@@ -1193,6 +1204,7 @@ Status ThermophysicalPredictorPlan::predict(
       collective_high_state(communicator, local, locally_high_admissible, rank,
                             size, input.post_source_transport.source_identity,
                             input.post_source_transport.time,
+                            input.mixture_transport ? input.mixture_transport->linearization : 0U,
                             globally_high_admissible, failure, failure);
   if (!consensus) return publish_failure(consensus);
   ++blocking_collectives;
@@ -3133,6 +3145,15 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     return {StatusCode::invalid_plan, kPredictorPlan};
   }
 
+  if (input.mixture_transport) {
+    if (second_order || input.implicit_scalar_seed ||
+        input.mixture_transport->linearization != input.time ||
+        input.mixture_transport->face_flux != input.mass_flux_accepted.revision ||
+        !detail::valid_cell_view(input.mixture_mass_diffusivity,cells_,0U,1U,1U))
+      return {StatusCode::invalid_plan,kPredictorPlan};
+  } else if (!empty_field(input.mixture_mass_diffusivity)) {
+    return {StatusCode::invalid_plan,kPredictorPlan};
+  }
   const auto &post = input.post_source_transport;
   const bool source_first = post.source_identity != 0U;
   if (source_first) {
@@ -3250,6 +3271,9 @@ Status ThermophysicalPredictorPlan::predict_high_local(
       output.accepted_advection_workspace,
       output.previous_advection_workspace};
   for (std::size_t left = 0U; left < primary_outputs.size(); ++left) {
+    if (input.mixture_transport && detail::field_views_overlap(
+            input.mixture_mass_diffusivity,as_const(primary_outputs[left])))
+      return {StatusCode::invalid_plan,kPredictorPlan};
     for (std::size_t right = left + 1U; right < primary_outputs.size();
          ++right) {
       if (detail::field_views_overlap(as_const(primary_outputs[left]),
@@ -3260,6 +3284,9 @@ Status ThermophysicalPredictorPlan::predict_high_local(
   }
   for (std::size_t i = 0U; i < species_.size(); ++i) {
     const FieldView species_output = output.independent_species.data[i];
+    if (input.mixture_transport && detail::field_views_overlap(
+            input.mixture_mass_diffusivity,as_const(species_output)))
+      return {StatusCode::invalid_plan,kPredictorPlan};
     for (FieldView primary : primary_outputs) {
       if (detail::field_views_overlap(as_const(species_output),
                                       as_const(primary))) {
@@ -3276,6 +3303,9 @@ Status ThermophysicalPredictorPlan::predict_high_local(
   }
   for (std::size_t i = 0U; i < passive_scalars_.size(); ++i) {
     const FieldView scalar_output = output.passive_scalars.data[i];
+    if (input.mixture_transport && detail::field_views_overlap(
+            input.mixture_mass_diffusivity,as_const(scalar_output)))
+      return {StatusCode::invalid_plan,kPredictorPlan};
     for (FieldView primary : primary_outputs) {
       if (detail::field_views_overlap(as_const(scalar_output),
                                       as_const(primary))) {
@@ -3676,6 +3706,12 @@ Status ThermophysicalPredictorPlan::predict_high_local(
           FieldView predicted, const IbmInterfaceInletField* inlet_field,
           ThermophysicalPredictorFailureField field_kind,
           std::uint32_t field_index) noexcept -> Status {
+    if (input.implicit_scalar_seed) {
+      for (int z=0; z<cells_.z; ++z) for (int y=0; y<cells_.y; ++y)
+        for (int x=0; x<cells_.x; ++x)
+          predicted.unchecked({x,y,z},0U)=accepted.unchecked({x,y,z},0U);
+      return {};
+    }
     ConstFieldView transported = accepted;
     if (source_first) {
       if (field_kind == ThermophysicalPredictorFailureField::enthalpy)
@@ -3693,9 +3729,13 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         {accepted_reads.data(), accepted_reads.size()},
         {accepted_writes.data(), accepted_writes.size()}, box, 0U, 0U, 1U,
         input.mass_flux_accepted.revision, input.counters};
-    Status status = cartesian_convection(*kernels_, convection,
-                                         input.mass_flux_accepted,
-                                         accepted_call);
+    const bool common = input.mixture_transport &&
+        field_kind != ThermophysicalPredictorFailureField::passive_scalar;
+    Status status = common ? cartesian_mixture_transport(*kernels_,
+        *input.mixture_transport,input.mixture_mass_diffusivity,
+        input.mass_flux_accepted,accepted_call)
+        : cartesian_convection(*kernels_, convection,
+                               input.mass_flux_accepted, accepted_call);
     if (!status) {
       if (status.code == StatusCode::numerical_failure) {
         mark_failure(
@@ -3708,20 +3748,44 @@ Status ThermophysicalPredictorPlan::predict_high_local(
       return status;
     }
     if (immersed_interface != nullptr && inlet_field != nullptr) {
-      status = inlet_field->kind==IbmInterfaceInletFieldKind::independent_species
+      if (common && inlet_field->kind==IbmInterfaceInletFieldKind::independent_species) {
+        status = detail::IbmScalarTransport::transport(*immersed_interface,
+            inlet_field->component,transported,input.mixture_mass_diffusivity,
+            input.mass_flux_accepted,box,output.accepted_advection_workspace,
+            *input.mixture_transport);
+      } else {
+        status = inlet_field->kind==IbmInterfaceInletFieldKind::independent_species
           ? detail::IbmScalarTransport::convection(*immersed_interface,
-              inlet_field->component,convection,accepted,input.mass_flux_accepted,
-              box,output.accepted_advection_workspace)
+              inlet_field->component,convection,common ? transported : accepted,
+              input.mass_flux_accepted, box,output.accepted_advection_workspace,
+              common ? input.mixture_transport : nullptr)
           : immersed_interface->add_source_convection_correction(
-          *inlet_field, convection, accepted, 1.0,
+          *inlet_field, common ? ConvectionScheme::central2 : convection,
+          common ? transported : accepted, 1.0,
           output.accepted_advection_workspace, box);
+      }
       if (!status) return status;
     }
-    if(mixture_enthalpy_!=nullptr && field_kind==ThermophysicalPredictorFailureField::enthalpy) {
+    if(!common && mixture_enthalpy_!=nullptr && field_kind==ThermophysicalPredictorFailureField::enthalpy) {
       status=detail::MixtureEnthalpyConvection::add_predictor_correction(
           *mixture_enthalpy_,accepted,input.temperature_accepted,input.species_accepted,
           input.mass_flux_accepted,immersed_interface,box,output.accepted_advection_workspace);
       if(!status) return status;
+    }
+    if (common) {
+      // The fused operator already contains Cartesian physical diffusion.
+      // Remove that same rate from the accepted nonadvective ledger, leaving
+      // wall/IBM corrections and every other physical contribution intact.
+      // BE leaves the previous-advection workspace available for this rate.
+      const auto diffusion_output = output.previous_advection_workspace;
+      const KernelInvocation diffusion_call{{accepted_reads.data(),1},
+          {&diffusion_output,1},box,0U,0U,1U,0U,input.counters};
+      status = cartesian_diffusion(*kernels_,input.mixture_mass_diffusivity,diffusion_call);
+      if (status && immersed_interface &&
+          field_kind==ThermophysicalPredictorFailureField::independent_species)
+        status = detail::IbmScalarTransport::diffusion(*immersed_interface,
+            transported,input.mixture_mass_diffusivity,box,diffusion_output);
+      if (!status) return status;
     }
     if (second_order) {
       const std::array<ConstFieldView, 1U> previous_reads{previous};
@@ -3786,8 +3850,10 @@ Status ThermophysicalPredictorPlan::predict_high_local(
               !second_order || rate_is_zero(nonadvective_rhs.previous)
                   ? 0.0
                   : nonadvective_rhs.previous.unchecked(cell, 0U);
+          const double remaining_rhs = common ?
+              rhs_n-output.previous_advection_workspace.unchecked(cell,0U) : rhs_n;
           const double transport_n =
-              output.accepted_advection_workspace.unchecked(cell, 0U) - rhs_n;
+              output.accepted_advection_workspace.unchecked(cell, 0U) - remaining_rhs;
           const double transport_nm1 =
               second_order
                   ? output.previous_advection_workspace.unchecked(cell, 0U) -

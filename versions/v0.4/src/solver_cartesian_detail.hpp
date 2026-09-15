@@ -181,6 +181,15 @@ inline DerivativeWeights metric_derivative_weights(
           left / (right * total)};
 }
 
+inline const CartesianFaceMetric* cached_face_metric(
+    const CartesianKernelPlan& plan, std::size_t axis,
+    std::int32_t local_face) noexcept {
+  const auto& metric=plan.metric(axis);
+  const auto index=static_cast<std::int64_t>(metric.global_begin)+local_face;
+  return index>=0 && static_cast<std::size_t>(index)<=metric.cells && metric.face_geometry
+      ? metric.face_geometry+index : nullptr;
+}
+
 template <bool Uniform, class Scalar>
 inline Scalar metric_interpolate_face(const CartesianKernelPlan& plan,
                                       std::size_t axis,
@@ -189,14 +198,20 @@ inline Scalar metric_interpolate_face(const CartesianKernelPlan& plan,
   if constexpr (Uniform) {
     return 0.5 * (left + right);
   }
+  if (plan.geometry_kind()!=GeometryKind::uniform)
+    if (const auto* metric=cached_face_metric(plan,axis,local_face))
+      // Difference form preserves a constant exactly and avoids subtracting
+      // a spurious face perturbation from its upwind value in AFC.
+      return left + (metric->left_distance * metric->inverse_distance) *
+                        (right - left);
   const double face = metric_face<false>(plan, axis, local_face);
   const double left_centre =
       metric_centre<false>(plan, axis, local_face - 1);
   const double right_centre = metric_centre<false>(plan, axis, local_face);
   const double left_distance = face - left_centre;
   const double right_distance = right_centre - face;
-  return (right_distance * left + left_distance * right) /
-         (left_distance + right_distance);
+  return left + (left_distance / (left_distance + right_distance)) *
+                    (right - left);
 }
 
 template <bool Uniform>

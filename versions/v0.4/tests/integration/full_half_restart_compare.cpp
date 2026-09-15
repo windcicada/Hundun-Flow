@@ -389,6 +389,7 @@ bool same_summary(const PlanSummary& left, const PlanSummary& right) noexcept {
          left.graph_stage_count == right.graph_stage_count &&
          left.graph_node_count == right.graph_node_count &&
          left.maximum_workspace_bytes == right.maximum_workspace_bytes &&
+         left.esf_energy_workspace_bytes == right.esf_energy_workspace_bytes &&
          left.service_staging_bytes == right.service_staging_bytes &&
          left.pressure_correctors == right.pressure_correctors &&
          same_bits(left.pressure_absolute_tolerance,
@@ -2114,19 +2115,14 @@ bool set_uniform_open_boundaries(const fs::path& case_root) {
                              std::istreambuf_iterator<char>()};
   if (!input.good() && !input.eof()) return false;
   std::string text = original;
-  if (!replace_once(text, "\"pressure_reference\": \"closed_mass\"",
-                    "\"pressure_reference\": \"boundary_absolute\"") ||
-      !replace_once(
+  // The native template already supplies a static-pressure outlet and
+  // absolute pressure reference. Match this self-test's uniform speed.
+  if (!replace_once(
           text,
-          "\"x_min\": {\"flow_kind\":\"periodic\",\"thermal_kind\":\"none\","
-          "\"velocity\":[0,0,0]",
-          "\"x_min\": {\"flow_kind\":\"velocity_inlet\","
-          "\"thermal_kind\":\"none\",\"velocity\":[0.1,0,0]") ||
-      !replace_once(
-          text,
-          "\"x_max\": {\"flow_kind\":\"periodic\",\"thermal_kind\":\"none\"",
-          "\"x_max\": {\"flow_kind\":\"pressure_outlet\","
-          "\"thermal_kind\":\"none\""))
+          "\"x_min\": {\"flow_kind\":\"velocity_inlet\",\"thermal_kind\":\"none\","
+          "\"velocity\":[1,0,0]",
+          "\"x_min\": {\"flow_kind\":\"velocity_inlet\",\"thermal_kind\":\"none\","
+          "\"velocity\":[0.1,0,0]"))
     return false;
   std::ofstream output(case_json, std::ios::binary | std::ios::trunc);
   output.write(text.data(), static_cast<std::streamsize>(text.size()));

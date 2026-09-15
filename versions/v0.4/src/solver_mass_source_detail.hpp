@@ -3,6 +3,16 @@
 #include "hundun/v04_flow.hpp"
 #include "solver_cartesian_detail.hpp"
 namespace hundun::v04::detail {
+// Equivalent conservative mass of the frozen-density advective scalar row.
+// Callers validate views/a0 before entry and validate the resulting mass.
+inline double frozen_density_carrier_mass(ConstFaceFluxView flux, Int3 c,
+                                          double accepted_mass,
+                                          double a0) noexcept {
+  const long double net=(static_cast<long double>(flux.x.unchecked({c.x+1,c.y,c.z}))-flux.x.unchecked(c))+
+      (static_cast<long double>(flux.y.unchecked({c.x,c.y+1,c.z}))-flux.y.unchecked(c))+
+      (static_cast<long double>(flux.z.unchecked({c.x,c.y,c.z+1}))-flux.z.unchecked(c));
+  return static_cast<double>(accepted_mass-net/a0);
+}
 inline bool valid_mass_source(ConservativeMassSourceView source,
                               PlanFingerprint identity, RevisionToken time,
                               Int3 cells) noexcept {

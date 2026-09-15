@@ -358,7 +358,9 @@ void mutate(ValidatedModel& value, Mutation selected) {
       value.boundaries[3U].scalars[0U].backflow_value = 0.2;
       break;
     case Mutation::scheme:
-      value.schemes.momentum = ConvectionScheme::central2;
+      value.schemes.momentum =
+          value.schemes.momentum == ConvectionScheme::central2
+              ? ConvectionScheme::tvd2 : ConvectionScheme::central2;
       break;
     case Mutation::time:
       value.time.initial_dt = 2.0e-4;
@@ -392,6 +394,7 @@ bool test_divergent_model(Mutation selected, std::string_view description,
   BoundaryCompileDiagnostics diagnostics;
   const Status status = compile(divergent, geometry, patch, state,
                                 &diagnostics);
+  passed &= expect(!status, rank, description);
   passed &= same_collective_status(status, rank);
   passed &= expect(diagnostics.lowest_failing_rank == 1, rank,
                    "semantic divergence reports rank one as first failure");

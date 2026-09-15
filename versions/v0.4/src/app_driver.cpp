@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <iomanip>
 #include <locale>
@@ -263,7 +264,7 @@ constexpr std::string_view kCaseJson = R"json({
   "flow": {"model": "single_phase_low_mach_compressible",
            "pressure_reference": "boundary_absolute", "reacting": false},
   "solver": {
-    "coupling": "CN_BE",
+    "coupling": "outer_corrected",
     "pressure_correctors": 2,
     "pressure_linear": {
       "absolute_tolerance": 1e-13,
@@ -291,7 +292,7 @@ constexpr std::string_view kCaseJson = R"json({
     "z_max": {"flow_kind":"periodic","thermal_kind":"none","velocity":[0,0,0],"direction":[0,0,1],"backflow_velocity":[0,0,0],"mass_flow_rate":0,"pressure":101325,"temperature":300,"total_pressure":101325,"total_temperature":300,"backflow_temperature":300,"heat_flux":0,"relaxation":1,"mach_limit":0.95,"allow_backflow":false,"scalars":[]}
   },
   "schemes": {"momentum":"central2","enthalpy":"limited_central2","species":"tvd2","passive_scalar":"tvd2","diffusion":"central2","limiter":1.0},
-  "time": {"control":"adaptive_flow","scheme":"cn_be","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.8,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.2,"retry_factor":0.5,"maximum_retries":6,"minimum_bdf_ratio":0.25,"maximum_bdf_ratio":4.0}
+  "time": {"control":"adaptive_flow","scheme":"cn_be","initial_dt":0.001,"minimum_dt":1e-8,"maximum_dt":0.1,"convective_cfl":0.3,"convective_cfl_margin":0.05,"viscous_cfl":0.5,"thermal_cfl":0.5,"species_cfl":0.5,"acoustic_cfl":0.8,"maximum_growth":1.2,"retry_factor":0.5,"maximum_retries":6,"minimum_bdf_ratio":0.25,"maximum_bdf_ratio":4.0}
 })json";
 
 constexpr std::string_view kThermophysics = R"data(HUNDUN_THERMOPHYSICS_V1
@@ -462,7 +463,8 @@ static Status run_application(MPI_Comm communicator,
               options.source_root.empty() || options.steps == 0U ||
               (!options.restart_source_case.empty() &&
                (options.restart_directory.empty() ||
-                options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history ||
+                (options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history &&
+                 options.restart_history_policy != RestartHistoryPolicy::refine_chemistry) ||
                 options.restart_storage_compatibility != RestartStorageCompatibility::strict)) ||
               (options.initial_state.has_value() &&
                (!options.restart_directory.empty() || options.initial_state->start_time != 0.0)) ||
@@ -472,20 +474,24 @@ static Status run_application(MPI_Comm communicator,
                     RestartStorageCompatibility::mg_bundle_ghost_v1 ||
                 options.restart_directory.empty())) ||
               (options.restart_history_policy != RestartHistoryPolicy::require_compatible &&
-               (options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history ||
-                options.restart_directory.empty()))
+               ((options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history &&
+                 options.restart_history_policy != RestartHistoryPolicy::refine_chemistry) ||
+                options.restart_directory.empty())) ||
+              (options.restart_history_policy == RestartHistoryPolicy::refine_chemistry &&
+               options.restart_source_case.empty())
           ? Status{StatusCode::invalid_case, kApplicationInput}
           : Status{});
   if (!status) return status;
   // These controls determine collective order, not local storage identity.
   // Check once before filesystem/product work; do not add hot halo checks.
-  const std::array<std::uint64_t, 9U> control{{
+  const std::array<std::uint64_t, 10U> control{{
       options.steps, options.output_interval, options.restart_interval,
       options.restart_directory.empty() ? 0U : 1U,
       static_cast<std::uint64_t>(options.restart_storage_compatibility),
       static_cast<std::uint64_t>(options.restart_history_policy),
       options.initial_state.has_value() ? 1U : 0U,
-      options.diagnostics_interval, options.restart_source_case.empty() ? 0U : 1U}};
+      options.diagnostics_interval, options.restart_source_case.empty() ? 0U : 1U,
+      options.observe_mg_cost ? 1U : 0U}};
   auto minimum = control, maximum = control;
   const int min_status = MPI_Allreduce(MPI_IN_PLACE, minimum.data(),
       static_cast<int>(minimum.size()), MPI_UINT64_T, MPI_MIN, communicator);
@@ -517,8 +523,11 @@ static Status run_application(MPI_Comm communicator,
   ValidatedModel source_model;
   if (status && !options.restart_source_case.empty()) {
     status = CaseCompiler::load_and_compile(communicator, options.restart_source_case, source_model);
-    if (status) status = ProductCompiler::compile_transport_restart(communicator,
-        source_model, options.restart_source_case, model, options.case_root, plan);
+    if (status) status = options.restart_history_policy == RestartHistoryPolicy::refine_chemistry
+        ? ProductCompiler::compile_chemistry_restart(communicator,
+            source_model, options.restart_source_case, model, options.case_root, plan)
+        : ProductCompiler::compile_transport_restart(communicator,
+            source_model, options.restart_source_case, model, options.case_root, plan);
   } else if (status)
     status = ProductCompiler::compile(communicator, model, options.case_root, plan);
   if (!status) return status;
@@ -653,6 +662,10 @@ static Status run_application(MPI_Comm communicator,
        step_index < options.steps && status; ++step_index) {
     report.failure_phase = ApplicationFailurePhase::time_control;
     timing.phase(1U);
+    if (options.observe_mg_cost) {
+      status = driver.set_pressure_mg_profiling(true);
+      if (!status) return status;
+    }
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
     LocalTimeLimits time_limits = options.time_limits;
@@ -698,6 +711,52 @@ static Status run_application(MPI_Comm communicator,
       report.pressure_energy_globalization =
           step.pressure_energy_globalization;
       break;
+    }
+    if (options.observe_mg_cost) {
+      const auto view = driver.pressure_mg_profile();
+      const auto* profile = view.cumulative;
+      constexpr std::size_t width = 11U;
+      std::array<std::uint64_t, 3U+width*kMgMaximumLevels> local{}, maximum{};
+      std::array<int, 2> valid{{profile && profile->enabled ? 1 : 0,
+                               profile && profile->complete ? 1 : 0}};
+      if (profile) {
+        local[0] = profile->apply_nanoseconds;
+        local[1] = profile->reduction_nanoseconds;
+        local[2] = profile->attempts;
+        for (std::size_t i=0; i<profile->level_count; ++i) {
+          const auto& level = profile->levels[i];
+          const std::uint64_t values[]{level.visits,level.pre_smooth.nanoseconds,
+              level.post_smooth.nanoseconds,level.residual.nanoseconds,
+              level.restriction.nanoseconds,level.prolongation.nanoseconds,
+              level.terminal.nanoseconds,level.direct_mpi.nanoseconds,
+              level.halo_wait_nanoseconds,level.halo_control_nanoseconds,
+              level.halo_control_calls};
+          std::copy(std::begin(values),std::end(values),local.begin()+3U+i*width);
+        }
+      }
+      const int valid_status = MPI_Allreduce(MPI_IN_PLACE,valid.data(),2,MPI_INT,
+                                             MPI_MIN,communicator);
+      const int profile_status = MPI_Allreduce(local.data(),maximum.data(),
+          static_cast<int>(local.size()),MPI_UINT64_T,MPI_MAX,communicator);
+      if (valid_status != MPI_SUCCESS || profile_status != MPI_SUCCESS)
+        return {StatusCode::mpi_failure,kApplicationInput};
+      if (rank == 0) {
+        std::fprintf(stdout,"mg_cost step=%llu observed=%d complete=%d apply_s=%.17g "
+            "reduction_s=%.17g attempts=%llu scope=max_rank_step communication=nested\n",
+            (unsigned long long)step.accepted_step,valid[0],valid[1],maximum[0]*1e-9,
+            maximum[1]*1e-9,(unsigned long long)maximum[2]);
+        if (valid[0]) for (std::size_t i=0; i<profile->level_count; ++i) {
+          const auto* row=maximum.data()+3U+i*width;
+          std::fprintf(stdout,"mg_level step=%llu level=%zu visits=%llu pre_s=%.17g "
+              "post_s=%.17g residual_s=%.17g restriction_s=%.17g prolongation_s=%.17g "
+              "terminal_s=%.17g direct_mpi_s=%.17g halo_wait_s=%.17g "
+              "halo_control_s=%.17g halo_control_calls=%llu\n",
+              (unsigned long long)step.accepted_step,i,(unsigned long long)row[0],
+              row[1]*1e-9,row[2]*1e-9,row[3]*1e-9,row[4]*1e-9,row[5]*1e-9,
+              row[6]*1e-9,row[7]*1e-9,row[8]*1e-9,row[9]*1e-9,
+              (unsigned long long)row[10]);
+        }
+      }
     }
     report.requested_bdf = step.proposal.bdf;
     report.effective_bdf = step.effective_bdf;
@@ -759,6 +818,11 @@ static Status run_application(MPI_Comm communicator,
         if (output) output_path = options.run_directory / "Visit";
         return driver.committed_output_snapshot(snapshot);
       });
+      // Every rank has completed fallible path preparation before entering
+      // the collective accepted SGS reconstruction. Monitor-only steps retain
+      // the primary snapshot and its original cost.
+      if (status && output)
+        status = driver.committed_sgs_output_snapshot(snapshot);
     }
     if (status && output)
       status = VisitWriter::write(communicator, output_path, services, snapshot,
@@ -854,7 +918,7 @@ static Status run_application(MPI_Comm communicator,
             terminal.final_flux == 0U ||
             terminal.final_flux != step.piso.final_flux_revision)
           return Status{StatusCode::invalid_plan, kApplicationDiagnostics};
-        const std::array<std::pair<const char*, double>, 16U> values{{
+        const std::array<std::pair<const char*, double>, 18U> values{{
             {"dt", step.proposal.dt},
             {"mass_kg", terminal.mass},
             {"internal_energy_J", terminal.internal_energy},
@@ -865,6 +929,8 @@ static Status run_application(MPI_Comm communicator,
             {"conductive_heat_input_W", balance.conductive_heat_input},
             {"species_enthalpy_diffusion_input_W", balance.species_enthalpy_diffusion_input},
             {"viscous_work_input_W", balance.viscous_work_input},
+            {"statistical_enthalpy_outflow_W", balance.statistical_enthalpy_outflow},
+            {"statistical_enthalpy_source_W", balance.statistical_enthalpy_source},
             {"mass_bdf_rate_kg_s", balance.mass_bdf_rate},
             {"total_energy_bdf_rate_W", balance.total_energy_bdf_rate},
             {"mass_balance_defect_kg_s", balance.mass_balance_defect},
@@ -883,6 +949,34 @@ static Status run_application(MPI_Comm communicator,
           if (!std::isfinite(value.second))
             return Status{StatusCode::invalid_plan, kApplicationDiagnostics};
           payload << ",\"" << value.first << "\":" << value.second;
+        }
+        if(balance.composition_valid) {
+          payload << ",\"composition_balance\":{\"scope\":\"gas_transport_reaction\",\"density\":\"field0\","
+                  << "\"composition\":\"physical_ensemble_mean\",\"revision\":" << balance.composition_revision
+                  << ",\"duration_s\":" << balance.composition_duration
+                  << ",\"after_parcel_exchange\":" << (balance.composition_after_parcel_exchange ? "true" : "false")
+                  << ",\"species_units\":\"kg,kg/s\",\"element_units\":\"kmol(atoms),kmol(atoms)/s\"";
+          for(unsigned group=0;group<2;++group) {
+            payload << (group ? ",\"elements\":[" : ",\"species\":[");
+            bool first=true;
+            for(const auto& row:(group ? balance.element_balance : balance.species_balance)) {
+              if(!first)payload << ',';first=false;
+              payload << "{\"name\":\"" << detail::output_json_escape(row.name) << '"';
+              const std::array<std::pair<const char*,double>,10> entries{{
+                  {"accepted_inventory",row.accepted_inventory},{"current_inventory",row.current_inventory},
+                  {"temporal_rate",row.temporal_rate},{"transport_outflow",row.transport_outflow},
+                  {"pressure_outflow",row.pressure_outflow},{"noise_source",row.noise_source},
+                  {"mixing_source",row.mixing_source},{"chemistry_source",row.chemistry_source},
+                  {"defect",row.defect},{"relative_defect",row.relative_defect}}};
+              for(const auto& entry:entries) {
+                if(!std::isfinite(entry.second))return Status{StatusCode::invalid_plan,kApplicationDiagnostics};
+                payload << ",\"" << entry.first << "\":" << entry.second;
+              }
+              payload << '}';
+            }
+            payload << ']';
+          }
+          payload << '}';
         }
         payload << '}';
         diagnostic_text = payload.str();
@@ -947,6 +1041,8 @@ static Status run_application(MPI_Comm communicator,
       evidence.requested_bdf_order = step.proposal.bdf.order;
       evidence.bdf_order = step.effective_bdf.order;
       evidence.cold = step.piso.cold;
+      evidence.algorithm = {true, model.time.scheme,
+          effective_coupling(model.time.scheme, model.solver.coupling)};
       evidence.coupling = step.piso.cold.active
                               ? RuntimeCouplingKind::cn_be
                           : model.solver.coupling == CouplingKind::simple

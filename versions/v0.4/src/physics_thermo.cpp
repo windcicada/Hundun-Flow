@@ -456,6 +456,18 @@ Status ThermodynamicsPlan::composition(
              : Status{StatusCode::numerical_failure, kThermoComposition};
 }
 
+std::size_t ThermodynamicsPlan::mixture_reference(
+    Span<const double> fractions, double dependent) const noexcept {
+  std::size_t reference = dependent_species_;
+  double largest = std::abs(dependent);
+  for (std::size_t i = 0; i < fractions.size; ++i)
+    if (std::abs(fractions.data[i]) > largest) {
+      largest = std::abs(fractions.data[i]);
+      reference = independent_to_species_[i];
+    }
+  return reference;
+}
+
 Status ThermodynamicsPlan::mixture_properties(
     double temperature, Span<const double> independent_mass_fractions,
     double dependent, double& enthalpy, double& cp,
@@ -466,49 +478,58 @@ Status ThermodynamicsPlan::mixture_properties(
       dependent_species_ >= inverse_molecular_weight_.size()) {
     return {StatusCode::numerical_failure, kThermoRange};
   }
-  double mixture_h = 0.0;
-  double mixture_cp = 0.0;
-  double mixture_r = 0.0;
-  for (std::size_t independent = 0U;
-       independent < independent_mass_fractions.size; ++independent) {
-    const std::size_t species = independent_to_species_[independent];
-    const double mass_fraction = independent_mass_fractions.data[independent];
+  const auto properties = [&](std::size_t species) {
     const bool low = temperature <= temperature_switch_[species];
     std::array<double, 7U> coefficients{};
     for (std::size_t index = 0U; index < 7U; ++index) {
       coefficients[index] =
           (low ? nasa_low_[index] : nasa_high_[index])[species];
     }
-    mixture_h += mass_fraction *
-                 species_h(universal_gas_constant_, temperature,
-                           inverse_molecular_weight_[species],
-                           coefficients);
-    mixture_cp += mass_fraction *
-                  species_cp(universal_gas_constant_, temperature,
-                             inverse_molecular_weight_[species],
-                             coefficients);
-    mixture_r += mass_fraction * universal_gas_constant_ *
-                 inverse_molecular_weight_[species];
+    return std::array<double, 3>{
+        species_h(universal_gas_constant_, temperature, inverse_molecular_weight_[species], coefficients),
+        species_cp(universal_gas_constant_, temperature, inverse_molecular_weight_[species], coefficients),
+        universal_gas_constant_ * inverse_molecular_weight_[species]};
+  };
+  // An affine sum preserves a common property exactly as composition changes.
+  // Anchor at the largest fraction so a trace balance species cannot dominate
+  // cancellation. Extended intermediates retain contrast near pure endpoints.
+  const auto reference = mixture_reference(independent_mass_fractions, dependent);
+  const auto base = properties(reference);
+  // Binary mixtures need one affine term. Keep extended intermediates while
+  // bypassing the generic species/component accumulation and its workspace.
+  if (independent_mass_fractions.size == 1U) {
+    const bool reference_is_balance = reference == dependent_species_;
+    const auto other = reference_is_balance ? independent_to_species_[0]
+                                            : dependent_species_;
+    const double weight = reference_is_balance
+                              ? independent_mass_fractions.data[0] : dependent;
+    const auto value = weight == 0.0 ? base : properties(other);
+    const auto mix = [&](unsigned component) noexcept {
+      return static_cast<double>(base[component] + weight *
+          (static_cast<long double>(value[component]) - base[component]));
+    };
+    const double mixed_h = mix(0), mixed_cp = mix(1), mixed_r = mix(2);
+    if (!finite(mixed_h) || !finite(mixed_cp) || !finite(mixed_r) ||
+        mixed_r <= 0.0 || mixed_cp <= mixed_r)
+      return {StatusCode::numerical_failure, kThermoRange};
+    enthalpy = mixed_h;
+    cp = mixed_cp;
+    gas_constant = mixed_r;
+    return {};
   }
-  {
-    const std::size_t species = dependent_species_;
-    const bool low = temperature <= temperature_switch_[species];
-    std::array<double, 7U> coefficients{};
-    for (std::size_t index = 0U; index < 7U; ++index) {
-      coefficients[index] =
-          (low ? nasa_low_[index] : nasa_high_[index])[species];
-    }
-    mixture_h += dependent *
-                 species_h(universal_gas_constant_, temperature,
-                           inverse_molecular_weight_[species],
-                           coefficients);
-    mixture_cp += dependent *
-                  species_cp(universal_gas_constant_, temperature,
-                             inverse_molecular_weight_[species],
-                             coefficients);
-    mixture_r += dependent * universal_gas_constant_ *
-                 inverse_molecular_weight_[species];
-  }
+  std::array<long double, 3> delta{};
+  const auto add = [&](std::size_t species, double weight) {
+    if (species == reference || weight == 0) return;
+    const auto value = properties(species);
+    for (unsigned c = 0; c < 3; ++c)
+      delta[c] += weight * (static_cast<long double>(value[c]) - base[c]);
+  };
+  for (std::size_t i = 0; i < independent_mass_fractions.size; ++i)
+    add(independent_to_species_[i], independent_mass_fractions.data[i]);
+  add(dependent_species_, dependent);
+  const double mixture_h = static_cast<double>(base[0] + delta[0]);
+  const double mixture_cp = static_cast<double>(base[1] + delta[1]);
+  const double mixture_r = static_cast<double>(base[2] + delta[2]);
   if (!finite(mixture_h) || !finite(mixture_cp) || !finite(mixture_r) ||
       mixture_r <= 0.0 || mixture_cp <= mixture_r) {
     return {StatusCode::numerical_failure, kThermoRange};
@@ -516,6 +537,79 @@ Status ThermodynamicsPlan::mixture_properties(
   enthalpy = mixture_h;
   cp = mixture_cp;
   gas_constant = mixture_r;
+  return {};
+}
+
+Status ThermodynamicsPlan::transport_enthalpy_coordinate(
+    double temperature, Span<const double> independent_mass_fractions,
+    double& coordinate) const noexcept {
+  if (fingerprint_ == 0U ||
+      independent_mass_fractions.size != independent_to_species_.size() ||
+      (independent_mass_fractions.size && !independent_mass_fractions.data))
+    return {StatusCode::invalid_plan, kThermoComposition};
+  double dependent = 1.0;
+  for (std::size_t i=0; i<independent_mass_fractions.size; ++i) {
+    if (!finite(independent_mass_fractions.data[i]))
+      return {StatusCode::numerical_failure, kThermoComposition};
+    dependent -= independent_mass_fractions.data[i];
+  }
+  if (!finite(dependent) || !finite(temperature) || temperature < minimum_temperature_ ||
+      temperature > maximum_temperature_)
+    return {StatusCode::numerical_failure, kThermoRange};
+  const auto sensible = [&](std::size_t species) {
+    const bool low = temperature <= temperature_switch_[species];
+    std::array<double, 7U> coefficients{};
+    for (std::size_t k = 0; k < 7U; ++k)
+      coefficients[k] = (low ? nasa_low_[k] : nasa_high_[k])[species];
+    coefficients[5U] -= nasa_low_[5U][species];
+    return species_h(universal_gas_constant_, temperature,
+                     inverse_molecular_weight_[species], coefficients);
+  };
+  const auto reference = mixture_reference(independent_mass_fractions, dependent);
+  const double base = sensible(reference);
+  long double delta = 0;
+  for (std::size_t i = 0; i < independent_mass_fractions.size; ++i)
+    if (independent_to_species_[i] != reference)
+      delta += independent_mass_fractions.data[i] *
+          (static_cast<long double>(sensible(independent_to_species_[i])) - base);
+  if (dependent_species_ != reference)
+    delta += dependent * (static_cast<long double>(sensible(dependent_species_)) - base);
+  const double result = static_cast<double>(base + delta);
+  if (!finite(result)) return {StatusCode::numerical_failure, kThermoRange};
+  coordinate = result;
+  return {};
+}
+
+Status ThermodynamicsPlan::transport_enthalpy_coordinate_from_h(
+    double enthalpy, Span<const double> independent_mass_fractions,
+    double& coordinate) const noexcept {
+  if (fingerprint_ == 0U ||
+      independent_mass_fractions.size != independent_to_species_.size() ||
+      (independent_mass_fractions.size && !independent_mass_fractions.data))
+    return {StatusCode::invalid_plan, kThermoComposition};
+  if (!finite(enthalpy)) return {StatusCode::numerical_failure, kThermoRange};
+  double dependent = 1.0;
+  for (std::size_t i = 0; i < independent_mass_fractions.size; ++i) {
+    if (!finite(independent_mass_fractions.data[i]))
+      return {StatusCode::numerical_failure, kThermoComposition};
+    dependent -= independent_mass_fractions.data[i];
+  }
+  if (!finite(dependent)) return {StatusCode::numerical_failure, kThermoComposition};
+  const auto offset = [&](std::size_t s) noexcept {
+    return universal_gas_constant_ * inverse_molecular_weight_[s] * nasa_low_[5U][s];
+  };
+  const auto reference = mixture_reference(independent_mass_fractions, dependent);
+  const double base = offset(reference);
+  long double value = static_cast<long double>(enthalpy) - base;
+  for (std::size_t i = 0; i < independent_mass_fractions.size; ++i)
+    if (independent_to_species_[i] != reference)
+      value -= independent_mass_fractions.data[i] *
+          (static_cast<long double>(offset(independent_to_species_[i])) - base);
+  if (dependent_species_ != reference)
+    value -= dependent * (static_cast<long double>(offset(dependent_species_)) - base);
+  const double result = static_cast<double>(value);
+  if (!finite(result)) return {StatusCode::numerical_failure, kThermoRange};
+  coordinate = result;
   return {};
 }
 
@@ -668,23 +762,24 @@ Status ThermodynamicsPlan::evaluate_thermal_impl(
   }
 
   if (kernel_ == ThermodynamicsKernel::constant_cp) {
-    double cp = 0.0;
-    double gas = 0.0;
+    const auto reference = mixture_reference(independent_mass_fractions, dependent);
+    const double reference_gas = universal_gas_constant_ * inverse_molecular_weight_[reference];
+    const double reference_cp = reference_gas * nasa_low_[0U][reference];
+    long double cp_delta = 0, gas_delta = 0;
+    const auto add = [&](std::size_t species, double fraction) {
+      if (species == reference || fraction == 0) return;
+      const double species_gas = universal_gas_constant_ * inverse_molecular_weight_[species];
+      const double species_cp = species_gas * nasa_low_[0U][species];
+      gas_delta += fraction * (static_cast<long double>(species_gas) - reference_gas);
+      cp_delta += fraction * (static_cast<long double>(species_cp) - reference_cp);
+    };
     for (std::size_t independent = 0U;
          independent < independent_mass_fractions.size; ++independent) {
-      const std::size_t species = independent_to_species_[independent];
-      const double fraction = independent_mass_fractions.data[independent];
-      const double species_gas =
-          universal_gas_constant_ * inverse_molecular_weight_[species];
-      gas += fraction * species_gas;
-      cp += fraction * species_gas * nasa_low_[0U][species];
+      add(independent_to_species_[independent], independent_mass_fractions.data[independent]);
     }
-    const double dependent_gas =
-        universal_gas_constant_ *
-        inverse_molecular_weight_[dependent_species_];
-    gas += dependent * dependent_gas;
-    cp += dependent * dependent_gas *
-          nasa_low_[0U][dependent_species_];
+    add(dependent_species_, dependent);
+    const double gas = static_cast<double>(reference_gas + gas_delta);
+    const double cp = static_cast<double>(reference_cp + cp_delta);
     if (!finite(cp) || !finite(gas) || gas <= 0.0 || cp <= gas) {
       return {StatusCode::numerical_failure, kThermoRange};
     }

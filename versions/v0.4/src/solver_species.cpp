@@ -9,6 +9,9 @@
 #include "solver_equation_detail.hpp"
 #include "solver_species_guess_detail.hpp"
 #include "solver_ibm_scalar_transport_detail.hpp"
+#include "solver_mixture_transport_detail.hpp"
+#include "solver_statistical_detail.hpp"
+#include "solver_heat_boundary_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -197,36 +200,6 @@ RevisionToken scalar_state_revision(const EquationStateView& state,
   return hash == 0U ? RevisionToken{1U} : hash;
 }
 
-double positive_transmissibility(const CartesianKernelPlan& kernels,
-                                 ConstFieldView diffusivity,
-                                 CartesianAxis axis, Int3 face) noexcept {
-  const std::int32_t normal = axis == CartesianAxis::x
-                                  ? face.x
-                                  : (axis == CartesianAxis::y ? face.y
-                                                              : face.z);
-  Int3 left = face;
-  if (axis == CartesianAxis::x) {
-    --left.x;
-  } else if (axis == CartesianAxis::y) {
-    --left.y;
-  } else {
-    --left.z;
-  }
-  const double gamma_left = diffusivity.unchecked(left, 0U);
-  const double gamma_right = diffusivity.unchecked(face, 0U);
-  const double face_coordinate = detail::face_coordinate(kernels, axis, normal);
-  const double left_distance =
-      face_coordinate - detail::centre_coordinate(kernels, axis, normal - 1);
-  const double right_distance =
-      detail::centre_coordinate(kernels, axis, normal) - face_coordinate;
-  if (!finite_positive(gamma_left) || !finite_positive(gamma_right) ||
-      !finite_positive(left_distance) || !finite_positive(right_distance)) {
-    return std::numeric_limits<double>::quiet_NaN();
-  }
-  return detail::face_area(kernels, axis, face) /
-         (left_distance / gamma_left + right_distance / gamma_right);
-}
-
 template <CartesianAxis Axis>
 Status fill_face_coefficients(const CartesianKernelPlan& kernels,
                               ConstFieldView diffusivity, KernelBox box,
@@ -251,7 +224,7 @@ Status fill_face_coefficients(const CartesianKernelPlan& kernels,
       for (std::int32_t x = face_begin.x; x < face_end.x; ++x) {
         const Int3 face{x, y, z};
         const double coefficient =
-            positive_transmissibility(kernels, diffusivity, Axis, face);
+            detail::positive_transmissibility(kernels, diffusivity, Axis, face);
         if (!std::isfinite(coefficient)) {
           return {StatusCode::numerical_failure, kScalarNumerical};
         }
@@ -273,7 +246,10 @@ Status assemble_transport(
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial,
     const IbmInterfaceInletField* inlet_field, bool density_units=false,
-    bool retain_diagonal=false) noexcept {
+    bool retain_diagonal=false,
+    const EnthalpyEquationPlan* statistical_enthalpy=nullptr) noexcept {
+  const auto* mixture = (spec.role == TransportedScalarRole::species || statistical_enthalpy)
+      ? context.mixture_transport : nullptr;
   Span<const CompiledContribution> descriptors{};
   if (!detail::select_contribution_stage(
           all_descriptors, context.contribution_stage, descriptors)) {
@@ -295,10 +271,18 @@ Status assemble_transport(
       !detail::finite_face_neighbour_slabs(scalar.trial, box, 0U, 1U,
                                            required_ghosts) ||
       !valid_material(diffusivity, cells) || !valid_system(system, cells) ||
+      !detail::valid_mixture_transport(mixture,cells,context.face_flux,system) ||
       detail::output_aliases_input(diffusivity, system, true) ||
       detail::output_aliases_flux(system, true, context.mass_flux)) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
+  if (context.reaction_endpoint.base &&
+      (spec.role != TransportedScalarRole::species || context.bdf.order != 1U ||
+       context.reaction_endpoint.field != spec.field ||
+       !detail::valid_cell_view(context.reaction_endpoint,cells,0U,1U,0U) ||
+       !detail::finite_field_box(context.reaction_endpoint,box,0U,1U) ||
+       detail::output_aliases_input(context.reaction_endpoint,system,true)))
+    return {StatusCode::invalid_plan,kScalarAssembly};
   const PrimitiveHistory histories[]{state.density, scalar};
   for (const PrimitiveHistory& history : histories) {
     if (detail::output_aliases_input(history.trial, system, true) ||
@@ -346,22 +330,24 @@ Status assemble_transport(
                 contribution.implicit_sink_density.unchecked(cell, 0U);
           }
         }
-        const double diffusion_diagonal =
+        double diffusion_diagonal =
             retain_diagonal ? 0.0 : context.immersed_interface != nullptr
             ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
             :
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, cell) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, {x + 1, y, z}) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::y, cell) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::y, {x, y + 1, z}) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::z, cell) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::z, {x, y, z + 1});
+        if (!retain_diagonal)
+          diffusion_diagonal += detail::mixture_diffusion_diagonal(mixture,cell);
         if (!finite_positive(rho_trial) || !finite_positive(rho_accepted) ||
             !finite_positive(rho_previous) || !std::isfinite(q_trial) ||
             !std::isfinite(q_accepted) || !std::isfinite(q_previous) ||
@@ -369,17 +355,30 @@ Status assemble_transport(
             implicit_sink < 0.0 || !std::isfinite(diffusion_diagonal) || diffusion_diagonal < 0.0) {
           return {StatusCode::numerical_failure, kScalarNumerical};
         }
+        if (context.reaction_endpoint.base) {
+          const double endpoint=context.reaction_endpoint.unchecked(cell,0U);
+          if(endpoint<0.0 || endpoint>1.0)
+            return {StatusCode::numerical_failure,kScalarComposition};
+        }
         const double volume = detail::cell_volume(kernels, cell);
-        const double unsteady =
-            context.bdf.a0 * rho_trial * q_trial +
-            context.bdf.a1 * rho_accepted * q_accepted +
-            context.bdf.a2 * rho_previous * q_previous;
+        // Resolve BE increments before scaling by 1/dt. This equivalent
+        // conservative form retains represented changes close to equilibrium.
+        const double unsteady = context.bdf.a2 == 0.0 &&
+                context.bdf.a1 == -context.bdf.a0
+            ? context.bdf.a0 * ((rho_trial-rho_accepted)*q_trial +
+                                rho_accepted*(q_trial-q_accepted))
+            : context.bdf.a0 * rho_trial * q_trial +
+              context.bdf.a1 * rho_accepted * q_accepted +
+              context.bdf.a2 * rho_previous * q_previous;
         const double diagonal = retain_diagonal
             ? system.diagonal.unchecked(cell, 0U)
             : (context.bdf.a0 * rho_trial + implicit_sink) * volume +
             diffusion_diagonal;
+        const double reaction_storage = context.reaction_endpoint.base
+            ? rho_trial*(context.reaction_endpoint.unchecked(cell,0U)-q_trial)/context.dt : 0.0;
+        const double source_balance = reaction_storage-explicit_source;
         const double non_diffusive_without_convection =
-            (unsteady - explicit_source + implicit_sink * q_trial) * volume;
+            (unsteady + source_balance + implicit_sink * q_trial) * volume;
         if (!finite_positive(diagonal) ||
             !std::isfinite(non_diffusive_without_convection)) {
           return {StatusCode::numerical_failure, kScalarNumerical};
@@ -388,16 +387,20 @@ Status assemble_transport(
     }
   }
 
-  // Both kernels write the same scratch view.  Convection is consumed before
-  // diffusion overwrites it, keeping the hot path allocation-free.
+  // Common-face transport combines convection and physical diffusion before
+  // multiplication by the composition jump. At its upwind limit this keeps
+  // a vanishing downwind coefficient exact, including trace/zero species.
+  // The separate kernels otherwise share the same allocation-free scratch.
   const std::array<ConstFieldView, 1U> reads{scalar.trial};
   const std::array<FieldView, 1U> writes{system.residual};
   const KernelInvocation invocation{{reads.data(), reads.size()},
                                     {writes.data(), writes.size()}, box,
                                     0U, 0U, 1U, context.face_flux,
                                     context.counters};
-  Status evaluated =
-      context.scope == EquationAssemblyScope::final_conservative
+  Status evaluated = mixture
+      ? cartesian_mixture_transport(kernels,*mixture,diffusivity,
+                                    context.mass_flux,invocation)
+      : context.scope == EquationAssemblyScope::final_conservative
           ? cartesian_convection(kernels, convection, context.mass_flux,
                                  invocation)
           : cartesian_provisional_convection(
@@ -406,9 +409,17 @@ Status assemble_transport(
     return evaluated;
   }
   if (context.immersed_interface != nullptr && inlet_field != nullptr) {
-    evaluated = detail::IbmScalarTransport::convection(
-        *context.immersed_interface,inlet_field->component,convection,
-        scalar.trial,context.mass_flux,box,system.residual);
+    const detail::IbmScalarTransport::Field field{
+        statistical_enthalpy ? detail::IbmScalarTransport::Quantity::enthalpy
+                             : detail::IbmScalarTransport::Quantity::independent_species,
+        inlet_field->component};
+    evaluated = mixture
+        ? detail::IbmScalarTransport::transport(*context.immersed_interface,
+              field,scalar.trial,diffusivity,context.mass_flux,box,
+              system.residual,*mixture)
+        : detail::IbmScalarTransport::convection(*context.immersed_interface,
+              field,convection,scalar.trial,context.mass_flux,box,
+              system.residual);
     if (!evaluated) return evaluated;
   }
 
@@ -439,35 +450,48 @@ Status assemble_transport(
                 contribution.implicit_sink_density.unchecked(cell, 0U);
           }
         }
-        const double unsteady =
-            context.bdf.a0 * rho_trial * q_trial +
-            context.bdf.a1 * rho_accepted * q_accepted +
-            context.bdf.a2 * rho_previous * q_previous;
+        // Resolve BE increments before scaling by 1/dt. This equivalent
+        // conservative form retains represented changes close to equilibrium.
+        const double unsteady = context.bdf.a2 == 0.0 &&
+                context.bdf.a1 == -context.bdf.a0
+            ? context.bdf.a0 * ((rho_trial-rho_accepted)*q_trial +
+                                rho_accepted*(q_trial-q_accepted))
+            : context.bdf.a0 * rho_trial * q_trial +
+              context.bdf.a1 * rho_accepted * q_accepted +
+              context.bdf.a2 * rho_previous * q_previous;
         const double volume = detail::cell_volume(kernels, cell);
-        const double diffusion_diagonal =
+        double diffusion_diagonal =
             retain_diagonal ? 0.0 : context.immersed_interface != nullptr
             ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
             :
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, cell) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, {x + 1, y, z}) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::y, cell) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::y, {x, y + 1, z}) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::z, cell) +
-            positive_transmissibility(kernels, diffusivity,
+            detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::z, {x, y, z + 1});
+        if (!retain_diagonal)
+          diffusion_diagonal += detail::mixture_diffusion_diagonal(mixture,cell);
         const double diagonal = retain_diagonal
             ? system.diagonal.unchecked(cell, 0U)
             : density_units
             ? context.bdf.a0 * rho_trial + implicit_sink + diffusion_diagonal / volume
             : (context.bdf.a0 * rho_trial + implicit_sink) * volume + diffusion_diagonal;
+        // Combine the reaction storage with its interval source before
+        // adding the much smaller transport residual. Both retain their
+        // original values for the independent source/conservation ledger.
+        const double reaction_storage = context.reaction_endpoint.base
+            ? rho_trial*(context.reaction_endpoint.unchecked(cell,0U)-q_trial)/context.dt : 0.0;
+        const double source_balance = reaction_storage-explicit_source;
         const double non_diffusive =
-            (unsteady + system.residual.unchecked(cell, 0U) -
-             explicit_source + implicit_sink * q_trial) *
+            (unsteady + system.residual.unchecked(cell, 0U) +
+             source_balance + implicit_sink * q_trial) *
             (density_units ? 1.0 : volume);
         if (!finite_positive(rho_trial) || !std::isfinite(rho_accepted) ||
             !std::isfinite(rho_previous) || !std::isfinite(q_trial) ||
@@ -486,13 +510,28 @@ Status assemble_transport(
 
   KernelInvocation diffusion_call = invocation;
   diffusion_call.required_face_flux_revision = 0U;
-  evaluated = cartesian_diffusion(kernels, diffusivity, diffusion_call);
+  if (mixture) {
+    // Physical diffusion is already in rhs. The remaining rate workspace
+    // carries only an optional prescribed-heat boundary correction.
+    for (int z=box.begin.z; z<end.z; ++z)
+      for (int y=box.begin.y; y<end.y; ++y)
+        for (int x=box.begin.x; x<end.x; ++x)
+          system.residual.unchecked({x,y,z},0U)=0.0;
+  } else {
+    evaluated = cartesian_diffusion(kernels, diffusivity, diffusion_call);
+  }
   if (!evaluated) {
     return evaluated;
   }
-  if(context.immersed_interface!=nullptr) {
+  if(context.immersed_interface!=nullptr && mixture==nullptr) {
     evaluated=detail::IbmScalarTransport::diffusion(*context.immersed_interface,
         scalar.trial,diffusivity,box,system.residual);
+    if(!evaluated) return evaluated;
+  }
+  if (statistical_enthalpy) {
+    evaluated=detail::apply_heat_flux_boundary(*statistical_enthalpy,kernels,
+        scalar.trial,diffusivity,box,system.residual,context.immersed_interface
+            ? context.immersed_interface->cell_activity() : Span<const std::uint8_t>{});
     if(!evaluated) return evaluated;
   }
   for (std::int32_t z = box.begin.z; z < end.z; ++z) {
@@ -532,8 +571,29 @@ Status assemble_transport(
     return evaluated;
   }
 
+  if (!retain_diagonal && mixture && system.x_coefficient.base) {
+    const std::array<FaceFieldView,3> coefficients{
+        system.x_coefficient,system.y_coefficient,system.z_coefficient};
+    for (unsigned a=0; a<3; ++a) {
+      auto extent=box.cells;
+      (a==0 ? extent.x : a==1 ? extent.y : extent.z)++;
+      for (int z=box.begin.z; z<box.begin.z+extent.z; ++z)
+        for (int y=box.begin.y; y<box.begin.y+extent.y; ++y)
+          for (int x=box.begin.x; x<box.begin.x+extent.x; ++x) {
+            const Int3 face{x,y,z};
+            coefficients[a].unchecked(face) += detail::mixture_face_extra(mixture,a,face);
+          }
+    }
+  }
   RevisionToken assembled_state =
       scalar_state_revision(state, scalar, diffusivity, contributions);
+  if (mixture) assembled_state=hash_mix(assembled_state,mixture->linearization);
+  if (context.reaction_endpoint.base) {
+    assembled_state=hash_mix(assembled_state,context.reaction_endpoint.field);
+    assembled_state=hash_mix(assembled_state,context.reaction_endpoint.revision);
+    assembled_state=hash_mix(assembled_state,context.reaction_endpoint.storage_identity);
+    assembled_state=hash_mix(assembled_state,context.reaction_endpoint.revision_domain);
+  }
   if (context.immersed_interface != nullptr) {
     evaluated=detail::IbmScalarTransport::constrain_rows(
         *context.immersed_interface,scalar.trial,box,system);
@@ -549,6 +609,36 @@ Status assemble_transport(
 }
 
 }  // namespace
+
+Status detail::StatisticalEnthalpy::assemble(
+    const EnthalpyEquationPlan& plan, const EquationStateView& state,
+    ConstFieldView diffusivity, Span<const EquationContributionView> contributions,
+    const EquationAssemblyContext& context, EquationSystemView system,
+    EquationAssemblyCertificate& certificate) noexcept {
+  if (!plan.kernels_ || context.geometry!=plan.geometry_revision_ ||
+      context.boundary!=plan.boundary_revision_ ||
+      context.thermo!=plan.thermodynamics_fingerprint_ ||
+      context.transport!=plan.transport_fingerprint_ ||
+      context.scope!=EquationAssemblyScope::final_conservative ||
+      context.provisional_mass_flux || context.reaction_endpoint.base)
+    return {StatusCode::invalid_plan,kScalarAssembly};
+  const ScalarEquationSpec spec{plan.enthalpy_,TransportedScalarRole::passive_scalar,1.,1.};
+  const IbmInterfaceInletField inlet{IbmInterfaceInletFieldKind::enthalpy,0};
+  return assemble_transport(*plan.kernels_,plan.cells_,
+      hash_mix(plan.fingerprint_,UINT64_C(0x53544154454e5431)),plan.density_,
+      plan.convection_,spec,{plan.contributions_.data(),plan.contributions_.size()},
+      state.enthalpy,state,diffusivity,contributions,context,system,certificate,
+      false,&inlet,false,false,&plan);
+}
+
+Status detail::StatisticalSpecies::assemble(const SpeciesEquationPlan& plan,
+    std::size_t species, const EquationStateView& state,
+    const EquationMaterialView& material, Span<const EquationContributionView> contributions,
+    const EquationAssemblyContext& context, EquationSystemView system,
+    EquationAssemblyCertificate& certificate) noexcept {
+  return assemble_species_impl(plan,species,state,material,contributions,context,
+      system,certificate,false,false,false,false,true);
+}
 
 Status close_independent_species(Span<const double> independent,
                                  Span<const double> diffusive_fluxes,
@@ -689,8 +779,11 @@ Status assemble_species_impl(
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial,
-    bool initial_guess, bool density_units, bool retain_diagonal) noexcept {
+    bool initial_guess, bool density_units, bool retain_diagonal,
+    bool statistical) noexcept {
   if (plan.kernels_ == nullptr ||
+      (statistical && (initial_guess || density_units || retain_diagonal ||
+                       allow_partial || context.reaction_endpoint.base)) ||
       context.geometry != plan.geometry_revision_ ||
       context.boundary != plan.boundary_revision_ ||
       context.thermo != plan.thermodynamics_fingerprint_ ||
@@ -727,8 +820,9 @@ Status assemble_species_impl(
       return {StatusCode::invalid_plan, kScalarAssembly};
     }
   }
-  // Enforce the N-1 composition contract before any scalar output is
-  // modified.  This deliberately rejects instead of clipping or normalizing.
+  // Accepted histories always satisfy the N-1 composition contract. A
+  // statistical component correction may temporarily cross the simplex;
+  // its enclosing tuple transaction owns the complete candidate audit.
   const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
                  box.begin.z + box.cells.z};
   for (std::int32_t z = box.begin.z; z < end.z; ++z) {
@@ -746,7 +840,7 @@ Status assemble_species_impl(
           const double accepted = history.accepted.unchecked(cell, 0U);
           const double previous = history.previous.unchecked(cell, 0U);
           if (!std::isfinite(trial) || !std::isfinite(accepted) ||
-              !std::isfinite(previous) || trial < 0.0 || trial > 1.0 ||
+              !std::isfinite(previous) || (!statistical && (trial < 0.0 || trial > 1.0)) ||
               accepted < 0.0 || accepted > 1.0 || previous < 0.0 ||
               previous > 1.0) {
             return {StatusCode::numerical_failure, kScalarComposition};
@@ -755,7 +849,7 @@ Status assemble_species_impl(
           accepted_sum += accepted;
           previous_sum += previous;
         }
-        if (trial_sum > 1.0L || accepted_sum > 1.0L ||
+        if ((!statistical && trial_sum > 1.0L) || accepted_sum > 1.0L ||
             previous_sum > 1.0L) {
           return {StatusCode::numerical_failure, kScalarComposition};
         }
@@ -765,7 +859,9 @@ Status assemble_species_impl(
   const IbmInterfaceInletField inlet_field{
       IbmInterfaceInletFieldKind::independent_species, species};
   return assemble_transport(
-      *plan.kernels_, plan.cells_, plan.fingerprint_, plan.density_,
+      *plan.kernels_, plan.cells_,
+      statistical ? hash_mix(plan.fingerprint_,UINT64_C(0x5354415453504331)) : plan.fingerprint_,
+      plan.density_,
       plan.convection_, plan.specs_[species],
       plan.contribution_counts_[species] == 0U
           ? Span<const CompiledContribution>{}
@@ -776,6 +872,16 @@ Status assemble_species_impl(
       state.independent_species.data[species],
       state, plan.unity_lewis_total_enthalpy_ ? material.enthalpy_diffusivity : material.scalar_mass_diffusivity.data[species], contributions,
       context, system, certificate, allow_partial, &inlet_field, density_units, retain_diagonal);
+}
+
+Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
+    const EquationStateView& state, const EquationMaterialView& material,
+    Span<const EquationContributionView> contributions,
+    const EquationAssemblyContext& context, EquationSystemView system,
+    EquationAssemblyCertificate& certificate, bool allow_partial,
+    bool initial_guess, bool density_units, bool retain_diagonal) noexcept {
+  return assemble_species_impl(plan,species,state,material,contributions,context,
+      system,certificate,allow_partial,initial_guess,density_units,retain_diagonal,false);
 }
 
 Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
@@ -902,28 +1008,28 @@ Status detail::assemble_species_guess(const SpeciesEquationPlan& plan,
 Status detail::assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
-    EquationSystemView system) noexcept {
+    EquationSystemView system, Span<const EquationContributionView> sources) noexcept {
   if(context.contribution_stage==0U ||
       !detail::full_equation_box(resolved_box(context.box,plan.cells()),plan.cells()) ||
       (context.scope!=EquationAssemblyScope::momentum_predictor &&
        context.scope!=EquationAssemblyScope::final_conservative))
     return {StatusCode::invalid_plan,kScalarAssembly};
   EquationAssemblyCertificate local_certificate;
-  return assemble_species_impl(plan,species,state,material,{},context,system,
+  return assemble_species_impl(plan,species,state,material,sources,context,system,
       local_certificate,false,context.scope==EquationAssemblyScope::momentum_predictor,true);
 }
 
 Status detail::assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
-    EquationSystemView system) noexcept {
+    EquationSystemView system, Span<const EquationContributionView> sources) noexcept {
   if (context.contribution_stage == 0U ||
       !detail::full_equation_box(resolved_box(context.box, plan.cells()), plan.cells()) ||
       (context.scope != EquationAssemblyScope::momentum_predictor &&
        context.scope != EquationAssemblyScope::final_conservative))
     return {StatusCode::invalid_plan, kScalarAssembly};
   EquationAssemblyCertificate certificate;
-  return assemble_species_impl(plan, species, state, material, {}, context,
+  return assemble_species_impl(plan, species, state, material, sources, context,
       system, certificate, false,
       context.scope == EquationAssemblyScope::momentum_predictor, true, true);
 }

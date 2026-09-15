@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 def main():
@@ -68,12 +69,14 @@ def main():
                        "--run-root", str(path.resolve()), "--steps", "1", "--visit-interval", "1" if args.visit else "0"]
             if args.visit:
                 command.append("--observe-performance")
+            started = time.monotonic()
             result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, timeout=40,
                                     universal_newlines=True)
             (args.output / (path.name + ".log")).write_text(result.stdout)
             match = re.search(r"CHECKPOINT_ALLOC sites=(\d+) fired=(\d+) started=(\d+)", result.stdout)
             row = {"target": target, "index": index, "returncode": result.returncode,
+                   "elapsed_s": time.monotonic() - started,
                    "observation": match.groups() if match else None, "command": command}
             results.append(row)
             (args.output / "results.json").write_text(json.dumps(results, indent=2))

@@ -168,7 +168,7 @@
   },
   "time": {
     "control": "adaptive_flow",
-    "scheme": "variable_bdf2",
+    "scheme": "backward_euler",
     "initial_dt": 0.0001,
     "minimum_dt": 1e-10,
     "maximum_dt": 0.01,

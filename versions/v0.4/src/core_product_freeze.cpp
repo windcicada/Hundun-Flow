@@ -9,7 +9,9 @@
 #include "bc_identity_detail.hpp"
 #include "common_terminal_audit.h"
 #include "core_conservation_detail.hpp"
+#include "core_composition_balance_detail.hpp"
 #include "core_esf_detail.hpp"
+#include "core_esf_energy_detail.hpp"
 #include "core_product_freeze_detail.hpp"
 #include "core_reaction_detail.hpp"
 #include "core_spray_detail.hpp"
@@ -21,10 +23,13 @@
 #include "local_timing_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_cold.hpp"
+#include "solver_mixture_step_detail.hpp"
+#include "solver_statistical_detail.hpp"
 #include <cstdio>
 #include "solver_conservative_energy_detail.hpp"
 #include "solver_piso_detail.hpp"
 #include "solver_scalar_mass_remap_detail.hpp"
+#include "solver_esf_flux_detail.hpp"
 #include "solver_schur_pc_detail.hpp"
 #include "solver_schur_rho_detail.hpp"
 #include "solver_schur_seed_detail.hpp"
@@ -552,6 +557,10 @@ struct ProductFields {
     std::size_t catalog_slot{};
   };
   std::vector<FieldId> esf_fields;
+  FieldId esf_mean{}, esf_old{}, esf_iter{}, esf_auxiliary{};
+  // One owned contribution pair per independent species, followed by h.
+  // Random fields reuse these pairs sequentially with fresh revisions.
+  std::vector<FieldId> esf_transport_sources, esf_transport_sinks;
   std::vector<FieldId> post_esf_fields, post_scalars, post_scalar_rates;
   FieldId post_density{}, post_enthalpy{}, post_enthalpy_rate{},
       post_transport{}, post_diffusivity{};
@@ -836,7 +845,7 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
   if (model.reaction.esf.has_value()) {
     const auto count = model.reaction.esf->fields;
     const auto components = model.thermophysics.species.size() + 1U;
-    if (components > UINT8_MAX || 4U + fields.scalars.size() + count > 64U)
+    if (components > UINT8_MAX || 5U + fields.scalars.size() + count > 64U)
       return {StatusCode::invalid_plan, kProductRegistration};
     fields.esf_components = static_cast<std::uint8_t>(components);
     for (std::size_t f = 0; f < count; ++f) {
@@ -848,7 +857,30 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
       fields.esf_fields.push_back(id);
     }
     status =
-        require(registry, "esf_transport", 2U, ghosts, fields.esf_transport);
+        require(registry, "esf_transport", detail::ProductEsf::transport_components,
+                ghosts, fields.esf_transport);
+    if (!status)
+      return status;
+    status = require(registry, "esf_mean", fields.esf_components, ghosts,
+                     fields.esf_mean);
+    if (status)
+      status = require(registry, "esf_old", fields.esf_components, ghosts,
+                       fields.esf_old);
+    if (status)
+      status = require(registry, "esf_iter", fields.esf_components, ghosts,
+                       fields.esf_iter);
+    for (std::size_t c = 0; c < components - 1 && status; ++c) {
+      FieldId source{}, sink{};
+      status = registry.require_field("esf_rhs_" + std::to_string(c), 1U, 0U,
+                                      source);
+      if (status)
+        status = registry.require_field("esf_sink_" + std::to_string(c), 1U,
+                                        0U, sink);
+      if (status) {
+        fields.esf_transport_sources.push_back(source);
+        fields.esf_transport_sinks.push_back(sink);
+      }
+    }
     if (!status)
       return status;
   }
@@ -881,7 +913,8 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
           scalar("post_source_h_diffusion", 1, 0, fields.post_enthalpy_rate);
     if (status)
       status =
-          scalar("post_source_transport", 4, ghosts, fields.post_transport);
+          scalar("post_source_transport", detail::ProductEsf::transport_components,
+                 ghosts, fields.post_transport);
     if (status)
       status =
           scalar("post_source_diffusivity", 1, ghosts, fields.post_diffusivity);
@@ -904,6 +937,11 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     if (!status)
       return status;
   }
+  if (model.reaction.esf) {
+    status = require(registry, "esf_auxiliary", fields.esf_components, 0,
+                     fields.esf_auxiliary);
+    if (!status) return status;
+  }
   (void)mg;
   return {};
 }
@@ -916,7 +954,7 @@ bool state_field(FieldId field, const ProductFields& fields) noexcept {
     return true;
   }
   if (!fields.esf_fields.empty() &&
-      (field == fields.esf_transport ||
+      (field == fields.esf_transport || field == fields.esf_auxiliary ||
        std::find(fields.esf_fields.begin(), fields.esf_fields.end(), field) !=
            fields.esf_fields.end()))
     return true;
@@ -963,7 +1001,7 @@ Status compile_graph(const ProductFields &fields, std::uint8_t ghosts,
                                   2U + fields.scalars.size() +
                                       fields.esf_fields.size() *
                                           fields.esf_components +
-                                      (fields.esf_fields.empty() ? 0U : 2U),
+                                      (fields.esf_fields.empty() ? 0U : detail::ProductEsf::transport_components),
                                   ghosts, predictor_halo_bytes) ||
       !detail::product_halo_bytes(local_shape, 1U, 1U,
                                   predictor_donor_halo_bytes) ||
@@ -1338,6 +1376,8 @@ Status compile_graph(const ProductFields &fields, std::uint8_t ghosts,
     declarations.push_back({{field, StateVisibility::trial}, ghosts, false});
   }
   if (!fields.esf_fields.empty()) {
+    declarations.push_back({{fields.esf_auxiliary, StateVisibility::accepted}, 0U, true});
+    declarations.push_back({{fields.esf_auxiliary, StateVisibility::trial}, 0U, false});
     declarations.push_back(
         {{fields.esf_transport, StateVisibility::accepted}, ghosts, true});
     declarations.push_back(
@@ -1413,6 +1453,7 @@ Status compile_graph(const ProductFields &fields, std::uint8_t ghosts,
     predictor_ghosts.push_back({field, StateVisibility::accepted});
   }
   if (!fields.esf_fields.empty()) {
+    predictor_writes.push_back({fields.esf_auxiliary, StateVisibility::trial});
     predictor_reads.push_back(
         {fields.esf_transport, StateVisibility::accepted});
     predictor_ghosts.push_back(
@@ -2371,7 +2412,7 @@ Status resolve_static_boundary_values(
     Span<const ConstFieldView> passive,
     Span<double> composition, std::vector<double>& scalars,
     std::vector<Real3>& vectors,
-    const std::vector<double>& normal_gradients,
+    std::vector<double>& normal_gradients,
     bool resolve_vectors, Status prerequisite = {}) noexcept {
   if (communicator == MPI_COMM_NULL)
     return {StatusCode::invalid_plan, kProductBinding};
@@ -2386,10 +2427,25 @@ Status resolve_static_boundary_values(
            boundary.resolved_normal_gradient_count()))
     local = {StatusCode::invalid_plan, kProductBinding};
 
-  // Flux-derived thermal/species gradients still require material-field
-  // resolution. Fail closed instead of publishing zero gradients.
-  if (local && !normal_gradients.empty())
-    local = {StatusCode::invalid_plan, kProductBinding};
+  // A prescribed Neumann heat flux is eliminated into the equation source.
+  // Ghosts represent its homogeneous linear operator, keeping exterior EOS
+  // samples at the owner state. The physical q remains in EnthalpyEquationPlan
+  // and is applied by every energy residual, transport rate and boundary audit.
+  if (local && !normal_gradients.empty()) {
+    const auto gradient_spans = boundary.spans();
+    for (std::size_t index = 0; index < gradient_spans.size; ++index) {
+      const auto& span = gradient_spans.data[index];
+      if (span.value_source != BoundaryValueSource::resolved_normal_gradient) continue;
+      if (span.stage != BoundaryStage::enthalpy ||
+          span.parameter >= boundary.heat_flux_targets().size ||
+          span.resolved_begin > normal_gradients.size() ||
+          span.resolved_stride > normal_gradients.size() - span.resolved_begin) {
+        local = {StatusCode::invalid_plan, kProductBinding};
+        break;
+      }
+      std::fill_n(normal_gradients.data() + span.resolved_begin, span.resolved_stride, 0.0);
+    }
+  }
 
   const Span<const BoundaryIndexSpan> spans = boundary.spans();
   const Span<const double> temperatures = boundary.temperature_targets();
@@ -2955,6 +3011,7 @@ struct CompiledCasePlan::Impl {
   ContributionRegistry contributions;
   detail::ProductReactionSources reaction;
   detail::ProductEsf esf;
+  detail::StatisticalEnergyLedger esf_energy_ledger;
   detail::ProductSpray spray;
   TurbulencePlan turbulence;
   EquationPlanSet equations;
@@ -2987,6 +3044,7 @@ struct CompiledCasePlan::Impl {
   HaloEngine pressure_energy_enthalpy_halo;
   HaloEngine momentum_limiter_halo;
   HaloEngine krylov_halo;
+  HaloEngine esf_transport_halo;
   HaloEngine mg_halo;
   std::vector<HaloEngine> coarse_halos;
   std::vector<HaloEngine*> coarse_halo_pointers;
@@ -3029,6 +3087,8 @@ struct CompiledCasePlan::Impl {
   PlanFingerprint legacy_afc_v3_fingerprint{};
   PlanFingerprint legacy_time_fingerprint{};
   PlanFingerprint transport_source_plan{};
+  PlanFingerprint chemistry_source_plan{};
+  PlanFingerprint transport_source_schema{};
   std::array<PlanFingerprint, 4> transport_source_histories{};
   std::optional<ColdStoppingSpec> cold_stopping;
   bool unity_lewis_enthalpy{};
@@ -3064,6 +3124,7 @@ struct ProductDriver::Impl {
   ResourceCounters resources{};
   MPI_Comm communicator{MPI_COMM_NULL};
   std::vector<SnapshotFieldView> output_fields;
+  std::vector<double> output_sgs;
   std::vector<RestartFieldView> restart_fields;
   std::vector<RestartFieldView> restart_previous_fields;
   std::vector<RestartFieldView> restart_rate_fields;
@@ -3214,7 +3275,8 @@ struct ProductDriver::Impl {
       const ThermoState& thermo, const MolecularTransportState& transport,
       double heat_capacity) noexcept;
   Status rebuild_cold_velocity_dependents(double pressure_reference,
-                                          bool restart) noexcept;
+                                          bool restart,
+                                          bool rebuild_esf_transport = false) noexcept;
 
   ~Impl() noexcept {
     if (communicator != MPI_COMM_NULL) {
@@ -3228,7 +3290,7 @@ struct ProductDriver::Impl {
 };
 
 void ProductDriver::Impl::clear_pending_attempt_side_state() noexcept {
-  plan.implementation_->esf.tcr_history.discard();
+  plan.implementation_->esf.discard();
   plan.implementation_->spray.discard();
   pending_closed_mass_target = 0;
   pending_pressure_reference = {};
@@ -3289,7 +3351,7 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
   pressure_correction_warm_start_valid =
       plan.implementation_->time.spec().scheme != TimeScheme::cn_be;
   balance_history = pending_balance;
-  plan.implementation_->esf.tcr_history.commit();
+  plan.implementation_->esf.commit();
   if (plan.implementation_->spray.enabled()) {
     plan.implementation_->spray.commit();
     closed_mass_target = pending_closed_mass_target;
@@ -3376,6 +3438,7 @@ DriverResourceReport ProductDriver::Impl::resource_snapshot() const noexcept {
   halo(product.pressure_energy_enthalpy_halo);
   halo(product.momentum_limiter_halo);
   halo(product.krylov_halo);
+  halo(product.esf_transport_halo);
   halo(product.mg_halo);
   for (const HaloEngine& engine : product.coarse_halos) halo(engine);
   const auto donor = [&](const std::optional<RemoteDonorExchangePlan>& plan) {
@@ -3529,6 +3592,39 @@ std::uintptr_t CompiledCasePlan::mg_storage_address() const noexcept {
              : implementation_->mg_workspace.storage_address();
 }
 
+Status ProductCompiler::compile_chemistry_restart(MPI_Comm communicator,
+    const ValidatedModel& source, const std::filesystem::path& source_root,
+    const ValidatedModel& target, const std::filesystem::path& target_root,
+    CompiledCasePlan& out) noexcept try {
+  auto status=CaseCompiler::validate_chemistry_refinement(communicator,
+      source_root,source,target_root,target);
+  if (!status) return status;
+  CompiledCasePlan previous,candidate;
+  status=compile(communicator,source,source_root,previous);
+  if (!status) return status;
+  const auto source_plan=previous.fingerprint();
+  const auto source_schema=previous.implementation_->schema_fingerprint;
+  const auto source_geometry=previous.implementation_->geometry.fingerprint();
+  // Retain the source identities, then release its mesh-sized workspaces
+  // before allocating the target plan on production grids.
+  previous=CompiledCasePlan{};
+  status=compile(communicator,target,target_root,candidate);
+  if (!status) return status;
+  auto& to=*candidate.implementation_;
+  status=product_collective_status(communicator,
+      out.implementation_==nullptr && source_schema==to.schema_fingerprint &&
+      source_geometry==to.geometry.fingerprint()
+          ? Status{} : Status{StatusCode::invalid_plan,kProductInput});
+  if (!status) return status;
+  to.chemistry_source_plan=source_plan;
+  out=std::move(candidate);
+  return {};
+} catch (const std::bad_alloc&) {
+  return {StatusCode::allocation_failure,kProductAllocation};
+} catch (...) {
+  return {StatusCode::invalid_plan,kProductInput};
+}
+
 Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
     const ValidatedModel& source, const std::filesystem::path& source_root,
     const ValidatedModel& target, const std::filesystem::path& target_root,
@@ -3542,12 +3638,27 @@ Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
   if (!status) return status;
   auto &from = *source_plan.implementation_;
   auto &to = *candidate.implementation_;
+  const bool solver_change = source.solver.pressure.algorithm != target.solver.pressure.algorithm;
+  bool schema_matches = from.schema_fingerprint == to.schema_fingerprint;
+  if (!schema_matches && solver_change && from.schema.size() == to.schema.size()) {
+    schema_matches = true;
+    for (std::size_t i=0; i<from.schema.size(); ++i) {
+      const auto& a = from.schema[i];
+      const auto& b = to.schema[i];
+      const bool krylov_capacity = a.id == from.fields.krylov_vectors &&
+          b.id == to.fields.krylov_vectors && a.stable_name == "krylov_vectors";
+      schema_matches &= a.id == b.id && a.stable_name == b.stable_name &&
+          a.ghost_width == b.ghost_width && (a.components == b.components || krylov_capacity);
+    }
+  }
   status = product_collective_status(communicator,
-      out.implementation_ == nullptr && from.schema_fingerprint == to.schema_fingerprint &&
-      from.geometry.fingerprint() == to.geometry.fingerprint() && to.unity_lewis_enthalpy
-          ? Status{} : Status{StatusCode::invalid_plan, kProductInput});
+      out.implementation_ == nullptr && schema_matches &&
+      from.geometry.fingerprint() == to.geometry.fingerprint() &&
+      (solver_change || to.unity_lewis_enthalpy)
+          ? Status{} : Status{StatusCode::invalid_plan,kProductInput});
   if (!status) return status;
   to.transport_source_plan = source_plan.fingerprint();
+  to.transport_source_schema = from.schema_fingerprint;
   // Transport migration rebuilds method history explicitly. Bind each known
   // source revision to the validated source model, including its physics flags.
   constexpr std::array<detail::ColdHistoryRevision, 4> revisions{{
@@ -3577,8 +3688,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     return {StatusCode::invalid_plan, kProductInput};
   }
   const bool cold_model = model.time.scheme == TimeScheme::cn_be;
+  const auto schedule = effective_coupling(model.time.scheme, model.solver.coupling);
   const bool cold_perry = cold_model && !model.thermophysics.species.empty() &&
-      model.thermophysics.species.front().transport_law == TransportLaw::coast_perry;
+      coast_mixture_transport(model.thermophysics.species.front().transport_law);
   const bool incompatible_lewis = cold_perry && std::any_of(
       model.transported_scalars.begin(), model.transported_scalars.end(),
       [](const TransportedScalarSpec &scalar) {
@@ -3596,11 +3708,17 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       default: return false;
     }
   };
+  const bool implicit_esf = model.reaction.mode == ReactionMode::esf_tpdf &&
+      model.reaction.esf && (model.reaction.esf->tcr.mode == TcrMode::off ||
+                            model.reaction.esf->tcr.mode == TcrMode::shadow);
   const bool unsupported_cold = cold_model &&
-      (model.reaction.mode != ReactionMode::none || model.spray ||
+      ((model.reaction.mode != ReactionMode::none &&
+        model.reaction.mode != ReactionMode::finite_rate_mean &&
+        model.reaction.mode != ReactionMode::pasr_algebraic_v1 && !implicit_esf) || model.spray ||
        model.pressure_reference != PressureReferenceKind::boundary_absolute ||
-       model.solver.coupling != CouplingKind::piso ||
-       model.solver.pressure.algorithm != LinearAlgorithm::fgmres ||
+       schedule != CouplingKind::outer_corrected ||
+       (model.solver.pressure.algorithm != LinearAlgorithm::fgmres &&
+        model.solver.pressure.algorithm != LinearAlgorithm::bicgstab) ||
        std::any_of(model.transported_scalars.begin(), model.transported_scalars.end(),
            [](const TransportedScalarSpec& scalar) {
              return scalar.role != TransportedScalarRole::species;
@@ -3610,6 +3728,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   Status status = product_collective_status(
       communicator, model.fingerprint == 0U || out.implementation_ != nullptr ||
                         model.time.scheme == TimeScheme::variable_bdf2 ||
+                        (!cold_model && schedule == CouplingKind::outer_corrected) ||
                         unsupported_cold || incompatible_lewis ||
                         (model.solver.cold_stopping &&
                          (!cold_model || !model.solver.cold_stopping->valid()))
@@ -3651,6 +3770,32 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     candidate->cpu_fingerprint = candidate->cpu.semantic_fingerprint();
   const bool immersed = model.immersed_boundary.has_value();
   if (status && immersed) {
+    ImmersedDomainBoundaryPolicy boundary_policy;
+    for (std::size_t face = 0U; face < model.boundaries.size(); ++face) {
+      const BoundaryKind kind = model.boundaries[face].flow_kind;
+      boundary_policy.allow_one_sided_quadratic[face] =
+          kind == BoundaryKind::symmetry || kind == BoundaryKind::slip;
+    }
+    // Case validation already requires paired periodic faces.  Re-derive
+    // the authority here from both faces so an IBM policy can never acquire
+    // a one-sided or caller-invented periodic image permission.
+    for (int axis = 0; axis < 3 && status; ++axis) {
+      const std::size_t lower = static_cast<std::size_t>(2 * axis);
+      const std::size_t upper = lower + 1U;
+      const bool lower_periodic =
+          model.boundaries[lower].flow_kind == BoundaryKind::periodic;
+      const bool upper_periodic =
+          model.boundaries[upper].flow_kind == BoundaryKind::periodic;
+      if (lower_periodic != upper_periodic) {
+        status = {StatusCode::invalid_plan, kProductInput};
+        break;
+      }
+      boundary_policy.allow_periodic_images[lower] =
+          lower_periodic && upper_periodic;
+      boundary_policy.allow_periodic_images[upper] =
+          lower_periodic && upper_periodic;
+    }
+
     if (model.immersed_boundary->marker_file) {
       std::vector<std::uint8_t> marker;
       const Int3 cells = candidate->geometry.global_cells();
@@ -3670,7 +3815,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         status = ImportedIbmCompiler::compile(communicator, candidate->geometry,
             candidate->patch, {marker.data(), marker.size()},
             model.immersed_boundary->marker_fingerprint, limits,
-            *candidate->topology, *candidate->ibm_boundary, *candidate->quadrature);
+            *candidate->topology, *candidate->ibm_boundary, *candidate->quadrature, boundary_policy);
       }
       if (status) {
         candidate->stl_fingerprint = model.immersed_boundary->marker_fingerprint;
@@ -3725,7 +3870,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = EBTopologyCompiler::compile(
           communicator, candidate->geometry, candidate->patch,
           *candidate->scan, *candidate->surface,
-          model.immersed_boundary->fluid_side, limits, *candidate->topology);
+          model.immersed_boundary->fluid_side, limits, *candidate->topology, boundary_policy);
     }
     if (status) {
       status = product_local_stage(communicator, [&] {
@@ -3746,31 +3891,6 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       if (limits.stencil.policy ==
           IbmReconstructionPolicy::adaptive_order) {
         limits.stencil.standard_reach = 2U;
-      }
-      ImmersedDomainBoundaryPolicy boundary_policy;
-      for (std::size_t face = 0U; face < model.boundaries.size(); ++face) {
-        const BoundaryKind kind = model.boundaries[face].flow_kind;
-        boundary_policy.allow_one_sided_quadratic[face] =
-            kind == BoundaryKind::symmetry || kind == BoundaryKind::slip;
-      }
-      // Case validation already requires paired periodic faces.  Re-derive
-      // the authority here from both faces so an IBM policy can never acquire
-      // a one-sided or caller-invented periodic image permission.
-      for (int axis = 0; axis < 3 && status; ++axis) {
-        const std::size_t lower = static_cast<std::size_t>(2 * axis);
-        const std::size_t upper = lower + 1U;
-        const bool lower_periodic =
-            model.boundaries[lower].flow_kind == BoundaryKind::periodic;
-        const bool upper_periodic =
-            model.boundaries[upper].flow_kind == BoundaryKind::periodic;
-        if (lower_periodic != upper_periodic) {
-          status = {StatusCode::invalid_plan, kProductInput};
-          break;
-        }
-        boundary_policy.allow_periodic_images[lower] =
-            lower_periodic && upper_periodic;
-        boundary_policy.allow_periodic_images[upper] =
-            lower_periodic && upper_periodic;
       }
       candidate->ibm_boundary.emplace();
       candidate->quadrature.emplace();
@@ -3830,7 +3950,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   });
   if (!status) return status;
   PisoPlanSpec piso_spec;
-  piso_spec.coupling = model.solver.coupling;
+  // The pressure kernel is shared by the external correction schedule. Its
+  // historical identity remains stable for an equivalent native Restart.
+  piso_spec.coupling = schedule == CouplingKind::outer_corrected
+                          ? CouplingKind::piso : schedule;
   piso_spec.pressure_correctors = 2U;
   piso_spec.pressure_stage = 50U;
   piso_spec.final_flux_slot = 0U;
@@ -4012,7 +4135,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         fields.push_back({id, candidate->fields.esf_components});
       fields.push_back({post ? candidate->fields.post_transport
                              : candidate->fields.esf_transport,
-                        static_cast<std::uint8_t>(post ? 4 : 2)});
+                        detail::ProductEsf::transport_components});
       return Status{};
     });
     if (status)
@@ -4045,7 +4168,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         fields.push_back({id, 1});
       for (auto id : candidate->fields.post_esf_fields)
         fields.push_back({id, candidate->fields.esf_components});
-      fields.push_back({candidate->fields.post_transport, 4});
+      fields.push_back({candidate->fields.post_transport, detail::ProductEsf::transport_components});
       return Status{};
     });
     if (status)
@@ -4108,13 +4231,24 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                                              {candidate->fields.enthalpy, 1U}};
     for (FieldId scalar : candidate->fields.scalars)
       snapshots.push_back({scalar, 1U});
+    if (model.turbulence != TurbulenceKind::none) {
+      for (SnapshotSource source : {SnapshotSource::sgs_kinematic_viscosity,
+                                    SnapshotSource::sgs_kinetic_energy,
+                                    SnapshotSource::sgs_dissipation_volume,
+                                    SnapshotSource::sgs_dissipation_specific})
+        snapshots.push_back({candidate->fields.velocity, 1U, source});
+      if (!detail::product_field_bytes(local_cells, 4U,
+              candidate->summary.derived_output_bytes))
+        return {StatusCode::invalid_plan, kProductAnalysis};
+    }
     std::size_t snapshot_components = 0U;
     std::size_t snapshot_bytes = 0U;
     std::size_t coordinate_values = 0U;
     std::size_t coordinate_bytes = 0U;
     std::size_t staging_bytes = 0U;
-    if (!detail::product_checked_add(5U, candidate->fields.scalars.size(),
-                                     snapshot_components) ||
+    if (!detail::product_checked_add(
+            model.turbulence == TurbulenceKind::none ? 5U : 9U,
+            candidate->fields.scalars.size(), snapshot_components) ||
         !detail::product_field_bytes(local_cells, snapshot_components,
                                      snapshot_bytes) ||
         !detail::product_checked_add(
@@ -4150,11 +4284,18 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             static_cast<std::size_t>(extent) + 1U, envelope))
         return {StatusCode::invalid_plan, kProductAnalysis};
     std::size_t model_components = 0U, model_record_bytes = 0U;
+    std::size_t stochastic_states = 0U;
+    // Each state level serializes every physical random field, independent
+    // field0, and the shared transport history. Use registered component
+    // widths so the staging ceiling follows the actual Restart payload.
     if (candidate->esf.enabled() &&
-        (!detail::product_checked_multiply(
-             candidate->fields.esf_fields.size(),
-             model.thermophysics.species.size() + 1U, model_components) ||
-         !detail::product_checked_add(model_components, 2U, model_components) ||
+        (!detail::product_checked_add(candidate->fields.esf_fields.size(), 1U,
+                                      stochastic_states) ||
+         !detail::product_checked_multiply(
+             stochastic_states, candidate->fields.esf_components,
+             model_components) ||
+         !detail::product_checked_add(model_components, detail::ProductEsf::transport_components,
+                                      model_components) ||
          !detail::product_checked_multiply(model_components, 2U,
                                            model_components) ||
          !detail::product_checked_multiply(
@@ -4244,14 +4385,30 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       status = ArenaLayout::compile(candidate->schema,
                                     {requests.data(), requests.size()},
                                     candidate->layout);
-    if (status && (candidate->spray.enabled() || candidate->esf.enabled())) {
+    if (status && schedule == CouplingKind::outer_corrected &&
+        candidate->esf.implicit_transport())
+      status = FaceFluxStorage::workspace_bytes(candidate->patch.cells, 5U,
+          candidate->summary.esf_energy_workspace_bytes);
+    if (status && (candidate->spray.enabled() || candidate->esf.enabled() ||
+                   candidate->summary.derived_output_bytes != 0U)) {
       const auto limit = model.mesh.limits.max_memory_bytes_per_rank;
-      const auto model_bytes =
-          candidate->spray.owned_bytes() + candidate->esf.owned_bytes();
+      std::size_t model_bytes = 0U;
+      if (!detail::product_checked_add(candidate->spray.owned_bytes(),
+              candidate->esf.owned_bytes(), model_bytes) ||
+          !detail::product_checked_add(model_bytes,
+              candidate->summary.derived_output_bytes, model_bytes) ||
+          !detail::product_checked_add(model_bytes,
+              candidate->summary.esf_energy_workspace_bytes, model_bytes))
+        return Status{StatusCode::allocation_failure, kProductAllocation};
       if (model_bytes > limit || candidate->layout.total_doubles() >
               (limit - model_bytes) / sizeof(double))
         status = {StatusCode::allocation_failure, kProductAllocation};
     }
+    if (status && candidate->summary.esf_energy_workspace_bytes)
+      status = candidate->esf_energy_ledger.reserve(candidate->patch.cells);
+    if (status && candidate->esf_energy_ledger.owned_payload_bytes() !=
+                      candidate->summary.esf_energy_workspace_bytes)
+      status = {StatusCode::invalid_plan, kProductCapacity};
     if (status)
       status = StateLayers::allocate(candidate->layout, candidate->layers);
     if (!status) {
@@ -4321,12 +4478,17 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       }
       if (status) status = candidate->reaction.bind(
           {candidate->fields.reaction_conserved.data(), candidate->fields.reaction_conserved.size()},
-          {candidate->fields.reaction_sources.data(), candidate->fields.reaction_sources.size()});
+          {candidate->fields.reaction_sources.data(), candidate->fields.reaction_sources.size()},
+          std::size_t(candidate->patch.cells.x)*candidate->patch.cells.y*candidate->patch.cells.z);
       if (status && candidate->reaction.enabled()) {
         std::vector<FieldId> reads{candidate->fields.rho, candidate->fields.pressure,
                                   candidate->fields.enthalpy, candidate->fields.temperature};
         reads.insert(reads.end(), candidate->fields.reaction_conserved.begin(),
                      candidate->fields.reaction_conserved.end());
+        if(candidate->esf.enabled()) {
+          reads.insert(reads.end(),candidate->fields.esf_fields.begin(),candidate->fields.esf_fields.end());
+          reads.push_back(candidate->fields.esf_transport);
+        }
         for (std::size_t i = 0; i < candidate->fields.reaction_sources.size() && status; ++i) {
           ContributionSpec source;
           source.conserved_quantity = candidate->fields.reaction_conserved[i];
@@ -4341,12 +4503,46 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           status = candidate->contributions.register_contribution(source);
         }
       }
+      if (status && candidate->esf.enabled()) {
+        const auto& fields = candidate->fields;
+        if (fields.esf_transport_sources.size() != fields.reaction_conserved.size() + 1 ||
+            fields.esf_transport_sinks.size() != fields.esf_transport_sources.size())
+          return {StatusCode::invalid_plan, kProductRegistration};
+        std::vector<FieldId> reads{fields.rho, fields.velocity, fields.pressure,
+            fields.enthalpy, fields.esf_transport, fields.esf_mean, fields.esf_old};
+        reads.push_back(fields.esf_iter);
+        reads.insert(reads.end(), fields.reaction_conserved.begin(),
+                     fields.reaction_conserved.end());
+        reads.insert(reads.end(), fields.esf_fields.begin(), fields.esf_fields.end());
+        if (candidate->spray.enabled()) {
+          reads.insert(reads.end(), {fields.post_density, fields.post_enthalpy,
+                                    fields.post_transport});
+          reads.insert(reads.end(), fields.post_scalars.begin(), fields.post_scalars.end());
+          reads.insert(reads.end(), fields.post_esf_fields.begin(), fields.post_esf_fields.end());
+        }
+        for (std::size_t c = 0; c < fields.esf_transport_sources.size() && status; ++c) {
+          const bool heat = c == fields.reaction_conserved.size();
+          ContributionSpec source;
+          source.conserved_quantity = heat ? fields.enthalpy : fields.reaction_conserved[c];
+          source.explicit_source = fields.esf_transport_sources[c];
+          source.implicit_diagonal = fields.esf_transport_sinks[c];
+          source.supplies_implicit_diagonal = true;
+          source.stage = detail::ProductEsf::transport_source_stage;
+          source.units.si_exponents = heat ? std::array<std::int8_t,7>{1,-1,-3,0,0,0,0}
+                                           : std::array<std::int8_t,7>{1,-3,-1,0,0,0,0};
+          source.reads = {reads.data(), reads.size()};
+          source.capability = ContributionCapability::reacting;
+          source.source_identity = candidate->reaction.fingerprint();
+          status = candidate->contributions.register_contribution(source);
+        }
+      }
     }
     return status;
   });
   if (!status) return status;
   TurbulencePlanSpec turbulence_spec;
   turbulence_spec.kind = model.turbulence;
+  turbulence_spec.smagorinsky_coefficient = model.smagorinsky_coefficient;
   if (candidate->esf.enabled()) {
     turbulence_spec.turbulent_prandtl = model.reaction.turbulent_schmidt;
     turbulence_spec.turbulent_schmidt = model.reaction.turbulent_schmidt;
@@ -4379,7 +4575,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         : candidate->esf.enabled() ? candidate->reaction.fingerprint()
                                    : 0U;
     equation_spec.physical_inlet_material = true;
-    equation_spec.conservative_total_energy = !candidate->reaction.enabled() && !candidate->spray.enabled();
+    // CN/BE interval and stochastic chemistry share the conservative energy row already
+    // used by cold flow: h - p/rho + |U|^2/2. Its kinetic storage/flux matches
+    // the accepted velocity even during strong heat-driven acceleration.
+    equation_spec.conservative_total_energy = !candidate->spray.enabled() &&
+        (!candidate->reaction.enabled() || candidate->reaction.interval_enabled() ||
+         (cold_model && candidate->esf.implicit_transport()));
     equation_spec.density = candidate->fields.rho;
     equation_spec.velocity = candidate->fields.velocity;
     equation_spec.pressure_perturbation = candidate->fields.pressure;
@@ -4640,6 +4841,26 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         communicator, candidate->patch,
         {krylov_halo.data(), krylov_halo.size()},
         candidate->boundary.halo_topology());
+  if (status && candidate->esf.implicit_transport()) {
+    const HaloFieldSpec field{candidate->fields.esf_mean,ghosts,candidate->fields.esf_components};
+    status=candidate->esf_transport_halo.reserve(communicator,candidate->patch,
+        {&field,1},candidate->boundary.halo_topology());
+    if (status) status=product_local_stage(communicator,[&] {
+      const auto stats=candidate->esf_transport_halo.plan_stats();
+      const auto limit=model.mesh.limits.max_memory_bytes_per_rank;
+      std::size_t doubles{},bytes{};
+      if (!detail::product_checked_add(stats.send_capacity_doubles,
+              stats.receive_capacity_doubles,doubles) ||
+          !detail::product_checked_add(doubles,candidate->layout.total_doubles(),doubles) ||
+          !detail::product_checked_add(candidate->spray.owned_bytes(),
+              candidate->esf.owned_bytes(),bytes) ||
+          !detail::product_checked_add(bytes,candidate->summary.derived_output_bytes,bytes) ||
+          !detail::product_checked_add(bytes,candidate->summary.esf_energy_workspace_bytes,bytes) ||
+          bytes>limit || doubles>(limit-bytes)/sizeof(double))
+        return Status{StatusCode::allocation_failure,kProductAllocation};
+      return Status{};
+    });
+  }
   const std::array<HaloFieldSpec, 1U> mg_halo{{
       {candidate->fields.mg_arena, 1U, 1U}}};
   if (status)
@@ -5459,6 +5680,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       legacy.fingerprint = model.legacy_time_fingerprint;
       legacy.legacy_time_fingerprint = 0U;
       legacy.time.scheme = TimeScheme::variable_bdf2;
+      legacy.solver.coupling = CouplingKind::piso;
       legacy.solver.cold_stopping.reset();
       PlanFingerprint legacy_boundary{};
       const auto identity_status = detail::boundary_identity_for_registry(
@@ -5490,7 +5712,18 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->phases[8U] = ProductFreezePhase::validation;
   candidate->phases[9U] = ProductFreezePhase::sealed;
   candidate->summary.unity_lewis_enthalpy = candidate->unity_lewis_enthalpy;
-  candidate->summary.coupling = candidate->piso.coupling();
+  candidate->summary.conservative_total_energy = candidate->equations.enthalpy().conservative_total_energy();
+  candidate->summary.turbulence = model.turbulence;
+  candidate->summary.smagorinsky_coefficient = model.turbulence == TurbulenceKind::smagorinsky
+      ? model.smagorinsky_coefficient : 0.0;
+  candidate->summary.coupling = schedule;
+  candidate->summary.time_scheme = model.time.scheme;
+  candidate->summary.reaction_mode = model.reaction.mode;
+    candidate->summary.interval_chemistry = candidate->reaction.interval_enabled();
+    candidate->summary.reaction_model = candidate->reaction.reaction_model();
+  candidate->summary.reaction_workspace_bytes = candidate->reaction.interval_workspace_bytes();
+  candidate->summary.interval_source_relative_tolerance = candidate->reaction.interval_response_tolerance();
+  candidate->summary.interval_source_absolute_tolerance = candidate->reaction.interval_response_absolute_tolerance();
   candidate->summary.global_cells = candidate->geometry.global_cells();
   candidate->summary.local_cells = candidate->patch.cells;
   candidate->summary.field_count = candidate->schema.size();
@@ -5600,9 +5833,10 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
       status = TimeControllerState::start(product.time, 0.0, candidate->time);
     if (status) {
       candidate->output_fields.resize(product.io.snapshot_fields().size);
+      candidate->output_sgs.resize(product.summary.derived_output_bytes / sizeof(double));
       const auto primary_count = 3U + product.fields.scalars.size() +
                                  product.fields.esf_fields.size() +
-                                 (product.fields.esf_fields.empty() ? 0U : 1U);
+                                 (product.fields.esf_fields.empty() ? 0U : 2U);
       candidate->restart_fields.resize(primary_count);
       candidate->restart_previous_fields.resize(primary_count);
       candidate->restart_expected_fields.resize(primary_count);
@@ -5633,7 +5867,11 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
       if (!product.fields.esf_fields.empty())
         candidate->restart_expected_fields[esf_slot++] = {
             RestartFieldRole::stochastic_transport,
-            product.fields.esf_transport, 2U};
+            product.fields.esf_transport, detail::ProductEsf::transport_components};
+      if (!product.fields.esf_fields.empty())
+        candidate->restart_expected_fields[esf_slot++] = {
+            RestartFieldRole::stochastic_auxiliary, product.fields.esf_auxiliary,
+            product.fields.esf_components};
       candidate->restart_expected_rate_fields[0U] = {
           RestartFieldRole::enthalpy_nonadvective_rate,
           product.fields.enthalpy_nonadvective_rate, 1U};
@@ -5923,9 +6161,14 @@ Status ProductDriver::Impl::initialize_common_fields(
             product.reaction, product.thermodynamics,
             initial.pressure_reference);
       if (status)
+        status = product.layers.view(role, product.fields.esf_auxiliary, field);
+      if (status)
+        status = product.esf.capture_auxiliary(
+            {ensemble.data(), product.fields.esf_fields.size()}, field);
+      if (status)
         status = product.layers.view(role, product.fields.esf_transport, field);
-      const std::array<double, 2> transport_values{
-          transport.conductivity / heat_capacity, 0.0};
+      const std::array<double, detail::ProductEsf::transport_components> transport_values{
+          transport.conductivity / heat_capacity, 0.0, transport.viscosity, 0.0};
       if (status)
         fill_field(field, {transport_values.data(), transport_values.size()});
     }
@@ -6131,7 +6374,8 @@ Status ProductDriver::Impl::initialize_common_fields(
 }
 
 Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
-    double cold_pressure_reference, bool restart) noexcept {
+    double cold_pressure_reference, bool restart,
+    bool rebuild_esf_transport) noexcept {
   CompiledCasePlan::Impl& product = *plan.implementation_;
   const Int3 cells = product.patch.cells;
   const KernelBox full_box{{0, 0, 0}, cells};
@@ -6307,7 +6551,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
           as_const(molecular_viscosity), as_const(effective_viscosity),
           as_const(heat_capacity), conductivity, enthalpy_diffusivity);
   }
-  if (status && product.esf.enabled() && !restart) {
+  if (status && product.esf.enabled() && (!restart || rebuild_esf_transport)) {
     for (StateRole role : roles) {
       FieldView cache;
       status = product.layers.view(role, product.fields.esf_transport, cache);
@@ -6472,12 +6716,15 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
   status = product.reductions.consensus(status);
   if (!status) return status;
 
+  std::array<ConstFieldView, UINT8_MAX> trial_composition{};
+  for (std::size_t s=0; s<species_trial.size(); ++s)
+    trial_composition[s]=as_const(species_trial[s]);
   status = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
       product.boundary, product.thermodynamics, product.transport,
       cold_pressure_reference, as_const(trial_pressure),
       {trial_density, trial_temperature, {}, {}, {}, molecular_viscosity, conductivity, {}},
       effective_viscosity, as_const(trial_enthalpy),
-      {species_accepted.data(), species_accepted.size()});
+      {trial_composition.data(), species_trial.size()});
   status = product.reductions.consensus(status);
   if (!status) return status;
 
@@ -6770,8 +7017,9 @@ Status ProductDriver::restart_expected(
     RestartHistoryPolicy history_policy) noexcept {
   if (implementation_ == nullptr || implementation_->initialized ||
       (history_policy != RestartHistoryPolicy::require_compatible &&
-       history_policy != RestartHistoryPolicy::rebuild_method_history) ||
-      (history_policy == RestartHistoryPolicy::rebuild_method_history &&
+       history_policy != RestartHistoryPolicy::rebuild_method_history &&
+       history_policy != RestartHistoryPolicy::refine_chemistry) ||
+      (history_policy != RestartHistoryPolicy::require_compatible &&
        compatibility != RestartStorageCompatibility::strict) ||
       (compatibility != RestartStorageCompatibility::strict &&
        compatibility != RestartStorageCompatibility::mg_bundle_ghost_v1))
@@ -6797,11 +7045,18 @@ Status ProductDriver::restart_expected(
       product.esf.enabled(), product.esf.tcr_history.enabled(),
       product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy);
-  if (history_policy == RestartHistoryPolicy::rebuild_method_history)
+  if (history_policy == RestartHistoryPolicy::rebuild_method_history) {
+    out.compatible_method_schema = product.transport_source_schema;
     out.compatible_method_plan = product.transport_source_plan != 0U
         ? product.transport_source_plan
         : product.time.spec().scheme == TimeScheme::cn_be
             ? product.legacy_time_fingerprint : product.legacy_afc_v3_fingerprint;
+  }
+  if (history_policy == RestartHistoryPolicy::refine_chemistry) {
+    if (!product.chemistry_source_plan) return {StatusCode::invalid_plan,kProductInput};
+    out.compatible_method_plan=product.chemistry_source_plan;
+    out.compatible_method_schema=product.schema_fingerprint;
+  }
   const auto records = product.spray.enabled()
                            ? product.spray.history.snapshot()
                            : product.esf.tcr_history.snapshot();
@@ -7665,6 +7920,11 @@ Status ProductDriver::initialize_restart(
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
+  const bool chemistry_refinement = history_policy == RestartHistoryPolicy::refine_chemistry;
+  const bool refined_identity = chemistry_refinement && complete_source_history &&
+      compatibility == RestartStorageCompatibility::strict && product.chemistry_source_plan &&
+      image.source_format_version >= 3U && image.plan == product.chemistry_source_plan &&
+      image.schema == product.schema_fingerprint;
   const bool legacy_identity =
       compatibility == RestartStorageCompatibility::mg_bundle_ghost_v1 &&
       exact_history && image.plan == product.legacy_mg_fingerprint &&
@@ -7681,12 +7941,14 @@ Status ProductDriver::initialize_restart(
         image.plan == (product.time.spec().scheme == TimeScheme::cn_be
                           ? product.legacy_time_fingerprint
                           : product.legacy_afc_v3_fingerprint))) &&
-      image.schema == product.schema_fingerprint;
+      image.schema == (product.transport_source_plan != 0U
+          ? product.transport_source_schema : product.schema_fingerprint);
   Status status =
       !runtime.initialized &&
               (product.transport_source_plan == 0U || !method_recovery || known_method_identity) &&
               (history_policy == RestartHistoryPolicy::require_compatible ||
-               history_policy == RestartHistoryPolicy::rebuild_method_history) &&
+               history_policy == RestartHistoryPolicy::rebuild_method_history ||
+               chemistry_refinement) && (!chemistry_refinement || refined_identity) &&
               (!method_recovery ||
                compatibility == RestartStorageCompatibility::strict) &&
               (compatibility == RestartStorageCompatibility::strict ||
@@ -7731,7 +7993,7 @@ Status ProductDriver::initialize_restart(
   if (status &&
       (!same_int3(image.global_cells, product.geometry.global_cells()) ||
        !same_patch(image.patch, product.patch) ||
-       (!current_identity && !legacy_identity && !known_method_identity) ||
+       (!current_identity && !legacy_identity && !known_method_identity && !refined_identity) ||
        image.geometry != product.geometry.fingerprint() ||
        image.fields.size() != runtime.restart_expected_fields.size()))
     status = {StatusCode::invalid_plan, kProductInput};
@@ -7997,10 +8259,29 @@ Status ProductDriver::initialize_restart(
                 if (!level_status)
                   break;
               }
+              const bool fluid = !product.topology.has_value() ||
+                  product.topology->region().data[cell] != 0U;
+              double density = thermo.rho;
+              double psi = thermo.drho_dp_hY, chi = thermo.drho_dh_pY;
+              if (fluid && product.esf.implicit_transport() &&
+                  product.summary.coupling == CouplingKind::outer_corrected) {
+                const auto& auxiliary = fields.back();
+                const std::size_t stride = product.reaction.species_indices().size + 2U;
+                esf::detail::AuxiliaryPressureState selected;
+                level_status = product.esf.auxiliary_pressure(
+                    {auxiliary.values.data() + cell * stride, stride},
+                    reference_pressure + level_pressure.values[cell],
+                    product.reaction, product.thermodynamics,
+                    {image.step, image.controller_state, 1}, selected);
+                if (!level_status) break;
+                density = selected.density_kg_per_m3;
+                psi = selected.density_pressure_derivative;
+                chi = selected.density_enthalpy_derivative;
+              }
               states[cell] = {
-                  thermo.rho, thermo.temperature, transport.viscosity,
-                  transport.conductivity, thermo.cp, thermo.drho_dp_hY,
-                  thermo.drho_dh_pY, transport.conductivity / thermo.cp};
+                  density, thermo.temperature, transport.viscosity,
+                  transport.conductivity, thermo.cp, psi,
+                  chi, transport.conductivity / thermo.cp};
               if (accumulate_mass &&
                   (!product.topology.has_value() ||
                    product.topology->region().data[cell] != 0U)) {
@@ -8011,7 +8292,7 @@ Status ProductDriver::initialize_restart(
                 const std::size_t gz = static_cast<std::size_t>(
                     product.patch.begin.z + z);
                 local_mass +=
-                    thermo.rho * dx.data[gx] * dy.data[gy] * dz.data[gz];
+                    density * dx.data[gx] * dy.data[gy] * dz.data[gz];
               }
             }
         return level_status;
@@ -8205,7 +8486,7 @@ Status ProductDriver::initialize_restart(
   // initialize_common_fields.  Rebuild those derived histories from the
   // restored U/state while leaving checkpoint U and phi interiors untouched.
   status = runtime.rebuild_cold_velocity_dependents(
-      image.pressure_reference, true);
+      image.pressure_reference, true, method_recovery);
   if (!status) return status;
 
   if (exact_history) {
@@ -8414,7 +8695,7 @@ Status ProductDriver::initialize_restart(
                : runtime.final_flux_writer.initialize_restored(
                      product.final_flux, restored_flux);
   if (!status) return status;
-  product.esf.tcr_history.commit();
+  product.esf.commit();
   if (product.spray.enabled())
     product.spray.commit();
   runtime.time = std::move(controller);
@@ -8439,7 +8720,9 @@ Status ProductDriver::Impl::execute_attempt(
     const StepTime& step, PisoAttemptReport& report,
     PreparedAttemptFinish& prepared) noexcept {
   CompiledCasePlan::Impl& product = *plan.implementation_;
-  const bool cold_method = product.time.spec().scheme == TimeScheme::cn_be;
+  const bool cold_method = product.summary.coupling == CouplingKind::outer_corrected;
+  const bool dual_esf = cold_method && product.esf.implicit_transport();
+  product.esf_energy_ledger.discard_attempt();
   effective_bdf = step.bdf;
   thermophysical_predictor_calls = 0U;
   scalar_remap_report = {};
@@ -8635,6 +8918,11 @@ Status ProductDriver::Impl::execute_attempt(
       status = transaction.revise_trial(field);
   if (status && product.esf.enabled())
     status = transaction.revise_trial(product.fields.esf_transport);
+  if (status && product.esf.enabled())
+    status = transaction.revise_trial(product.fields.esf_auxiliary);
+  FieldView esf_auxiliary;
+  if (status && product.esf.enabled())
+    status = product.layers.view(StateRole::trial, product.fields.esf_auxiliary, esf_auxiliary);
   PrimitiveHistory rho_history;
   PrimitiveHistory velocity_history;
   PrimitiveHistory pressure_history;
@@ -8706,7 +8994,7 @@ Status ProductDriver::Impl::execute_attempt(
 
   // CN midpoint face density and old-neighbour action consume the complete
   // accepted U/rho state. Refresh it on every advance, including a restart.
-  if (cold_method) {
+  if (cold_method || product.esf.implicit_transport()) {
     const std::array<FieldId,5> ids{product.fields.velocity,product.fields.rho,product.fields.pressure,product.fields.enthalpy,product.fields.temperature};
     std::array<FieldView,5> accepted;
     for(std::size_t i=0;i<ids.size()&&status;++i)status=product.layers.view(StateRole::accepted_n,ids[i],accepted[i]);
@@ -8717,9 +9005,17 @@ Status ProductDriver::Impl::execute_attempt(
     if(status)status=apply_boundary_ghosts(BoundaryStage::pressure,product.boundary,{&accepted[2],1},boundary_values);
     if(status){std::array<FieldView,2> thermal{accepted[1],accepted[4]};status=apply_physical_zero_gradient(product.boundary,{thermal.data(),thermal.size()});}
     if(status)status=BoundaryThermophysicalFaceClosure::refresh_inlet_material(product.boundary,product.thermodynamics,product.transport,pressure_reference,as_const(accepted[2]),{accepted[1],accepted[4],{},{},{},{},{},{}},{});
-    if(status)status=resolve_static_boundary_values(communicator,product.boundary,product.boundary_specs,product.patch_inlets,product.geometry,product.patch,product.thermodynamics,pressure_reference,as_const(accepted[1]),as_const(accepted[0]),as_const(accepted[3]),{species_accepted.data(),species_accepted.size()},{passive_accepted.data(),passive_accepted.size()},{species_values.data(),species_values.size()},boundary_scalars,boundary_vectors,boundary_normal_gradients,false);
+    // Candidate solves also update resolved velocity targets. Rebuild them
+    // from accepted state before its momentum ghosts and SGS gradients, so a
+    // retry and a fresh continuation use the same physical boundary stencil.
+    status=resolve_static_boundary_values(communicator,product.boundary,product.boundary_specs,product.patch_inlets,product.geometry,product.patch,product.thermodynamics,pressure_reference,as_const(accepted[1]),as_const(accepted[0]),as_const(accepted[3]),{species_accepted.data(),species_accepted.size()},{passive_accepted.data(),passive_accepted.size()},{species_values.data(),species_values.size()},boundary_scalars,boundary_vectors,boundary_normal_gradients,true,status);
     if(status)status=apply_boundary_ghosts(BoundaryStage::momentum,product.boundary,{&accepted[0],1},boundary_values);
-    status=product.reductions.consensus(status);if(!status)return status;
+    status = product.reductions.consensus(status);
+    if (!status) {
+      const auto preparation = transaction.collective_prepare(communicator, status, prepared);
+      finish_stage_timings();
+      return preparation ? prepared.outcome() : preparation;
+    }
   }
   // Reuse the native scalar/thermal boundary relations for each stochastic
   // realization. In particular, fixed T resolves h from that realization's Y,
@@ -8727,7 +9023,9 @@ Status ProductDriver::Impl::execute_attempt(
   const auto close_esf_boundaries = [&](Span<FieldView> ensemble,
                                         FieldView cache, FieldView mean_h,
                                         Span<FieldView> mean_scalars,
-                                        ConstFieldView density) noexcept {
+                                        ConstFieldView density,
+                                        ConstFieldView boundary_velocity={},
+                                        double boundary_pressure=std::numeric_limits<double>::quiet_NaN()) noexcept {
     bool physical = false;
     for (const auto &b : product.boundary_specs)
       physical |= b.flow_kind != BoundaryKind::periodic;
@@ -8754,7 +9052,8 @@ Status ProductDriver::Impl::execute_attempt(
       return resolve_static_boundary_values(
           communicator, product.boundary, product.boundary_specs,
           product.patch_inlets, product.geometry, product.patch, product.thermodynamics,
-          pressure_reference, density, velocity_history.accepted, h, species,
+          std::isfinite(boundary_pressure) ? boundary_pressure : pressure_reference,
+          density,boundary_velocity.base ? boundary_velocity : velocity_history.accepted,h,species,
           {passives.data(), np}, {species_values.data(), species_values.size()},
           boundary_scalars, boundary_vectors, boundary_normal_gradients, false);
     };
@@ -8809,7 +9108,7 @@ Status ProductDriver::Impl::execute_attempt(
         }
       }
     }
-    if (closed)
+    if (closed && cache.base)
       closed = apply_physical_zero_gradient(product.boundary, {&cache, 1});
     // The caller's remaining native stages consume mean boundary targets.
     if (closed)
@@ -9034,6 +9333,85 @@ Status ProductDriver::Impl::execute_attempt(
       } else {
         passive_low[passive_index++] = component;
       }
+    }
+  }
+  if (cold_method && product.reaction.enabled()) {
+    // Rebuild the explicit derivative from committed state on every attempt.
+    // Endpoint preparation can partially overwrite this workspace before a
+    // failed attempt rolls back its state layers. Outer solves and their final
+    // equation audit share this accepted-state source until endpoint preparation.
+    const auto accepted_history = [](PrimitiveHistory value) noexcept {
+      value.trial = value.accepted;
+      return value;
+    };
+    std::array<PrimitiveHistory, UINT8_MAX> accepted_species{};
+    for (std::size_t species = 0; species < species_history.size(); ++species)
+      accepted_species[species] = accepted_history(species_history[species]);
+    EquationStateView accepted_state;
+    accepted_state.density = accepted_history(rho_history);
+    accepted_state.velocity = accepted_history(velocity_history);
+    accepted_state.pressure_perturbation = accepted_history(pressure_history);
+    accepted_state.enthalpy = accepted_history(enthalpy_history);
+    accepted_state.temperature = accepted_history(temperature_history);
+    accepted_state.pressure_reference = pressure_reference;
+    accepted_state.accepted_pressure_reference = pressure_reference;
+    accepted_state.previous_pressure_reference = previous_pressure_reference;
+    accepted_state.independent_species =
+        {accepted_species.data(), species_history.size()};
+    EquationMaterialView accepted_material;
+    if (product.reaction.mixing_enabled()) {
+      // COAST refreshes viscosity before scalar/chemistry advancement. Rebuild
+      // the accepted transport state after every attempt, including retries;
+      // endpoint and candidate solves may have replaced the shared workspace.
+      FieldView mu, effective, gradient;
+      if (status) status = runtime_write_view(product.fields.molecular_viscosity, mu);
+      if (status) status = runtime_write_view(product.fields.effective_viscosity, effective);
+      if (status) status = runtime_write_view(product.fields.velocity_gradient, gradient);
+      for (int z = 0; z < cells.z && status; ++z)
+        for (int y = 0; y < cells.y && status; ++y)
+          for (int x = 0; x < cells.x && status; ++x) {
+            const Int3 cell{x, y, z};
+            for (std::size_t species = 0; species < species_history.size(); ++species)
+              species_values[species] = species_history[species].accepted.unchecked(cell, 0);
+            MolecularTransportState material;
+            status = product.transport.evaluate(
+                temperature_history.accepted.unchecked(cell, 0),
+                {species_values.data(), species_values.size()}, material);
+            if (status) mu.unchecked(cell, 0) = material.viscosity;
+          }
+      if (status) {
+        const std::array<ConstFieldView, 1> reads{velocity_history.accepted};
+        const std::array<FieldView, 1> writes{gradient};
+        status = cartesian_gradient(product.equations.kernels(),
+            {{reads.data(), reads.size()}, {writes.data(), writes.size()},
+             full_box, 0U, 0U, 3U, 0U, nullptr});
+      }
+      if (status && product.ibm_equations)
+        status = product.ibm_equations->correct_velocity_gradient(
+            velocity_history.accepted, gradient);
+      TurbulenceCertificate certificate;
+      if (status)
+        status = product.turbulence.update(
+            {rho_history.accepted, as_const(mu), {}, gradient.revision, as_const(gradient)},
+            effective, certificate);
+      accepted_material.molecular_viscosity = as_const(mu);
+      accepted_material.effective_viscosity = as_const(effective);
+    }
+    if (status && product.reaction.interval_enabled())
+      status = product.reaction.clear_interval(product.layers, cells);
+    else if (status)
+      status = product.reaction.prepare(
+          accepted_state, product.thermodynamics, accepted_material,
+          product.equations.kernels(), product.layers, cells,
+          {product.pressure_mg_cell_activity.data(),
+           product.pressure_mg_cell_activity.size()},
+          time.accepted_step());
+    status = product.reductions.consensus(status);
+    if (!status) {
+      const Status prepare_status =
+          transaction.collective_prepare(communicator, status, prepared);
+      finish_stage_timings();
+      return prepare_status ? prepared.outcome() : prepare_status;
     }
   }
   ConservativeMassSourceView coupled_mass_source;
@@ -9290,7 +9668,8 @@ Status ProductDriver::Impl::execute_attempt(
             as_const(post_rho));
       if (status)
         status = product.esf.source_diffusion(
-            product.equations.kernels(), as_const(post_cache), as_const(post_h),
+            product.equations.kernels(), product.equations.enthalpy(),
+            as_const(post_cache), as_const(post_h),
             {post_species_read.data(), ns}, post_h_rate,
             {post_species_rates.data(), ns}, {post_passive_read.data(), np},
             {post_passive_rates.data(), np}, post_diffusivity);
@@ -9301,6 +9680,364 @@ Status ProductDriver::Impl::execute_attempt(
     }
   }
   std::array<FieldView, UINT8_MAX> esf_sources{};
+  auto& esf_energy_ledger = product.esf_energy_ledger;
+  detail::CompositionBalanceLedger esf_composition_ledger;
+  ConstFieldView esf_ledger_initial_density;
+  std::array<ConstFieldView,UINT8_MAX> esf_ledger_initial_species{};
+  const auto solve_esf_transport = [&]() -> Status {
+    const auto& fields=product.fields;
+    const auto mapping=product.reaction.species_indices();
+    const std::size_t ns=mapping.size,nf=fields.esf_fields.size();
+    const auto accepted_fields=product.spray.enabled() ? post_esf_read.data() : esf_accepted.data();
+    const auto mean_species=product.spray.enabled() ? post_species_read.data() : species_accepted.data();
+    const auto mean_h=product.spray.enabled() ? as_const(post_h) : enthalpy_history.accepted;
+    auto density=product.spray.enabled() ? as_const(post_rho) : rho_history.accepted;
+    density.field=fields.rho;
+    const auto cache=product.spray.enabled() ? as_const(post_cache) : esf_transport;
+    auto gamma=cache;gamma.components=1;
+    const auto alias=[](FieldView view,std::size_t c,FieldId semantic) {
+      view.base+=c*view.component_stride;view.components=1;view.field=semantic;return view;
+    };
+    const auto read_alias=[](ConstFieldView view,std::size_t c,FieldId semantic) {
+      view.base+=c*view.component_stride;view.components=1;view.field=semantic;return view;
+    };
+    FieldView mean,old,iterate,diagonal,rhs,residual,variation,linear_rhs,increment,backup;
+    auto s=runtime_write_view(fields.esf_mean,mean);
+    if(s && dual_esf)s=esf_energy_ledger.initialize(cells,nf,step.generation,product.equations.enthalpy());
+    if(s && dual_esf && product.esf.common_transport())
+      s=esf_composition_ledger.initialize(product.reaction.gas_identity(),mapping,
+          product.reaction.dependent_index(),nf,step.generation,step.dt,product.spray.enabled());
+    if(s && esf_composition_ledger.active()) {
+      // Later material refreshes reuse species_accepted as current query views.
+      // Preserve the gas-stage starting views before that semantic reuse.
+      esf_ledger_initial_density=density;
+      for(std::size_t c=0;c<ns;++c)esf_ledger_initial_species[c]=mean_species[c];
+    }
+    if(s)s=runtime_write_view(fields.esf_old,old);
+    if(s)s=runtime_write_view(fields.esf_iter,iterate);
+    if(s)s=runtime_write_view(fields.pressure_energy_e_h,diagonal);
+    if(s)s=runtime_write_view(fields.pressure_energy_continuity_residual,rhs);
+    if(s)s=runtime_write_view(fields.pressure_energy_energy_residual,residual);
+    if(s)s=runtime_write_view(fields.pressure_energy_candidate_pressure_correction,variation);
+    if(s)s=runtime_write_view(fields.pressure_rhs,linear_rhs);
+    if(s)s=runtime_write_view(fields.pressure_correction,increment);
+    if(s)s=runtime_write_view(fields.pressure_energy_candidate_enthalpy,backup);
+    FaceFieldView ax,ay,az;
+    if(s)s=make_pressure_face_views(product.energy_assembly_face_storage,cells,ax,ay,az);
+    s=product.reductions.consensus(s);if(!s)return s;
+    const EquationSystemView equation{diagonal,rhs,residual,ax,ay,az};
+    const detail::ScalarCorrectionStorage storage{equation,variation,linear_rhs,increment,backup};
+    auto& workspace=product.piso.pressure_algorithm()==LinearAlgorithm::fgmres
+        ? product.krylov_workspace : product.auxiliary_krylov_workspace;
+    auto& pc=product.esf.transport_preconditioner();
+    auto& rows=product.esf.transport_rows();
+    const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
+    const auto fluid=[&](std::size_t i){return active.size==0 || active.data[i]!=0;};
+    if(esf_composition_ledger.active())
+      esf_composition_ledger.add_total(detail::CompositionBalanceLedger::transport,
+          detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),accepted_flux,active));
+    zero_field(old);zero_field(mean);zero_field(iterate);
+    for(int z=-old.ghosts.z;z<cells.z+old.ghosts.z;++z)
+      for(int y=-old.ghosts.y;y<cells.y+old.ghosts.y;++y)
+        for(int x=-old.ghosts.x;x<cells.x+old.ghosts.x;++x) {
+          if(int(x<0||x>=cells.x)+int(y<0||y>=cells.y)+int(z<0||z>=cells.z)>1)continue;
+          const Int3 cell{x,y,z};double sum=0;
+          for(std::size_t a=0;a<ns;++a) {
+            const double q=mean_species[a].unchecked(cell,0);
+            old.unchecked(cell,mapping.data[a])=q;sum+=q;
+          }
+          old.unchecked(cell,product.reaction.dependent_index())=1-sum;
+          old.unchecked(cell,ns+1)=mean_h.unchecked(cell,0);
+        }
+    const auto copy_tuple=[&](ConstFieldView input,FieldView output) {
+      for(int z=-output.ghosts.z;z<cells.z+output.ghosts.z;++z)
+        for(int y=-output.ghosts.y;y<cells.y+output.ghosts.y;++y)
+          for(int x=-output.ghosts.x;x<cells.x+output.ghosts.x;++x)
+            if(int(x<0||x>=cells.x)+int(y<0||y>=cells.y)+int(z<0||z>=cells.z)<=1)
+              for(std::size_t c=0;c<ns+2;++c)output.unchecked({x,y,z},c)=input.unchecked({x,y,z},c);
+    };
+    const auto close_composition=[&](FieldView frame) {
+      std::size_t i{};
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+        const Int3 cell{x,y,z};
+        if (!fluid(i)) continue;
+        std::array<double, UINT8_MAX> tuple{};
+        for (std::size_t c=0;c<ns+1;++c) tuple[c]=frame.unchecked(cell,c);
+        if (!detail::close_statistical_composition({tuple.data(),ns+1},
+                                                  product.reaction.dependent_index())) {
+          return Status{StatusCode::numerical_failure,10230};
+        }
+        for (std::size_t c=0;c<ns+1;++c) frame.unchecked(cell,c)=tuple[c];
+      }
+      return Status{};
+    };
+    bool physical=false;for(const auto& b:product.boundary_specs)physical|=b.flow_kind!=BoundaryKind::periodic;
+    std::array<FieldView,UINT8_MAX> boundary_aliases{};
+    std::array<ConstFieldView,UINT8_MAX> query_species{},query_passives{};
+    const auto boundary_aliases_for=[&](FieldView frame) {
+      for(const auto& binding:fields.scalar_bindings) {
+        if(binding.role==TransportedScalarRole::species)
+          boundary_aliases[binding.catalog_slot]=alias(frame,mapping.data[binding.role_index],binding.field);
+        else if(product.spray.enabled())
+          boundary_aliases[binding.catalog_slot]=post_passives[binding.role_index];
+        else {
+          const auto bound=product.layers.view(StateRole::accepted_n,binding.field,boundary_aliases[binding.catalog_slot]);
+          if(!bound)return bound;
+        }
+      }
+      return Status{};
+    };
+    const auto exchange_frame=[&](FieldView frame,Status prerequisite=Status{}) {
+      frame.field=fields.esf_mean;HaloTicket ticket;
+      auto exchanged=product.esf_transport_halo.begin(178,{&frame,1},prerequisite,ticket);
+      if(exchanged)exchanged=product.esf_transport_halo.finish(ticket,{&frame,1});
+      return exchanged;
+    };
+    const auto close_frame=[&](FieldView frame) {
+      auto closed=close_composition(frame);
+      if(closed)closed=boundary_aliases_for(frame);
+      closed=product.reductions.consensus(closed);if(!closed)return closed;
+      auto h=alias(frame,ns+1,fields.enthalpy);
+      if(physical) {
+        std::size_t np=0;
+        for(std::size_t a=0;a<ns;++a)query_species[a]=as_const(alias(frame,mapping.data[a],fields.reaction_conserved[a]));
+        for(const auto& binding:fields.scalar_bindings)
+          if(binding.role==TransportedScalarRole::passive_scalar)
+            query_passives[np++]=as_const(boundary_aliases[binding.catalog_slot]);
+        closed=resolve_static_boundary_values(communicator,product.boundary,product.boundary_specs,
+            product.patch_inlets,product.geometry,product.patch,product.thermodynamics,pressure_reference,
+            density,velocity_history.accepted,as_const(h),{query_species.data(),ns},{query_passives.data(),np},
+            {species_values.data(),species_values.size()},boundary_scalars,boundary_vectors,boundary_normal_gradients,false);
+        if(closed)closed=apply_boundary_ghosts(BoundaryStage::scalar,product.boundary,
+            {boundary_aliases.data(),fields.scalars.size()},boundary_values);
+        if(closed)closed=apply_boundary_ghosts(BoundaryStage::enthalpy,product.boundary,{&h,1},boundary_values);
+        if (closed) {
+          const auto spans=product.boundary.spans();
+          for(std::size_t b=0;b<spans.size;++b) {
+            const auto& span=spans.data[b];
+            if(span.stage!=BoundaryStage::enthalpy)continue;
+            const unsigned face=static_cast<unsigned>(span.face);
+            for(unsigned o=0;o<span.tangent_outer_count;++o)
+              for(unsigned i=0;i<span.tangent_inner_count;++i)
+                for(unsigned layer=0;layer<span.ghost_layers;++layer) {
+                  auto c=boundary_first_ghost_cell(span.face,cells,i,o);
+                  (face<2 ? c.x : face<4 ? c.y : c.z)+=(face%2 ? 1 : -1)*int(layer);
+                  long double sum=0;
+                  for(std::size_t a=0;a<ns;++a)sum+=frame.unchecked(c,mapping.data[a]);
+                  frame.unchecked(c,product.reaction.dependent_index())=static_cast<double>(1-sum);
+                }
+          }
+        }
+      }
+      return exchange_frame(frame,closed);
+    };
+    copy_tuple(as_const(old),mean);
+    for(std::size_t field=0;field<=nf;++field) {
+      auto current=field==0 ? mean : iterate;
+      const auto accepted=field==0 ? as_const(old) : accepted_fields[field-1];
+      if(field) {
+        s=runtime_write_view(fields.esf_iter,current);
+        s=product.reductions.consensus(s);if(!s)return s;
+        copy_tuple(accepted,current);
+      }
+      s=close_frame(current);if(!s)return s;
+      for(unsigned sweep=0;sweep<2;++sweep) {
+        MixtureTransportFaces mixture;
+        EquationAssemblyContext context;
+        context.dt=step.dt;context.bdf={1/step.dt,-1/step.dt,0,1};context.time=step.generation;
+        context.geometry=product.geometry.topology_revision();context.boundary=product.boundary.revision();
+        context.thermo=product.thermodynamics.fingerprint();context.transport=product.transport.fingerprint();
+        context.contribution_stage=detail::ProductEsf::transport_source_stage;
+        context.scope=EquationAssemblyScope::final_conservative;context.mass_flux=accepted_flux;
+        context.face_flux=accepted_flux.revision;context.face_flux_authority=accepted_flux.certificate.authority();
+        context.face_flux_storage=accepted_flux.certificate.storage();
+        context.face_flux_revision_domain=accepted_flux.certificate.revision_domain();
+        context.immersed_interface=product.ibm_equations ? &*product.ibm_equations : nullptr;
+        if(product.esf.common_transport()) {
+          for(std::size_t a=0;a<ns;++a)query_species[a]=as_const(alias(current,mapping.data[a],fields.reaction_conserved[a]));
+          s=product.esf.prepare_mixture_faces(product.equations.kernels(),product.thermodynamics,
+              {query_species.data(),ns},as_const(alias(current,ns+1,fields.enthalpy)),gamma,accepted_flux,
+              step.generation,mixture);
+          context.mixture_transport=&mixture;
+        }
+        s=product.reductions.consensus(s);if(!s)return s;
+        for(std::size_t c=0;c<=ns;++c) {
+          const bool heat=c==ns;
+          if(heat) {s=close_frame(current);if(!s)return s;}
+          const FieldId quantity=heat ? fields.enthalpy : fields.reaction_conserved[c];
+          const std::size_t component=heat ? ns+1 : mapping.data[c];
+          auto q=alias(current,component,quantity);
+          std::array<PrimitiveHistory,UINT8_MAX> histories{};
+          std::array<ConstFieldView,UINT8_MAX> diffusivities{};
+          for(std::size_t a=0;a<ns;++a) {
+            const auto old_q=read_alias(accepted,mapping.data[a],fields.reaction_conserved[a]);
+            histories[a]={as_const(alias(current,mapping.data[a],fields.reaction_conserved[a])),old_q,old_q};
+            diffusivities[a]=gamma;
+          }
+          const auto old_h=read_alias(accepted,ns+1,fields.enthalpy);
+          EquationStateView state;state.density={density,density,density};
+          state.velocity={velocity_history.accepted,velocity_history.accepted,velocity_history.accepted};
+          state.independent_species={histories.data(),ns};state.enthalpy={as_const(alias(current,ns+1,fields.enthalpy)),old_h,old_h};
+          auto& scalar=heat ? state.enthalpy : histories[c];
+          EquationMaterialView material;material.scalar_mass_diffusivity={diffusivities.data(),ns};material.enthalpy_diffusivity=gamma;
+          FieldView source,sink;
+          s=runtime_write_view(fields.esf_transport_sources[c],source);
+          if(s)s=runtime_write_view(fields.esf_transport_sinks[c],sink);
+          std::size_t i{};
+          if(s)for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+            const Int3 cell{x,y,z};esf::detail::IemSource mixing;
+            if(field && fluid(i) && esf::detail::iem_source(
+                detail::cell_volume(product.equations.kernels(),cell),cache.unchecked(cell,2),
+                cache.unchecked(cell,3),product.esf.mixing_cd(),1.,mean.unchecked(cell,component),mixing)
+                    !=portable::Status::success) {s={StatusCode::numerical_failure,10232};break;}
+            source.unchecked(cell,0)=mixing.explicit_source_density+
+                (field && fluid(i) ? product.esf.frozen_noise_source(i,field-1,component) : 0.)+
+                (heat && fluid(i) ? product.esf.pressure_source(i) : 0.);
+            sink.unchecked(cell,0)=mixing.implicit_sink_density;
+          }
+          s=product.reductions.consensus(s);if(!s)return s;
+          EquationContributionView contribution;
+          contribution.explicit_source_density=as_const(source);
+          contribution.implicit_sink_density=as_const(sink);contribution.has_implicit_sink=true;
+          contribution.conserved_quantity=quantity;
+          contribution.units.si_exponents=heat ? std::array<std::int8_t,7>{1,-1,-3,0,0,0,0}
+                                               : std::array<std::int8_t,7>{1,-3,-1,0,0,0,0};
+          contribution.stage=detail::ProductEsf::transport_source_stage;
+          contribution.explicit_source_field=source.field;contribution.implicit_sink_field=sink.field;
+          contribution.capability=ContributionCapability::reacting;
+          contribution.source_identity=product.reaction.fingerprint();
+          const auto assemble=[&](EquationAssemblyCertificate& certificate) {
+            return heat ? detail::StatisticalEnthalpy::assemble(product.equations.enthalpy(),state,
+                gamma,{&contribution,1},context,equation,certificate)
+              : detail::StatisticalSpecies::assemble(product.equations.species(),c,state,material,
+                {&contribution,1},context,equation,certificate);
+          };
+          const auto refresh=[&](FieldView& updated) {
+            auto closed=runtime_write_view(current.field,current);
+            if(closed)closed=boundary_aliases_for(current);
+            updated=alias(current,component,quantity);
+            if(closed && physical)closed=heat
+                ? apply_boundary_ghosts(BoundaryStage::enthalpy,product.boundary,{&updated,1},boundary_values)
+                : apply_boundary_ghosts(BoundaryStage::scalar,product.boundary,
+                    {boundary_aliases.data(),fields.scalars.size()},boundary_values);
+            return exchange_frame(current,closed);
+          };
+          const LinearIdentity identity{
+              detail::product_mix(product.equations.species().fingerprint(),UINT64_C(0x5354494d504c01)+field*(ns+1)+c),
+              step.generation,product.geometry.fingerprint(),workspace.fingerprint(),
+              detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep)};
+          pc.reset_identity(identity);
+          detail::ScalarCorrectionRuntime runtime{rows,pc,product.krylov_halo,workspace,product.reductions,
+              identity,{heat ? 1e-8 : 1e-12,1e-11,400,1,workspace.requirements().maximum_restart}};
+          detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,
+              heat ? BoundaryStage::enthalpy : BoundaryStage::scalar,
+              heat ? product.schemes.enthalpy() : product.schemes.species(),
+              velocity_history.accepted,context,state.density,scalar,q};
+          const auto solved=detail::correct_frozen_scalar(problem,storage,runtime,assemble,refresh);
+          s=solved.status;if(!s)return s;
+        }
+        s=close_frame(current);if(!s)return s;
+        if(dual_esf && field>0 && sweep==1) {
+          if(esf_composition_ledger.active()) {
+            for(std::size_t c=0;c<ns && s;++c) {
+              s=form_cartesian_mixture_transport_flux(product.equations.kernels(),
+                  *context.mixture_transport,gamma,accepted_flux,
+                  as_const(alias(current,mapping.data[c],fields.reaction_conserved[c])),{ax,ay,az});
+              if(s && product.ibm_equations)
+                s=detail::IbmScalarTransport::constrain_flux(*product.ibm_equations,
+                    {detail::IbmScalarTransport::Quantity::independent_species,c},accepted_flux,{ax,ay,az});
+              if(s)esf_composition_ledger.freeze_transport(c,
+                  detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),
+                      {as_const(ax),as_const(ay),as_const(az),accepted_flux.revision},active));
+            }
+            s=product.reductions.consensus(s);if(!s)return s;
+          }
+          s=esf_energy_ledger.freeze(product.equations.kernels(),
+              as_const(alias(current,ns+1,fields.enthalpy)),gamma,accepted_flux,
+              context.mixture_transport,product.ibm_equations ? &*product.ibm_equations : nullptr);
+          s=product.reductions.consensus(s);if(!s)return s;
+        }
+      }
+      if(field==0) {
+        mean=current;
+        s=copy_interior(as_const(current),esf_auxiliary);
+      }
+      else {iterate=current;s=copy_interior(as_const(current),esf_trial[field-1]);}
+      s=product.reductions.consensus(s);if(!s)return s;
+    }
+    if(product.summary.coupling==CouplingKind::outer_corrected) {
+      // Freeze the realized ensemble transport source before chemistry.
+      // Its finite-field noise and IEM terms belong to the mean equation;
+      // pressure work remains in the common total-energy operator. Reuse
+      // the registered transport buffers after all field solves finish.
+      double local_heat[2]{};
+      for(std::size_t q=0;q<fields.esf_transport_sources.size() && s;++q) {
+        const bool heat=q==ns;
+        const auto component=heat ? ns+1 : mapping.data[q];
+        FieldView source,sink;
+        s=runtime_write_view(fields.esf_transport_sources[q],source);
+        if(s)s=runtime_write_view(fields.esf_transport_sinks[q],sink);
+        std::size_t i{};
+        for(int z=0;z<cells.z && s;++z)for(int y=0;y<cells.y && s;++y)for(int x=0;x<cells.x;++x,++i) {
+          const Int3 cell{x,y,z};
+          source.unchecked(cell,0)=sink.unchecked(cell,0)=0.;
+          if(!fluid(i))continue;
+          long double noise{},physical_mean{};
+          for(std::size_t f=0;f<nf;++f) {
+            noise+=product.esf.frozen_noise_source(i,f,component)/static_cast<long double>(nf);
+            physical_mean+=esf_trial[f].unchecked(cell,component)/static_cast<long double>(nf);
+          }
+          esf::detail::IemSource mixing;
+          const auto volume=detail::cell_volume(product.equations.kernels(),cell);
+          if(esf::detail::iem_source(volume,cache.unchecked(cell,2),cache.unchecked(cell,3),
+              product.esf.mixing_cd(),1.,0.,mixing)!=portable::Status::success) {
+            s={StatusCode::numerical_failure,10232};break;
+          }
+          const long double exchange=mixing.implicit_sink_density*
+              (static_cast<long double>(esf_auxiliary.unchecked(cell,component))-physical_mean);
+          if(!heat && esf_composition_ledger.active()) {
+            esf_composition_ledger.add(q,detail::CompositionBalanceLedger::noise,volume*noise);
+            esf_composition_ledger.add(q,detail::CompositionBalanceLedger::mixing,volume*exchange);
+          }
+          source.unchecked(cell,0)=static_cast<double>(noise+exchange);
+          if(!std::isfinite(source.unchecked(cell,0))) {s={StatusCode::numerical_failure,10232};break;}
+          if(heat) {local_heat[0]+=volume*static_cast<double>(noise);local_heat[1]+=volume*static_cast<double>(exchange);}
+        }
+        if(heat && s) {
+          auto& contribution=enthalpy_sources[0];
+          contribution={};contribution.conserved_quantity=fields.enthalpy;
+          contribution.explicit_source_density=as_const(source);
+          contribution.implicit_sink_density=as_const(sink);contribution.has_implicit_sink=true;
+          contribution.explicit_source_field=source.field;contribution.implicit_sink_field=sink.field;
+          contribution.units.si_exponents={1,-1,-3,0,0,0,0};
+          contribution.stage=detail::ProductEsf::transport_source_stage;
+          contribution.capability=ContributionCapability::reacting;
+          contribution.source_identity=product.reaction.fingerprint();
+          enthalpy_contributions={enthalpy_sources.data(),1};
+        }
+      }
+      s=product.reductions.consensus(s);if(!s)return s;
+      double global_heat[2]{};int rank{};
+      if(MPI_Allreduce(local_heat,global_heat,2,MPI_DOUBLE,MPI_SUM,communicator)!=MPI_SUCCESS)
+        return Status{StatusCode::mpi_failure,kProductCollective};
+      MPI_Comm_rank(communicator,&rank);
+      if(rank==0)std::fprintf(stdout,
+          "esf_statistical_ledger noise_W=%.17g mixing_W=%.17g total_W=%.17g duration_s=%.17g revision=%llu physical_source=ensemble_transport step_committed=0\n",
+          global_heat[0],global_heat[1],global_heat[0]+global_heat[1],step.dt,
+          static_cast<unsigned long long>(step.generation));
+    }
+    if (physical) {
+      std::size_t np=0;
+      for(const auto& binding:fields.scalar_bindings)
+        if(binding.role==TransportedScalarRole::passive_scalar)
+          query_passives[np++]=as_const(boundary_aliases[binding.catalog_slot]);
+      s=resolve_static_boundary_values(communicator,product.boundary,product.boundary_specs,
+          product.patch_inlets,product.geometry,product.patch,product.thermodynamics,pressure_reference,
+          density,velocity_history.accepted,mean_h,{mean_species,ns},{query_passives.data(),np},
+          {species_values.data(),species_values.size()},boundary_scalars,boundary_vectors,boundary_normal_gradients,false);
+    }
+    return product.reductions.consensus(s);
+  };
   if (status && product.esf.enabled()) {
     FieldView mass;
     status = runtime_write_view(product.fields.coupled_mass_source, mass);
@@ -9313,9 +10050,11 @@ Status ProductDriver::Impl::execute_attempt(
          s < product.fields.reaction_sources.size() && status; ++s)
       status = runtime_write_view(product.fields.reaction_sources[s],
                                   esf_sources[s]);
+    status = product.reductions.consensus(status);
     if (status)
-      status = product.esf.prepare(
-          product.equations.kernels(), product.reaction, product.thermodynamics,
+      status = product.esf.prepare_transport(
+          communicator, product.equations.kernels(), product.equations.enthalpy(),
+          product.reaction, product.thermodynamics,
           {product.spray.enabled() ? post_esf_read.data() : esf_accepted.data(),
            product.fields.esf_fields.size()},
           {esf_trial.data(), product.fields.esf_fields.size()},
@@ -9330,6 +10069,51 @@ Status ProductDriver::Impl::execute_attempt(
           pressure_reference, accepted_flux, time.time(), step.dt,
           step.accepted_step, step.generation,
           {esf_sources.data(), product.fields.reaction_sources.size()});
+    status = product.reductions.consensus(status);
+    if(status && product.esf.implicit_transport()) {
+      if(product.ibm_pressure_donors) {
+        FieldView accepted_pressure;
+        status=product.layers.view(StateRole::accepted_n,product.fields.pressure,accepted_pressure);
+        status=product.reductions.consensus(status);
+        if(status) {
+          accepted_pressure.field=product.fields.pressure_correction;
+          status=product.ibm_pressure_donors->exchange(kIbmPressureCorrectionDonorStage,{&accepted_pressure,1});
+        }
+      }
+      status=product.reductions.consensus(status);
+      if(status)status=product.esf.prepare_pressure_work(product.equations.kernels(),
+          pressure_history,velocity_history.accepted,pressure_reference,previous_pressure_reference,
+          time.last_accepted_dt());
+      status=product.reductions.consensus(status);
+    }
+    if(status && !product.esf.implicit_transport())
+      status=product.esf.capture_auxiliary(
+          {esf_trial.data(),product.fields.esf_fields.size()},esf_auxiliary);
+    if(status && product.esf.implicit_transport())status=solve_esf_transport();
+    if(status && product.esf.implicit_transport())status=product.esf.finish_implicit_transport(
+        product.reaction,product.thermodynamics,{esf_trial.data(),product.fields.esf_fields.size()},
+        pressure_history.accepted,pressure_reference,time.time(),step.dt,step.accepted_step,step.generation);
+    status = product.reductions.consensus(status);
+    if (status)
+      status = product.esf.react(product.reaction, product.thermodynamics,
+          {esf_trial.data(), product.fields.esf_fields.size()}, esf_auxiliary,
+          product.spray.enabled() ? as_const(post_rho) : rho_history.accepted,
+          pressure_history.accepted, pressure_reference, time.time(), step.dt,
+          step.accepted_step, step.generation,
+          {esf_sources.data(), product.fields.reaction_sources.size()});
+    if(status)status=product.reaction.publish_esf_sources(
+        {esf_sources.data(),product.fields.reaction_sources.size()});
+    if(status && esf_composition_ledger.active()) {
+      const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
+      std::size_t i{};
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+        if(active.size && !active.data[i])continue;
+        const Int3 cell{x,y,z};const auto volume=detail::cell_volume(product.equations.kernels(),cell);
+        for(std::size_t c=0;c<product.fields.reaction_sources.size();++c)
+          esf_composition_ledger.add(c,detail::CompositionBalanceLedger::chemistry,
+              static_cast<long double>(volume)*esf_sources[c].unchecked(cell,0));
+      }
+    }
     if (status)
       for (std::size_t s = 0; s < species_rate_history.size(); ++s)
         species_rate_history[s].current = as_const(esf_sources[s]);
@@ -9404,6 +10188,20 @@ Status ProductDriver::Impl::execute_attempt(
         {post_passive_ghosts.data(), passive_accepted.size()}};
   }
   predictor_input.enthalpy_ghosts = enthalpy_ghosts;
+  predictor_input.implicit_scalar_seed=cold_method;
+  MixtureTransportFaces predictor_mixture;
+  if (status && product.esf.common_transport() && !cold_method) {
+    auto gamma = product.spray.enabled() ? as_const(post_cache) : esf_transport;
+    gamma.components = 1;
+    status = product.esf.prepare_mixture_faces(product.equations.kernels(),
+        product.thermodynamics,
+        {product.spray.enabled() ? post_species_read.data() : species_accepted.data(),
+         species_accepted.size()},
+        product.spray.enabled() ? as_const(post_h) : enthalpy_history.accepted,
+        gamma, accepted_flux, step.generation, predictor_mixture);
+    predictor_input.mixture_transport = &predictor_mixture;
+    predictor_input.mixture_mass_diffusivity = gamma;
+  }
   predictor_input.temperature_accepted=temperature_history.accepted;
   predictor_input.temperature_previous=effective_bdf.order==2U ? temperature_history.previous : ConstFieldView{};
   predictor_input.temperature_ghosts=temperature_ghosts;
@@ -10146,6 +10944,81 @@ Status ProductDriver::Impl::execute_attempt(
     numerical_failure = context;
   };
 
+  FieldView esf_mean_anchor;
+  if (status && dual_esf) status=runtime_write_view(product.fields.esf_mean,esf_mean_anchor);
+  const auto update_esf_mean=[&](const double* energy_shift=nullptr) {
+    const auto mapping=product.reaction.species_indices();
+    std::size_t i{};
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+      const Int3 c{x,y,z};
+      if(product.topology && !product.topology->is_fluid_global(
+          {x+product.patch.begin.x,y+product.patch.begin.y,z+product.patch.begin.z}))continue;
+      for(std::size_t j=0;j<product.fields.esf_components;++j) {
+        long double mean{};
+        for(std::size_t f=0;f<product.fields.esf_fields.size();++f)
+          mean+=static_cast<long double>(esf_trial[f].unchecked(c,j))/product.fields.esf_fields.size();
+        esf_mean_anchor.unchecked(c,j)=static_cast<double>(mean);
+      }
+      for(std::size_t j=0;j<mapping.size;++j)
+        species_trial[j].unchecked(c,0)=esf_mean_anchor.unchecked(c,mapping.data[j]);
+      trial_enthalpy.unchecked(c,0)=esf_mean_anchor.unchecked(c,mapping.size+1)+(energy_shift ? energy_shift[i] : 0.);
+    }
+  };
+  if(status && dual_esf) {
+    update_esf_mean();
+    halo_count=0;
+    halo_views[halo_count++]=trial_enthalpy;
+    append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
+    status=exchange(product.stage_halos[1U],15U,halo_count,status);
+  }
+  struct CoupledThermoState : ThermoState { PressureThermoState pressure; };
+  const auto evaluate_selected_reference=[&](Int3 c,double reference,double pi,double h,
+      Span<const double> y,Real3 velocity,CoupledThermoState& out,double hint) {
+    const bool fluid=!product.topology || product.topology->is_fluid_global(
+        {c.x+product.patch.begin.x,c.y+product.patch.begin.y,c.z+product.patch.begin.z});
+    CoupledThermoState candidate;
+    Status evaluated;
+    if(dual_esf && fluid) {
+      std::array<double,UINT8_MAX> mean{};
+      detail::ProductEsf::DualState selected;
+      evaluated=product.esf.evaluate_dual_state_cell(c,
+          {esf_trial.data(),product.fields.esf_fields.size()},as_const(esf_auxiliary),
+          reference+pi,h-esf_mean_anchor.unchecked(c,product.fields.esf_components-1),velocity,
+          product.reaction,product.thermodynamics,{step.accepted_step,step.generation,1},
+          {mean.data(),product.fields.esf_components},selected);
+      if(evaluated) {
+        const auto mapping=product.reaction.species_indices();
+        for(std::size_t j=0;j<mapping.size;++j)
+          if(!std::isfinite(y.data[j]) || std::abs(y.data[j]-mean[mapping.data[j]])>2e-12)
+            return Status{StatusCode::numerical_failure,17853};
+        static_cast<ThermoState&>(candidate)=selected.physical;
+        candidate.pressure={selected.pressure.density_kg_per_m3,
+            selected.pressure.density_pressure_derivative,selected.pressure.density_enthalpy_derivative};
+      }
+    } else {
+      evaluated=product.thermodynamics.evaluate_from_reference_pressure(reference,pi,h,y,velocity,candidate,hint);
+      candidate.pressure={candidate.rho,candidate.drho_dp_hY,candidate.drho_dh_pY};
+    }
+    if(evaluated)out=candidate;
+    return evaluated;
+  };
+  const auto evaluate_selected_density=[&](Int3 c,double rho,double h,
+      Span<const double> y,Real3 velocity,double& p,CoupledThermoState& out,double hint) {
+    if(!dual_esf) {
+      const auto evaluated=product.thermodynamics.evaluate_from_density(rho,h,y,velocity,p,out,hint);
+      if(evaluated)out.pressure={out.rho,out.drho_dp_hY,out.drho_dh_pY};
+      return evaluated;
+    }
+    CoupledThermoState base,candidate;
+    auto evaluated=evaluate_selected_reference(c,pressure_reference,trial_pressure.unchecked(c,0),h,y,velocity,base,hint);
+    if(!evaluated)return evaluated;
+    const double target=rho/base.pressure.drho_dp_hY;
+    if(!std::isfinite(rho) || rho<=0 || !std::isfinite(target) || target<=0)
+      return Status{StatusCode::numerical_failure,17854};
+    evaluated=evaluate_selected_reference(c,target,0,h,y,velocity,candidate,hint);
+    if(evaluated){p=target;out=candidate;}
+    return evaluated;
+  };
   const PressureReferenceKind pressure_reference_kind =
       product.equations.pressure_reference().kind();
   const auto update_thermo_from_authority =
@@ -10164,20 +11037,20 @@ Status ProductDriver::Impl::execute_attempt(
               trial_velocity.unchecked(cell, 2U)};
           double density_value = trial_density.unchecked(cell, 0U);
           double absolute_pressure = 0.0;
-          ThermoState thermo;
+          CoupledThermoState thermo;
           Status evaluated;
           const bool use_density_authority =
               !coupled_pressure_authority &&
               pressure_reference_kind == PressureReferenceKind::closed_mass;
           if (use_density_authority) {
-            evaluated = product.thermodynamics.evaluate_from_density(
+            evaluated = evaluate_selected_density(cell,
                 density_value, trial_enthalpy.unchecked(cell, 0U),
                 {species_values.data(), species_values.size()}, velocity,
                 absolute_pressure, thermo,
                 temperature_history.accepted.unchecked(cell, 0U));
           } else {
             evaluated =
-                product.thermodynamics.evaluate_from_reference_pressure(
+                evaluate_selected_reference(cell,
                     p_ref, trial_pressure.unchecked(cell, 0U),
                     trial_enthalpy.unchecked(cell, 0U),
                     {species_values.data(), species_values.size()}, velocity,
@@ -10186,7 +11059,7 @@ Status ProductDriver::Impl::execute_attempt(
             if (evaluated) {
               absolute_pressure =
                   p_ref + trial_pressure.unchecked(cell, 0U);
-              density_value = thermo.rho;
+              density_value = thermo.pressure.rho;
             }
           }
           MolecularTransportState transport;
@@ -10201,7 +11074,7 @@ Status ProductDriver::Impl::execute_attempt(
           const double pi = use_density_authority
                                 ? absolute_pressure - p_ref
                                 : trial_pressure.unchecked(cell, 0U);
-          const double oracle_density = thermo.rho;
+          const double oracle_density = thermo.pressure.rho;
           if (!std::isfinite(pi) || !std::isfinite(oracle_density) ||
               oracle_density <= 0.0) {
             const Status failure{StatusCode::numerical_failure,
@@ -10215,8 +11088,8 @@ Status ProductDriver::Impl::execute_attempt(
             trial_density.unchecked(cell, 0U) = density_value;
           eos_density.unchecked(cell, 0U) = oracle_density;
           trial_temperature.unchecked(cell, 0U) = thermo.temperature;
-          compressibility.unchecked(cell, 0U) = thermo.drho_dp_hY;
-          enthalpy_compressibility.unchecked(cell, 0U) = thermo.drho_dh_pY;
+          compressibility.unchecked(cell, 0U) = thermo.pressure.drho_dp_hY;
+          enthalpy_compressibility.unchecked(cell, 0U) = thermo.pressure.drho_dh_pY;
           heat_capacity.unchecked(cell, 0U) = thermo.cp;
           molecular_viscosity.unchecked(cell, 0U) = transport.viscosity;
           effective_viscosity.unchecked(cell, 0U) = transport.viscosity;
@@ -10278,6 +11151,9 @@ Status ProductDriver::Impl::execute_attempt(
 #endif
   if (status)
     status = update_thermo_from_authority(attempt_pressure_reference, false);
+  // Material refresh below includes a collective result. Every rank enters
+  // that stage with the same prerequisite, including a local EOS failure.
+  status = product.reductions.consensus(status);
   // COAST viscos is evaluated before the current step's PDF transport.
   // Its molecular material must depend on accepted history, not a guess.
   if(cold_method && status){
@@ -10359,6 +11235,18 @@ Status ProductDriver::Impl::execute_attempt(
       {passive_accepted.data(), passive_accepted.size()},
       {species_values.data(), species_values.size()}, boundary_scalars,
       boundary_vectors, boundary_normal_gradients, true, status);
+
+  if(status && dual_esf) {
+    // The new ensemble mean owns the physical boundary mirrors as well as
+    // the interior. Inlet/outlet material queries below reconstruct the
+    // face from the current owner and its matching ghost.
+    halo_count=0;
+    append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
+    status=apply_boundary_ghosts(BoundaryStage::scalar,product.boundary,
+        {halo_views.data(),halo_count},boundary_values);
+    if(status)status=apply_boundary_ghosts(BoundaryStage::enthalpy,product.boundary,
+        {&trial_enthalpy,1},boundary_values);
+  }
 
   // The effective temporal method is now fixed.  Form its momentum history
   // before the existing stage-20 exchange so predictor, momentum and PISO
@@ -11422,6 +12310,12 @@ Status ProductDriver::Impl::execute_attempt(
         kCoupledStateC1Stage,
         BoundaryThermophysicalGhostPhase::corrector_one, status);
   if (cold_method) {
+    // Pressure selects its own Krylov workspace. Momentum and enthalpy
+    // retain their FGMRES workspace and controls in either configuration.
+    auto& equation_workspace = product.piso.pressure_algorithm() == LinearAlgorithm::fgmres
+        ? product.krylov_workspace : product.auxiliary_krylov_workspace;
+    auto equation_solve = product.piso.pressure_solve();
+    equation_solve.restart = equation_workspace.requirements().maximum_restart;
     const auto cold_attempt = [&]() -> Status {
       report.cold.active = true;
       report.cold.independent_species_count =
@@ -11431,11 +12325,84 @@ Status ProductDriver::Impl::execute_attempt(
       // its original cause and let the shared finish path prepare rollback.
       if (!status) return status;
       const bool reference_stopping = product.cold_stopping.has_value();
+      // This branch returns before the PISO enthalpy reconstruction. Its
+      // preallocated face workspace holds the common scalar conductance.
+      FaceFluxView mixture_workspace{energy_frozen_x_enthalpy,
+          energy_frozen_y_enthalpy,energy_frozen_z_enthalpy,step.generation};
+      MixtureTransportFaces mixture_faces;
+      std::vector<ConstFieldView> mixture_species(species_trial.size());
+      std::vector<double> mixture_energy_residual(species_trial.empty() ? 0U :
+          std::size_t(cells.x)*cells.y*cells.z,0.0);
+      std::vector<double> mixture_composition(species_trial.size());
+      RevisionToken mixture_iteration{};
+      std::array<bool,6> mixture_reflected_faces{};
+      for (unsigned f=0; f<6; ++f) {
+        const auto face=static_cast<CartesianFace>(f);
+        const BoundaryFacePlan* plan=nullptr;
+        if (product.boundary.face(face,plan) && plan && plan->local_owner && !plan->periodic)
+          mixture_reflected_faces[f]=product.boundary.has_thermophysical_inlet_face(face) ||
+              plan->flow_kind==BoundaryKind::pressure_outlet;
+      }
+      const auto prepare_mixture_faces = [&](ConstFaceFluxView flux) {
+        if(dual_esf) {
+          const auto prepared=esf_energy_ledger.correction_mixture(
+              product.equations.kernels(),product.boundary,accepted_flux,flux,
+              mixture_workspace,++mixture_iteration,mixture_faces);
+          return product.reductions.consensus(prepared);
+        }
+        for (std::size_t s=0; s<species_trial.size(); ++s)
+          mixture_species[s]=as_const(species_trial[s]);
+        // The inactive PISO cell workspace stores a formation-reference-free
+        // thermal coordinate. Face slabs suffice for the Cartesian stencil.
+        Status prepared_faces;
+        if (!species_trial.empty()) {
+          auto& composition=mixture_composition;
+          for (int z=-2; z<cells.z+2 && prepared_faces; ++z)
+            for (int y=-2; y<cells.y+2 && prepared_faces; ++y)
+              for (int x=-2; x<cells.x+2 && prepared_faces; ++x) {
+                if (int(x<0 || x>=cells.x)+int(y<0 || y>=cells.y)+
+                    int(z<0 || z>=cells.z)>1) continue;
+                const Int3 c{x,y,z};
+                for (std::size_t i=0; i<species_trial.size(); ++i)
+                  composition[i]=species_trial[i].unchecked(c,0);
+                const bool reflected=(x<0 && mixture_reflected_faces[0]) ||
+                    (x>=cells.x && mixture_reflected_faces[1]) ||
+                    (y<0 && mixture_reflected_faces[2]) ||
+                    (y>=cells.y && mixture_reflected_faces[3]) ||
+                    (z<0 && mixture_reflected_faces[4]) ||
+                    (z>=cells.z && mixture_reflected_faces[5]);
+                // Physical material uses the cached T form to retain accuracy
+                // across formation-reference shifts. Reflected boundary h/Y
+                // stencils use the affine coordinate and preserve their trace.
+                prepared_faces=reflected
+                    ? product.thermodynamics.transport_enthalpy_coordinate_from_h(
+                        trial_enthalpy.unchecked(c,0),
+                        {composition.data(),species_trial.size()},
+                        pressure_energy_candidate_enthalpy.unchecked(c,0))
+                    : product.thermodynamics.transport_enthalpy_coordinate(
+                        trial_temperature.unchecked(c,0),
+                        {composition.data(),species_trial.size()},
+                        pressure_energy_candidate_enthalpy.unchecked(c,0));
+              }
+        }
+        if (prepared_faces) prepared_faces=prepare_cartesian_mixture_transport(
+            product.equations.kernels(),
+            {mixture_species.data(),mixture_species.size()},
+            species_trial.empty() ? as_const(trial_enthalpy) :
+                as_const(pressure_energy_candidate_enthalpy),
+            as_const(enthalpy_diffusivity),flux,
+            mixture_workspace,++mixture_iteration,mixture_faces,
+            product.ibm_equations ? &*product.ibm_equations : nullptr);
+        return product.reductions.consensus(prepared_faces);
+      };
       bool coast_momentum_tvd{};
+      bool quiescent_reference_pending{};
+      std::vector<std::uint8_t> nascent_species_reference;
       {
         const std::size_t reference_count = 5U + species_history.size();
         // ewt/ewt_pdf run before the COAST PDF/flow updates. Freeze the
-        // conservative maxima of the accepted state, never the candidate.
+        // conservative maxima of the accepted state. Initially absent
+        // components use the first resolved response, frozen below.
         std::vector<double> local(reference_count + 2U, 0.0);
         std::vector<double> global(local.size(), 0.0);
         for (int z = 0; z < cells.z; ++z)
@@ -11541,10 +12508,17 @@ Status ProductDriver::Impl::execute_attempt(
           const double reference_time = product.cold_stopping->reference_time;
           report.cold.momentum_reference_scale =
               std::max(1e-15, std::hypot(global[0], global[1], global[2])) / reference_time;
+          quiescent_reference_pending = std::hypot(global[0], global[1], global[2]) <= 1e-15;
           report.cold.enthalpy_reference_scale = std::max(1e-15, global[3]) / reference_time;
           report.cold.species_reference_scales.resize(species_history.size() + 1U);
           for (std::size_t j = 0; j < report.cold.species_reference_scales.size(); ++j)
             report.cold.species_reference_scales[j] = std::max(1e-15, global[4 + j]) / reference_time;
+          if (std::any_of(global.begin() + 4, global.begin() + reference_count,
+                          [](double value) { return value <= 1e-15; })) {
+            nascent_species_reference.resize(species_history.size() + 1U);
+            for (std::size_t j = 0; j < nascent_species_reference.size(); ++j)
+              nascent_species_reference[j] = global[4 + j] <= 1e-15;
+          }
           const auto finite_scale = [](double value) {
             return std::isfinite(value) && value > 0.0;
           };
@@ -11556,9 +12530,840 @@ Status ProductDriver::Impl::execute_attempt(
         }
       }
       double cold_E{}, cold_Y{}, cold_reference_E{};
-      for (unsigned cold_outer = 0; cold_outer < 16; ++cold_outer) {
+      double cold_energy_tolerance = reference_stopping
+          ? product.cold_stopping->enthalpy : 1e-10;
+      std::vector<double> species_residual_limits;
+      bool conservative_energy_requested{};
+      // Physical composition follows the complete random-field transport
+      // and reactor state. Field0 remains COAST's frozen noise-reduced
+      // pressure anchor; pressure work shifts h0 and physical h together.
+      const auto correct_esf_for_flux=[&](ConstFaceFluxView target_flux,bool audit,
+                                         double& residual) -> Status {
+        FieldView iterate,next;
+        auto local=runtime_write_view(product.fields.esf_iter,iterate);
+        if(local)local=runtime_write_view(product.fields.esf_old,next);
+        local=product.reductions.consensus(local);if(!local)return local;
+        iterate.field=product.fields.esf_mean;
+        if(!audit) {
+          std::size_t i{};
+          for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i)
+            mixture_energy_residual[i]=trial_enthalpy.unchecked({x,y,z},0)-
+                esf_mean_anchor.unchecked({x,y,z},product.fields.esf_components-1);
+        }
+        std::array<FieldView,UINT8_MAX> mean_scalars{};
+        std::size_t si{},pi{};
+        for(std::size_t j=0;j<product.fields.scalars.size();++j)
+          mean_scalars[j]=product.fields.scalar_roles[j]==TransportedScalarRole::species
+              ? species_trial[si++] : passive_trial[pi++];
+        const auto density=product.spray.enabled() ? as_const(post_rho) : rho_history.accepted;
+        const auto close=[&](FieldView frame) {
+          return close_esf_boundaries({&frame,1},{},trial_enthalpy,
+              {mean_scalars.data(),product.fields.scalars.size()},density,
+              as_const(trial_velocity),attempt_pressure_reference);
+        };
+        residual=0;
+        local=esf_energy_ledger.start_correction();
+        if(esf_composition_ledger.active()) {
+          esf_composition_ledger.start_pressure();
+          const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
+          esf_composition_ledger.add_total(detail::CompositionBalanceLedger::pressure,
+              detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),target_flux,active)-
+              detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),accepted_flux,active));
+        }
+        local=product.reductions.consensus(local);if(!local)return local;
+        const auto heat_component=product.fields.esf_components-1;
+        // The field solves close their own physical and MPI ghosts. Their
+        // equal mean supplies the anchor trace for the energy flux difference.
+        for(int z=-1;z<=cells.z;++z)for(int y=-1;y<=cells.y;++y)for(int x=-1;x<=cells.x;++x)
+          if(int(x<0 || x>=cells.x)+int(y<0 || y>=cells.y)+int(z<0 || z>=cells.z)==1)
+            esf_mean_anchor.unchecked({x,y,z},heat_component)=0;
+        for(std::size_t f=0;f<product.fields.esf_fields.size();++f) {
+          ConstFieldView seed;
+          local=product.esf.correction_seed(f,product.fields.esf_mean,
+              {step.accepted_step,step.generation,1},seed);
+          local=product.reductions.consensus(local);if(!local)return local;
+          detail::StatisticalFluxReport solved;
+          local=detail::correct_statistical_flux(product.equations.kernels(),density,seed,
+              accepted_flux,target_flux,step.dt,
+              product.topology ? product.topology->region() : Span<const std::uint8_t>{},
+              false,product.boundary,as_const(trial_velocity),iterate,next,
+              product.esf_transport_halo,178,product.reductions,close,solved,
+              audit ? as_const(esf_trial[f]) : ConstFieldView{},audit,
+              product.ibm_equations ? &*product.ibm_equations : nullptr);
+          if(!local) {
+            if(solved.failure_reason) {
+              int rank{};MPI_Comm_rank(communicator,&rank);
+              const auto c=solved.failure_cell;
+              std::fprintf(stderr,"esf_flux_input field=%zu rank=%d reason=%u global=%d,%d,%d values=%.17g,%.17g,%.17g\n",
+                  f,rank,solved.failure_reason,c.x+product.patch.begin.x,c.y+product.patch.begin.y,c.z+product.patch.begin.z,
+                  solved.failure_values[0],solved.failure_values[1],solved.failure_values[2]);
+            }
+            return local;
+          }
+          auto h=as_const(iterate);h.base+=heat_component*h.component_stride;h.components=1;h.field=product.fields.enthalpy;
+          local=esf_energy_ledger.add_pressure(product.boundary,h,as_const(trial_velocity),accepted_flux,target_flux);
+          if(local && esf_composition_ledger.active()) {
+            const auto mapping=product.reaction.species_indices();
+            const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
+            for(std::size_t c=0;c<mapping.size;++c) {
+              auto q=as_const(iterate);q.base+=mapping.data[c]*q.component_stride;q.components=1;
+              esf_composition_ledger.add_pressure(c,detail::CompositionBalanceLedger::pressure_sum(
+                  product.equations.kernels(),product.boundary,q,as_const(trial_velocity),
+                  accepted_flux,target_flux,active));
+            }
+          }
+          local=product.reductions.consensus(local);if(!local)return local;
+          for(int z=-1;z<=cells.z;++z)for(int y=-1;y<=cells.y;++y)for(int x=-1;x<=cells.x;++x)
+            if(int(x<0 || x>=cells.x)+int(y<0 || y>=cells.y)+int(z<0 || z>=cells.z)==1)
+              esf_mean_anchor.unchecked({x,y,z},heat_component)+=h.unchecked({x,y,z},0)/product.fields.esf_fields.size();
+          residual=std::max(residual,solved.convergence_residual);
+          if(solved.composition_closure>2e-12 ||
+              solved.mass_pairing_residual>detail::ScalarMassRemap::tolerance)
+            return {StatusCode::numerical_failure,17855};
+          if(!audit) {
+            local=copy_interior(as_const(iterate),esf_trial[f]);
+            local=product.reductions.consensus(local);if(!local)return local;
+            report.cold.species_iterations+=solved.iterations;
+          }
+        }
+        if(!audit) {
+          update_esf_mean(mixture_energy_residual.data());
+          std::fill(mixture_energy_residual.begin(),mixture_energy_residual.end(),0.);
+          ++report.cold.species_solve_calls;
+        }
+        return {};
+      };
+      const auto refresh_scalar_thermodynamics=[&]() -> Status {
+          // Refresh the density-authoritative EOS for the coupled h/Y
+          // guess before assembling the conservative energy equation.
+          for (int z = 0; z < cells.z && status; ++z)
+            for (int y = 0; y < cells.y && status; ++y)
+              for (int x = 0; x < cells.x; ++x) {
+                Int3 c{x, y, z};
+                if (product.topology &&
+                    !product.topology->is_fluid_global(
+                        {x + product.patch.begin.x, y + product.patch.begin.y,
+                         z + product.patch.begin.z}))
+                  continue;
+                for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
+                  species_values[isp] = species_trial[isp].unchecked(c, 0);
+                CoupledThermoState therm;
+                double absolute_pressure{};
+                status = evaluate_selected_density(c,
+                    trial_density.unchecked(c, 0),
+                    trial_enthalpy.unchecked(c, 0),
+                    {species_values.data(), species_values.size()},
+                    {trial_velocity.unchecked(c, 0),
+                     trial_velocity.unchecked(c, 1),
+                     trial_velocity.unchecked(c, 2)},
+                    absolute_pressure, therm,
+                    trial_temperature.unchecked(c, 0));
+                if (!status)
+                  break;
+                // Keep an EOS-compatible pressure only while resolving a
+                // full energy request. Ordinary h/Y guesses refresh pressure
+                // directly so roundoff retention adds no thermodynamic lag.
+                if (conservative_energy_requested)
+                  absolute_pressure=detail::cold_density_pressure_candidate(
+                    trial_density.unchecked(c,0),therm.pressure.drho_dp_hY,
+                    attempt_pressure_reference+trial_pressure.unchecked(c,0),absolute_pressure);
+                trial_pressure.unchecked(c, 0) =
+                    absolute_pressure - attempt_pressure_reference;
+                trial_temperature.unchecked(c, 0) = therm.temperature;
+                heat_capacity.unchecked(c, 0) = therm.cp;
+                compressibility.unchecked(c, 0) = therm.pressure.drho_dp_hY;
+                enthalpy_compressibility.unchecked(c, 0) = therm.pressure.drho_dh_pY;
+                enthalpy_diffusivity.unchecked(c, 0) =
+                    conductivity.unchecked(c, 0) / therm.cp;
+              }
+          status = product.reductions.consensus(status);
+          if (!status)
+            return status;
+          status = refresh_coupled_state(
+              kCoupledStateC1Stage,
+              BoundaryThermophysicalGhostPhase::corrector_one, status);
+          if (!status)
+            return status;
+        return {};
+      };
+      // Each scalar solve uses the same accepted history and current flux.
+      const auto solve_cold_scalars = [&](unsigned cold_outer) -> Status {
+        int rank{};
+        MPI_Comm_rank(communicator,&rank);
+        EquationAssemblyContext cold_energy_context;
+        if (product.reaction.interval_enabled()) {
+          status=product.reaction.clear_interval(product.layers,cells,cold_outer==0U);
+          status=product.reductions.consensus(status);
+          if (!status) return status;
+        }
+        status=prepare_mixture_faces(as_const(provisional_flux));
+        if (!status) return status;
+        cold_energy_context.mixture_transport=&mixture_faces;
+        cold_energy_context.dt = step.dt;
+        cold_energy_context.time = step.generation;
+        cold_energy_context.geometry = product.geometry.topology_revision();
+        cold_energy_context.boundary = product.boundary.revision();
+        cold_energy_context.thermo = product.thermodynamics.fingerprint();
+        cold_energy_context.transport = product.transport.fingerprint();
+        cold_energy_context.contribution_stage = 1;
+        cold_energy_context.box = full_box;
+        cold_energy_context.immersed_interface =
+            product.ibm_equations ? &*product.ibm_equations : nullptr;
+        cold_energy_context.wall_treatment =
+            product.ibm_equations ? &product.turbulence : nullptr;
+        const auto assemble_pressure_energy_residual_from_flux =
+            [&](ConstFaceFluxView target_flux, EquationAssemblyScope scope) {
+              Status assembled;
+              if (assembled) {
+                assembled =
+                    history(product.fields.rho, equation_state.density);
+                if (assembled)
+                  assembled = history(product.fields.velocity,
+                                      equation_state.velocity);
+                if (assembled)
+                  assembled = history(product.fields.pressure,
+                                      equation_state.pressure_perturbation);
+                if (assembled)
+                  assembled = history(product.fields.enthalpy,
+                                      equation_state.enthalpy);
+                if (assembled)
+                  assembled = history(product.fields.temperature,
+                                      equation_state.temperature);
+                equation_state.pressure_reference =
+                    attempt_pressure_reference;
+                equation_state.accepted_pressure_reference =
+                    pressure_reference;
+                equation_state.previous_pressure_reference =
+                    previous_pressure_reference;
+                equation_state.independent_species = {species_history.data(),
+                                                      species_history.size()};
+                equation_state.passive_scalars = {passive_history.data(),
+                                                  passive_history.size()};
+                material.molecular_viscosity = as_const(molecular_viscosity);
+                material.effective_viscosity = as_const(effective_viscosity);
+                material.thermal_conductivity = as_const(conductivity);
+                material.heat_capacity = as_const(heat_capacity);
+                material.enthalpy_diffusivity =
+                    as_const(enthalpy_diffusivity);
+                material.pressure_compressibility = as_const(compressibility);
+                cold_energy_context.scope = scope;
+                cold_energy_context.face_flux = target_flux.revision;
+                cold_energy_context.face_flux_authority =
+                    scope == EquationAssemblyScope::final_conservative
+                        ? target_flux.certificate.authority()
+                        : 0U;
+                cold_energy_context.face_flux_storage =
+                    scope == EquationAssemblyScope::final_conservative
+                        ? target_flux.certificate.storage()
+                        : 0U;
+                cold_energy_context.face_flux_revision_domain =
+                    scope == EquationAssemblyScope::final_conservative
+                        ? target_flux.certificate.revision_domain()
+                        : 0U;
+                cold_energy_context.mass_flux = target_flux;
+                cold_energy_context.provisional_mass_flux = false;
+              }
+              EquationAssemblyCertificate energy_certificate;
+              auto enthalpy_assembly = cold_energy_context;
+              if (product.spray.enabled())
+                enthalpy_assembly.contribution_stage = 2;
+              if(dual_esf)enthalpy_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
+              if (assembled)
+                assembled = assemble_enthalpy(
+                    product.equations.enthalpy(), equation_state, material,
+                    as_const(velocity_gradient), enthalpy_contributions,
+                    enthalpy_assembly, pressure_energy_system,
+                    energy_certificate);
+              if (assembled && product.ibm_equations.has_value()) {
+                zero_field(pressure_energy_e_p);
+                if (!product.equations.enthalpy().conservative_total_energy())
+                  assembled = product.ibm_equations->correct_pressure_work(
+                      as_const(trial_pressure), as_const(trial_velocity),
+                      pressure_energy_e_p);
+                for (std::int32_t z = 0; z < cells.z && assembled; ++z)
+                  for (std::int32_t y = 0; y < cells.y; ++y)
+                    for (std::int32_t x = 0; x < cells.x; ++x) {
+                      const Int3 cell{x, y, z};
+                      pressure_energy_r_e.unchecked(cell, 0U) -=
+                          detail::cell_volume(product.equations.kernels(),
+                                              cell) *
+                          pressure_energy_e_p.unchecked(cell, 0U);
+                    }
+                if (assembled) {
+                  zero_field(pressure_energy_e_p);
+                  assembled = product.ibm_equations
+                                  ->correct_impermeable_scalar_diffusion(
+                                      product.unity_lewis_enthalpy
+                                          ? as_const(trial_enthalpy)
+                                          : as_const(trial_temperature),
+                                      product.unity_lewis_enthalpy
+                                          ? as_const(enthalpy_diffusivity)
+                                          : as_const(conductivity),
+                                      pressure_energy_e_p);
+                }
+                for (std::int32_t z = 0; z < cells.z && assembled; ++z)
+                  for (std::int32_t y = 0; y < cells.y; ++y)
+                    for (std::int32_t x = 0; x < cells.x; ++x) {
+                      const Int3 cell{x, y, z};
+                      pressure_energy_r_e.unchecked(cell, 0U) -=
+                          detail::cell_volume(product.equations.kernels(),
+                                              cell) *
+                          pressure_energy_e_p.unchecked(cell, 0U);
+                    }
+              }
+              if (assembled && product.topology.has_value()) {
+                const Span<const std::uint8_t> active =
+                    product.topology->region();
+                std::size_t offset = 0U;
+                for (std::int32_t z = 0; z < cells.z; ++z)
+                  for (std::int32_t y = 0; y < cells.y; ++y)
+                    for (std::int32_t x = 0; x < cells.x; ++x, ++offset)
+                      if (active.data[offset] == 0U)
+                        pressure_energy_r_e.unchecked({x, y, z}, 0U) = 0.0;
+              }
+              if(assembled && dual_esf) {
+                    auto anchor=as_const(esf_mean_anchor);
+                    anchor.base+=(product.fields.esf_components-1)*anchor.component_stride;
+                    anchor.components=1;anchor.field=product.fields.enthalpy;
+                    assembled=esf_energy_ledger.prepare(product.equations.kernels(),anchor,
+                        as_const(enthalpy_diffusivity),target_flux,mixture_faces,
+                        product.ibm_equations ? &*product.ibm_equations : nullptr);
+                    if(assembled)assembled=esf_energy_ledger.add_residual(pressure_energy_r_e,
+                        product.topology ? product.topology->region() : Span<const std::uint8_t>{});
+                  }
+                  return product.reductions.consensus(assembled);
+            };
+        cold_energy_context.bdf = {1 / step.dt, -1 / step.dt, 0, 1};
+        if (!species_trial.empty() && !dual_esf) {
+          const double species_begin = MPI_Wtime();
+          halo_count = 0U;
+          append_scalar_halo_views(product.fields, species_trial,
+                                   passive_trial, halo_views, halo_count);
+          FieldView y_diagonal, y_rhs, y_residual, y_diffusivity;
+          status = runtime_write_view(product.fields.pressure_energy_c_h,
+                                      y_diagonal);
+          if (status)
+            status = runtime_write_view(
+                product.fields.pressure_energy_c_h_row_scale, y_rhs);
+          if (status)
+            status = runtime_write_view(product.fields.pressure_energy_e_p,
+                                        y_residual);
+          if (status)
+            status = runtime_write_view(product.fields.scalar_diffusivity,
+                                        y_diffusivity);
+          if (status)
+            status = history(product.fields.rho, equation_state.density);
+          for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
+            species_history[isp].trial = as_const(species_trial[isp]);
+          equation_state.independent_species = {species_history.data(),
+                                                species_history.size()};
+          material.molecular_viscosity = as_const(molecular_viscosity);
+          material.effective_viscosity = as_const(effective_viscosity);
+          auto y_context = cold_energy_context;
+          y_context.scope = EquationAssemblyScope::momentum_predictor;
+          y_context.mass_flux = as_const(provisional_flux);
+          y_context.face_flux = provisional_flux.revision;
+          y_context.provisional_mass_flux = true;
+          y_context.contribution_stage = product.reaction.coupling_source_stage();
+          detail::ScalarMassRemap::Report y_report;
+          status = product.reductions.consensus(status);
+          if (!status)
+            return status;
+          // Each transport/reactor correction starts from the same accepted
+          // composition. A reacted guess introduces trace products into the
+          // source-free transport iteration and contaminates stiff kinetics
+          // through its intentionally inexact intermediate stopping rule.
+          if (product.reaction.interval_enabled())
+            for (std::size_t j=0; j<species_trial.size(); ++j)
+              for (int z=0; z<cells.z; ++z) for (int y=0; y<cells.y; ++y)
+                for (int x=0; x<cells.x; ++x)
+                  species_trial[j].unchecked({x,y,z},0)=
+                      species_history[j].accepted.unchecked({x,y,z},0);
+          // COAST's continuity-reduced row supplies the first coupling
+          // guess. A terminal residual request targets the full conservative
+          // row: a represented mass residual can otherwise bias a trace
+          // species after the reduced search reaches its half-ULP floor.
+          status = scalar_remap->solve_target_species(
+              product.equations, equation_state, material, y_context,
+              {y_diagonal, y_rhs, y_residual}, y_diffusivity,
+              {halo_views.data(), halo_count},
+              product.topology ? product.topology->region()
+                               : Span<const std::uint8_t>{},
+              boundary_values, product.reductions, y_report, true,
+              &product.thermodynamics,as_const(trial_temperature),
+              {mixture_energy_residual.data(),mixture_energy_residual.size()},
+              species_residual_limits.empty(),
+              product.reaction.coupling_contributions(),
+              {species_residual_limits.data(), species_residual_limits.size()});
+          ++report.cold.species_solve_calls;
+          report.cold.species_iterations += y_report.iterations;
+          double species_s = MPI_Wtime() - species_begin, global_species_s{};
+          MPI_Allreduce(&species_s, &global_species_s, 1, MPI_DOUBLE, MPI_MAX,
+                        communicator);
+          cold_Y = y_report.initial_species_residual;
+          if (rank == 0)
+            std::fprintf(
+                stdout,
+                "cold_species outer=%u status=%u/%u iterations=%u "
+                "initial_residual=%.17g final_residual=%.17g "
+                "convergence_residual=%.17g reference_ratio=%.17g reference_quantized=%d solve_s=%.17g temporal=BE "
+                "source=%s SGS=midpoint step_committed=0\n",
+                cold_outer, unsigned(status.code), status.detail,
+                y_report.iterations, y_report.initial_species_residual,
+                y_report.residual, y_report.convergence_residual,
+                y_report.requested_residual_ratio, int(y_report.quantized_coupling_guess), global_species_s,
+                product.reaction.interval_enabled() ? "transport_reactor" :
+                    product.reaction.mixing_enabled() ? "frozen_pasr" :
+                    product.reaction.enabled() ? "frozen_mean" : "none");
+          if (!status)
+            return status;
+          // Seed h at the current temperature when Y changes, using the
+          // same thermophysical coupling predictor as the public BE path.
+          // The conservative energy equation below remains the acceptance
+          // authority for this uncommitted guess.
+          if (!product.reaction.interval_enabled())
+            status=scalar_remap->copy_thermophysical_coupling_guess(
+              product.thermodynamics,attempt_pressure_reference,
+              as_const(trial_pressure),trial_enthalpy,
+              {halo_views.data(),halo_count},
+              {species_values.data(),species_values.size()},true);
+          status=product.reductions.consensus(status);
+          if (!status) return status;
+          scalar_remap->copy_solution({halo_views.data(), halo_count},
+                                      TransportedScalarRole::species);
+          if (product.reaction.interval_enabled()) {
+            double change{}, maximum_change{};
+            std::uint64_t internal_steps{}, total_internal_steps{};
+            const double reaction_begin=MPI_Wtime();
+            status=product.reaction.advance_transport(equation_state,
+                product.thermodynamics, product.layers,
+                {species_trial.data(),species_trial.size()}, cells,
+                {product.pressure_mg_cell_activity.data(),product.pressure_mg_cell_activity.size()},
+                time.time(),step.dt,step.accepted_step,step.generation,
+                change,internal_steps);
+            status=product.reductions.consensus(status);
+            double elapsed=MPI_Wtime()-reaction_begin, maximum_elapsed{};
+            MPI_Allreduce(&elapsed,&maximum_elapsed,1,MPI_DOUBLE,MPI_MAX,communicator);
+            double response_local[2]{change,product.reaction.interval_response_error()}, response_global[2]{};
+            MPI_Allreduce(response_local,response_global,2,MPI_DOUBLE,MPI_MAX,communicator);
+            maximum_change=response_global[0];
+            std::uint64_t local_counts[2]{internal_steps,product.reaction.interval_response_reused_cells()}, global_counts[2]{};
+            MPI_Allreduce(local_counts,global_counts,2,MPI_UINT64_T,MPI_SUM,communicator);
+            total_internal_steps=global_counts[0];
+            const auto total_reused=global_counts[1];
+            if(rank==0) std::fprintf(stdout,
+                "mean_reactor outer=%u status=%u/%u start=%.17g dt=%.17g "
+                "change=%.17g internal_steps=%llu seconds=%.17g source_reused_cells=%llu source_response_ratio=%.17g source_response_rtol=%.17g step_committed=0\n",
+                cold_outer,unsigned(status.code),status.detail,time.time(),step.dt,
+                maximum_change,static_cast<unsigned long long>(total_internal_steps),maximum_elapsed,
+                static_cast<unsigned long long>(total_reused),response_global[1],product.reaction.interval_response_tolerance());
+            if(!status) return status;
+          }
+          halo_count = 0U;
+          halo_views[halo_count++] = trial_enthalpy;
+          append_scalar_halo_views(product.fields, species_trial,
+                                   passive_trial, halo_views, halo_count);
+          status = exchange(product.stage_halos[1U], 15U, halo_count, status);
+          if (!status)
+            return status;
+          trial_enthalpy = halo_views[0U];
+          std::size_t y_index{}, passive_index_cold{};
+          for (std::size_t slot = 0; slot < product.fields.scalars.size();
+               ++slot) {
+            if (product.fields.scalar_roles[slot] ==
+                TransportedScalarRole::species) {
+              species_trial[y_index] = halo_views[slot + 1U];
+              species_history[y_index].trial =
+                  as_const(species_trial[y_index]);
+              species_accepted[y_index] = as_const(species_trial[y_index]);
+              ++y_index;
+            } else
+              passive_trial[passive_index_cold++] = halo_views[slot + 1U];
+          }
+
+        }
+
+        if(dual_esf) {
+          const double begin=MPI_Wtime();
+          status=correct_esf_for_flux(as_const(provisional_flux),false,cold_Y);
+          if(!status)return status;
+          // Publishing the ensemble mean changes owned scalar values. C1
+          // exchanges U/rho/p/h/T only; exchange Y here before its physical
+          // boundary closure and the coupled energy/material assembly.
+          halo_count=0;
+          halo_views[halo_count++]=trial_enthalpy;
+          append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
+          status=exchange(product.stage_halos[1U],15U,halo_count,status);
+          if(!status)return status;
+          for(std::size_t j=0;j<species_trial.size();++j) {
+            species_history[j].trial=as_const(species_trial[j]);
+            species_accepted[j]=as_const(species_trial[j]);
+          }
+          equation_state.independent_species={species_history.data(),species_history.size()};
+          double seconds=MPI_Wtime()-begin,maximum_seconds{};
+          MPI_Allreduce(&seconds,&maximum_seconds,1,MPI_DOUBLE,MPI_MAX,communicator);
+          if(rank==0)std::fprintf(stdout,
+              "cold_esf_flux outer=%u residual=%.17g seconds=%.17g physical_mean=ensemble density=field0 step_committed=0\n",
+              cold_outer,cold_Y,maximum_seconds);
+        }
+        if(!species_trial.empty()) {
+          status=refresh_scalar_thermodynamics();
+          if(!status)return status;
+        }
+        const double energy_begin = MPI_Wtime();
+        status = assemble_pressure_energy_residual_from_flux(
+            as_const(provisional_flux),
+            EquationAssemblyScope::target_coupled);
+        double energy_local[5]{};
+        if (status)
+          for (int z = 0; z < cells.z; ++z)
+            for (int y = 0; y < cells.y; ++y)
+              for (int x = 0; x < cells.x; ++x) {
+                Int3 c{x, y, z};
+                if (product.topology &&
+                    !product.topology->is_fluid_global(
+                        {x + product.patch.begin.x, y + product.patch.begin.y,
+                         z + product.patch.begin.z}))
+                  continue;
+                const double residual = pressure_energy_r_e.unchecked(c, 0),
+                             diagonal = pressure_energy_e_h.unchecked(c, 0),
+                             cp = heat_capacity.unchecked(c, 0);
+                const double volume =
+                    detail::cell_volume(product.equations.kernels(), c);
+                energy_local[0] += residual;
+                energy_local[1] =
+                    std::max(energy_local[1], std::abs(residual) / volume);
+                energy_local[2] =
+                    std::max(energy_local[2], std::abs(residual / diagonal));
+                energy_local[3] = std::max(
+                    energy_local[3], std::abs(residual / diagonal / cp));
+                energy_local[4] = std::max(
+                    energy_local[4],
+                    std::abs(residual) /
+                        (volume * trial_density.unchecked(c, 0) * cp *
+                         trial_temperature.unchecked(c, 0) / step.dt));
+              }
+        double energy_global[5]{};
+        MPI_Allreduce(energy_local, energy_global, 5, MPI_DOUBLE, MPI_MAX,
+                      communicator);
+        MPI_Allreduce(energy_local, energy_global, 1, MPI_DOUBLE, MPI_SUM,
+                      communicator);
+        const double energy_time = MPI_Wtime() - energy_begin;
+        double energy_max_time{};
+        MPI_Allreduce(&energy_time, &energy_max_time, 1, MPI_DOUBLE, MPI_MAX,
+                      communicator);
+        if (rank == 0)
+          std::fprintf(
+              stdout,
+              "cold_energy_audit status=%u/%u conservative_total_energy=%d "
+              "assembly_audit_s=%.17g imbalance_W=%.17g "
+              "max_residual_W_m3=%.17g diagonal_dh_max=%.17g "
+              "diagonal_dT_max=%.17g rho_cp_T_dt_scaled=%.17g temporal=BE "
+              "step_committed=0\n",
+              unsigned(status.code), status.detail,
+              int(product.equations.enthalpy().conservative_total_energy()),
+              energy_max_time, energy_global[0], energy_global[1],
+              energy_global[2], energy_global[3], energy_global[4]);
+        if (!status)
+          return status;
+        cold_E = energy_global[4];
+        if (reference_stopping)
+          cold_reference_E = energy_global[1] / report.cold.enthalpy_reference_scale;
+        // Once the full energy row is requested, retain a state which already
+        // meets that row's original tolerance. An extra Newton correction at
+        // the discrete EOS plateau can move h to a worse adjacent FP64 value.
+        // Momentum/pressure and the final independent audit still follow.
+        const bool retain_converged_energy = conservative_energy_requested &&
+            (reference_stopping ? cold_reference_E : cold_E) < cold_energy_tolerance;
+        if (retain_converged_energy) ++report.cold.enthalpy_retained_calls;
+        if (retain_converged_energy && rank==0)
+          std::fprintf(stdout,
+              "cold_enthalpy_retained outer=%u residual=%.17g tolerance=%.17g energy_row=full_conservative final_audit=required step_committed=0\n",
+              cold_outer,reference_stopping ? cold_reference_E : cold_E,
+              cold_energy_tolerance);
+        std::vector<double> thermal_pressure_base;
+        thermal_pressure_base.reserve(std::size_t(cells.x) * cells.y *
+                                      cells.z);
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x)
+              thermal_pressure_base.push_back(
+                  trial_pressure.unchecked({x, y, z}, 0));
+        for (unsigned energy_pass = 0; energy_pass < 1 && !retain_converged_energy; ++energy_pass) {
+          std::vector<detail::ColdPressureRow> hrows;
+          const double h_begin = MPI_Wtime();
+          double derivative_error{};
+          bool sampled = false;
+          for (int z = 0; z < cells.z && status; ++z)
+            for (int y = 0; y < cells.y && status; ++y)
+              for (int x = 0; x < cells.x; ++x) {
+                Int3 c{x, y, z};
+                if (product.topology &&
+                    !product.topology->is_fluid_global(
+                        {x + product.patch.begin.x, y + product.patch.begin.y,
+                         z + product.patch.begin.z}))
+                  continue;
+                if (energy_pass == 0) {
+                  for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
+                    species_values[isp] = species_trial[isp].unchecked(c, 0);
+                  CoupledThermoState refreshed_thermo;
+                  double eos_pressure{};
+                  status = evaluate_selected_density(c,
+                      trial_density.unchecked(c, 0),
+                      trial_enthalpy.unchecked(c, 0),
+                      {species_values.data(), species_values.size()},
+                      {trial_velocity.unchecked(c, 0),
+                       trial_velocity.unchecked(c, 1),
+                       trial_velocity.unchecked(c, 2)},
+                      eos_pressure, refreshed_thermo,
+                      trial_temperature.unchecked(c, 0));
+                  if (!status)
+                    break;
+                  compressibility.unchecked(c, 0) =
+                      refreshed_thermo.pressure.drho_dp_hY;
+                  enthalpy_compressibility.unchecked(c, 0) =
+                      refreshed_thermo.pressure.drho_dh_pY;
+                }
+                const double psi = compressibility.unchecked(c, 0),
+                             chi = enthalpy_compressibility.unchecked(c, 0);
+                const double dpdh = -chi / psi;
+                if (!std::isfinite(dpdh) || dpdh <= 0) {
+                  status = {StatusCode::numerical_failure, 17817};
+                  break;
+                }
+                pressure_energy_e_h.unchecked(c, 0) -=
+                    detail::cell_volume(product.equations.kernels(), c) *
+                    dpdh / step.dt;
+                if (!sampled) {
+                  sampled = true;
+                  for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
+                    species_values[isp] = species_trial[isp].unchecked(c, 0);
+                  const double epsilon = .01 * heat_capacity.unchecked(c, 0);
+                  double plus{}, minus{};
+                  CoupledThermoState tplus, tminus;
+                  status = evaluate_selected_density(c,
+                      trial_density.unchecked(c, 0),
+                      trial_enthalpy.unchecked(c, 0) + epsilon,
+                      {species_values.data(), species_values.size()}, {},
+                      plus, tplus, trial_temperature.unchecked(c, 0));
+                  if (status)
+                    status = evaluate_selected_density(c,
+                        trial_density.unchecked(c, 0),
+                        trial_enthalpy.unchecked(c, 0) - epsilon,
+                        {species_values.data(), species_values.size()}, {},
+                        minus, tminus, trial_temperature.unchecked(c, 0));
+                  if (!status)
+                    break;
+                  derivative_error =
+                      std::abs((plus - minus) / (2 * epsilon) - dpdh) / dpdh;
+                }
+              }
+          status = product.reductions.consensus(status);
+          if (!status)
+            return status;
+          double global_derivative_error{};
+          MPI_Allreduce(&derivative_error, &global_derivative_error, 1,
+                        MPI_DOUBLE, MPI_MAX, communicator);
+          if (rank == 0)
+            std::fprintf(stdout,
+                         "cold_EOS_derivative pass=%u "
+                         "finite_difference_relative=%.17g\n",
+                         energy_pass, global_derivative_error);
+          if (global_derivative_error > 1e-6)
+            return {StatusCode::invalid_plan, 17818};
+          status = detail::close_cold_enthalpy_rows(
+              product.equations.kernels(), product.patch,
+              product.geometry.global_cells(),
+              product.topology ? &*product.topology : nullptr,
+              product.boundary, equation_state, cold_energy_context,
+              pressure_energy_system, hrows, !conservative_energy_requested);
+          status = product.reductions.consensus(status);
+          if (!status)
+            return status;
+          LinearIdentity identity{product.piso.fingerprint(),
+                                  0x434f4c4448454e00ULL + energy_pass,
+                                  product.geometry.fingerprint(),
+                                  equation_workspace.fingerprint(),
+                                  0x434f4c4448454e31ULL + energy_pass};
+          detail::ColdPressureOperator hop(hrows, cells, product.krylov_halo,
+                                           identity);
+          detail::ColdPressureDilu hpc(hrows, cells, identity);
+          status = hpc.prepare();
+          status = product.reductions.consensus(status);
+          if (!status)
+            return status;
+          std::size_t index{};
+          for (int z = 0; z < cells.z; ++z)
+            for (int y = 0; y < cells.y; ++y)
+              for (int x = 0; x < cells.x; ++x, ++index) {
+                // Block row operation R_T = R_E - sum((h_s-h_dep)*R_Ys).
+                // It preserves the energy/species root while keeping an
+                // inexact composition solve from generating artificial heat.
+                // A terminal energy request solves R_E itself, so rounded
+                // mass/species residuals cannot bias the final heat balance.
+                pressure_rhs.unchecked({x, y, z}, 0) = hrows[index].rhs+
+                    (conservative_energy_requested || mixture_energy_residual.empty()
+                        ? 0.0 : mixture_energy_residual[index]);
+                pressure_correction.unchecked({x, y, z}, 0) = 0.0;
+              }
+          const auto hsolve =
+              solve_fgmres(hop, hpc,
+                           {as_const(pressure_rhs), pressure_correction,
+                            identity, equation_solve},
+                           equation_workspace, product.reductions);
+          ++report.cold.enthalpy_solve_calls;
+          report.cold.enthalpy_iterations += hsolve.iterations;
+          report.cold.final_enthalpy = hsolve;
+          status = hsolve.status;
+          if (!status)
+            return status;
+          double hstats[5]{};
+          for (int z = 0; z < cells.z && status; ++z)
+            for (int y = 0; y < cells.y && status; ++y)
+              for (int x = 0; x < cells.x; ++x) {
+                Int3 c{x, y, z};
+                if (product.topology &&
+                    !product.topology->is_fluid_global(
+                        {x + product.patch.begin.x, y + product.patch.begin.y,
+                         z + product.patch.begin.z}))
+                  continue;
+                double next_h = trial_enthalpy.unchecked(c,0)+
+                    pressure_correction.unchecked(c, 0);
+                hstats[0] = std::max(hstats[0],
+                    std::abs(next_h-trial_enthalpy.unchecked(c,0)));
+                trial_enthalpy.unchecked(c, 0) = next_h;
+                for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
+                  species_values[isp] = species_trial[isp].unchecked(c, 0);
+                CoupledThermoState thermo;
+                double absolute_pressure{};
+                status = evaluate_selected_density(c,
+                    trial_density.unchecked(c, 0), next_h,
+                    {species_values.data(), species_values.size()},
+                    {trial_velocity.unchecked(c, 0),
+                     trial_velocity.unchecked(c, 1),
+                     trial_velocity.unchecked(c, 2)},
+                    absolute_pressure, thermo,
+                    trial_temperature.unchecked(c, 0));
+                if (!status)
+                  break;
+                // Keep an EOS-compatible pressure only while resolving a
+                // full energy request. Ordinary h/Y guesses refresh pressure
+                // directly so roundoff retention adds no thermodynamic lag.
+                if (conservative_energy_requested)
+                  absolute_pressure=detail::cold_density_pressure_candidate(
+                    trial_density.unchecked(c,0),thermo.pressure.drho_dp_hY,
+                    attempt_pressure_reference+trial_pressure.unchecked(c,0),absolute_pressure,
+                    // Mean-reacting reference audits resolve the pressure
+                    // work and its EOS derivative together. Even an adjacent
+                    // retained pressure can form a dead band in that Newton
+                    // response, so this closure uses the evaluated pressure.
+                    product.reaction.interval_enabled() && reference_stopping
+                        ? 0.0
+                        : std::numeric_limits<double>::infinity());
+                trial_pressure.unchecked(c, 0) =
+                    absolute_pressure - attempt_pressure_reference;
+                hstats[1] = std::max(
+                    hstats[1], std::abs((attempt_pressure_reference +
+                                         trial_pressure.unchecked(c, 0)) *
+                                            thermo.pressure.drho_dp_hY -
+                                        trial_density.unchecked(c, 0)) /
+                                   trial_density.unchecked(c, 0));
+                trial_temperature.unchecked(c, 0) = thermo.temperature;
+                heat_capacity.unchecked(c, 0) = thermo.cp;
+                compressibility.unchecked(c, 0) = thermo.pressure.drho_dp_hY;
+                enthalpy_compressibility.unchecked(c, 0) = thermo.pressure.drho_dh_pY;
+                enthalpy_diffusivity.unchecked(c, 0) =
+                    conductivity.unchecked(c, 0) / thermo.cp;
+              }
+          status = product.reductions.consensus(status);
+          if (!status)
+            return status;
+          // The next outer refreshes all coupled fields before assembling
+          // rows. Use the already measured pre-h residual only as a candidate
+          // gate; the independent terminal audit always reassembles the true
+          // final state.
+          hstats[4] = MPI_Wtime() - h_begin;
+          double hglobal[5]{};
+          MPI_Allreduce(hstats, hglobal, 5, MPI_DOUBLE, MPI_MAX,
+                        communicator);
+          if (rank == 0)
+            std::fprintf(stdout,
+                         "cold_enthalpy_EOS pass=%u iterations=%u "
+                         "final_linear=%.17g total_s=%.17g dh_max=%.17g "
+                         "EOS_density_gap=%.17g energy_before_h_scaled=%.17g "
+                         "energy_row=%s final_energy_audit=required step_committed=0\n",
+                         energy_pass, hsolve.iterations,
+                         hsolve.final_true_residual, hglobal[4], hglobal[0],
+                         hglobal[1], energy_global[4],
+                         conservative_energy_requested ? "full_conservative" : "temperature_guess");
+        }
+        double thermal_final[4]{};
+        std::size_t thermal_index{};
+        for (int z = 0; z < cells.z; ++z)
+          for (int y = 0; y < cells.y; ++y)
+            for (int x = 0; x < cells.x; ++x, ++thermal_index) {
+              Int3 c{x, y, z};
+              if (product.topology &&
+                  !product.topology->is_fluid_global(
+                      {x + product.patch.begin.x, y + product.patch.begin.y,
+                       z + product.patch.begin.z}))
+                continue;
+              const double vol = detail::cell_volume(
+                               product.equations.kernels(), c),
+                           rho = trial_density.unchecked(c, 0);
+              const double div =
+                  (provisional_flux.x.unchecked({x + 1, y, z}) -
+                   provisional_flux.x.unchecked(c) +
+                   provisional_flux.y.unchecked({x, y + 1, z}) -
+                   provisional_flux.y.unchecked(c) +
+                   provisional_flux.z.unchecked({x, y, z + 1}) -
+                   provisional_flux.z.unchecked(c)) /
+                  vol;
+              const double continuity =
+                  (rho - rho_history.accepted.unchecked(c, 0)) / step.dt +
+                  div;
+              thermal_final[0] += continuity * vol;
+              thermal_final[1] = std::max(
+                  thermal_final[1], std::abs(continuity) / (rho / step.dt));
+              thermal_final[2] =
+                  std::max(thermal_final[2],
+                           std::abs(trial_pressure.unchecked(c, 0) -
+                                    thermal_pressure_base[thermal_index]));
+              thermal_final[3] = std::max(
+                  thermal_final[3],
+                  double(!std::isfinite(trial_pressure.unchecked(c, 0)) ||
+                         attempt_pressure_reference +
+                                 trial_pressure.unchecked(c, 0) <=
+                             0 ||
+                         !std::isfinite(trial_temperature.unchecked(c, 0)) ||
+                         trial_temperature.unchecked(c, 0) <= 0));
+            }
+        double thermal_global[4]{};
+        MPI_Allreduce(thermal_final, thermal_global, 4, MPI_DOUBLE, MPI_MAX,
+                      communicator);
+        MPI_Allreduce(thermal_final, thermal_global, 1, MPI_DOUBLE, MPI_SUM,
+                      communicator);
+        if (rank == 0)
+          std::fprintf(
+              stdout,
+              "cold_thermal_final mass_defect=%.17g continuity_rho_dt=%.17g "
+              "thermal_dp_max=%.17g invalid_state=%g "
+              "momentum_recorrection=pending step_committed=0\n",
+              thermal_global[0], thermal_global[1], thermal_global[2],
+              thermal_global[3]);
+        if (thermal_global[3] != 0 ||
+            (cold_outer > 0 && thermal_global[1] >
+             128 * std::numeric_limits<double>::epsilon()))
+          return {StatusCode::invalid_plan, 17819};
+
+        return status;
+      };
+      double previous_energy_screen=std::numeric_limits<double>::infinity();
+      for (unsigned cold_outer = 0; cold_outer < ColdCouplingReport::maximum_outer_iterations; ++cold_outer) {
         report.cold.outer_iterations = cold_outer + 1U;
         const double outer_begin = MPI_Wtime();
+        status=solve_cold_scalars(cold_outer);
+        if (!status) return status;
         if (status) {
           const double reference_begin = MPI_Wtime();
           cold_freeze_sgs = false;
@@ -11584,6 +13389,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status)
             return status;
 
+          const double state_refresh_time = MPI_Wtime() - reference_begin;
           cold_freeze_sgs = true;
           Status probe_status =
               history(product.fields.rho, equation_state.density);
@@ -11597,12 +13403,14 @@ Status ProductDriver::Impl::execute_attempt(
           material.effective_viscosity = as_const(effective_viscosity);
           assembly.mass_flux = as_const(provisional_flux);
           assembly.face_flux = provisional_flux.revision;
+          const double source_kernel_begin = MPI_Wtime();
           if (probe_status)
             probe_status = assemble_momentum_predictor(
                 product.equations.momentum(), equation_state, material,
                 as_const(velocity_gradient), momentum_contributions, assembly,
                 momentum_system, momentum_low_order_rhs_delta,
                 momentum_certificate);
+          const double source_kernel_time = MPI_Wtime() - source_kernel_begin;
           probe_status = product.reductions.consensus(probe_status);
           const double reference_time = MPI_Wtime() - reference_begin;
           const double assemble_begin = MPI_Wtime();
@@ -11638,7 +13446,7 @@ Status ProductDriver::Impl::execute_attempt(
             LinearIdentity identity{product.piso.fingerprint(),
                                     0x434f4c444d4f4d00ULL + component,
                                     product.geometry.fingerprint(),
-                                    product.krylov_workspace.fingerprint(),
+                                    equation_workspace.fingerprint(),
                                     0x434f4c444d4f4d31ULL + component};
             detail::ColdPressureOperator op(rows[component], cells,
                                             product.krylov_halo, identity);
@@ -11662,8 +13470,8 @@ Status ProductDriver::Impl::execute_attempt(
             auto solved =
                 solve_fgmres(op, pc,
                              {as_const(pressure_rhs), pressure_correction,
-                              identity, product.piso.pressure_solve()},
-                             product.krylov_workspace, product.reductions);
+                              identity, equation_solve},
+                             equation_workspace, product.reductions);
             ++report.cold.momentum_solve_calls;
             report.cold.momentum_iterations += solved.iterations;
             report.cold.final_momentum[component] = solved;
@@ -11697,8 +13505,9 @@ Status ProductDriver::Impl::execute_attempt(
                 }
           }
           double local[] = {reference_time, assembly_time, total_solve,
-                            max_delta, max_velocity}, global[5]{};
-          MPI_Allreduce(local, global, 5, MPI_DOUBLE, MPI_MAX, communicator);
+                            max_delta, max_velocity, state_refresh_time,
+                            source_kernel_time}, global[7]{};
+          MPI_Allreduce(local, global, 7, MPI_DOUBLE, MPI_MAX, communicator);
           std::uint64_t counts[] = {observed.solid_rows, observed.cut_links,
                                     observed.physical_links},
                         global_counts[3]{};
@@ -11711,11 +13520,12 @@ Status ProductDriver::Impl::execute_attempt(
                 "closure_s=%.17g solve_setup_s=%.17g "
                 "delta_from_outer_start=%.17g "
                 "velocity_max=%.17g solid_rows=%llu removed_cut_links=%llu "
-                "physical_component_faces=%llu dt=%.17g step_committed=0\n",
+                "physical_component_faces=%llu dt=%.17g "
+                "state_refresh_s=%.17g source_kernel_s=%.17g step_committed=0\n",
                 global[0], global[1], global[2], global[3], global[4],
                 (unsigned long long)global_counts[0],
                 (unsigned long long)global_counts[1],
-                (unsigned long long)global_counts[2], step.dt);
+                (unsigned long long)global_counts[2], step.dt, global[5], global[6]);
           status = refresh_coupled_state(
               kCoupledStateC1Stage,
               BoundaryThermophysicalGhostPhase::corrector_one, probe_status);
@@ -11821,6 +13631,7 @@ Status ProductDriver::Impl::execute_attempt(
               spec.identity = identity;
               spec.coefficients = numeric;
               spec.policy = detail::production_pressure_mg_policy();
+              spec.correction_scaling = product.piso.pressure_correction_scaling();
               spec.operator_class = MgOperatorClass::symmetric_diagonally_dominant_m_matrix;
               spec.activity = momentum_activity;
               MgBoundaryKind* kinds[]{&spec.boundaries.x_min, &spec.boundaries.x_max,
@@ -11834,7 +13645,10 @@ Status ProductDriver::Impl::execute_attempt(
                                           product.coarse_halo_pointers.size()}};
               probe_status = NativeCartesianMgPlan::compile(spec, services, coefficients,
                   pressure_mg, &pressure_mg_counters);
-              if (probe_status) pressure_mg_initialized = true;
+              if (probe_status) {
+                pressure_mg_initialized = true;
+                static_cast<void>(pressure_mg.set_apply_profiling(pressure_mg_profiling));
+              }
             } else if (probe_status) {
               probe_status = pressure_mg.update_coefficients(identity, numeric,
                   coefficients, &pressure_mg_counters);
@@ -11854,6 +13668,28 @@ Status ProductDriver::Impl::execute_attempt(
           }
           if (rank == 0) std::fprintf(stdout, "cn_pressure_preconditioner kind=%s face_diagonal_ratio=%.17g\n",
               use_mg ? "multigrid" : "dilu", global_ratio);
+          if (pressure_mg_profiling) {
+            // Diagnostic identity of the actual distributed matrix and RHS.
+            // Rank and row order bind the decomposition; solver identities
+            // are excluded so different Krylov methods can share this input.
+            std::uint64_t hashes[2]{UINT64_C(1469598103934665603),
+                                    UINT64_C(1469598103934665603)};
+            for (auto& hash : hashes) hash = detail::product_mix(hash,static_cast<std::uint64_t>(rank));
+            for (const auto& row : rows) {
+              hashes[0] = detail::product_mix(hashes[0],product_double_bits(row.diagonal));
+              for (double value : row.neighbour)
+                hashes[0] = detail::product_mix(hashes[0],product_double_bits(value));
+              hashes[1] = detail::product_mix(hashes[1],product_double_bits(row.rhs));
+            }
+            std::uint64_t global[2]{};
+            if (MPI_Allreduce(hashes,global,2,MPI_UINT64_T,MPI_BXOR,communicator) != MPI_SUCCESS)
+              return {StatusCode::mpi_failure,kProductCollective};
+            if (rank == 0) std::fprintf(stdout,
+                "cold_matrix outer=%u matrix=%016llx rhs=%016llx algorithm=%s\n",
+                cold_outer,static_cast<unsigned long long>(global[0]),
+                static_cast<unsigned long long>(global[1]),
+                product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab");
+          }
           std::size_t ordinal{};
           for (int z = 0; z < cells.z; ++z)
             for (int y = 0; y < cells.y; ++y)
@@ -11862,15 +13698,25 @@ Status ProductDriver::Impl::execute_attempt(
                 pressure_correction.unchecked({x, y, z}, 0) = 0;
               }
           const double solve_begin = MPI_Wtime();
-          const auto solved =
-              solve_fgmres(op, pc,
-                           {as_const(pressure_rhs), pressure_correction,
-                            identity, product.piso.pressure_solve()},
-                           product.krylov_workspace, product.reductions);
+          detail::ColdPressureContinuityAudit continuity_audit(
+              as_const(trial_density),as_const(trial_pressure),attempt_pressure_reference,step.dt,
+              product.topology ? product.topology->region() : Span<const std::uint8_t>{},
+              detail::product_mix(product.piso.fingerprint(),UINT64_C(0x434f4c4441554431)));
+          const LinearSolveInvocation pressure_call{
+              as_const(pressure_rhs), pressure_correction, identity,
+              product.piso.pressure_solve(),&continuity_audit};
+          const auto solved = product.piso.pressure_algorithm() == LinearAlgorithm::fgmres
+              ? solve_fgmres(op, pc, pressure_call, product.krylov_workspace, product.reductions)
+              : solve_bicgstab(op, pc, pressure_call, product.krylov_workspace, product.reductions);
           const double solve_time = MPI_Wtime() - solve_begin;
           ++report.cold.pressure_solve_calls;
           report.cold.pressure_iterations += solved.iterations;
           report.cold.final_pressure = solved;
+          if(rank==0)std::fprintf(stdout,
+              "cold_pressure_continuity_audit calls=%llu rejected=%llu metric=%.17g limit=%.17g true_residual_limit=%.17g step_committed=0\n",
+              static_cast<unsigned long long>(solved.convergence_audits),
+              static_cast<unsigned long long>(solved.convergence_rejections),
+              solved.final_convergence_metric,solved.convergence_limit,solved.true_residual_limit);
 
           probe_status = solved.status;
           FieldView dp = pressure_correction;
@@ -11982,9 +13828,11 @@ Status ProductDriver::Impl::execute_attempt(
           MPI_Allreduce(audit + 5, global_audit + 5, 1, MPI_DOUBLE, MPI_SUM,
                         communicator);
           const double audit_time = MPI_Wtime() - audit_begin;
-          double times[] = {assembly, setup, solve_time, audit_time},
-                 max_times[4]{};
-          MPI_Allreduce(times, max_times, 4, MPI_DOUBLE, MPI_MAX, communicator);
+          double times[] = {assembly, setup, solve_time, audit_time,
+              solved.operator_nanoseconds * 1e-9, solved.preconditioner_nanoseconds * 1e-9,
+              solved.arnoldi_dot_nanoseconds * 1e-9, solved.arnoldi_reduce_nanoseconds * 1e-9,
+              solved.arnoldi_update_nanoseconds * 1e-9}, max_times[9]{};
+          MPI_Allreduce(times, max_times, 9, MPI_DOUBLE, MPI_MAX, communicator);
           if (rank == 0)
             std::fprintf(
                 stdout,
@@ -11992,13 +13840,21 @@ Status ProductDriver::Impl::execute_attempt(
                 "initial=%.17g final=%.17g assembly=%.17g setup=%.17g "
                 "solve=%.17g audit=%.17g matrix_max=%.17g continuity_max=%.17g "
                 "parity=%.17g relative_max=%.17g dp_max=%.17g "
-                "mass_defect=%.17g dt=%.17g step_committed=0\n",
+                "mass_defect=%.17g dt=%.17g step_committed=0 "
+                "algorithm=%s operator_s=%.17g preconditioner_s=%.17g "
+                "arnoldi_dot_s=%.17g arnoldi_reduce_s=%.17g arnoldi_update_s=%.17g "
+                "operator_calls=%llu preconditioner_calls=%llu reduction_calls=%llu\n",
                 unsigned(probe_status.code), probe_status.detail,
                 unsigned(solved.termination), solved.iterations,
                 solved.initial_true_residual, solved.final_true_residual,
                 max_times[0], max_times[1], max_times[2], max_times[3],
                 global_audit[0], global_audit[1], global_audit[2],
-                global_audit[3], global_audit[4], global_audit[5], step.dt);
+                global_audit[3], global_audit[4], global_audit[5], step.dt,
+                product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab",
+                max_times[4], max_times[5], max_times[6], max_times[7], max_times[8],
+                static_cast<unsigned long long>(solved.operator_applies),
+                static_cast<unsigned long long>(solved.preconditioner_applies),
+                static_cast<unsigned long long>(solved.reduction_calls));
           if (rank == 0)
             std::fprintf(stdout,
                          "cold_update fixed_T_Y_EOS=%.17g "
@@ -12009,7 +13865,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (!probe_status)
             return probe_status;
           if (global_update[2] != 0 ||
-              global_update[0] > 16 * std::numeric_limits<double>::epsilon())
+              global_update[0] > detail::kColdEosRoundoff)
             return {StatusCode::invalid_plan, 17805};
           if (global_audit[2] > 128 * std::numeric_limits<double>::epsilon())
             return {StatusCode::invalid_plan, 17804};
@@ -12178,588 +14034,68 @@ Status ProductDriver::Impl::execute_attempt(
               BoundaryThermophysicalGhostPhase::corrector_one, probe_status);
           if (!status)
             return status;
-          EquationAssemblyContext cold_energy_context;
-          cold_energy_context.dt = step.dt;
-          cold_energy_context.time = step.generation;
-          cold_energy_context.geometry = product.geometry.topology_revision();
-          cold_energy_context.boundary = product.boundary.revision();
-          cold_energy_context.thermo = product.thermodynamics.fingerprint();
-          cold_energy_context.transport = product.transport.fingerprint();
-          cold_energy_context.contribution_stage = 1;
-          cold_energy_context.box = full_box;
-          cold_energy_context.immersed_interface =
-              product.ibm_equations ? &*product.ibm_equations : nullptr;
-          cold_energy_context.wall_treatment =
-              product.ibm_equations ? &product.turbulence : nullptr;
-          const auto assemble_pressure_energy_residual_from_flux =
-              [&](ConstFaceFluxView target_flux, EquationAssemblyScope scope) {
-                Status assembled;
-                if (assembled) {
-                  assembled =
-                      history(product.fields.rho, equation_state.density);
-                  if (assembled)
-                    assembled = history(product.fields.velocity,
-                                        equation_state.velocity);
-                  if (assembled)
-                    assembled = history(product.fields.pressure,
-                                        equation_state.pressure_perturbation);
-                  if (assembled)
-                    assembled = history(product.fields.enthalpy,
-                                        equation_state.enthalpy);
-                  if (assembled)
-                    assembled = history(product.fields.temperature,
-                                        equation_state.temperature);
-                  equation_state.pressure_reference =
-                      attempt_pressure_reference;
-                  equation_state.accepted_pressure_reference =
-                      pressure_reference;
-                  equation_state.previous_pressure_reference =
-                      previous_pressure_reference;
-                  equation_state.independent_species = {species_history.data(),
-                                                        species_history.size()};
-                  equation_state.passive_scalars = {passive_history.data(),
-                                                    passive_history.size()};
-                  material.molecular_viscosity = as_const(molecular_viscosity);
-                  material.effective_viscosity = as_const(effective_viscosity);
-                  material.thermal_conductivity = as_const(conductivity);
-                  material.heat_capacity = as_const(heat_capacity);
-                  material.enthalpy_diffusivity =
-                      as_const(enthalpy_diffusivity);
-                  material.pressure_compressibility = as_const(compressibility);
-                  cold_energy_context.scope = scope;
-                  cold_energy_context.face_flux = target_flux.revision;
-                  cold_energy_context.face_flux_authority =
-                      scope == EquationAssemblyScope::final_conservative
-                          ? target_flux.certificate.authority()
-                          : 0U;
-                  cold_energy_context.face_flux_storage =
-                      scope == EquationAssemblyScope::final_conservative
-                          ? target_flux.certificate.storage()
-                          : 0U;
-                  cold_energy_context.face_flux_revision_domain =
-                      scope == EquationAssemblyScope::final_conservative
-                          ? target_flux.certificate.revision_domain()
-                          : 0U;
-                  cold_energy_context.mass_flux = target_flux;
-                  cold_energy_context.provisional_mass_flux = false;
-                }
-                EquationAssemblyCertificate energy_certificate;
-                auto enthalpy_assembly = cold_energy_context;
-                if (product.spray.enabled())
-                  enthalpy_assembly.contribution_stage = 2;
-                if (false && assembled &&
-                    scope == EquationAssemblyScope::target_coupled &&
-                    enthalpy_contributions.size == 0U) {
-                  // Schur consumes A_h's diagonal; its spatial operator
-                  // prepares its own face coefficients. Retain that diagonal
-                  // while evaluating the expensive pressure/viscous terms once
-                  // in attempt-local scratch.
-                  assembled = assemble_target_coupled_enthalpy_residual(
-                      product.equations.enthalpy(), equation_state, material,
-                      as_const(velocity_gradient), enthalpy_assembly,
-                      pressure_energy_r_e,
-                      {pressure_energy_e_h, pressure_energy_r_c,
-                       pressure_energy_e_p, true},
-                      energy_certificate);
-                } else if (assembled)
-                  assembled = assemble_enthalpy(
-                      product.equations.enthalpy(), equation_state, material,
-                      as_const(velocity_gradient), enthalpy_contributions,
-                      enthalpy_assembly, pressure_energy_system,
-                      energy_certificate);
-                if (assembled && product.ibm_equations.has_value()) {
-                  zero_field(pressure_energy_e_p);
-                  if (!product.equations.enthalpy().conservative_total_energy())
-                    assembled = product.ibm_equations->correct_pressure_work(
-                        as_const(trial_pressure), as_const(trial_velocity),
-                        pressure_energy_e_p);
-                  for (std::int32_t z = 0; z < cells.z && assembled; ++z)
-                    for (std::int32_t y = 0; y < cells.y; ++y)
-                      for (std::int32_t x = 0; x < cells.x; ++x) {
-                        const Int3 cell{x, y, z};
-                        pressure_energy_r_e.unchecked(cell, 0U) -=
-                            detail::cell_volume(product.equations.kernels(),
-                                                cell) *
-                            pressure_energy_e_p.unchecked(cell, 0U);
-                      }
-                  if (assembled) {
-                    zero_field(pressure_energy_e_p);
-                    assembled = product.ibm_equations
-                                    ->correct_impermeable_scalar_diffusion(
-                                        product.unity_lewis_enthalpy
-                                            ? as_const(trial_enthalpy)
-                                            : as_const(trial_temperature),
-                                        product.unity_lewis_enthalpy
-                                            ? as_const(enthalpy_diffusivity)
-                                            : as_const(conductivity),
-                                        pressure_energy_e_p);
-                  }
-                  for (std::int32_t z = 0; z < cells.z && assembled; ++z)
-                    for (std::int32_t y = 0; y < cells.y; ++y)
-                      for (std::int32_t x = 0; x < cells.x; ++x) {
-                        const Int3 cell{x, y, z};
-                        pressure_energy_r_e.unchecked(cell, 0U) -=
-                            detail::cell_volume(product.equations.kernels(),
-                                                cell) *
-                            pressure_energy_e_p.unchecked(cell, 0U);
-                      }
-                }
-                if (assembled && product.topology.has_value()) {
-                  const Span<const std::uint8_t> active =
-                      product.topology->region();
-                  std::size_t offset = 0U;
-                  for (std::int32_t z = 0; z < cells.z; ++z)
-                    for (std::int32_t y = 0; y < cells.y; ++y)
-                      for (std::int32_t x = 0; x < cells.x; ++x, ++offset)
-                        if (active.data[offset] == 0U)
-                          pressure_energy_r_e.unchecked({x, y, z}, 0U) = 0.0;
-                }
-                return product.reductions.consensus(assembled);
-              };
-          cold_energy_context.bdf = {1 / step.dt, -1 / step.dt, 0, 1};
-          if (!species_trial.empty()) {
-            const double species_begin = MPI_Wtime();
-            halo_count = 0U;
-            append_scalar_halo_views(product.fields, species_trial,
-                                     passive_trial, halo_views, halo_count);
-            FieldView y_diagonal, y_rhs, y_residual, y_diffusivity;
-            status = runtime_write_view(product.fields.pressure_energy_c_h,
-                                        y_diagonal);
-            if (status)
-              status = runtime_write_view(
-                  product.fields.pressure_energy_c_h_row_scale, y_rhs);
-            if (status)
-              status = runtime_write_view(product.fields.pressure_energy_e_p,
-                                          y_residual);
-            if (status)
-              status = runtime_write_view(product.fields.scalar_diffusivity,
-                                          y_diffusivity);
-            if (status)
-              status = history(product.fields.rho, equation_state.density);
-            for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
-              species_history[isp].trial = as_const(species_trial[isp]);
-            equation_state.independent_species = {species_history.data(),
-                                                  species_history.size()};
-            material.molecular_viscosity = as_const(molecular_viscosity);
-            material.effective_viscosity = as_const(effective_viscosity);
-            auto y_context = cold_energy_context;
-            y_context.scope = EquationAssemblyScope::momentum_predictor;
-            y_context.mass_flux = as_const(provisional_flux);
-            y_context.face_flux = provisional_flux.revision;
-            y_context.provisional_mass_flux = true;
-            y_context.contribution_stage = 177U;
-            detail::ScalarMassRemap::Report y_report;
-            status = product.reductions.consensus(status);
-            if (!status)
-              return status;
-            status = scalar_remap->solve_target_species(
-                product.equations, equation_state, material, y_context,
-                {y_diagonal, y_rhs, y_residual}, y_diffusivity,
-                {halo_views.data(), halo_count},
-                product.topology ? product.topology->region()
-                                 : Span<const std::uint8_t>{},
-                boundary_values, product.reductions, y_report, true);
-            ++report.cold.species_solve_calls;
-            report.cold.species_iterations += y_report.iterations;
-            double species_s = MPI_Wtime() - species_begin, global_species_s{};
-            MPI_Allreduce(&species_s, &global_species_s, 1, MPI_DOUBLE, MPI_MAX,
-                          communicator);
-            cold_Y = y_report.initial_species_residual;
-            if (rank == 0)
-              std::fprintf(
-                  stdout,
-                  "cold_species outer=%u status=%u/%u iterations=%u "
-                  "initial_residual=%.17g final_residual=%.17g "
-                  "convergence_residual=%.17g solve_s=%.17g temporal=BE "
-                  "source=none SGS=midpoint step_committed=0\n",
-                  cold_outer, unsigned(status.code), status.detail,
-                  y_report.iterations, y_report.initial_species_residual,
-                  y_report.residual, y_report.convergence_residual,
-                  global_species_s);
-            if (!status)
-              return status;
-            scalar_remap->copy_solution({halo_views.data(), halo_count},
-                                        TransportedScalarRole::species);
-            halo_count = 0U;
-            halo_views[halo_count++] = trial_enthalpy;
-            append_scalar_halo_views(product.fields, species_trial,
-                                     passive_trial, halo_views, halo_count);
-            status = exchange(product.stage_halos[1U], 15U, halo_count, status);
-            if (!status)
-              return status;
-            trial_enthalpy = halo_views[0U];
-            std::size_t y_index{}, passive_index_cold{};
-            for (std::size_t slot = 0; slot < product.fields.scalars.size();
-                 ++slot) {
-              if (product.fields.scalar_roles[slot] ==
-                  TransportedScalarRole::species) {
-                species_trial[y_index] = halo_views[slot + 1U];
-                species_history[y_index].trial =
-                    as_const(species_trial[y_index]);
-                species_accepted[y_index] = as_const(species_trial[y_index]);
-                ++y_index;
-              } else
-                passive_trial[passive_index_cold++] = halo_views[slot + 1U];
-            }
-            // Preserve rho and conservative h when changing composition; the
-            // native density-authoritative EOS supplies pressure and its
-            // current derivatives.
-            for (int z = 0; z < cells.z && status; ++z)
-              for (int y = 0; y < cells.y && status; ++y)
-                for (int x = 0; x < cells.x; ++x) {
-                  Int3 c{x, y, z};
-                  if (product.topology &&
-                      !product.topology->is_fluid_global(
-                          {x + product.patch.begin.x, y + product.patch.begin.y,
-                           z + product.patch.begin.z}))
-                    continue;
-                  for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
-                    species_values[isp] = species_trial[isp].unchecked(c, 0);
-                  ThermoState therm;
-                  double absolute_pressure{};
-                  status = product.thermodynamics.evaluate_from_density(
-                      trial_density.unchecked(c, 0),
-                      trial_enthalpy.unchecked(c, 0),
-                      {species_values.data(), species_values.size()},
-                      {trial_velocity.unchecked(c, 0),
-                       trial_velocity.unchecked(c, 1),
-                       trial_velocity.unchecked(c, 2)},
-                      absolute_pressure, therm,
-                      trial_temperature.unchecked(c, 0));
-                  if (!status)
-                    break;
-                  trial_pressure.unchecked(c, 0) =
-                      absolute_pressure - attempt_pressure_reference;
-                  trial_temperature.unchecked(c, 0) = therm.temperature;
-                  heat_capacity.unchecked(c, 0) = therm.cp;
-                  compressibility.unchecked(c, 0) = therm.drho_dp_hY;
-                  enthalpy_compressibility.unchecked(c, 0) = therm.drho_dh_pY;
-                  enthalpy_diffusivity.unchecked(c, 0) =
-                      conductivity.unchecked(c, 0) / therm.cp;
-                }
-            status = product.reductions.consensus(status);
-            if (!status)
-              return status;
-            status = refresh_coupled_state(
-                kCoupledStateC1Stage,
-                BoundaryThermophysicalGhostPhase::corrector_one, status);
-            if (!status)
-              return status;
-          }
 
-          const double energy_begin = MPI_Wtime();
-          status = assemble_pressure_energy_residual_from_flux(
-              as_const(provisional_flux),
-              EquationAssemblyScope::target_coupled);
-          double energy_local[5]{};
-          if (status)
-            for (int z = 0; z < cells.z; ++z)
-              for (int y = 0; y < cells.y; ++y)
-                for (int x = 0; x < cells.x; ++x) {
-                  Int3 c{x, y, z};
-                  if (product.topology &&
-                      !product.topology->is_fluid_global(
-                          {x + product.patch.begin.x, y + product.patch.begin.y,
-                           z + product.patch.begin.z}))
-                    continue;
-                  const double residual = pressure_energy_r_e.unchecked(c, 0),
-                               diagonal = pressure_energy_e_h.unchecked(c, 0),
-                               cp = heat_capacity.unchecked(c, 0);
-                  const double volume =
-                      detail::cell_volume(product.equations.kernels(), c);
-                  energy_local[0] += residual;
-                  energy_local[1] =
-                      std::max(energy_local[1], std::abs(residual) / volume);
-                  energy_local[2] =
-                      std::max(energy_local[2], std::abs(residual / diagonal));
-                  energy_local[3] = std::max(
-                      energy_local[3], std::abs(residual / diagonal / cp));
-                  energy_local[4] = std::max(
-                      energy_local[4],
-                      std::abs(residual) /
-                          (volume * trial_density.unchecked(c, 0) * cp *
-                           trial_temperature.unchecked(c, 0) / step.dt));
-                }
-          double energy_global[5]{};
-          MPI_Allreduce(energy_local, energy_global, 5, MPI_DOUBLE, MPI_MAX,
-                        communicator);
-          MPI_Allreduce(energy_local, energy_global, 1, MPI_DOUBLE, MPI_SUM,
-                        communicator);
-          const double energy_time = MPI_Wtime() - energy_begin;
-          double energy_max_time{};
-          MPI_Allreduce(&energy_time, &energy_max_time, 1, MPI_DOUBLE, MPI_MAX,
-                        communicator);
-          if (rank == 0)
-            std::fprintf(
-                stdout,
-                "cold_energy_audit status=%u/%u conservative_total_energy=%d "
-                "assembly_audit_s=%.17g imbalance_W=%.17g "
-                "max_residual_W_m3=%.17g diagonal_dh_max=%.17g "
-                "diagonal_dT_max=%.17g rho_cp_T_dt_scaled=%.17g temporal=BE "
-                "step_committed=0\n",
-                unsigned(status.code), status.detail,
-                int(product.equations.enthalpy().conservative_total_energy()),
-                energy_max_time, energy_global[0], energy_global[1],
-                energy_global[2], energy_global[3], energy_global[4]);
-          if (!status)
-            return status;
-          std::vector<double> thermal_pressure_base;
-          thermal_pressure_base.reserve(std::size_t(cells.x) * cells.y *
-                                        cells.z);
-          for (int z = 0; z < cells.z; ++z)
-            for (int y = 0; y < cells.y; ++y)
-              for (int x = 0; x < cells.x; ++x)
-                thermal_pressure_base.push_back(
-                    trial_pressure.unchecked({x, y, z}, 0));
-          for (unsigned energy_pass = 0; energy_pass < 1; ++energy_pass) {
-            std::vector<detail::ColdPressureRow> hrows;
-            const double h_begin = MPI_Wtime();
-            double derivative_error{};
-            bool sampled = false;
-            for (int z = 0; z < cells.z && status; ++z)
-              for (int y = 0; y < cells.y && status; ++y)
-                for (int x = 0; x < cells.x; ++x) {
-                  Int3 c{x, y, z};
-                  if (product.topology &&
-                      !product.topology->is_fluid_global(
-                          {x + product.patch.begin.x, y + product.patch.begin.y,
-                           z + product.patch.begin.z}))
-                    continue;
-                  if (energy_pass == 0) {
-                    for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
-                      species_values[isp] = species_trial[isp].unchecked(c, 0);
-                    ThermoState refreshed_thermo;
-                    double eos_pressure{};
-                    status = product.thermodynamics.evaluate_from_density(
-                        trial_density.unchecked(c, 0),
-                        trial_enthalpy.unchecked(c, 0),
-                        {species_values.data(), species_values.size()},
-                        {trial_velocity.unchecked(c, 0),
-                         trial_velocity.unchecked(c, 1),
-                         trial_velocity.unchecked(c, 2)},
-                        eos_pressure, refreshed_thermo,
-                        trial_temperature.unchecked(c, 0));
-                    if (!status)
-                      break;
-                    compressibility.unchecked(c, 0) =
-                        refreshed_thermo.drho_dp_hY;
-                    enthalpy_compressibility.unchecked(c, 0) =
-                        refreshed_thermo.drho_dh_pY;
-                  }
-                  const double psi = compressibility.unchecked(c, 0),
-                               chi = enthalpy_compressibility.unchecked(c, 0);
-                  const double dpdh = -chi / psi;
-                  if (!std::isfinite(dpdh) || dpdh <= 0) {
-                    status = {StatusCode::numerical_failure, 17817};
-                    break;
-                  }
-                  pressure_energy_e_h.unchecked(c, 0) -=
-                      detail::cell_volume(product.equations.kernels(), c) *
-                      dpdh / step.dt;
-                  if (!sampled) {
-                    sampled = true;
-                    for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
-                      species_values[isp] = species_trial[isp].unchecked(c, 0);
-                    const double epsilon = .01 * heat_capacity.unchecked(c, 0);
-                    double plus{}, minus{};
-                    ThermoState tplus, tminus;
-                    status = product.thermodynamics.evaluate_from_density(
-                        trial_density.unchecked(c, 0),
-                        trial_enthalpy.unchecked(c, 0) + epsilon,
-                        {species_values.data(), species_values.size()}, {},
-                        plus, tplus, trial_temperature.unchecked(c, 0));
-                    if (status)
-                      status = product.thermodynamics.evaluate_from_density(
-                          trial_density.unchecked(c, 0),
-                          trial_enthalpy.unchecked(c, 0) - epsilon,
-                          {species_values.data(), species_values.size()}, {},
-                          minus, tminus, trial_temperature.unchecked(c, 0));
-                    if (!status)
-                      break;
-                    derivative_error =
-                        std::abs((plus - minus) / (2 * epsilon) - dpdh) / dpdh;
-                  }
-                }
-            status = product.reductions.consensus(status);
-            if (!status)
-              return status;
-            double global_derivative_error{};
-            MPI_Allreduce(&derivative_error, &global_derivative_error, 1,
-                          MPI_DOUBLE, MPI_MAX, communicator);
-            if (rank == 0)
-              std::fprintf(stdout,
-                           "cold_EOS_derivative pass=%u "
-                           "finite_difference_relative=%.17g\n",
-                           energy_pass, global_derivative_error);
-            if (global_derivative_error > 1e-6)
-              return {StatusCode::invalid_plan, 17818};
-            status = detail::close_cold_enthalpy_rows(
-                product.equations.kernels(), product.patch,
-                product.geometry.global_cells(),
-                product.topology ? &*product.topology : nullptr,
-                product.boundary, equation_state, cold_energy_context,
-                pressure_energy_system, hrows);
-            status = product.reductions.consensus(status);
-            if (!status)
-              return status;
-            LinearIdentity identity{product.piso.fingerprint(),
-                                    0x434f4c4448454e00ULL + energy_pass,
-                                    product.geometry.fingerprint(),
-                                    product.krylov_workspace.fingerprint(),
-                                    0x434f4c4448454e31ULL + energy_pass};
-            detail::ColdPressureOperator hop(hrows, cells, product.krylov_halo,
-                                             identity);
-            detail::ColdPressureDilu hpc(hrows, cells, identity);
-            status = hpc.prepare();
-            status = product.reductions.consensus(status);
-            if (!status)
-              return status;
-            std::size_t index{};
-            for (int z = 0; z < cells.z; ++z)
-              for (int y = 0; y < cells.y; ++y)
-                for (int x = 0; x < cells.x; ++x, ++index) {
-                  pressure_rhs.unchecked({x, y, z}, 0) = hrows[index].rhs;
-                  pressure_correction.unchecked({x, y, z}, 0) =
-                      trial_enthalpy.unchecked({x, y, z}, 0);
-                }
-            const auto hsolve =
-                solve_fgmres(hop, hpc,
-                             {as_const(pressure_rhs), pressure_correction,
-                              identity, product.piso.pressure_solve()},
-                             product.krylov_workspace, product.reductions);
-            ++report.cold.enthalpy_solve_calls;
-            report.cold.enthalpy_iterations += hsolve.iterations;
-            report.cold.final_enthalpy = hsolve;
-            status = hsolve.status;
-            if (!status)
-              return status;
-            double hstats[5]{};
-            for (int z = 0; z < cells.z && status; ++z)
-              for (int y = 0; y < cells.y && status; ++y)
-                for (int x = 0; x < cells.x; ++x) {
-                  Int3 c{x, y, z};
-                  if (product.topology &&
-                      !product.topology->is_fluid_global(
-                          {x + product.patch.begin.x, y + product.patch.begin.y,
-                           z + product.patch.begin.z}))
-                    continue;
-                  double next_h = pressure_correction.unchecked(c, 0);
-                  hstats[0] = std::max(
-                      hstats[0],
-                      std::abs(next_h - trial_enthalpy.unchecked(c, 0)));
-                  trial_enthalpy.unchecked(c, 0) = next_h;
-                  for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
-                    species_values[isp] = species_trial[isp].unchecked(c, 0);
-                  ThermoState thermo;
-                  double absolute_pressure{};
-                  status = product.thermodynamics.evaluate_from_density(
-                      trial_density.unchecked(c, 0), next_h,
-                      {species_values.data(), species_values.size()},
-                      {trial_velocity.unchecked(c, 0),
-                       trial_velocity.unchecked(c, 1),
-                       trial_velocity.unchecked(c, 2)},
-                      absolute_pressure, thermo,
-                      trial_temperature.unchecked(c, 0));
-                  if (!status)
-                    break;
-                  trial_pressure.unchecked(c, 0) =
-                      absolute_pressure - attempt_pressure_reference;
-                  hstats[1] = std::max(
-                      hstats[1], std::abs((attempt_pressure_reference +
-                                           trial_pressure.unchecked(c, 0)) *
-                                              thermo.drho_dp_hY -
-                                          trial_density.unchecked(c, 0)) /
-                                     trial_density.unchecked(c, 0));
-                  trial_temperature.unchecked(c, 0) = thermo.temperature;
-                  heat_capacity.unchecked(c, 0) = thermo.cp;
-                  compressibility.unchecked(c, 0) = thermo.drho_dp_hY;
-                  enthalpy_compressibility.unchecked(c, 0) = thermo.drho_dh_pY;
-                  enthalpy_diffusivity.unchecked(c, 0) =
-                      conductivity.unchecked(c, 0) / thermo.cp;
-                }
-            status = product.reductions.consensus(status);
-            if (!status)
-              return status;
-            // The next outer refreshes all coupled fields before assembling
-            // rows. Use the already measured pre-h residual only as a candidate
-            // gate; the independent terminal audit always reassembles the true
-            // final state.
-            hstats[4] = MPI_Wtime() - h_begin;
-            double hglobal[5]{};
-            MPI_Allreduce(hstats, hglobal, 5, MPI_DOUBLE, MPI_MAX,
-                          communicator);
-            if (rank == 0)
-              std::fprintf(stdout,
-                           "cold_enthalpy_EOS pass=%u iterations=%u "
-                           "final_linear=%.17g total_s=%.17g dh_max=%.17g "
-                           "EOS_density_gap=%.17g energy_before_h_scaled=%.17g "
-                           "final_energy_audit=required step_committed=0\n",
-                           energy_pass, hsolve.iterations,
-                           hsolve.final_true_residual, hglobal[4], hglobal[0],
-                           hglobal[1], energy_global[4]);
-            cold_E = energy_global[4];
-            if (reference_stopping)
-              cold_reference_E = energy_global[1] / report.cold.enthalpy_reference_scale;
-          }
-          double thermal_final[4]{};
-          std::size_t thermal_index{};
-          for (int z = 0; z < cells.z; ++z)
-            for (int y = 0; y < cells.y; ++y)
-              for (int x = 0; x < cells.x; ++x, ++thermal_index) {
-                Int3 c{x, y, z};
-                if (product.topology &&
-                    !product.topology->is_fluid_global(
-                        {x + product.patch.begin.x, y + product.patch.begin.y,
-                         z + product.patch.begin.z}))
-                  continue;
-                const double vol = detail::cell_volume(
-                                 product.equations.kernels(), c),
-                             rho = trial_density.unchecked(c, 0);
-                const double div =
-                    (provisional_flux.x.unchecked({x + 1, y, z}) -
-                     provisional_flux.x.unchecked(c) +
-                     provisional_flux.y.unchecked({x, y + 1, z}) -
-                     provisional_flux.y.unchecked(c) +
-                     provisional_flux.z.unchecked({x, y, z + 1}) -
-                     provisional_flux.z.unchecked(c)) /
-                    vol;
-                const double continuity =
-                    (rho - rho_history.accepted.unchecked(c, 0)) / step.dt +
-                    div;
-                thermal_final[0] += continuity * vol;
-                thermal_final[1] = std::max(
-                    thermal_final[1], std::abs(continuity) / (rho / step.dt));
-                thermal_final[2] =
-                    std::max(thermal_final[2],
-                             std::abs(trial_pressure.unchecked(c, 0) -
-                                      thermal_pressure_base[thermal_index]));
-                thermal_final[3] = std::max(
-                    thermal_final[3],
-                    double(!std::isfinite(trial_pressure.unchecked(c, 0)) ||
-                           attempt_pressure_reference +
-                                   trial_pressure.unchecked(c, 0) <=
-                               0 ||
-                           !std::isfinite(trial_temperature.unchecked(c, 0)) ||
-                           trial_temperature.unchecked(c, 0) <= 0));
-              }
-          double thermal_global[4]{};
-          MPI_Allreduce(thermal_final, thermal_global, 4, MPI_DOUBLE, MPI_MAX,
-                        communicator);
-          MPI_Allreduce(thermal_final, thermal_global, 1, MPI_DOUBLE, MPI_SUM,
-                        communicator);
-          if (rank == 0)
-            std::fprintf(
-                stdout,
-                "cold_thermal_final mass_defect=%.17g continuity_rho_dt=%.17g "
-                "thermal_dp_max=%.17g invalid_state=%g "
-                "momentum_recorrection=pending step_committed=0\n",
-                thermal_global[0], thermal_global[1], thermal_global[2],
-                thermal_global[3]);
-          if (thermal_global[3] != 0 ||
-              thermal_global[1] > 128 * std::numeric_limits<double>::epsilon())
-            return {StatusCode::invalid_plan, 17819};
         }
 
+        // At rest the accepted momentum reference is the numerical floor.
+        // Freeze the first resolved flow response before auditing this step;
+        // subsequent corrections cannot enlarge their own reference scale.
+        if (quiescent_reference_pending) {
+          double local_momentum[3]{}, global_momentum[3]{};
+          std::size_t flat{};
+          for (int z = 0; z < cells.z; ++z)
+            for (int y = 0; y < cells.y; ++y)
+              for (int x = 0; x < cells.x; ++x, ++flat) {
+                if (pressure_energy_activity.cells.size &&
+                    pressure_energy_activity.cells.data[flat] == 0) continue;
+                const Int3 c{x, y, z};
+                for (unsigned k = 0; k < 3; ++k)
+                  local_momentum[k] = std::max(local_momentum[k], std::abs(
+                      trial_density.unchecked(c, 0) * trial_velocity.unchecked(c, k)));
+              }
+          status = product.reductions.checked_max({local_momentum, 3U}, {global_momentum, 3U});
+          if (!status) return status;
+          const double magnitude = std::hypot(global_momentum[0], global_momentum[1], global_momentum[2]);
+          if (magnitude > 1e-15) {
+            report.cold.momentum_reference_scale = magnitude / product.cold_stopping->reference_time;
+            report.cold.momentum_reference_from_corrector = true;
+            quiescent_reference_pending = false;
+          }
+        }
+        // A product initially absent from the accepted mixture has only a
+        // numerical reference floor. Use its first conservative response for
+        // this attempt, including the dependent species, then freeze the scale.
+        // Later corrections retain the same convergence target.
+        if (!nascent_species_reference.empty()) {
+          std::vector<double> local_y(nascent_species_reference.size(), 0.0);
+          std::vector<double> global_y(local_y.size(), 0.0);
+          std::size_t flat{};
+          for (int z = 0; z < cells.z; ++z)
+            for (int y = 0; y < cells.y; ++y)
+              for (int x = 0; x < cells.x; ++x, ++flat) {
+                if (pressure_energy_activity.cells.size &&
+                    pressure_energy_activity.cells.data[flat] == 0) continue;
+                const Int3 c{x, y, z};
+                const double rho = trial_density.unchecked(c, 0);
+                double sum{};
+                for (std::size_t j = 0; j < species_trial.size(); ++j) {
+                  const double value = species_trial[j].unchecked(c, 0);
+                  sum += value;
+                  if (nascent_species_reference[j])
+                    local_y[j] = std::max(local_y[j], std::abs(rho * value));
+                }
+                if (nascent_species_reference.back())
+                  local_y.back() = std::max(local_y.back(), std::abs(rho * (1.0 - sum)));
+              }
+          status = product.reductions.checked_max({local_y.data(), local_y.size()},
+                                                  {global_y.data(), global_y.size()});
+          if (!status) return status;
+          for (std::size_t j = 0; j < global_y.size(); ++j)
+            if (nascent_species_reference[j])
+              report.cold.species_reference_scales[j] = std::max(1e-15, global_y[j]) /
+                  product.cold_stopping->reference_time;
+          nascent_species_reference.clear();
+        }
         const double outer_elapsed = MPI_Wtime() - outer_begin;
         double maximum_outer_elapsed{};
         MPI_Allreduce(&outer_elapsed, &maximum_outer_elapsed, 1, MPI_DOUBLE,
@@ -12771,8 +14107,17 @@ Status ProductDriver::Impl::execute_attempt(
               stdout,
               "cold_outer outer=%u seconds=%.17g Y_transport=BE step_committed=0\n",
               cold_outer, maximum_outer_elapsed);
-        if (reference_stopping ? cold_reference_E < product.cold_stopping->enthalpy
-                               : cold_E < 1e-10) {
+        // The energy residual above precedes its correction. Extrapolate
+        // its observed contraction only to schedule the full candidate audit;
+        // acceptance still uses all original equation and physical thresholds.
+        const double energy_screen=reference_stopping ? cold_reference_E : cold_E;
+        double predicted_energy=energy_screen;
+        if (std::isfinite(previous_energy_screen) &&
+            previous_energy_screen>energy_screen && previous_energy_screen>0.0)
+          predicted_energy*=energy_screen/previous_energy_screen;
+        previous_energy_screen=energy_screen;
+        if (product.reaction.interval_enabled() ||
+            predicted_energy < cold_energy_tolerance) {
           if (outer_rank == 0)
             std::fprintf(
                 stdout,
@@ -12780,6 +14125,31 @@ Status ProductDriver::Impl::execute_attempt(
                 "closure=candidate final_audit=required step_committed=0\n",
                 cold_outer, cold_E, cold_Y);
 
+          if(dual_esf) {
+            // Pressure has just changed phi. Close the physical random
+            // fields against this endpoint before the read-only audit;
+            // local trace-species residuals retain their original target.
+            const double endpoint_begin=MPI_Wtime();double endpoint_residual{};
+            status=correct_esf_for_flux(as_const(provisional_flux),false,endpoint_residual);
+            if(!status)return status;
+            ++report.cold.species_endpoint_solve_calls;
+            halo_count=0;halo_views[halo_count++]=trial_enthalpy;
+            append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
+            status=exchange(product.stage_halos[1U],15U,halo_count,status);
+            if(!status)return status;
+            for(std::size_t j=0;j<species_trial.size();++j) {
+              species_history[j].trial=as_const(species_trial[j]);
+              species_accepted[j]=as_const(species_trial[j]);
+            }
+            equation_state.independent_species={species_history.data(),species_history.size()};
+            status=refresh_scalar_thermodynamics();
+            if(!status)return status;
+            double elapsed=MPI_Wtime()-endpoint_begin,maximum{};
+            MPI_Allreduce(&elapsed,&maximum,1,MPI_DOUBLE,MPI_MAX,communicator);
+            if(outer_rank==0)std::fprintf(stdout,
+                "cold_esf_endpoint outer=%u residual=%.17g seconds=%.17g field0=frozen history=accepted step_committed=0\n",
+                cold_outer,endpoint_residual,maximum);
+          }
           bool audit_negative = false;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
           audit_negative = std::getenv("HUNDUN_COLD_AUDIT_NEGATIVE") != nullptr;
@@ -12795,7 +14165,11 @@ Status ProductDriver::Impl::execute_attempt(
           const double final_audit_begin = MPI_Wtime();
           double reference_local[3]{};
           double final_local[6]{}; // M, E, Y, EOS, solid U, invalid state
-          {
+          double species_mass_scale_min = std::numeric_limits<double>::infinity();
+          const bool refine_momentum = product.reaction.interval_enabled() &&
+              product.equations.enthalpy().conservative_total_energy() && !audit_negative;
+          for(unsigned refinement_pass=0; refinement_pass<2; ++refinement_pass) {
+            double refinement_local[2]{}; // represented velocity change, speed
             const double reference_begin = MPI_Wtime();
             cold_freeze_sgs = false;
             std::vector<double> endpoint_velocity;
@@ -12874,7 +14248,7 @@ Status ProductDriver::Impl::execute_attempt(
               LinearIdentity identity{product.piso.fingerprint(),
                                       0x434f4c444d4f4d00ULL + component,
                                       product.geometry.fingerprint(),
-                                      product.krylov_workspace.fingerprint(),
+                                      equation_workspace.fingerprint(),
                                       0x434f4c444d4f4d31ULL + component};
               detail::ColdPressureOperator op(rows[component], cells,
                                               product.krylov_halo, identity);
@@ -12885,7 +14259,7 @@ Status ProductDriver::Impl::execute_attempt(
                         trial_velocity.unchecked({x, y, z}, component);
               FieldView solution = pressure_correction;
               solution.field = product.fields.krylov_vectors;
-              status = op.apply(solution, pressure_rhs);
+              status = op.residual(solution, pressure_rhs);
               status = product.reductions.consensus(status);
               if (!status)
                 return status;
@@ -12894,8 +14268,15 @@ Status ProductDriver::Impl::execute_attempt(
                 for (int y = 0; y < cells.y; ++y)
                   for (int x = 0; x < cells.x; ++x, ++index) {
                     Int3 c{x, y, z};
-                    const double residual = pressure_rhs.unchecked(c, 0) -
-                                            rows[component][index].rhs;
+                    const double residual = pressure_rhs.unchecked(c, 0);
+                    if(refine_momentum && refinement_pass==0) {
+                      const double value=trial_velocity.unchecked(c,component);
+                      const double next=value-residual/rows[component][index].diagonal;
+                      endpoint_velocity[3*index+component]=next;
+                      refinement_local[0]=std::max(refinement_local[0],std::abs(next-value));
+                      refinement_local[1]=std::max(refinement_local[1],std::abs(value));
+                      if(!std::isfinite(next)) final_local[5]=1;
+                    }
                     const double rho_bar =
                         .5 * (trial_density.unchecked(c, 0) +
                               equation_state.density.accepted.unchecked(c, 0));
@@ -12918,6 +14299,31 @@ Status ProductDriver::Impl::execute_attempt(
                 BoundaryThermophysicalGhostPhase::corrector_one, status);
             if (!status)
               return status;
+            if(refine_momentum && refinement_pass==0) {
+              const double local[4]{reference_stopping ? reference_local[0] : final_local[0],
+                  refinement_local[0],refinement_local[1],final_local[5]};
+              double global[4]{};
+              status=product.reductions.checked_max({local,4},{global,4});
+              if(!status) return status;
+              const double tolerance=reference_stopping ? product.cold_stopping->momentum : 1e-10;
+              const double rounding_scale=64*std::numeric_limits<double>::epsilon()*std::max(1.,global[2]);
+              // Pressure/enthalpy correction can leave a representationally
+              // small velocity defect. Refine its assembled momentum row,
+              // then rebuild and audit the equations on the corrected state.
+              if(global[3]==0 && global[0]>=tolerance && global[1]>0 &&
+                 global[1]<=rounding_scale) {
+                std::size_t index{};
+                for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x)
+                  for(unsigned component=0;component<3;++component)
+                    trial_velocity.unchecked({x,y,z},component)=endpoint_velocity[index++];
+                if(rank==0) std::fprintf(stdout,
+                    "cold_momentum_refine outer=%u sweep=1 method=diagonal defect=%.17g delta_U=%.17g roundoff_scale=%.17g candidate_velocity_updated=1 final_audit=required step_committed=0\n",
+                    cold_outer,global[0],global[1],rounding_scale);
+                reference_local[0]=0; final_local[0]=0; final_local[5]=0;
+                continue;
+              }
+            }
+            break;
           }
           // A failed final momentum equation already rejects this outer
           // candidate. COAST's max-norm stopping cannot accept it, so avoid
@@ -12939,8 +14345,18 @@ Status ProductDriver::Impl::execute_attempt(
                   cold_outer, momentum_gate_residual, momentum_gate_tolerance, maximum_elapsed);
             continue;
           }
+          if(dual_esf) {
+            double statistical_residual{};
+            status=correct_esf_for_flux(as_const(provisional_flux),true,statistical_residual);
+            if(!status)return status;
+            final_local[2]=reference_local[2]=statistical_residual;
+          }
           {
             EquationAssemblyContext cold_energy_context;
+            // Audit the same frozen face operator used by this transport
+            // correction, as COAST condif/step/cgstab do within one jstep.
+            // Rebuilding the limiter here would audit a different matrix.
+            cold_energy_context.mixture_transport=&mixture_faces;
             cold_energy_context.dt = step.dt;
             cold_energy_context.time = step.generation;
             cold_energy_context.geometry = product.geometry.topology_revision();
@@ -13013,21 +14429,8 @@ Status ProductDriver::Impl::execute_attempt(
                   auto enthalpy_assembly = cold_energy_context;
                   if (product.spray.enabled())
                     enthalpy_assembly.contribution_stage = 2;
-                  if (false && assembled &&
-                      scope == EquationAssemblyScope::target_coupled &&
-                      enthalpy_contributions.size == 0U) {
-                    // Schur consumes A_h's diagonal; its spatial operator
-                    // prepares its own face coefficients. Retain that diagonal
-                    // while evaluating the expensive pressure/viscous terms
-                    // once in attempt-local scratch.
-                    assembled = assemble_target_coupled_enthalpy_residual(
-                        product.equations.enthalpy(), equation_state, material,
-                        as_const(velocity_gradient), enthalpy_assembly,
-                        pressure_energy_r_e,
-                        {pressure_energy_e_h, pressure_energy_r_c,
-                         pressure_energy_e_p, true},
-                        energy_certificate);
-                  } else if (assembled)
+                  if(dual_esf)enthalpy_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
+                  if (assembled)
                     assembled = assemble_enthalpy(
                         product.equations.enthalpy(), equation_state, material,
                         as_const(velocity_gradient), enthalpy_contributions,
@@ -13080,6 +14483,16 @@ Status ProductDriver::Impl::execute_attempt(
                         for (std::int32_t x = 0; x < cells.x; ++x, ++offset)
                           if (active.data[offset] == 0U)
                             pressure_energy_r_e.unchecked({x, y, z}, 0U) = 0.0;
+                  }
+                  if(assembled && dual_esf) {
+                    auto anchor=as_const(esf_mean_anchor);
+                    anchor.base+=(product.fields.esf_components-1)*anchor.component_stride;
+                    anchor.components=1;anchor.field=product.fields.enthalpy;
+                    assembled=esf_energy_ledger.prepare(product.equations.kernels(),anchor,
+                        as_const(enthalpy_diffusivity),target_flux,mixture_faces,
+                        product.ibm_equations ? &*product.ibm_equations : nullptr);
+                    if(assembled)assembled=esf_energy_ledger.add_residual(pressure_energy_r_e,
+                        product.topology ? product.topology->region() : Span<const std::uint8_t>{});
                   }
                   return product.reductions.consensus(assembled);
                 };
@@ -13137,9 +14550,9 @@ Status ProductDriver::Impl::execute_attempt(
                       T <= 0 || !std::isfinite(absolute_pressure) ||
                       absolute_pressure <= 0)
                     final_local[5] = 1;
-                  ThermoState eos;
-                  status = product.thermodynamics.evaluate(
-                      absolute_pressure, trial_enthalpy.unchecked(c, 0),
+                  CoupledThermoState eos;
+                  status = evaluate_selected_reference(c,
+                      absolute_pressure,0, trial_enthalpy.unchecked(c, 0),
                       {species_values.data(), species_values.size()},
                       {trial_velocity.unchecked(c, 0),
                        trial_velocity.unchecked(c, 1),
@@ -13148,11 +14561,12 @@ Status ProductDriver::Impl::execute_attempt(
                   if (!status)
                     break;
                   final_local[3] =
-                      std::max(final_local[3], std::abs(eos.rho - rho) / rho);
+                      std::max(final_local[3], std::abs(eos.pressure.rho - rho) / rho);
                 }
             status = product.reductions.consensus(status);
             if (!status)
               return status;
+            if(!dual_esf) {
             FieldView yd, yr, ye, yg;
             status = runtime_write_view(product.fields.pressure_energy_c_h, yd);
             if (status)
@@ -13168,6 +14582,7 @@ Status ProductDriver::Impl::execute_attempt(
             if (!status)
               return status;
             auto yc = cold_energy_context;
+            yc.contribution_stage=product.reaction.coupling_source_stage();
             yc.scope = EquationAssemblyScope::momentum_predictor;
             yc.provisional_mass_flux = true;
             yc.mass_flux = as_const(provisional_flux);
@@ -13182,6 +14597,20 @@ Status ProductDriver::Impl::execute_attempt(
             std::vector<double> independent_residual_sum;
             if (reference_stopping)
               independent_residual_sum.assign(std::size_t(cells.x) * cells.y * cells.z, 0.0);
+            auto species_audit_state=equation_state;
+            decltype(species_history) transport_history;
+            if (product.reaction.interval_enabled()) {
+              transport_history=species_history;
+              for(std::size_t j=0;j<transport_history.size();++j)
+                transport_history[j].trial=scalar_remap->target_species(j);
+              species_audit_state.independent_species={transport_history.data(),transport_history.size()};
+              status=product.reaction.reweight_interval(equation_state,product.layers,cells,
+                  {product.pressure_mg_cell_activity.data(),product.pressure_mg_cell_activity.size()},
+                  {transport_history.data(),transport_history.size()},
+                  {species_trial.data(),species_trial.size()},step.dt);
+              status=product.reductions.consensus(status);
+              if(!status) return status;
+            }
             for (std::size_t j = 0; j < species_trial.size() && status; ++j) {
               const auto &spec = *product.equations.species().spec(j);
               for (int z = -1; z <= cells.z; ++z)
@@ -13199,9 +14628,17 @@ Status ProductDriver::Impl::execute_attempt(
                                  effective_viscosity.unchecked(c, 0) - mu) /
                             spec.turbulent_schmidt;
                   }
+              Span<const EquationContributionView> sources;
+              if (!detail::select_species_sources(product.reaction.coupling_contributions(),
+                    spec.field, sources)) {
+                status = {StatusCode::invalid_plan, kProductBinding};
+                break;
+              }
+              yc.reaction_endpoint=product.reaction.interval_enabled()
+                  ? as_const(species_trial[j]) : ConstFieldView{};
               status = detail::assemble_species_coupling_rows(
-                  product.equations.species(), j, equation_state, ym, yc,
-                  {yd, yr, ye, x_coefficient, y_coefficient, z_coefficient});
+                  product.equations.species(), j, species_audit_state, ym, yc,
+                  {yd, yr, ye, x_coefficient, y_coefficient, z_coefficient}, sources);
               if (!status)
                 break;
               for (int z = 0; z < cells.z; ++z)
@@ -13217,6 +14654,8 @@ Status ProductDriver::Impl::execute_attempt(
                         (trial_density.unchecked(c, 0) +
                          equation_state.density.accepted.unchecked(c, 0)) /
                         step.dt;
+                    if (!reference_stopping)
+                      species_mass_scale_min = std::min(species_mass_scale_min, scale);
                     if (!std::isfinite(ye.unchecked(c, 0)))
                       final_local[5] = 1;
                     if (reference_stopping) {
@@ -13253,6 +14692,7 @@ Status ProductDriver::Impl::execute_attempt(
             status = product.reductions.consensus(status);
             if (!status)
               return status;
+            }
           }
           double final_global[6]{};
           MPI_Allreduce(final_local, final_global, 6, MPI_DOUBLE, MPI_MAX,
@@ -13271,11 +14711,50 @@ Status ProductDriver::Impl::execute_attempt(
           }
           const bool equations_converged = reference_stopping
               ? report.cold.reference_residual[0] < product.cold_stopping->momentum &&
-                report.cold.reference_residual[1] < product.cold_stopping->enthalpy &&
+                report.cold.reference_residual[1] < cold_energy_tolerance &&
                 report.cold.reference_residual[2] < product.cold_stopping->species
-              : final_global[0] < 1e-10 && final_global[1] < 1e-10 &&
+              : final_global[0] < 1e-10 && final_global[1] < cold_energy_tolerance &&
                 final_global[2] < 128 * std::numeric_limits<double>::epsilon();
-          const bool final_converged = equations_converged &&
+          if ((reference_stopping ? report.cold.reference_residual[1] : final_global[1]) >=
+              cold_energy_tolerance)
+            conservative_energy_requested = true;
+          // The terminal equation audit can require more accuracy than an
+          // inexpensive intermediate scalar solve. Retain that request across
+          // outer corrections instead of repeating the same inexact solve.
+          if (reference_stopping && !species_trial.empty() &&
+              report.cold.reference_residual[2] >= product.cold_stopping->species) {
+            species_residual_limits.resize(species_trial.size());
+            const double dependent_budget = report.cold.species_reference_scales.back() /
+                double(species_trial.size());
+            for (std::size_t j = 0; j < species_trial.size(); ++j)
+              species_residual_limits[j] = .5 * product.cold_stopping->species *
+                  std::min(report.cold.species_reference_scales[j], dependent_budget);
+          }
+          if (!reference_stopping && !dual_esf && !species_trial.empty() &&
+              final_global[2] >= 128 * std::numeric_limits<double>::epsilon()) {
+            // The local-time audit scales each conservative row by
+            // (rho_trial + rho_accepted) / dt. A common absolute budget based
+            // on the global minimum scale meets every fluid cell's gate.
+            // Retain the same half-budget margin as reference stopping and
+            // request the full conservative row on the next outer solve.
+            double minimum_scale{};
+            if (MPI_Allreduce(&species_mass_scale_min, &minimum_scale, 1,
+                              MPI_DOUBLE, MPI_MIN, communicator) != MPI_SUCCESS)
+              return {StatusCode::mpi_failure, kProductBinding};
+            species_residual_limits.assign(species_trial.size(),
+                64 * std::numeric_limits<double>::epsilon() * minimum_scale);
+          }
+          double reaction_input_residual{};
+          if (product.reaction.interval_enabled()) {
+            const double local_input=product.reaction.interval_input_residual(
+                equation_state,as_const(heat_capacity),cells,
+                {product.pressure_mg_cell_activity.data(),product.pressure_mg_cell_activity.size()});
+            MPI_Allreduce(&local_input,&reaction_input_residual,1,MPI_DOUBLE,MPI_MAX,communicator);
+            if(outer_rank==0) std::fprintf(stdout,
+                "mean_reactor_consistency outer=%u input_residual=%.17g limit=1e-10 step_committed=0\n",
+                cold_outer,reaction_input_residual);
+          }
+          const bool final_converged = equations_converged && reaction_input_residual<1e-10 &&
               final_global[3] < 128 * std::numeric_limits<double>::epsilon() &&
               final_global[4] == 0 && final_global[5] == 0;
           if (outer_rank == 0)
@@ -13299,6 +14778,56 @@ Status ProductDriver::Impl::execute_attempt(
           }
           if (!final_converged)
             continue;
+
+          // A reaction can drive a small energy flux relative to rho*cp*T/dt.
+          // Audit its physical balance before staging any final flux. Tighten
+          // the local energy budget only when that global balance requires it.
+          if (product.reaction.enabled() &&
+              product.equations.enthalpy().conservative_total_energy()) {
+            DriverConservationReport candidate_balance;
+            detail::ProductBoundaryBalanceHistory candidate_history;
+            // Match the final publication below: the frozen face coefficients
+            // are evaluated with the flux just used by the terminal equations.
+            auto balance_mixture = mixture_faces;
+            balance_mixture.face_flux = provisional_flux.revision;
+            status = runtime_write_view(product.fields.h_by_a,
+                                        momentum_low_order_rhs_delta);
+            if (status) status = runtime_write_view(product.fields.pressure_energy_e_p,
+                                                    pressure_energy_e_p);
+            status = product.reductions.consensus(status);
+            const auto statistical_balance=esf_energy_ledger.balance(enthalpy_sources[0].explicit_source_density);
+            if (status) status = detail::collect_boundary_balance(
+                product.equations.enthalpy(), product.equations.kernels(),
+                product.schemes, product.boundary, equation_state, material,
+                as_const(velocity_gradient), {1/step.dt,-1/step.dt,0,1},
+                as_const(provisional_flux), pressure_energy_activity.cells,
+                momentum_low_order_rhs_delta, pressure_energy_e_p,
+                time.accepted_step(), balance_history, product.reductions,
+                candidate_balance, candidate_history,
+                product.ibm_equations ? &*product.ibm_equations : nullptr,
+                &balance_mixture, true,dual_esf ? &statistical_balance : nullptr);
+            status = product.reductions.consensus(status);
+            if (!status) return status;
+            const double scale = std::max({1.0,
+                std::abs(candidate_balance.total_energy_bdf_rate),
+                std::abs(candidate_balance.enthalpy_outflow),
+                std::abs(candidate_balance.kinetic_energy_outflow),
+                std::abs(candidate_balance.conductive_heat_input),
+                std::abs(candidate_balance.species_enthalpy_diffusion_input),
+                std::abs(candidate_balance.viscous_work_input)});
+            const double relative = std::abs(candidate_balance.total_energy_balance_defect)/scale;
+            if (outer_rank==0) std::fprintf(stdout,
+                "reacting_energy_balance outer=%u relative=%.17g limit=1e-6 step_committed=0\n",
+                cold_outer,relative);
+            if (relative>=1e-6) {
+              const double residual=reference_stopping
+                  ? report.cold.reference_residual[1] : final_global[1];
+              cold_energy_tolerance=std::min(.5*cold_energy_tolerance,
+                                             .25*residual*(1e-6/relative));
+              conservative_energy_requested=true;
+              continue;
+            }
+          }
 
           const auto flux_hash = [](ConstFaceFluxView flux) {
             std::uint64_t hash = 1469598103934665603ULL;
@@ -13366,6 +14895,9 @@ Status ProductDriver::Impl::execute_attempt(
           status = product.reductions.consensus(status);
           if (!status)
             return status;
+          // copy_pending preserved the face values used by the terminal
+          // equations. Bind the same coefficients to their published revision.
+          mixture_faces.face_flux=cold_final_flux.revision;
           ConstFaceFluxView current;
           if (status)
             status = final_flux_writer.committed(product.final_flux, current);
@@ -13540,6 +15072,7 @@ Status ProductDriver::Impl::execute_attempt(
             status = runtime_write_view(product.fields.pressure_energy_e_p,
                                         pressure_energy_e_p);
           status = product.reductions.consensus(status);
+          const auto statistical_balance=esf_energy_ledger.balance(enthalpy_sources[0].explicit_source_density);
           if (status)
             status = detail::collect_boundary_balance(
                 product.equations.enthalpy(), product.equations.kernels(),
@@ -13548,11 +15081,53 @@ Status ProductDriver::Impl::execute_attempt(
                 pressure_energy_activity.cells, momentum_low_order_rhs_delta,
                 pressure_energy_e_p, time.accepted_step(), balance_history,
                 product.reductions, conservation, pending_balance,
-                product.ibm_equations ? &*product.ibm_equations : nullptr);
+                product.ibm_equations ? &*product.ibm_equations : nullptr,
+                &mixture_faces,false,dual_esf ? &statistical_balance : nullptr);
           status = product.reductions.consensus(status);
           if (!status)
             return status;
           double balance_s = MPI_Wtime() - balance_begin, max_balance_s{};
+          if(esf_composition_ledger.active()) {
+            using Ledger=detail::CompositionBalanceLedger;
+            const auto initial_density=esf_ledger_initial_density;
+            const auto initial_species=esf_ledger_initial_species.data();
+            std::size_t i{};
+            for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+              if(pressure_energy_activity.cells.size && !pressure_energy_activity.cells.data[i])continue;
+              const Int3 cell{x,y,z};
+              const long double volume=detail::cell_volume(product.equations.kernels(),cell);
+              const long double initial=volume*initial_density.unchecked(cell,0);
+              const long double current=volume*trial_density.unchecked(cell,0);
+              esf_composition_ledger.add_total(Ledger::accepted,initial);
+              esf_composition_ledger.add_total(Ledger::current,current);
+              esf_composition_ledger.add_total(Ledger::temporal,(current-initial)/step.dt);
+              for(std::size_t c=0;c<species_trial.size();++c) {
+                const auto before=initial*initial_species[c].unchecked(cell,0);
+                const auto after=current*species_trial[c].unchecked(cell,0);
+                esf_composition_ledger.add(c,Ledger::accepted,before);
+                esf_composition_ledger.add(c,Ledger::current,after);
+                esf_composition_ledger.add(c,Ledger::temporal,(after-before)/step.dt);
+              }
+            }
+            status=esf_composition_ledger.finish(product.reductions,conservation);
+            if(status)for(const auto& species:conservation.species_balance) {
+              if(outer_rank==0)std::fprintf(stdout,
+                  "esf_species_balance species=%s defect_kg_s=%.17g relative=%.17g limit=1e-6 revision=%llu step_committed=0\n",
+                  species.name.c_str(),species.defect,species.relative_defect,
+                  static_cast<unsigned long long>(conservation.composition_revision));
+              if(!std::isfinite(species.relative_defect) || species.relative_defect>=1e-6)
+                status={StatusCode::numerical_failure,17861};
+            }
+            if(status)for(const auto& element:conservation.element_balance) {
+              if(outer_rank==0)std::fprintf(stdout,
+                  "esf_element_balance element=%s defect_kmol_s=%.17g relative=%.17g limit=1e-6 revision=%llu step_committed=0\n",
+                  element.name.c_str(),element.defect,element.relative_defect,
+                  static_cast<unsigned long long>(conservation.composition_revision));
+              if(!std::isfinite(element.relative_defect) || element.relative_defect>=1e-6)
+                status={StatusCode::numerical_failure,17861};
+            }
+            status=product.reductions.consensus(status);if(!status)return status;
+          }
           MPI_Allreduce(&balance_s, &max_balance_s, 1, MPI_DOUBLE, MPI_MAX,
                         communicator);
           if (outer_rank == 0)
@@ -13629,6 +15204,11 @@ Status ProductDriver::Impl::execute_attempt(
                 product.ibm_equations->correct_impermeable_scalar_diffusion(
                     thermal_coordinate,
                     thermal_coefficient, pressure_energy_e_p);
+          if (status)
+            status = detail::apply_heat_flux_boundary(
+                product.equations.enthalpy(), product.equations.kernels(),
+                thermal_coordinate, thermal_coefficient, full_box, pressure_energy_e_p,
+                pressure_energy_activity.cells);
           status = product.reductions.consensus(status);
           if (!status)
             return status;
@@ -14036,6 +15616,20 @@ Status ProductDriver::Impl::execute_attempt(
                                               passive_history.size()};
           }
           if (status && product.esf.enabled()) {
+            if(dual_esf) {
+              for(int z=0;z<cells.z && status;++z)for(int y=0;y<cells.y && status;++y)for(int x=0;x<cells.x;++x) {
+                const Int3 c{x,y,z};
+                if(product.topology && !product.topology->is_fluid_global(
+                    {x+product.patch.begin.x,y+product.patch.begin.y,z+product.patch.begin.z}))continue;
+                detail::ProductEsf::DualState published;
+                status=product.esf.publish_dual_state_cell(c,
+                    {esf_trial.data(),product.fields.esf_fields.size()},esf_auxiliary,esf_mean_anchor,
+                    attempt_pressure_reference+trial_pressure.unchecked(c,0),
+                    trial_enthalpy.unchecked(c,0)-esf_mean_anchor.unchecked(c,product.fields.esf_components-1),
+                    {trial_velocity.unchecked(c,0),trial_velocity.unchecked(c,1),trial_velocity.unchecked(c,2)},
+                    product.reaction,product.thermodynamics,{step.accepted_step,step.generation,1},published);
+              }
+            } else {
             status = product.esf.reconcile(
                 {esf_trial.data(), product.fields.esf_fields.size()},
                 {species_accepted.data(), species_accepted.size()},
@@ -14043,6 +15637,7 @@ Status ProductDriver::Impl::execute_attempt(
                 attempt_pressure_reference, product.reaction,
                 product.thermodynamics,
                 {step.accepted_step, step.generation, 1});
+            }
             FieldView cache;
             if (status)
               status = product.layers.view(StateRole::trial,
@@ -14234,6 +15829,7 @@ Status ProductDriver::Impl::execute_attempt(
         auto enthalpy_assembly = assembly;
         if (product.spray.enabled())
           enthalpy_assembly.contribution_stage = 2;
+        if(dual_esf)enthalpy_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
         if (assembled && scope == EquationAssemblyScope::target_coupled &&
             enthalpy_contributions.size == 0U) {
           // Schur consumes A_h's diagonal; its spatial operator prepares its
@@ -16487,6 +18083,7 @@ Status ProductDriver::Impl::execute_attempt(
         candidate_assembly.wall_treatment = product.ibm_equations ? &product.turbulence : nullptr;
         if (product.spray.enabled())
           candidate_assembly.contribution_stage = 2;
+        if(dual_esf)candidate_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
         const auto assemble_candidate_energy = [&]() noexcept {
           const TargetCoupledEnthalpyResidualWorkspace residual_workspace{
               pressure_energy_e_h, pressure_energy_r_c,
@@ -20267,7 +21864,7 @@ Status ProductDriver::committed_output_snapshot(
   ProductDriver::Impl& runtime = *implementation_;
   CompiledCasePlan::Impl& product = *runtime.plan.implementation_;
   const Span<const SnapshotFieldSpec> sealed = product.io.snapshot_fields();
-  for (std::size_t index = 0U; index < sealed.size; ++index) {
+  for (std::size_t index = 0U; index < product.io.primary_field_count(); ++index) {
     ConstFieldView view;
     Status status = product.layers.view(StateRole::accepted_n,
                                         sealed.data[index].field, view);
@@ -20285,10 +21882,150 @@ Status ProductDriver::committed_output_snapshot(
          product.schema_fingerprint,
          runtime.time.time(),
          runtime.time.accepted_step(),
-         {runtime.output_fields.data(), runtime.output_fields.size()},
+         {runtime.output_fields.data(), product.io.primary_field_count()},
          true,
          product.topology.has_value() ? product.topology->region()
                                       : Span<const std::uint8_t>{}};
+  return {};
+}
+
+Status ProductDriver::committed_sgs_output_snapshot(
+    CommittedOutputSnapshot& out) noexcept {
+  if (implementation_ == nullptr || !implementation_->initialized)
+    return {StatusCode::invalid_plan, kProductInput};
+  auto& runtime = *implementation_;
+  auto& product = *runtime.plan.implementation_;
+  if (runtime.output_sgs.empty()) return committed_output_snapshot(out);
+  const StateLayers& layers = product.layers;
+  FieldView velocity, gradient;
+  ConstFieldView density, temperature, enthalpy;
+  Status status = product.layers.view(StateRole::accepted_n,
+                                      product.fields.velocity, velocity);
+  if (status) status = layers.view(StateRole::accepted_n, product.fields.rho, density);
+  if (status) status = layers.view(StateRole::accepted_n, product.fields.temperature, temperature);
+  if (status) status = layers.view(StateRole::accepted_n, product.fields.enthalpy, enthalpy);
+  std::size_t species_count = 0U, passive_count = 0U;
+  for (std::size_t scalar = 0U; scalar < product.fields.scalars.size() && status; ++scalar) {
+    if (product.fields.scalar_roles[scalar] == TransportedScalarRole::species)
+      status = layers.view(StateRole::accepted_n, product.fields.scalars[scalar],
+                           runtime.species_accepted[species_count++]);
+    else
+      status = layers.view(StateRole::accepted_n, product.fields.scalars[scalar],
+                           runtime.passive_accepted[passive_count++]);
+  }
+  if (status && (species_count != runtime.species_accepted.size() ||
+                 passive_count != runtime.passive_accepted.size()))
+    status = {StatusCode::invalid_plan, kProductBinding};
+  // Resolve mass-flow and backflow values from accepted thermochemical state.
+  // Establish rank agreement before the resolver's own collectives.
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+  for (std::size_t species = 0U; species < species_count; ++species)
+    runtime.species_values[species] = runtime.species_accepted[species].unchecked({0,0,0},0U);
+  status = resolve_static_boundary_values(
+      runtime.communicator, product.boundary, product.boundary_specs, product.patch_inlets,
+      product.geometry, product.patch, product.thermodynamics,
+      runtime.pressure_reference, density, as_const(velocity), enthalpy,
+      {runtime.species_accepted.data(), runtime.species_accepted.size()},
+      {runtime.passive_accepted.data(), runtime.passive_accepted.size()},
+      {runtime.species_values.data(), runtime.species_values.size()},
+      runtime.boundary_scalars, runtime.boundary_vectors,
+      runtime.boundary_normal_gradients, true);
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+  // Only the accepted velocity's ghosts are refreshed. Its interior and all
+  // primitive/history revisions retain their accepted authority.
+  std::array<FieldView,1U> fields{velocity};
+  HaloTicket ticket;
+  status = product.final_velocity_halo.begin(kFreshVelocityAcceptedHaloStage,
+                                            {fields.data(),fields.size()},ticket);
+  if (status) status = product.final_velocity_halo.finish(ticket,{fields.data(),fields.size()});
+  if (status) {
+    velocity = fields[0U];
+    status = apply_boundary_ghosts(BoundaryStage::momentum, product.boundary,
+                                   {&velocity,1U},runtime.resolved_boundary_values());
+  }
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+  if (product.ibm_gradient_donors.has_value()) {
+    fields[0U] = velocity;
+    status = product.ibm_gradient_donors->exchange(kIbmGradientDonorStage,
+                                                  {fields.data(),fields.size()});
+    velocity = fields[0U];
+    status = product.reductions.consensus(status);
+    if (!status) return status;
+  }
+  // The candidate gradient is scratch at a quiescent boundary. Live SGS
+  // viscosity, material caches and accepted rate histories remain untouched.
+  status = product.layers.revise_runtime(FieldLifetime::persistent_workspace,
+      product.fields.pressure_energy_candidate_velocity_gradient);
+  if (status) status = product.layers.runtime_view(FieldLifetime::persistent_workspace,
+      product.fields.pressure_energy_candidate_velocity_gradient,gradient);
+  if (status) {
+    const ConstFieldView read = as_const(velocity);
+    status = cartesian_gradient(product.equations.kernels(),
+        {{&read,1U},{&gradient,1U},{{0,0,0},product.patch.cells},0U,0U,3U,0U,nullptr});
+  }
+  if (status && product.ibm_equations.has_value())
+    status = product.ibm_equations->correct_velocity_gradient(as_const(velocity),gradient);
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+  const Int3 cells = product.patch.cells;
+  const std::size_t count = runtime.output_sgs.size()/4U;
+  const auto activity = product.topology.has_value() ? product.topology->region()
+                                                    : Span<const std::uint8_t>{};
+  std::size_t flat = 0U;
+  for (std::int32_t z = 0; z < cells.z && status; ++z)
+    for (std::int32_t y = 0; y < cells.y && status; ++y)
+      for (std::int32_t x = 0; x < cells.x && status; ++x, ++flat) {
+        const Int3 cell{x,y,z};
+        SgsState state;
+        if (activity.size == 0U || activity.data[flat] != 0U) {
+          for (std::size_t species = 0U; species < species_count; ++species)
+            runtime.species_values[species] = runtime.species_accepted[species].unchecked(cell,0U);
+          MolecularTransportState molecular;
+          status = product.transport.evaluate(temperature.unchecked(cell,0U),
+              {runtime.species_values.data(),runtime.species_values.size()},molecular);
+          VelocityGradient local_gradient;
+          for (std::uint8_t component = 0U; component < 9U; ++component)
+            local_gradient.value[component] = gradient.unchecked(cell,component);
+          if (status) status = product.turbulence.evaluate_sgs_cell(cell,local_gradient,
+              density.unchecked(cell,0U),molecular.viscosity,state);
+        }
+        if (status) {
+          runtime.output_sgs[flat] = state.kinematic_viscosity_m2_s;
+          runtime.output_sgs[count+flat] = state.kinetic_energy_m2_s2;
+          runtime.output_sgs[2U*count+flat] = state.dissipation_w_m3;
+          runtime.output_sgs[3U*count+flat] = state.specific_dissipation_m2_s3;
+        }
+      }
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+  CommittedOutputSnapshot snapshot;
+  status = committed_output_snapshot(snapshot);
+  status = product.reductions.consensus(status);
+  if (!status) return status;
+  constexpr std::array<std::string_view,4U> names{
+      "nu_sgs","k_sgs","eps_sgs_volume","eps_sgs_specific"};
+  const auto sealed = product.io.snapshot_fields();
+  const auto primary = product.io.primary_field_count();
+  for (std::size_t quantity = 0U; quantity < names.size(); ++quantity) {
+    ConstFieldView view;
+    view.base = runtime.output_sgs.data()+quantity*count;
+    view.interior = cells;
+    view.components = 1U;
+    view.stride_y = static_cast<std::size_t>(cells.x);
+    view.stride_z = view.stride_y*static_cast<std::size_t>(cells.y);
+    view.component_stride = count;
+    view.field = product.fields.velocity;
+    view.revision = velocity.revision;
+    view.storage_identity = reinterpret_cast<std::uintptr_t>(view.base);
+    view.revision_domain = velocity.revision_domain;
+    runtime.output_fields[primary+quantity] = {
+        names[quantity],view,velocity.revision,sealed.data[primary+quantity].source};
+  }
+  snapshot.fields = {runtime.output_fields.data(),runtime.output_fields.size()};
+  out = snapshot;
   return {};
 }
 
@@ -20335,6 +22072,10 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
     status = append(RestartFieldRole::stochastic_transport,
                     product.fields.esf_transport, StateRole::accepted_n,
                     runtime.restart_fields, index);
+  if (status && !product.fields.esf_fields.empty())
+    status = append(RestartFieldRole::stochastic_auxiliary,
+                    product.fields.esf_auxiliary, StateRole::accepted_n,
+                    runtime.restart_fields, index);
   index = 0U;
   if (status)
     status = append(RestartFieldRole::velocity, product.fields.velocity,
@@ -20369,6 +22110,10 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
         append(RestartFieldRole::stochastic_transport,
                product.fields.esf_transport, StateRole::accepted_n_minus_one,
                runtime.restart_previous_fields, index);
+  if (status && !product.fields.esf_fields.empty())
+    status = append(RestartFieldRole::stochastic_auxiliary,
+                    product.fields.esf_auxiliary, StateRole::accepted_n_minus_one,
+                    runtime.restart_previous_fields, index);
   index = 0U;
   if (status)
     status = append(RestartFieldRole::enthalpy_nonadvective_rate,
@@ -20479,6 +22224,18 @@ Status ProductDriver::committed_surface_force(
 }
 
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
+Status ProductDriver::committed_thermo_for_test(StateRole role,
+    ConstFieldView& density, ConstFieldView& temperature) const noexcept {
+  if (implementation_ == nullptr || !implementation_->initialized ||
+      (role != StateRole::accepted_n && role != StateRole::accepted_n_minus_one))
+    return {StatusCode::invalid_plan, kProductInput};
+  const auto& product = *implementation_->plan.implementation_;
+  ConstFieldView rho, temp;
+  auto status = product.layers.view(role, product.fields.rho, rho);
+  if (status) status = product.layers.view(role, product.fields.temperature, temp);
+  if (status) {density=rho;temperature=temp;}
+  return status;
+}
 Status ProductDriver::committed_final_mass_flux_for_test(
     ConstFaceFluxView& out) const noexcept {
   out = {};

@@ -54,7 +54,7 @@ int main() {
                   << result.failure_field << '\n';
         return 2;
       }
-      if (result.chemistry_call_count != 2 * fields ||
+      if (result.chemistry_call_count != fields ||
           !near(result.candidate.values[reversed ? 1 : 0],
                 0.36787944117144233) ||
           result.candidate.values[2] != 101850) {

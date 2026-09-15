@@ -9,9 +9,15 @@
 
 using namespace hundun::v04;
 
-bool run(double speed, double composition = 0.3, bool inlet_reference = false) {
+bool run(double speed, double composition = 0.3, bool inlet_reference = false,
+         bool bicgstab = false, double initial_temperature = 300) {
   auto model = test::product_model({12, 8, 8});
   model.time.scheme = TimeScheme::cn_be;
+  if (bicgstab) {
+    model.solver.pressure.algorithm = LinearAlgorithm::bicgstab;
+    model.solver.pressure.krylov_restart = 0U;
+    model.solver.pressure.mg_correction_scaling = MgCorrectionScaling::unit_linear;
+  }
   model.time.initial_dt = 9.7088612375381536e-8;
   if (inlet_reference) model.solver.cold_stopping = ColdStoppingSpec{0.001};
   model.legacy_time_fingerprint = model.fingerprint + 1;
@@ -49,7 +55,7 @@ bool run(double speed, double composition = 0.3, bool inlet_reference = false) {
     status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
   DriverInitialState initial;
   initial.pressure_reference = 100100;
-  initial.temperature = 300;
+  initial.temperature = initial_temperature;
   initial.velocity = {speed, 0, 0};
   initial.transported_scalars = {&composition, 1};
   if (status)
@@ -130,10 +136,15 @@ bool run(double speed, double composition = 0.3, bool inlet_reference = false) {
   return all;
 }
 
-bool run_air() {
+bool run_air(bool profile = false, bool bicgstab = false) {
   auto model = test::product_model({12, 8, 8});
   model.time.scheme = TimeScheme::cn_be;
-  model.time.initial_dt = 1.3808912271980336e-5;
+  if (bicgstab) {
+    model.solver.pressure.algorithm = LinearAlgorithm::bicgstab;
+    model.solver.pressure.krylov_restart = 0U;
+    model.solver.pressure.mg_correction_scaling = MgCorrectionScaling::unit_linear;
+  }
+  model.time.initial_dt = profile ? 1.0e-3 : 1.3808912271980336e-5;
   model.legacy_time_fingerprint = model.fingerprint + 1;
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   auto &inlet = model.boundaries[0];
@@ -152,7 +163,8 @@ bool run_air() {
   DriverInitialState initial;
   initial.pressure_reference = 100000;
   initial.temperature = 300;
-  initial.velocity = {0.1, 0, 0};
+  initial.velocity = {profile ? 0.05 : 0.1, 0, 0};
+  if (status) status = driver.set_pressure_mg_profiling(profile);
   if (status) status = driver.initialize(initial);
   DriverStepReport report;
   for (int i = 0; i < 3 && status; ++i)
@@ -162,6 +174,15 @@ bool run_air() {
       report.piso.cold.active && report.piso.cold.species_solve_calls == 0 &&
       report.piso.cold.species_iterations == 0 &&
       report.piso.eos_residual < 1e-12 && report.piso.continuity_residual < 1e-10;
+  if (profile) {
+    const auto view=driver.pressure_mg_profile();
+    passed &= view.enabled && view.initialized && view.cumulative &&
+        view.cumulative->enabled && view.cumulative->complete &&
+        view.cumulative->attempts>0 && view.cumulative->apply_nanoseconds>0;
+    if (!passed) std::cerr << "cold_air profile enabled=" << view.enabled
+        << " initialized=" << view.initialized << " measured="
+        << (view.cumulative ? view.cumulative->apply_nanoseconds : 0) << '\n';
+  }
   if (!passed)
     std::cerr << "cold_air status=" << unsigned(status.code) << '/'
               << status.detail << " step=" << report.accepted_step << '\n';
@@ -174,6 +195,13 @@ int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   const bool out = run(0.02), back = run(-0.02), air = run_air();
   const bool zero_species = run(0.02, 0.0, true);
+  const bool profile = run_air(true);
+  const bool bi_out = run(0.02,0.3,false,true);
+  const bool bi_back = run(-0.02,0.3,false,true);
+  const bool bi_mg = run_air(true,true);
+  // Incoming reservoirs stay physical while their reflected h/Y stencil
+  // extends through temperatures outside the thermodynamic material range.
+  const bool hot_back = run(-0.02, 0.3, false, false, 900);
   MPI_Finalize();
-  return out && back && air && zero_species ? 0 : 1;
+  return out && back && air && zero_species && profile && bi_out && bi_back && bi_mg && hot_back ? 0 : 1;
 }

@@ -5,6 +5,11 @@
 #include "hundun/v04_ibm.hpp"
 #include "models_esf_detail.hpp"
 #include "models_exchange_batch_detail.hpp"
+#include "solver_heat_boundary_detail.hpp"
+#include "solver_ibm_scalar_transport_detail.hpp"
+#include "solver_cold.hpp"
+#include "solver_mass_source_detail.hpp"
+#include "field_view_interval_detail.hpp"
 
 namespace hundun::v04::detail {
 // Persistent fields live in native StateLayers; typed TCR histories are staged
@@ -12,6 +17,9 @@ namespace hundun::v04::detail {
 // the native attempt transaction is the sole acceptance authority.
 class ProductEsf {
 public:
+  // Gamma, turbulent scalar diffusivity, molecular viscosity, eddy viscosity.
+  static constexpr std::uint8_t transport_components=4;
+  static constexpr StageId transport_source_stage=178U;
   Status configure(const ValidatedModel &model,
                    const ProductReactionSources &gas, MeshPatch patch,
                    Int3 global_cells) {
@@ -20,9 +28,12 @@ public:
     const auto cells = patch.cells;
     begin_ = patch.begin;
     global_cells_ = global_cells;
+    for(unsigned face=0;face<6;++face)
+      physical_boundary_[face]=model.boundaries[face].flow_kind!=BoundaryKind::periodic;
     spec_ = *model.reaction.esf;
     cells_ = cells;
     ns_ = gas.gas_identity().species_names.size();
+    gas_fingerprint_=gas.fingerprint();
     stride_ = ns_ + 1;
     count_ = std::size_t(cells.x) * cells.y * cells.z;
     c_z_ = model.reaction.mixing_c_z;
@@ -33,8 +44,12 @@ public:
             {scalar.molecular_schmidt, scalar.turbulent_schmidt});
     species_scheme_ = model.schemes.species;
     enthalpy_scheme_ = model.schemes.enthalpy;
+    common_transport_ = species_scheme_ == ConvectionScheme::tvd2 ||
+                        species_scheme_ == ConvectionScheme::limited_central2;
     if (!gas.gas_advance() || !gas.gas_query() || ns_ < 2 || ns_ >= UINT8_MAX ||
-        model.time.scheme != TimeScheme::backward_euler ||
+        (model.time.scheme != TimeScheme::backward_euler &&
+         !(model.time.scheme == TimeScheme::cn_be &&
+           (spec_.tcr.mode == TcrMode::off || spec_.tcr.mode == TcrMode::shadow))) ||
         spec_.tcr.mode == TcrMode::validated)
       return invalid();
     if (!spec_.initial_species_offsets.empty() &&
@@ -64,23 +79,48 @@ public:
       }
     }
     const std::size_t per_cell =
-        sizeof(double) * (4 * spec_.fields * stride_ + 4) +
+        sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5) +
+        (spec_.tcr.mode!=TcrMode::experimental ? sizeof(ColdPressureRow)+sizeof(double) : 0) +
         (tcr ? 2 * (sizeof(tcr::detail::History) +
                     ProductTcrHistory::record_bytes)
              : 0);
 
-    if (count_ > SIZE_MAX / per_cell ||
-        count_ * per_cell > model.mesh.limits.max_memory_bytes_per_rank)
+    const std::size_t thermal_count = common_transport_ ?
+        std::size_t(cells.x + 4) * (cells.y + 4) * (cells.z + 4) : 0;
+    const std::size_t face_count = common_transport_ ?
+        std::size_t(cells.x + 1) * cells.y * cells.z +
+        std::size_t(cells.y + 1) * cells.x * cells.z +
+        std::size_t(cells.z + 1) * cells.x * cells.y : 0;
+    const auto extra_bytes = (thermal_count + face_count +
+        2*spec_.fields*stride_ + 1 + stride_) * sizeof(double) +
+        (common_transport_ ? (ns_ - 1) * sizeof(ConstFieldView) : 0);
+    const auto maximum_bytes = model.mesh.limits.max_memory_bytes_per_rank;
+    if (count_ > SIZE_MAX / per_cell || extra_bytes > maximum_bytes ||
+        count_ * per_cell > maximum_bytes - extra_bytes)
       return {StatusCode::allocation_failure, 10215};
+    if (common_transport_) {
+      const auto allocated = FaceFluxStorage::allocate_workspace(cells, 1, mixture_storage_);
+      if (!allocated) return allocated;
+      thermal_coordinate_.resize(thermal_count);
+      mixture_species_.resize(ns_ - 1);
+    }
     if (tcr)
       tcr_history.configure(gas.fingerprint(), count_,
                             spec_.tcr.initialization_sign);
     workspace_ = std::make_unique<esf::detail::Workspace>(ns_);
+    if (implicit_transport()) {
+      transport_rows_.resize(count_);
+      transport_pc_=std::make_unique<ColdPressureDilu>(transport_rows_,cells_,LinearIdentity{});
+    }
     rates_.resize(count_ * spec_.fields * stride_);
+    reactor_density_.resize(count_ * spec_.fields);
     gradients_.resize(3 * rates_.size());
     scratch_.resize(3 * count_);
     mass_divergence_.resize(count_);
+    transport_carrier_density_.resize(count_);
     tuple_.resize(spec_.fields * stride_);
+    noise_bounds_.resize(2*tuple_.size()+1);
+    noise_.resize(stride_);
     means_.resize(stride_);
     independent_.resize(ns_ - 1);
     diffusion_.resize(ns_);
@@ -149,7 +189,7 @@ public:
                                const ProductReactionSources &gas,
                                const ThermodynamicsPlan &thermo,
                                portable::Revision revision) noexcept {
-    if (fields.size() != start + spec_.fields + 1 ||
+    if (fields.size() != start + spec_.fields + 2 ||
         mean_species.size != ns_ - 1)
       return invalid();
     std::fill(means_.begin(), means_.end(), 0.0);
@@ -173,22 +213,34 @@ public:
         return numerical();
     if (std::abs(means_[ns_] - mean_h) > 2e-12 * std::max(1., std::abs(mean_h)))
       return numerical();
-    const auto &cache = fields.back();
+    const auto &cache = fields[start + spec_.fields];
     if (cache.role != RestartFieldRole::stochastic_transport ||
-        cache.components != 2 || cache.values.size() != 2 * count_ ||
-        !std::isfinite(cache.values[2 * cell]) ||
-        !(cache.values[2 * cell] > 0) ||
-        !std::isfinite(cache.values[2 * cell + 1]) ||
-        cache.values[2 * cell + 1] < 0)
+        cache.components != 4 || cache.values.size() != 4 * count_ ||
+        !std::isfinite(cache.values[4 * cell]) ||
+        !(cache.values[4 * cell] > 0) ||
+        !std::isfinite(cache.values[4 * cell + 1]) ||
+        cache.values[4 * cell + 1] < 0 ||
+        !std::isfinite(cache.values[4 * cell + 2]) ||
+        !(cache.values[4 * cell + 2] > 0) ||
+        !std::isfinite(cache.values[4 * cell + 3]) ||
+        cache.values[4 * cell + 3] < 0)
       return numerical();
-    return {};
+    const auto& auxiliary=fields.back();
+    if (auxiliary.role!=RestartFieldRole::stochastic_auxiliary ||
+        auxiliary.components!=stride_ || auxiliary.values.size()!=count_*stride_)
+      return invalid();
+    return query_auxiliary(gas,thermo,auxiliary.values.data()+cell*stride_,pressure,revision);
   }
   std::uint64_t owned_bytes() const noexcept {
     if (!enabled())
       return 0;
     std::uint64_t bytes =
         sizeof(*this) + immersed_bytes_ + workspace_->owned_bytes() +
+        mixture_storage_.counters().aligned_payload_bytes +
+        mixture_species_.capacity() * sizeof(ConstFieldView) +
         tcr_history.owned_bytes() +
+        transport_rows_.capacity()*sizeof(ColdPressureRow) +
+        (transport_pc_ ? sizeof(ColdPressureDilu)+transport_pc_->owned_payload_bytes() : 0) +
         reactants_.capacity() * sizeof(std::size_t) +
         passive_schmidt_.capacity() * sizeof(std::array<double, 2>) +
         (spec_.initial_species_offsets.capacity() +
@@ -199,11 +251,88 @@ public:
       bytes += name.capacity() + 1;
     for (const auto *v :
          {&rates_, &gradients_, &scratch_, &mass_divergence_, &tuple_, &means_,
-          &independent_, &diffusion_, &enthalpies_, &query_rates_})
+          &noise_bounds_, &noise_, &reactor_density_, &transport_carrier_density_,
+          &independent_, &diffusion_, &enthalpies_, &query_rates_, &thermal_coordinate_})
       bytes += v->capacity() * sizeof(double);
     return bytes;
   }
   bool enabled() const noexcept { return bool(workspace_); }
+  bool implicit_transport() const noexcept { return enabled() && spec_.tcr.mode!=TcrMode::experimental; }
+  std::vector<ColdPressureRow>& transport_rows() noexcept { return transport_rows_; }
+  ColdPressureDilu& transport_preconditioner() noexcept { return *transport_pc_; }
+  double mixing_cd() const noexcept { return 2/c_z_; }
+  double frozen_noise_source(std::size_t cell,std::size_t field,std::size_t component) const noexcept {
+    return rates_[slot(cell,field,component)];
+  }
+  double pressure_source(std::size_t cell) const noexcept { return mass_divergence_[cell]; }
+  // PDF transport uses the last accepted pressure increment, divided by its
+  // own time interval, plus the refreshed accepted U dot grad(p). Reuse the
+  // mass-divergence workspace after prepare_transport has frozen all noise.
+  Status prepare_pressure_work(const CartesianKernelPlan& kernels,
+      PrimitiveHistory pressure, ConstFieldView velocity, double reference,
+      double previous_reference, double previous_dt) noexcept {
+    if (!implicit_transport() || !transport_pending_ || !std::isfinite(previous_dt) ||
+        previous_dt<0 || !std::isfinite(reference) || !std::isfinite(previous_reference))
+      return invalid();
+    auto gradient=scratch_view(pressure.accepted,3);
+    const auto p=pressure.accepted;
+    auto status=cartesian_gradient(kernels,{{&p,1},{&gradient,1},
+        {{0,0,0},cells_},0,0,1,0,nullptr});
+    if(status && immersed_)status=immersed_->correct_pressure_gradient(p,gradient);
+    if(!status)return status;
+    std::size_t i=0;
+    for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x,++i) {
+      mass_divergence_[i]=0;
+      if(!active(i))continue;
+      const Int3 cell{x,y,z};
+      double work=previous_dt>0 ? ((reference-previous_reference)+
+          (p.unchecked(cell,0)-pressure.previous.unchecked(cell,0)))/previous_dt : 0;
+      for(unsigned a=0;a<3;++a)work+=velocity.unchecked(cell,a)*gradient.unchecked(cell,a);
+      if(!std::isfinite(work))return numerical();
+      mass_divergence_[i]=work;
+    }
+    return {};
+  }
+  bool common_transport() const noexcept { return enabled() && common_transport_; }
+  Status prepare_mixture_faces(const CartesianKernelPlan &kernels,
+                               const ThermodynamicsPlan &thermo,
+                               Span<const ConstFieldView> species,
+                               ConstFieldView enthalpy, ConstFieldView gamma,
+                               ConstFaceFluxView flux, RevisionToken generation,
+                               MixtureTransportFaces &mixture) noexcept {
+    if (!common_transport() || species.size != ns_ - 1 || !species.data)
+      return invalid();
+    const std::size_t nx = std::size_t(cells_.x) + 4;
+    const std::size_t ny = std::size_t(cells_.y) + 4;
+    auto thermal = scratch_view(enthalpy, 1);
+    thermal.base = thermal_coordinate_.data() + 2 + 2 * nx + 2 * nx * ny;
+    thermal.ghosts = {2, 2, 2};
+    thermal.stride_y = nx; thermal.stride_z = nx * ny;
+    thermal.component_stride = thermal_coordinate_.size();
+    thermal.storage_identity = reinterpret_cast<std::uintptr_t>(thermal_coordinate_.data());
+    // Each stochastic field and the mean use their own h/Y coordinates,
+    // with the same compiled reference and Cartesian face stencil.
+    for (int z = -2; z < cells_.z + 2; ++z)
+      for (int y = -2; y < cells_.y + 2; ++y)
+        for (int x = -2; x < cells_.x + 2; ++x) {
+          if (int(x < 0 || x >= cells_.x) + int(y < 0 || y >= cells_.y) +
+              int(z < 0 || z >= cells_.z) > 1) continue;
+          const Int3 c{x, y, z};
+          for (std::size_t s = 0; s < species.size; ++s)
+            independent_[s] = species.data[s].unchecked(c, 0);
+          const auto status = thermo.transport_enthalpy_coordinate_from_h(
+              enthalpy.unchecked(c, 0), {independent_.data(), independent_.size()},
+              thermal.unchecked(c, 0));
+          if (!status) return status;
+        }
+    FaceFluxView workspace;
+    auto status = mixture_storage_.workspace_view(0, generation, workspace);
+    if (status) status = prepare_cartesian_mixture_transport(kernels,
+        species, as_const(thermal), gamma, flux, workspace, generation,
+        mixture, immersed_, implicit_transport() ? MixtureFlatStencilPolicy::upwind_constraint
+                                                : MixtureFlatStencilPolicy::ignore_roundoff);
+    return status;
+  }
   ProductTcrHistory tcr_history;
   double offset(std::size_t f, std::size_t s) const noexcept {
     return spec_.initial_species_offsets.empty()
@@ -240,6 +369,23 @@ public:
               fields.data[f].unchecked(cell, c) = row[c];
           }
         }
+    return {};
+  }
+  // Explicit transport carries its own statistical auxiliary mean. The
+  // implicit COAST schedule replaces this with its independent field0 solve.
+  Status capture_auxiliary(Span<const FieldView> fields, FieldView auxiliary) const noexcept {
+    if(fields.size!=spec_.fields || auxiliary.components!=stride_ ||
+       auxiliary.interior.x!=cells_.x || auxiliary.interior.y!=cells_.y || auxiliary.interior.z!=cells_.z)
+      return invalid();
+    for(std::size_t f=0;f<fields.size;++f)
+      if(fields.data[f].components!=stride_ || fields.data[f].interior.x!=cells_.x ||
+         fields.data[f].interior.y!=cells_.y || fields.data[f].interior.z!=cells_.z) return invalid();
+    for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x)
+      for(std::size_t c=0;c<stride_;++c) {
+        long double mean=0;
+        for(std::size_t f=0;f<fields.size;++f)mean+=static_cast<long double>(fields.data[f].unchecked({x,y,z},c))/fields.size;
+        auxiliary.unchecked({x,y,z},c)=static_cast<double>(mean);
+      }
     return {};
   }
   template <class ScalarView>
@@ -279,6 +425,7 @@ public:
   Status cache_transport(FieldView cache, ConstFieldView rho, ConstFieldView mu,
                          ConstFieldView mu_eff, ConstFieldView lambda,
                          ConstFieldView cp) noexcept {
+    if (cache.components!=4) return invalid();
     for (int z = 0; z < cells_.z; ++z)
       for (int y = 0; y < cells_.y; ++y)
         for (int x = 0; x < cells_.x; ++x) {
@@ -289,10 +436,15 @@ public:
               mu_eff.unchecked(cell, 0) - mu.unchecked(cell, 0);
           const double gamma = lambda.unchecked(cell, 0) / heat_capacity;
           if (!(density > 0) || !(heat_capacity > 0) || !std::isfinite(gamma) ||
-              !(gamma > 0) || !std::isfinite(turbulent) || turbulent < 0)
+              !(gamma > 0) || !std::isfinite(turbulent) || turbulent < 0 ||
+              !std::isfinite(mu.unchecked(cell,0)) || mu.unchecked(cell,0)<=0)
             return numerical();
           cache.unchecked(cell, 0) = gamma;
           cache.unchecked(cell, 1) = turbulent / (sc_t_ * density);
+          // Frozen material belongs to the accepted step, including retries.
+          // IEM uses dynamic viscosities; diffusion keeps its own coefficient.
+          cache.unchecked(cell, 2) = mu.unchecked(cell,0);
+          cache.unchecked(cell, 3) = turbulent;
         }
     return {};
   }
@@ -312,7 +464,8 @@ public:
                          FieldView post_cache) noexcept {
     if (!enabled() || !exchange.available || exchange.cell_count != count_ ||
         !exchange.cells || fields.size != spec_.fields ||
-        post_fields.size != spec_.fields || post_species.size != ns_ - 1)
+        post_fields.size != spec_.fields || post_species.size != ns_ - 1 ||
+        accepted_cache.components!=4 || post_cache.components!=4)
       return invalid();
     const auto mapping = gas.species_indices();
     std::size_t i = 0;
@@ -370,10 +523,8 @@ public:
                 {independent_.data(), independent_.size()}, intrinsic);
           if (!status)
             return status;
-          // Accepted Dt and rho recover the accepted eddy viscosity without
-          // observing workspaces modified by a rejected gas iteration.
-          const double turbulent = accepted_cache.unchecked(cell, 1) * sc_t_ *
-                                   density.unchecked(cell, 0);
+          // Read the accepted eddy viscosity from the shared material cache.
+          const double turbulent = accepted_cache.unchecked(cell, 3);
           const double gamma =
               intrinsic.conductivity / sample.cp_j_per_kg_k + turbulent / sc_t_;
           if (!std::isfinite(gamma) || gamma <= 0 ||
@@ -387,6 +538,7 @@ public:
     return {};
   }
   Status source_diffusion(const CartesianKernelPlan &kernels,
+                          const EnthalpyEquationPlan &enthalpy_plan,
                           ConstFieldView post_cache, ConstFieldView enthalpy,
                           Span<const ConstFieldView> species,
                           FieldView enthalpy_rate,
@@ -413,6 +565,10 @@ public:
       return result;
     };
     auto status = evaluate(enthalpy, enthalpy_rate);
+    if (status)
+      status = apply_heat_flux_boundary(enthalpy_plan, kernels, enthalpy,
+          gamma, {{0, 0, 0}, cells_}, enthalpy_rate,
+          immersed_ ? immersed_->cell_activity() : Span<const std::uint8_t>{});
     for (std::size_t s = 0; s < species.size && status; ++s)
       status = evaluate(species.data[s], species_rates.data[s]);
     for (std::size_t s = 0; s < passives.size && status; ++s) {
@@ -435,7 +591,8 @@ public:
     }
     return status;
   }
-  Status prepare(const CartesianKernelPlan &kernels,
+  Status prepare_transport(MPI_Comm communicator, const CartesianKernelPlan &kernels,
+                 const EnthalpyEquationPlan &enthalpy_plan,
                  const ProductReactionSources &gas,
                  const ThermodynamicsPlan &thermo,
                  Span<const ConstFieldView> accepted, Span<FieldView> trial,
@@ -444,47 +601,144 @@ public:
                  double pressure_reference, ConstFaceFluxView flux, double time,
                  double dt, std::uint64_t step, RevisionToken generation,
                  Span<FieldView> sources) noexcept {
-    if (accepted.size != spec_.fields || trial.size != spec_.fields ||
+    transport_ready_ = false;
+    transport_pending_ = false;
+    correction_seed_ready_ = false;
+    unsigned invalid_input = accepted.size != spec_.fields || trial.size != spec_.fields ||
         sources.size != ns_ - 1 || mean_species.size != ns_ - 1 || !(dt > 0) ||
-        !std::isfinite(dt))
-      return invalid();
+        !std::isfinite(dt) || !std::isfinite(1/dt) || cache.components!=4 ||
+        !valid_cell_view(rho,cells_,0,1,0) || !valid_flux_view(flux,cells_,flux.revision);
+    if(MPI_Allreduce(MPI_IN_PLACE,&invalid_input,1,MPI_UNSIGNED,MPI_MAX,
+                     communicator)!=MPI_SUCCESS) return {StatusCode::mpi_failure,10215};
+    if(invalid_input) return invalid();
+    // Freeze the transport's extensive carrier before any chemistry. It is
+    // distinct from each reactor's PH/EOS density and from field0's density.
+    std::size_t carrier_cell=0;
+    for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)
+      for(int x=0;x<cells_.x;++x,++carrier_cell) {
+        const Int3 c{x,y,z};
+        const double accepted=rho.unchecked(c,0),volume=cell_volume(kernels,c);
+        const double carrier=implicit_transport() && active(carrier_cell)
+            ? frozen_density_carrier_mass(flux,c,accepted*volume,1/dt)/volume : accepted;
+        if(!std::isfinite(accepted) || accepted<=0 || !std::isfinite(carrier) || carrier<=0)
+          invalid_input=1;
+        transport_carrier_density_[carrier_cell]=carrier;
+      }
+    if(MPI_Allreduce(MPI_IN_PLACE,&invalid_input,1,MPI_UNSIGNED,MPI_MAX,communicator)!=MPI_SUCCESS)
+      return {StatusCode::mpi_failure,10215};
+    if(invalid_input)return numerical();
+    transport_density_authority_=rho;
+    // One frozen global envelope per field/component for this attempt.
+    // Signed maxima share the minimum reduction with the lower bounds.
+    const auto size=tuple_.size();
+    std::fill(noise_bounds_.begin(),noise_bounds_.end(),
+              std::numeric_limits<double>::infinity());
+    noise_bounds_.back()=0;
+    std::size_t index{};
+    for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y)
+      for(int x=0;x<cells_.x;++x,++index) {
+        if(!active(index)) continue;
+        for(std::size_t f=0;f<spec_.fields;++f) for(std::size_t c=0;c<stride_;++c) {
+          const double value=accepted.data[f].unchecked({x,y,z},c);
+          const auto j=f*stride_+c;
+          if(!std::isfinite(value)) noise_bounds_.back()=-1;
+          noise_bounds_[j]=std::min(noise_bounds_[j],value);
+          noise_bounds_[size+j]=std::min(noise_bounds_[size+j],-value);
+        }
+      }
+    if(MPI_Allreduce(MPI_IN_PLACE,noise_bounds_.data(),int(noise_bounds_.size()),
+                     MPI_DOUBLE,MPI_MIN,communicator)!=MPI_SUCCESS)
+      return {StatusCode::mpi_failure,10215};
+    if(noise_bounds_.back()<0) return numerical();
+    for(std::size_t j=0;j<size;++j) {
+      if(j%stride_<ns_) noise_bounds_[j]=std::max(0.,noise_bounds_[j]);
+      noise_bounds_[size+j]=-noise_bounds_[size+j];
+    }
+    const auto wiener=esf::detail::balanced_wiener(spec_.fields,dt,
+        {spec_.seed,step,1,0,0,1});
+    if(wiener.status!=portable::Status::success) return invalid();
     auto scratch = scratch_view(rho, 1);
     KernelInvocation call{{}, {&scratch, 1}, {{0, 0, 0}, cells_}, 0, 0,
                           1,  flux.revision};
-    auto status = cartesian_face_divergence(kernels, flux, call);
-    if (!status)
-      return status;
-    std::copy(scratch_.begin(), scratch_.begin() + count_,
-              mass_divergence_.begin());
+    Status status;
+    if (!implicit_transport()) {
+      status = cartesian_face_divergence(kernels, flux, call);
+      if (!status) return status;
+      std::copy(scratch_.begin(), scratch_.begin() + count_, mass_divergence_.begin());
+    }
     ConstFieldView gamma = cache;
     gamma.components = 1;
+    const auto mapping = gas.species_indices();
     for (std::size_t f = 0; f < spec_.fields; ++f) {
       const auto input = accepted.data[f];
+      MixtureTransportFaces mixture;
+      if (common_transport_ && !implicit_transport()) {
+        for (std::size_t s = 0; s < mapping.size; ++s) {
+          auto scalar = input;
+          scalar.base += mapping.data[s] * scalar.component_stride;
+          scalar.components = 1;
+          mixture_species_[s] = scalar;
+        }
+        auto h = input;
+        h.base += ns_ * h.component_stride;
+        h.components = 1;
+        status = prepare_mixture_faces(kernels, thermo,
+            {mixture_species_.data(), mixture_species_.size()}, h, gamma,
+            flux, generation, mixture);
+        if (!status) return status;
+      }
       for (std::uint8_t c = 0; c < stride_; ++c) {
         scratch = scratch_view(rho, 1);
         call.reads = {&input, 1};
         call.read_component_begin = c;
         call.required_face_flux_revision = flux.revision;
-        status = cartesian_convection(
-            kernels, c == ns_ ? enthalpy_scheme_ : species_scheme_, flux, call);
+        auto scalar = input;
+        scalar.base += c * scalar.component_stride;
+        scalar.components = 1;
+        if (!implicit_transport()) {
+        status = common_transport_
+            ? cartesian_mixture_transport(kernels, mixture, gamma, flux, call)
+            : cartesian_convection(
+                  kernels, c == ns_ ? enthalpy_scheme_ : species_scheme_, flux, call);
+        if (status && immersed_) {
+          IbmScalarTransport::Field field{IbmScalarTransport::Quantity::enthalpy,0};
+          if (c == gas.dependent_index())
+            field.quantity = IbmScalarTransport::Quantity::dependent_species;
+          else if (c != ns_) {
+            field.quantity = IbmScalarTransport::Quantity::independent_species;
+            const auto found = std::find(mapping.data,mapping.data+mapping.size,c);
+            if (found == mapping.data+mapping.size) return invalid();
+            field.component = std::size_t(found-mapping.data);
+          }
+          status = common_transport_
+              ? IbmScalarTransport::transport(*immersed_,field,scalar,gamma,flux,
+                    {{0,0,0},cells_},scratch,mixture)
+              : IbmScalarTransport::convection(*immersed_,field,
+                    c == ns_ ? enthalpy_scheme_ : species_scheme_,scalar,flux,
+                    {{0,0,0},cells_},scratch);
+        }
         if (!status)
           return status;
         for (std::size_t i = 0; i < count_; ++i)
           rates_[slot(i, f, c)] = -scratch_[i];
         call.required_face_flux_revision = 0;
-        status = cartesian_diffusion(kernels, gamma, call);
-        auto scalar = input;
-        scalar.base += c * scalar.component_stride;
-        scalar.components = 1;
-        if (status && immersed_)
-          status = c == ns_ ? immersed_->correct_zero_normal_diffusion(
-                                  scalar, gamma, scratch)
-                            : immersed_->correct_impermeable_scalar_diffusion(
-                                  scalar, gamma, scratch);
+        if (!common_transport_)
+          status = cartesian_diffusion(kernels, gamma, call);
+        else
+          std::fill_n(scratch_.begin(), count_, 0.0);
+        if (status && immersed_ && !common_transport_)
+          status = IbmScalarTransport::diffusion(*immersed_,scalar,gamma,
+              {{0,0,0},cells_},scratch);
+        if (status && c == ns_)
+          status = apply_heat_flux_boundary(enthalpy_plan, kernels, scalar,
+              gamma, {{0, 0, 0}, cells_}, scratch,
+              immersed_ ? immersed_->cell_activity() : Span<const std::uint8_t>{});
         if (!status)
           return status;
         for (std::size_t i = 0; i < count_; ++i)
           rates_[slot(i, f, c)] += scratch_[i];
+        }
+        call.required_face_flux_revision=0;
         scratch = scratch_view(rho, 3);
         status = cartesian_gradient(kernels, call);
         if (status && immersed_)
@@ -498,7 +752,6 @@ public:
             gradients_[3 * slot(i, f, c) + d] = scratch_[i + d * count_];
       }
     }
-    const auto mapping = gas.species_indices();
     for (int z = 0; z < cells_.z; ++z)
       for (int y = 0; y < cells_.y; ++y)
         for (int x = 0; x < cells_.x; ++x) {
@@ -526,22 +779,43 @@ public:
               // Specific transport uses the same committed mass flux, including
               // its continuity correction, rather than a second density solver.
               rates_[slot(i, f, c)] =
-                  (rates_[slot(i, f, c)] + value * mass_divergence_[i]) /
+                  implicit_transport() ? 0. : (rates_[slot(i, f, c)] + value * mass_divergence_[i]) /
                   density;
             }
           const portable::Revision revision{step, generation, 1};
+          if(noise_allowed(cell)) {
+            for(std::size_t f=0;f<spec_.fields;++f) {
+              const esf::detail::StochasticSourceRequest noise_request{
+                  density,cache.unchecked(cell,2),cache.unchecked(cell,3),.7,
+                  spec_.tcr.mode==TcrMode::experimental ? .7 : .5,dt,
+                  wiener.increments[f],tuple_.data()+f*stride_,
+                  gradients_.data()+3*slot(i,f,0),
+                  noise_bounds_.data()+f*stride_,noise_bounds_.data()+size+f*stride_,stride_,
+                  implicit_transport()};
+              const auto result=esf::detail::stochastic_source(noise_request,noise_.data());
+              if(result.status!=portable::Status::success) return numerical();
+              for(std::size_t c=0;c<stride_;++c)
+                rates_[slot(i,f,c)]+=implicit_transport() ? noise_[c] : noise_[c]/density;
+            }
+          }
           esf::detail::Request request;
           request.accepted = {revision, gas.chemistry_identity().fingerprint,
                               spec_.fields, ns_, tuple_.data()};
           request.expected_revision = revision;
           request.identity = &gas.chemistry_identity();
           request.dt_s = dt;
-          const double delta = std::cbrt(cell_volume(kernels, cell));
-          request.mixing_time_s =
-              c_z_ * delta * delta / (2 * cache.unchecked(cell, 0) / density);
-          request.turbulent_diffusivity_m2_s = cache.unchecked(cell, 1);
+          esf::detail::IemSource mixing;
+          // The existing c_z input maps to Cd=2/c_z; c_z=1 is GTMC Cd=2.
+          // TCR control is applied once by Workspace::advance below.
+          if (esf::detail::iem_source(cell_volume(kernels,cell),
+                  cache.unchecked(cell,2),cache.unchecked(cell,3),
+                  2/c_z_,1,0,mixing)!=portable::Status::success ||
+              !(mixing.implicit_sink_density>0)) return numerical();
+          request.mixing_time_s = density/(2*mixing.implicit_sink_density);
+          // The frozen, tuple-limited stochastic RHS is included above.
+          request.turbulent_diffusivity_m2_s = 0;
           request.deterministic_rates = rates_.data() + slot(i, 0, 0);
-          request.gradients = gradients_.data() + 3 * slot(i, 0, 0);
+          request.gradients = nullptr;
           request.random = {spec_.seed, step, 1, 0, 0, 1};
           if (tcr_history.enabled()) {
             double sum = 0;
@@ -620,43 +894,283 @@ public:
               return numerical();
             request.tcr_control = candidate.mixer_control;
           }
+          if (implicit_transport()) {
+            for (std::size_t f=0;f<spec_.fields;++f) for (std::size_t c=0;c<stride_;++c)
+              trial.data[f].unchecked(cell,c)=tuple_[f*stride_+c];
+            continue;
+          }
           auto moved = workspace_->advance(request);
           if (moved.status != portable::Status::success)
             return numerical();
-          std::array<double, 4> pressures{}, densities{};
           for (std::size_t f = 0; f < spec_.fields; ++f) {
             portable::GasSample sample;
-            pressures[f] = pressure_reference + pi.unchecked(cell, 0);
             status = query(gas, thermo, moved.candidate.values + f * stride_,
-                           pressures[f], revision, sample);
+                           pressure_reference + pi.unchecked(cell, 0), revision, sample);
             if (!status)
               return status;
-            densities[f] = sample.density_kg_per_m3;
+            reactor_density_[i * spec_.fields + f] = sample.density_kg_per_m3;
+            for (std::size_t c = 0; c < stride_; ++c)
+              trial.data[f].unchecked(cell, c) = moved.candidate.values[f * stride_ + c];
           }
-          esf::detail::ReactionRequest reaction{moved.candidate,
-                                                revision,
-                                                &gas.chemistry_identity(),
-                                                &gas.gas_identity(),
-                                                pressures.data(),
-                                                densities.data(),
-                                                time,
-                                                dt};
+        }
+    transport_revision_ = {step, generation, 1};
+    transport_time_ = time;
+    transport_dt_ = dt;
+    transport_ready_ = !implicit_transport();
+    transport_pending_ = implicit_transport();
+    return {};
+  }
+  Status finish_implicit_transport(const ProductReactionSources& gas,
+      const ThermodynamicsPlan& thermo, Span<const FieldView> trial,
+      ConstFieldView pi,double pressure,double time,double dt,
+      std::uint64_t step,RevisionToken generation) noexcept {
+    if (!implicit_transport() || !transport_pending_ || transport_ready_ || trial.size!=spec_.fields ||
+        transport_revision_!=portable::Revision{step,generation,1} ||
+        transport_time_!=time || transport_dt_!=dt) return invalid();
+    transport_pending_=false;
+    std::size_t i{};
+    for(int z=0;z<cells_.z;++z) for(int y=0;y<cells_.y;++y) for(int x=0;x<cells_.x;++x,++i) {
+      if(!active(i))continue;
+      const Int3 cell{x,y,z};
+      for(std::size_t f=0;f<spec_.fields;++f) {
+        double sum=0;
+        for(std::size_t c=0;c<stride_;++c) {
+          const double q=trial.data[f].unchecked(cell,c);
+          if(!std::isfinite(q) || (c<ns_ && (q<0 || q>1))) return numerical();
+          tuple_[c]=q;if(c<ns_)sum+=q;
+        }
+        if(std::abs(sum-1)>2e-12)return numerical();
+        portable::GasSample sample;
+        const auto status=query(gas,thermo,tuple_.data(),pressure+pi.unchecked(cell,0),
+            transport_revision_,sample);
+        if(!status)return status;
+        reactor_density_[i*spec_.fields+f]=sample.density_kg_per_m3;
+      }
+    }
+    transport_ready_=true;return {};
+  }
+  // Enter only after all ranks have accepted the complete spatial/mixing
+  // phase. Thermodynamic queries and TCR preparation precede this boundary;
+  // the interval provider then reads the assembled field state.
+  Status react(const ProductReactionSources &gas, const ThermodynamicsPlan& thermo,
+               Span<FieldView> trial, FieldView auxiliary,
+               ConstFieldView carrier_density, ConstFieldView pi, double pressure_reference, double time,
+               double dt, std::uint64_t step, RevisionToken generation,
+               Span<FieldView> sources) noexcept {
+    const portable::Revision revision{step, generation, 1};
+    const bool ready = transport_ready_;
+    transport_ready_ = false;
+    correction_seed_ready_ = false;
+    if (!ready || transport_revision_ != revision || time != transport_time_ ||
+        dt != transport_dt_ || trial.size != spec_.fields || sources.size != ns_ - 1 ||
+        auxiliary.components!=stride_ ||
+        carrier_density.base!=transport_density_authority_.base ||
+        carrier_density.field!=transport_density_authority_.field ||
+        carrier_density.revision!=transport_density_authority_.revision ||
+        carrier_density.storage_identity!=transport_density_authority_.storage_identity ||
+        carrier_density.revision_domain!=transport_density_authority_.revision_domain)
+      return invalid();
+    const auto mapping = gas.species_indices();
+    std::size_t i = 0;
+    for (int z = 0; z < cells_.z; ++z)
+      for (int y = 0; y < cells_.y; ++y)
+        for (int x = 0; x < cells_.x; ++x, ++i) {
+          const Int3 cell{x, y, z};
+          if (!active(i)) {
+            for (std::size_t s = 0; s < sources.size; ++s)
+              sources.data[s].unchecked(cell, 0) = 0;
+            continue;
+          }
+          std::array<double, 4> pressures{};
+          for (std::size_t f = 0; f < spec_.fields; ++f) {
+            pressures[f] = pressure_reference + pi.unchecked(cell, 0);
+            for (std::size_t c = 0; c < stride_; ++c)
+              tuple_[f * stride_ + c] = trial.data[f].unchecked(cell, c);
+          }
+          const esf::detail::View transported{revision,
+              gas.chemistry_identity().fingerprint, spec_.fields, ns_, tuple_.data()};
+          const esf::detail::ReactionRequest reaction{transported, revision,
+              &gas.chemistry_identity(), &gas.gas_identity(), pressures.data(),
+              reactor_density_.data() + i * spec_.fields, time, dt,
+              esf::detail::ReactionIntervals::full};
           const auto reacted = workspace_->react(reaction, *gas.gas_advance());
-          if (reacted.status != portable::Status::success ||
-              !reacted.mean_integrated_species_density_delta_kg_per_m3)
+          const double rho=transport_carrier_density_[i];
+          if (reacted.status != portable::Status::success || !(rho>0) || !std::isfinite(rho) ||
+              !reacted.mean_integrated_mass_fraction_delta)
             return numerical();
           for (std::size_t s = 0; s < mapping.size; ++s)
             sources.data[s].unchecked(cell, 0) =
-                reacted.mean_integrated_species_density_delta_kg_per_m3
-                    [mapping.data[s]] /
-                dt;
+                rho * reacted.mean_integrated_mass_fraction_delta[mapping.data[s]] / dt;
+          std::array<double,UINT8_MAX> auxiliary_row{};
+          for(std::size_t s=0;s<ns_;++s)
+            auxiliary_row[s]=auxiliary.unchecked(cell,s)+reacted.mean_integrated_mass_fraction_delta[s];
+          long double delta_h=0;
+          for(std::size_t f=0;f<spec_.fields;++f)
+            delta_h+=(static_cast<long double>(reacted.candidate.values[f*stride_+ns_])-tuple_[f*stride_+ns_])/spec_.fields;
+          auxiliary_row[ns_]=auxiliary.unchecked(cell,ns_)+static_cast<double>(delta_h);
+          const auto auxiliary_status=query_auxiliary(gas,thermo,auxiliary_row.data(),
+              pressure_reference+pi.unchecked(cell,0),revision);
+          if(!auxiliary_status)return auxiliary_status;
+          for(std::size_t c=0;c<stride_;++c)auxiliary.unchecked(cell,c)=auxiliary_row[c];
           for (std::size_t f = 0; f < spec_.fields; ++f)
             for (std::size_t c = 0; c < stride_; ++c)
-              trial.data[f].unchecked(cell, c) =
-                  reacted.candidate.values[f * stride_ + c];
+              trial.data[f].unchecked(cell, c) = reacted.candidate.values[f * stride_ + c];
         }
+    // Spatial gradients have completed their only use in this proposal.
+    // Reuse their owned payload for immutable post-reactor tuples, in native
+    // component-major field layout. Outer pressure corrections can restart
+    // from these exact tuples without advancing chemistry or recentering Y.
+    if (implicit_transport()) {
+      std::size_t cell_index{};
+      for (int z=0;z<cells_.z;++z) for (int y=0;y<cells_.y;++y)
+        for (int x=0;x<cells_.x;++x,++cell_index) {
+          const Int3 cell{x,y,z};
+          for (std::size_t f=0;f<=spec_.fields;++f)
+            for (std::size_t c=0;c<stride_;++c)
+              gradients_[(f*stride_+c)*count_+cell_index]=f==spec_.fields
+                  ? auxiliary.unchecked(cell,c) : trial.data[f].unchecked(cell,c);
+        }
+      correction_seed_ready_=true;
+    }
     tcr_history.seal();
     return {};
+  }
+  // Random fields occupy [0,fields); the independent signed auxiliary tuple
+  // occupies fields. Views are valid through this proposal's correction
+  // phase; every subsequent prepare/react invalidates the phase identity.
+  Status correction_seed(std::size_t field, FieldId semantic,
+      portable::Revision revision, ConstFieldView& out) const noexcept {
+    if (!implicit_transport() || !correction_seed_ready_ || field>spec_.fields ||
+        revision!=transport_revision_) return invalid();
+    ConstFieldView view;
+    view.base=gradients_.data()+field*stride_*count_;
+    view.interior=cells_;view.components=static_cast<std::uint8_t>(stride_);
+    view.stride_y=cells_.x;view.stride_z=std::size_t(cells_.x)*cells_.y;
+    view.component_stride=count_;view.field=semantic;view.revision=revision.input_revision;
+    view.storage_identity=reinterpret_cast<StorageIdentity>(gradients_.data());
+    view.revision_domain=reinterpret_cast<RevisionDomainIdentity>(this);
+    out=view;
+    return {};
+  }
+  // Restart images store an AoS tuple. Reuse the same raw field0 closure
+  // used by the live pressure corrector without constructing a strided view.
+  Status auxiliary_pressure(Span<const double> row, double pressure,
+      const ProductReactionSources& gas, const ThermodynamicsPlan& thermo,
+      portable::Revision revision, esf::detail::AuxiliaryPressureState& out) noexcept {
+    if (!implicit_transport() || gas.fingerprint()!=gas_fingerprint_ ||
+        !row.data || row.size!=stride_ || revision.algorithm_version!=1 ||
+        revision.input_revision==0 || !(pressure>0) || !std::isfinite(pressure))
+      return invalid();
+    return query_auxiliary(gas,thermo,row.data,pressure,revision,&out);
+  }
+  struct DualState {
+    // Physical temperature/material EOS remains explicitly distinct from
+    // the density and tangents selected by pressure coupling.
+    ThermoState physical{};
+    esf::detail::AuxiliaryPressureState pressure{};
+    double statistical_density{};
+    double physical_enthalpy{};
+    double auxiliary_enthalpy{};
+    double enthalpy_increment{};
+  };
+  // The field/auxiliary tuples are the same frozen flux-correction anchor.
+  // A common pressure-work increment shifts every h_f and h0 by delta_h;
+  // their compositions and enthalpy offsets remain independent. Derivatives
+  // in pressure are therefore also derivatives with respect to physical h.
+  // This read-only closure also serves accepted/restarted states. The caller
+  // supplies their revision; proposal-seed access has its separate lifetime
+  // checks. Evaluate into scratch first: an EOS failure preserves outputs.
+  Status evaluate_dual_state_cell(Int3 cell, Span<const FieldView> fields,
+      ConstFieldView auxiliary, double pressure, double delta_h, Real3 velocity,
+      const ProductReactionSources& gas, const ThermodynamicsPlan& thermo,
+      portable::Revision revision, Span<double> physical_mean, DualState& out) noexcept {
+    if (!implicit_transport() || gas.fingerprint()!=gas_fingerprint_ ||
+        revision.algorithm_version!=1 || revision.input_revision==0 ||
+        fields.size!=spec_.fields || !fields.data || physical_mean.size!=stride_ ||
+        !physical_mean.data || !std::isfinite(pressure) || !(pressure>0) ||
+        !std::isfinite(delta_h) || cell.x<0 || cell.x>=cells_.x ||
+        cell.y<0 || cell.y>=cells_.y || cell.z<0 || cell.z>=cells_.z ||
+        !valid_cell_view(auxiliary,cells_,0,stride_,0)) return invalid();
+    for (std::size_t f=0;f<fields.size;++f)
+      if (!valid_cell_view(as_const(fields.data[f]),cells_,0,stride_,0)) return invalid();
+    if (field_view_overlaps_storage(auxiliary,physical_mean.data,stride_)) return invalid();
+    for (std::size_t f=0;f<fields.size;++f)
+      if (field_view_overlaps_storage(fields.data[f],physical_mean.data,stride_)) return invalid();
+    std::array<double,UINT8_MAX> raw_auxiliary{};
+    std::array<double,4> densities{};
+    for (std::size_t c=0;c<stride_;++c)
+      raw_auxiliary[c]=auxiliary.unchecked(cell,c)+(c==ns_ ? delta_h : 0.);
+    esf::detail::AuxiliaryPressureState pressure_state;
+    auto status=query_auxiliary(gas,thermo,raw_auxiliary.data(),pressure,revision,&pressure_state);
+    if (!status) return status;
+    for (std::size_t f=0;f<fields.size;++f) {
+      for (std::size_t c=0;c<stride_;++c)
+        tuple_[f*stride_+c]=fields.data[f].unchecked(cell,c)+(c==ns_ ? delta_h : 0.);
+      portable::GasSample sample;
+      status=query(gas,thermo,tuple_.data()+f*stride_,pressure,revision,sample);
+      if (!status) return status;
+      densities[f]=sample.density_kg_per_m3;
+    }
+    const auto moments=esf::detail::dual_state_moments(
+        {{revision,gas.chemistry_identity().fingerprint,spec_.fields,ns_,tuple_.data()},
+         {revision,gas.chemistry_identity().fingerprint,1,ns_,raw_auxiliary.data()},
+         revision,densities.data(),pressure_state.density_kg_per_m3},
+        {means_.data(),noise_.data(),stride_});
+    if (moments.status!=portable::Status::success) return numerical();
+    const auto mapping=gas.species_indices();
+    for (std::size_t c=0;c<mapping.size;++c) independent_[c]=means_[mapping.data[c]];
+    DualState candidate;
+    status=thermo.evaluate(pressure,means_[ns_],{independent_.data(),independent_.size()},
+                          velocity,candidate.physical);
+    if (!status) return status;
+    candidate.pressure=pressure_state;
+    candidate.statistical_density=moments.statistical_density_kg_per_m3;
+    candidate.physical_enthalpy=means_[ns_];
+    candidate.auxiliary_enthalpy=raw_auxiliary[ns_];
+    candidate.enthalpy_increment=delta_h;
+    for (std::size_t c=0;c<stride_;++c)physical_mean.data[c]=means_[c];
+    out=candidate;
+    return {};
+  }
+  // Finalize one uncommitted cell after its pressure/energy correction.
+  // Y is published solely from the random fields. A common h increment
+  // preserves their spread and the independent field0 enthalpy offset.
+  // Callers retain the immutable proposal seed for any outer-loop replay.
+  Status publish_dual_state_cell(Int3 cell, Span<FieldView> fields,
+      FieldView auxiliary, FieldView physical_mean, double pressure,
+      double delta_h, Real3 velocity, const ProductReactionSources& gas,
+      const ThermodynamicsPlan& thermo, portable::Revision revision,
+      DualState& out) noexcept {
+    if (!correction_seed_ready_ || revision!=transport_revision_ ||
+        !valid_cell_view(as_const(physical_mean),cells_,0,stride_,0) ||
+        !valid_cell_view(as_const(auxiliary),cells_,0,stride_,0) ||
+        fields.size!=spec_.fields || !fields.data ||
+        field_views_overlap(physical_mean,auxiliary)) return invalid();
+    for (std::size_t f=0;f<fields.size;++f) {
+      if (!valid_cell_view(as_const(fields.data[f]),cells_,0,stride_,0) ||
+          field_views_overlap(fields.data[f],physical_mean) ||
+          field_views_overlap(fields.data[f],auxiliary)) return invalid();
+      for (std::size_t g=0;g<f;++g)
+        if (field_views_overlap(fields.data[f],fields.data[g])) return invalid();
+    }
+    std::array<double,UINT8_MAX> mean{};
+    DualState candidate;
+    auto status=evaluate_dual_state_cell(cell,{fields.data,fields.size},as_const(auxiliary),
+        pressure,delta_h,velocity,gas,thermo,revision,{mean.data(),stride_},candidate);
+    if (!status) return status;
+    for (std::size_t f=0;f<fields.size;++f)fields.data[f].unchecked(cell,ns_)+=delta_h;
+    auxiliary.unchecked(cell,ns_)+=delta_h;
+    for (std::size_t c=0;c<stride_;++c)physical_mean.unchecked(cell,c)=mean[c];
+    out=candidate;
+    return {};
+  }
+  void discard() noexcept {
+    transport_ready_=transport_pending_=correction_seed_ready_=false;
+    tcr_history.discard();
+  }
+  void commit() noexcept {
+    transport_ready_=transport_pending_=correction_seed_ready_=false;
+    tcr_history.commit();
   }
   Status reconcile(Span<FieldView> fields, Span<const ConstFieldView> species,
                    ConstFieldView h, ConstFieldView pi, double pressure,
@@ -672,28 +1186,29 @@ public:
                                               (y + std::size_t(cells_.y) * z);
           if (!active(i))
             continue;
-          std::fill(means_.begin(), means_.end(), 0);
-          for (std::size_t c = 0; c < stride_; ++c)
-            for (std::size_t f = 0; f < spec_.fields; ++f)
-              means_[c] += fields.data[f].unchecked(cell, c) / spec_.fields;
           double sum = 0;
           for (std::size_t s = 0; s < mapping.size; ++s) {
             const double target = species.data[s].unchecked(cell, 0);
             sum += target;
-            means_[mapping.data[s]] -= target;
+            means_[mapping.data[s]] = target;
           }
-          means_[gas.dependent_index()] -= 1 - sum;
-          means_[ns_] -= h.unchecked(cell, 0);
+          means_[gas.dependent_index()] = 1 - sum;
+          means_[ns_] = h.unchecked(cell, 0);
+          for(std::size_t f=0;f<spec_.fields;++f)
+            for(std::size_t c=0;c<stride_;++c)
+              tuple_[f*stride_+c]=fields.data[f].unchecked(cell,c);
+          const auto centered=workspace_->recenter(
+              {revision,gas.chemistry_identity().fingerprint,spec_.fields,ns_,tuple_.data()},
+              means_.data());
+          if(centered.status!=portable::Status::success) return numerical();
           for (std::size_t f = 0; f < spec_.fields; ++f) {
-            auto *row = tuple_.data() + f * stride_;
-            for (std::size_t c = 0; c < stride_; ++c)
-              row[c] = fields.data[f].unchecked(cell, c) - means_[c];
+            const auto *row = centered.candidate.values + f * stride_;
             portable::GasSample sample;
             auto status =
                 query(gas, thermo, row, pressure + pi.unchecked(cell, 0),
                       revision, sample);
             if (!status)
-              return status; // Reject whole attempt; never clip fields.
+              return status;
             for (std::size_t c = 0; c < stride_; ++c)
               fields.data[f].unchecked(cell, c) = row[c];
           }
@@ -702,6 +1217,14 @@ public:
   }
 
 private:
+  bool noise_allowed(Int3 cell) const noexcept {
+    const int position[]{cell.x+begin_.x,cell.y+begin_.y,cell.z+begin_.z};
+    const int dimensions[]{global_cells_.x,global_cells_.y,global_cells_.z};
+    for(unsigned a=0;a<3;++a)
+      if((position[a]==0 && physical_boundary_[2*a]) ||
+         (position[a]==dimensions[a]-1 && physical_boundary_[2*a+1])) return false;
+    return true;
+  }
   bool active(std::size_t cell) const noexcept {
     return !immersed_ || immersed_->cell_activity().data[cell] !=
                              static_cast<std::uint8_t>(RegionFlag::solid);
@@ -731,6 +1254,24 @@ private:
             authority.revision,
             reinterpret_cast<std::uintptr_t>(scratch_.data()),
             authority.revision_domain};
+  }
+  Status query_auxiliary(const ProductReactionSources& gas,
+      const ThermodynamicsPlan& thermo,const double* row,double pressure,
+      portable::Revision revision, esf::detail::AuxiliaryPressureState* output=nullptr) noexcept {
+    std::array<double,UINT8_MAX> normalized{};
+    const auto coordinates=esf::detail::auxiliary_eos_coordinates(
+        {revision,gas.chemistry_identity().fingerprint,1,ns_,row},revision,normalized.data(),ns_);
+    if(coordinates.status!=portable::Status::success)return numerical();
+    normalized[ns_]=coordinates.query_enthalpy_j_per_kg;
+    portable::GasSample sample;
+    const auto status=query(gas,thermo,normalized.data(),pressure,revision,sample);
+    if(!status)return status;
+    esf::detail::AuxiliaryPressureState pressure_state;
+    if (esf::detail::auxiliary_pressure_state(coordinates,sample,revision,
+        gas.gas_identity().composition_fingerprint,pressure_state)!=portable::Status::success)
+      return numerical();
+    if (output) *output=pressure_state;
+    return {};
   }
   Status query(const ProductReactionSources &gas,
                const ThermodynamicsPlan &thermo, const double *row,
@@ -829,12 +1370,24 @@ private:
   EsfSpec spec_;
   Int3 cells_{}, begin_{}, global_cells_{};
   std::size_t ns_{}, stride_{}, count_{};
+  PlanFingerprint gas_fingerprint_{};
   double c_z_{}, sc_t_{};
   std::vector<std::array<double, 2>> passive_schmidt_;
   ConvectionScheme species_scheme_{}, enthalpy_scheme_{};
+  bool common_transport_{};
+  bool transport_ready_{},transport_pending_{},correction_seed_ready_{};
+  portable::Revision transport_revision_{};
+  double transport_time_{}, transport_dt_{};
+  std::array<bool,6> physical_boundary_{};
+  FaceFluxStorage mixture_storage_;
+  std::vector<ConstFieldView> mixture_species_;
+  std::vector<double> thermal_coordinate_;
   std::unique_ptr<esf::detail::Workspace> workspace_;
+  std::vector<ColdPressureRow> transport_rows_;
+  std::unique_ptr<ColdPressureDilu> transport_pc_;
   std::vector<double> rates_, gradients_, scratch_, mass_divergence_, tuple_,
-      means_;
+      means_, noise_bounds_, noise_, reactor_density_, transport_carrier_density_;
+  ConstFieldView transport_density_authority_{};
   std::vector<double> independent_, diffusion_, enthalpies_, query_rates_;
 };
 } // namespace hundun::v04::detail

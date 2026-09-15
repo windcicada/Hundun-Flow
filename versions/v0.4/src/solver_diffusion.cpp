@@ -8,6 +8,9 @@
 
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
+#include "solver_equation_detail.hpp"
+#include "solver_shared_faces_detail.hpp"
+#include "hundun/v04_ibm.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2603,6 +2606,333 @@ double detail::sampled_convection_direction(const CartesianKernelPlan& plan,
     return std::numeric_limits<double>::quiet_NaN();
   };
   return plan.geometry_kind()==GeometryKind::uniform ? metric(std::true_type{}) : metric(std::false_type{});
+}
+
+Status prepare_cartesian_mixture_face(
+    const CartesianKernelPlan& plan, Span<const ConstFieldView> independent,
+    ConstFieldView thermal_coordinate, CartesianAxis axis, Int3 face,
+    double mass_rate, double physical_diffusion, MixtureFaceTransport& out,
+    bool allow_upwind, MixtureFlatStencilPolicy flat) noexcept {
+  const auto cells = plan.cells();
+  const auto a = static_cast<unsigned>(axis);
+  if (plan.fingerprint() == 0U || a > 2U ||
+      (flat != MixtureFlatStencilPolicy::ignore_roundoff &&
+       flat != MixtureFlatStencilPolicy::upwind_constraint) ||
+      (independent.size && independent.data == nullptr) ||
+      !std::isfinite(mass_rate) || !std::isfinite(physical_diffusion) ||
+      physical_diffusion < 0.0)
+    return {StatusCode::invalid_plan, kTransportKernel};
+  const std::array<int,3> coordinate{face.x,face.y,face.z};
+  const std::array<int,3> extent{cells.x,cells.y,cells.z};
+  for (unsigned d = 0; d < 3; ++d)
+    if (coordinate[d] < 0 || coordinate[d] >= extent[d] + (a == d))
+      return {StatusCode::invalid_plan, kTransportKernel};
+  for (std::size_t s = 0; s < independent.size; ++s)
+    if (!detail::valid_cell_view(independent.data[s],cells,0U,1U,2U))
+      return {StatusCode::invalid_plan, kTransportKernel};
+  if (thermal_coordinate.base &&
+      !detail::valid_cell_view(thermal_coordinate,cells,0U,1U,2U))
+    return {StatusCode::invalid_plan, kTransportKernel};
+  const int normal = coordinate[a];
+  const double weight = detail::interpolate_face(plan,axis,normal,1.0,0.0);
+  std::array<double,3> distance{};
+  for (int i = 0; i < 3; ++i) {
+    distance[i] = detail::centre_coordinate(plan,axis,normal+i-1) -
+                  detail::centre_coordinate(plan,axis,normal+i-2);
+    if (!std::isfinite(distance[i]) || distance[i] <= 0.0)
+      return {StatusCode::invalid_plan, kTransportKernel};
+  }
+  double conductance = physical_diffusion;
+  const bool lower = mass_rate > 0.0 && allow_upwind;
+  const auto constrain = [&](const std::array<double,4>& sample,
+                             double reference_scale) {
+    // Only the three cells used by the chosen gradient participate. The
+    // opposite far cell may be an IBM solid placeholder.
+    const auto begin=sample.begin()+(lower ? 0 : 1);
+    for(auto value=begin;value!=begin+3;++value)
+      if(!std::isfinite(*value)) return false;
+    const auto bounds=std::minmax_element(begin,begin+3);
+    const double roundoff=128.0*std::numeric_limits<double>::epsilon()*
+        std::max(reference_scale,
+            std::max(std::abs(*bounds.first),std::abs(*bounds.second)));
+    // Species use the unit composition scale, shared with the coupled row
+    // solve. Sub-resolution traces otherwise modulate every bulk scalar's
+    // diffusion while their own updates are already at the FP64 floor.
+    // A constant coordinate contributes no transport restriction. Resolve
+    // PH roundoff before forming gradient ratios shared by all species;
+    // otherwise a uniform temperature can toggle O(|mass_rate|) diffusion.
+    if (*bounds.second-*bounds.first<=roundoff) {
+      // An implicit solve couples even a locally constant coordinate to its
+      // neighbours. Retain the VLS ratio=0 upwind constraint in this policy;
+      // otherwise central off-diagonals can propagate negative trace species.
+      if (flat == MixtureFlatStencilPolicy::upwind_constraint)
+        conductance=std::max(conductance,
+            (lower ? 1.0-weight : weight)*std::abs(mass_rate));
+      return true;
+    }
+    const double middle = (sample[2]-sample[1])/distance[1];
+    const double upstream = lower ? (sample[1]-sample[0])/distance[0]
+                                  : (sample[3]-sample[2])/distance[2];
+    if (!std::isfinite(middle) || !std::isfinite(upstream)) return false;
+    const double epsilon = std::max(1e-30,
+        std::numeric_limits<double>::epsilon() *
+            std::max(std::abs(upstream),std::abs(middle)));
+    double ratio = upstream/(middle+std::copysign(epsilon,middle));
+    if (!std::isfinite(ratio)) ratio = 0.0;
+    const double limiter = 1.0-std::max(std::min(2.0*ratio,1.0),0.0);
+    conductance = std::max(conductance,
+        (lower ? 1.0-weight : weight)*std::abs(mass_rate)*limiter);
+    return std::isfinite(conductance);
+  };
+  const auto read = [&](ConstFieldView field) {
+    std::array<double,4> values{};
+    for (int i = 0; i < 4; ++i) {
+      auto c = face;
+      (a == 0 ? c.x : a == 1 ? c.y : c.z) += i-2;
+      values[i] = field.unchecked(c,0U);
+    }
+    return values;
+  };
+  std::array<long double,4> dependent{1.0L,1.0L,1.0L,1.0L};
+  for (std::size_t s = 0; s < independent.size; ++s) {
+    const auto sample = read(independent.data[s]);
+    if (!constrain(sample,1.0)) return {StatusCode::numerical_failure,kTransportNumerical};
+    for (unsigned i = 0; i < 4; ++i) dependent[i] -= sample[i];
+  }
+  std::array<double,4> sample{};
+  for (unsigned i = 0; i < 4; ++i) sample[i] = static_cast<double>(dependent[i]);
+  if (!constrain(sample,1.0) ||
+      (thermal_coordinate.base && !constrain(read(thermal_coordinate),0.0)))
+    return {StatusCode::numerical_failure,kTransportNumerical};
+  const double extra = conductance-physical_diffusion;
+  const double blend = mass_rate == 0.0 ? weight : weight+extra/mass_rate;
+  if (!std::isfinite(blend)) return {StatusCode::numerical_failure,kTransportNumerical};
+  out = {blend,conductance,extra};
+  return {};
+}
+
+Status prepare_cartesian_mixture_transport(
+    const CartesianKernelPlan& plan, Span<const ConstFieldView> independent,
+    ConstFieldView thermal_coordinate, ConstFieldView mass_diffusivity,
+    ConstFaceFluxView flux, FaceFluxView workspace,
+    RevisionToken linearization, MixtureTransportFaces& out,
+    const IbmEquationInterfacePlan* immersed, MixtureFlatStencilPolicy flat) noexcept {
+  const auto cells = plan.cells();
+  if (plan.fingerprint() == 0U || linearization == 0U ||
+      (flat != MixtureFlatStencilPolicy::ignore_roundoff &&
+       flat != MixtureFlatStencilPolicy::upwind_constraint) ||
+      !detail::valid_flux_view(flux,cells,flux.revision) ||
+      !detail::valid_flux_view(workspace,cells) ||
+      !detail::valid_cell_view(mass_diffusivity,cells,0U,1U,1U) ||
+      (thermal_coordinate.base &&
+       !detail::valid_cell_view(thermal_coordinate,cells,0U,1U,2U)) ||
+      (independent.size && independent.data == nullptr) ||
+      (immersed && immersed->fingerprint() == 0U))
+    return {StatusCode::invalid_plan,kTransportKernel};
+  const std::array<ConstFaceFieldView,3> input{flux.x,flux.y,flux.z};
+  const std::array<FaceFieldView,3> output{workspace.x,workspace.y,workspace.z};
+  for (unsigned a = 0; a < 3; ++a) {
+    for (unsigned b=0; b<a; ++b)
+      if (detail::face_views_overlap(output[a],output[b]))
+        return {StatusCode::invalid_plan,kTransportKernel};
+    for (const auto& in : input)
+      if (detail::face_views_overlap(output[a],in))
+        return {StatusCode::invalid_plan,kTransportKernel};
+    if (detail::cell_face_views_overlap(mass_diffusivity,output[a]) ||
+        (thermal_coordinate.base &&
+         detail::cell_face_views_overlap(thermal_coordinate,output[a])))
+      return {StatusCode::invalid_plan,kTransportKernel};
+    for (std::size_t s = 0; s < independent.size; ++s)
+      if (!detail::valid_cell_view(independent.data[s],cells,0U,1U,2U) ||
+          detail::cell_face_views_overlap(independent.data[s],output[a]))
+        return {StatusCode::invalid_plan,kTransportKernel};
+  }
+  out = {};
+  for (unsigned a = 0; a < 3; ++a) {
+    const auto axis = static_cast<CartesianAxis>(a);
+    const auto extent = output[a].extents;
+    for (int z = 0; z < extent.z; ++z)
+      for (int y = 0; y < extent.y; ++y)
+        for (int x = 0; x < extent.x; ++x) {
+          const Int3 face{x,y,z};
+          const double mass_rate = input[a].unchecked(face);
+          double imposed{};
+          const int normal=a==0 ? x : a==1 ? y : z;
+          if (mass_rate == 0.0 || plan.physical_inlet_material(a,normal) ||
+              (immersed && immersed->prescribed_face_flux(axis,face,imposed))) {
+            output[a].unchecked(face) = 0.0;
+            continue;
+          }
+          const double physical = detail::positive_transmissibility(
+              plan,mass_diffusivity,axis,face);
+          bool fluid_upstream=true;
+          if (immersed) {
+            const int first=mass_rate>0.0 ? -2 : -1;
+            for (int offset=first; offset<=first+2; ++offset) {
+              Int3 global{face.x+plan.metric(0).global_begin,
+                          face.y+plan.metric(1).global_begin,
+                          face.z+plan.metric(2).global_begin};
+              (a==0 ? global.x : a==1 ? global.y : global.z)+=offset;
+              if (!immersed->topology_->is_fluid_stencil(global))
+                fluid_upstream=false;
+            }
+          }
+          if (!fluid_upstream) {
+            // A missing upstream donor gives a first-order fluid-side face;
+            // it never selects a gradient through a solid placeholder.
+            const double lower_weight=detail::interpolate_face(plan,axis,normal,1.0,0.0);
+            const double upwind=(mass_rate>0.0 ? 1.0-lower_weight : lower_weight)*std::abs(mass_rate);
+            output[a].unchecked(face)=std::max(physical,upwind)-physical;
+            continue;
+          }
+          MixtureFaceTransport transport;
+          const auto status = prepare_cartesian_mixture_face(plan,independent,
+              thermal_coordinate,axis,face,mass_rate,physical,transport,true,flat);
+          if (!status) return status;
+          output[a].unchecked(face) = transport.extra_diffusion;
+        }
+  }
+  out = {as_const(workspace.x),as_const(workspace.y),as_const(workspace.z),
+         flux.revision,linearization};
+  return {};
+}
+
+namespace {
+Status mixture_transport_face_rate(const CartesianKernelPlan& plan,
+    const std::array<ConstFaceFieldView,3>& faces,
+    const std::array<ConstFaceFieldView,3>& extra, ConstFieldView q,
+    std::uint8_t component, ConstFieldView physical,
+    CartesianAxis axis, Int3 face, double& value) noexcept {
+  const auto a = static_cast<unsigned>(axis);
+  auto left = face;
+  (a == 0 ? left.x : a == 1 ? left.y : left.z)--;
+  const int normal = a == 0 ? face.x : a == 1 ? face.y : face.z;
+  const double lo = q.unchecked(left,component);
+  const double hi = q.unchecked(face,component);
+  const double gamma = extra[a].unchecked(face);
+  const double mass = faces[a].unchecked(face);
+  if (physical.base) {
+    const double diffusion = detail::positive_transmissibility(plan,physical,axis,face);
+    if (!std::isfinite(diffusion) || diffusion < 0.0)
+      return {StatusCode::numerical_failure,kTransportNumerical};
+    const double total = diffusion + gamma;
+    const double weight = detail::interpolate_face(plan,axis,normal,1.0,0.0);
+    // Anchor on the upwind value. At the upwind limit the downwind
+    // coefficient vanishes before multiplication by a trace species.
+    value = mass >= 0.0 ? mass*lo + (mass*(1.0-weight)-total)*(hi-lo)
+                        : mass*hi + (mass*weight+total)*(lo-hi);
+  } else {
+    value = mass * detail::interpolate_face(plan,axis,normal,lo,hi) - gamma*(hi-lo);
+  }
+  return std::isfinite(value) && std::isfinite(gamma) && gamma >= 0.0
+      ? Status{} : Status{StatusCode::numerical_failure,kTransportNumerical};
+}
+
+Status mixture_divergence(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFaceFluxView flux, const KernelInvocation& invocation,
+    ConstFieldView physical) noexcept {
+  const auto cells = plan.cells();
+  if (plan.fingerprint() == 0U || mixture.linearization == 0U ||
+      mixture.face_flux != flux.revision ||
+      invocation.required_face_flux_revision != flux.revision ||
+      !detail::valid_flux_view(flux,cells,flux.revision) ||
+      !detail::valid_kernel_box(invocation.box,cells) ||
+      invocation.reads.size != 1U || invocation.reads.data == nullptr ||
+      invocation.writes.size != 1U || invocation.writes.data == nullptr ||
+      invocation.component_count != 1U)
+    return {StatusCode::invalid_plan,kTransportKernel};
+  const auto q = invocation.reads.data[0];
+  const auto result = invocation.writes.data[0];
+  if (!detail::valid_cell_view(q,cells,invocation.read_component_begin,1U,1U) ||
+      !detail::valid_cell_view(result,cells,invocation.write_component_begin,1U) ||
+      detail::field_views_overlap(q,as_const(result)) ||
+      (physical.base && (!detail::valid_cell_view(physical,cells,0U,1U,1U) ||
+                        detail::field_views_overlap(physical,as_const(result)))))
+    return {StatusCode::invalid_plan,kTransportKernel};
+  const std::array<ConstFaceFieldView,3> faces{flux.x,flux.y,flux.z};
+  const std::array<ConstFaceFieldView,3> extra{mixture.x,mixture.y,mixture.z};
+  for (unsigned a = 0; a < 3; ++a)
+    if (!detail::valid_equation_face_view(extra[a],static_cast<CartesianAxis>(a),cells) ||
+        detail::cell_face_views_overlap(as_const(result),extra[a]) ||
+        detail::cell_face_views_overlap(as_const(result),faces[a]))
+      return {StatusCode::invalid_plan,kTransportKernel};
+  KernelCounters prepared{};
+  if (invocation.counters) {
+    prepared=*invocation.counters;
+    const auto counted=detail::add_kernel_counters(&prepared,invocation.box,6U,
+        physical.base ? 36U : 24U,1U);
+    if (!counted) return counted;
+  }
+  const auto status=detail::shared_cell_faces(cells,invocation.box,{},
+      [&](CartesianAxis axis,Int3 face,double& value) -> Status {
+        return mixture_transport_face_rate(plan,faces,extra,q,
+            invocation.read_component_begin,physical,axis,face,value);
+      },
+      [&](Int3 c,const std::array<double,6>& values) -> Status {
+        long double divergence{};
+        for (unsigned a = 0; a < 3; ++a)
+          divergence += static_cast<long double>(values[2*a+1])-values[2*a];
+        const double value = static_cast<double>(divergence/detail::cell_volume(plan,c));
+        if (!std::isfinite(value)) return {StatusCode::numerical_failure,kTransportNumerical};
+        result.unchecked(c,invocation.write_component_begin) = value;
+        return {};
+      });
+  if (status && invocation.counters) *invocation.counters=prepared;
+  return status;
+}
+} // namespace
+
+Status cartesian_mixture_convection(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFaceFluxView flux, const KernelInvocation& invocation) noexcept {
+  return mixture_divergence(plan,mixture,flux,invocation,{});
+}
+
+Status cartesian_mixture_transport(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFieldView mass_diffusivity, ConstFaceFluxView flux,
+    const KernelInvocation& invocation) noexcept {
+  if (!mass_diffusivity.base) return {StatusCode::invalid_plan,kTransportKernel};
+  return mixture_divergence(plan,mixture,flux,invocation,mass_diffusivity);
+}
+
+Status form_cartesian_mixture_transport_flux(
+    const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
+    ConstFieldView physical, ConstFaceFluxView flux,
+    ConstFieldView scalar, std::array<FaceFieldView,3> output) noexcept {
+  const auto cells=plan.cells();
+  if(plan.fingerprint()==0 || mixture.linearization==0 ||
+      mixture.face_flux!=flux.revision || !detail::valid_flux_view(flux,cells,flux.revision) ||
+      scalar.components!=1 || !detail::valid_cell_view(scalar,cells,0,1,1) ||
+      physical.components!=1 || !detail::valid_cell_view(physical,cells,0,1,1))
+    return {StatusCode::invalid_plan,kTransportKernel};
+  const std::array<ConstFaceFieldView,3> faces{flux.x,flux.y,flux.z};
+  const std::array<ConstFaceFieldView,3> extra{mixture.x,mixture.y,mixture.z};
+  for(unsigned a=0;a<3;++a) {
+    const auto axis=static_cast<CartesianAxis>(a);
+    if(!detail::valid_equation_face_view(extra[a],axis,cells) ||
+        !detail::valid_equation_face_view(as_const(output[a]),axis,cells) ||
+        detail::cell_face_views_overlap(scalar,as_const(output[a])) ||
+        detail::cell_face_views_overlap(physical,as_const(output[a])))
+      return {StatusCode::invalid_plan,kTransportKernel};
+    for(unsigned b=0;b<3;++b)
+      if(detail::face_views_overlap(output[a],faces[b]) ||
+          detail::face_views_overlap(output[a],extra[b]) ||
+          (b<a && detail::face_views_overlap(output[a],output[b])))
+        return {StatusCode::invalid_plan,kTransportKernel};
+  }
+  for(unsigned a=0;a<3;++a) {
+    auto end=cells;++(a==0 ? end.x : a==1 ? end.y : end.z);
+    for(int z=0;z<end.z;++z)for(int y=0;y<end.y;++y)for(int x=0;x<end.x;++x) {
+      const Int3 face{x,y,z};double value{};
+      const auto status=mixture_transport_face_rate(plan,faces,extra,scalar,0,
+          physical,static_cast<CartesianAxis>(a),face,value);
+      if(!status)return status;
+      output[a].unchecked(face)=value;
+    }
+  }
+  return {};
 }
 
 Status reconstruct_cartesian_convection_face(

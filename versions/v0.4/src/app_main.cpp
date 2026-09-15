@@ -94,12 +94,14 @@ void usage(int rank) {
     std::cerr << "usage:\n"
               << "  hundun --version\n"
               << "  hundun validate <case-dir> [--dry-plan]\n"
+              << "  hundun check <case-dir> [--dry-plan]\n"
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
                  " [--restart <restart-dir>] [--output-interval <N>]"
                  " [--restart-interval <N>]"
-                 " [--diagnostics-interval <N>] [--max-dt <seconds>]"
+                 " [--diagnostics-interval <N>] [--max-dt <seconds>] [--observe-mg-cost]"
                  " [--initial-state p,T,Ux,Uy,Uz[,q...]]"
                  " [--restart-method-recovery] [--restart-source-case <case-dir>]"
+                 " [--restart-refine-chemistry <source-case-dir>]"
                  " [--restart-storage-compatibility mg-bundle-ghost-v1]\n"
               << "    interval 0 disables Visit/screen/monitor or Restart;"
                  " evidence remains enabled outside the timed step\n"
@@ -218,7 +220,8 @@ int main(int argc, char* argv[]) {
     if (rank == 0) std::cout << "HUNDUN-FLOW 1.0.0 source=v0.4\n";
     result = 0;
   } else if ((argc == 3 || argc == 4) &&
-             std::string_view{argv[1]} == "validate" &&
+             (std::string_view{argv[1]} == "validate" ||
+              std::string_view{argv[1]} == "check") &&
              (argc == 3 || std::string_view{argv[3]} == "--dry-plan")) {
     CaseValidationReport report;
     const Status status =
@@ -226,6 +229,34 @@ int main(int argc, char* argv[]) {
     if (status && rank == 0) {
       std::cout << "VALID case=" << report.case_model
                 << " product=" << report.product
+                << " time_scheme="
+                << (report.summary.time_scheme == hundun::v04::TimeScheme::cn_be
+                        ? "cn_be" : "backward_euler")
+                << " coupling="
+                << (report.summary.coupling == hundun::v04::CouplingKind::outer_corrected
+                        ? "outer_corrected"
+                    : report.summary.coupling == hundun::v04::CouplingKind::simple
+                        ? "SIMPLE" : "PISO")
+                << " sgs="
+                << (report.summary.turbulence == hundun::v04::TurbulenceKind::smagorinsky ? "smagorinsky"
+                    : report.summary.turbulence == hundun::v04::TurbulenceKind::wale ? "wale"
+                    : report.summary.turbulence == hundun::v04::TurbulenceKind::vreman ? "vreman"
+                    : report.summary.turbulence == hundun::v04::TurbulenceKind::vreman_wall_function
+                        ? "vreman_wall_function" : "none")
+                << " smagorinsky_coefficient=" << report.summary.smagorinsky_coefficient
+                << " chemistry="
+                << (report.summary.reaction_mode == hundun::v04::ReactionMode::none ? "none"
+                    : report.summary.interval_chemistry ? "transport_then_interval"
+                    : report.summary.reaction_mode == hundun::v04::ReactionMode::esf_tpdf ? "esf_transport_then_interval"
+                    : report.summary.reaction_mode == hundun::v04::ReactionMode::pasr_algebraic_v1
+                        ? "frozen_pasr" : "frozen_mean")
+                << " reaction_model=" << report.summary.reaction_model
+                << " derived_output_bytes=" << report.summary.derived_output_bytes
+                << " reaction_workspace_bytes=" << report.summary.reaction_workspace_bytes
+                << " esf_energy_workspace_bytes=" << report.summary.esf_energy_workspace_bytes
+                << " source_response_rtol=" << report.summary.interval_source_relative_tolerance
+                << " source_response_atol=" << report.summary.interval_source_absolute_tolerance
+                << " energy=" << (report.summary.conservative_total_energy ? "conservative_total" : "enthalpy_material")
                 << " global=" << report.summary.global_cells.x << 'x'
                 << report.summary.global_cells.y << 'x'
                 << report.summary.global_cells.z
@@ -273,6 +304,11 @@ int main(int argc, char* argv[]) {
     std::array<double, 69U> initial_values{};
     for (int index = 3; index < argc && parsed;) {
       const std::string_view flag{argv[index++]};
+      if (flag == "--observe-mg-cost") {
+        parsed = !options.observe_mg_cost;
+        options.observe_mg_cost = true;
+        continue;
+      }
       if (flag == "--restart-method-recovery") {
         parsed = options.restart_history_policy ==
                  hundun::v04::RestartHistoryPolicy::require_compatible;
@@ -305,6 +341,10 @@ int main(int argc, char* argv[]) {
       } else if (flag == "--restart-source-case" && options.restart_source_case.empty()) {
         options.restart_source_case = std::string{value};
         options.restart_history_policy = hundun::v04::RestartHistoryPolicy::rebuild_method_history;
+      } else if (flag == "--restart-refine-chemistry" && options.restart_source_case.empty() &&
+                 options.restart_history_policy == hundun::v04::RestartHistoryPolicy::require_compatible) {
+        options.restart_source_case = std::string{value};
+        options.restart_history_policy = hundun::v04::RestartHistoryPolicy::refine_chemistry;
       } else if (flag == "--initial-state" && !options.initial_state.has_value()) {
         hundun::v04::DriverInitialState initial;
         parsed = initial_state(argv[index - 1], initial_values, initial);
@@ -684,10 +724,11 @@ int main(int argc, char* argv[]) {
       }
       if (!status && rank == 0 && report.failed_stage != 0U)
         std::cerr << '\n';
-      if (!status && rank == 0)
+      if (!status && rank == 0) {
         print_numerical_failure(report.numerical_failure);
         (void)hundun::v04::write_step_completion_failure(
             std::cerr, report.step_completion);
+      }
       if (!status && rank == 0)
         print_predictor_failure(report.thermophysical_predictor.failure);
       result = finish(status, rank);

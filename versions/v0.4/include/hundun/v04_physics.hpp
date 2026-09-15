@@ -156,6 +156,20 @@ class ThermodynamicsPlan {
                           double& enthalpy, double& cp,
                           double& gas_constant) const noexcept;
 
+  // Reference-independent thermal coordinate for common mixture face limiting.
+  // Integrates each species cp with its low-temperature NASA offset removed;
+  // physical energy continues to use the absolute mixture enthalpy. Signed
+  // finite weights support reflected Dirichlet ghost values.
+  Status transport_enthalpy_coordinate(
+      double temperature, Span<const double> independent_mass_fractions,
+      double& coordinate) const noexcept;
+  // The same affine coordinate from transported h/Y, including reflected
+  // boundary states. Removes only the compiled NASA reference offset;
+  // thermodynamic range/closure validation remains with the state owner.
+  Status transport_enthalpy_coordinate_from_h(
+      double enthalpy, Span<const double> independent_mass_fractions,
+      double& coordinate) const noexcept;
+
   // Returns the cached absolute NASA enthalpy for one complete species at the
   // configured temperature endpoints.  The caller intentionally forms the
   // conserved linear sum from arbitrary rho*Y_s values; no composition
@@ -216,6 +230,8 @@ class ThermodynamicsPlan {
                              ThermoState& out) const noexcept;
   Status composition(Span<const double> independent_mass_fractions,
                      double& dependent) const noexcept;
+  std::size_t mixture_reference(Span<const double> independent_mass_fractions,
+                                double dependent) const noexcept;
   Status mixture_properties(double temperature,
                             Span<const double> independent_mass_fractions,
                             double dependent, double& enthalpy, double& cp,
@@ -299,6 +315,7 @@ class TransportPlan {
   std::vector<double> constant_wilke_phi_;
   std::vector<double> perry_temperature_;
   std::vector<double> perry_scale_;
+  std::vector<std::uint8_t> kerosene_vapor_;
   std::vector<std::uint16_t> independent_to_species_;
   std::size_t dependent_species_{};
   double minimum_temperature_{};
@@ -411,7 +428,7 @@ class EffectiveViscosityAuthority {
   bool claimed_{};
 };
 
-enum class SubgridKind : std::uint8_t { none, wale, vreman };
+enum class SubgridKind : std::uint8_t { none, wale, vreman, smagorinsky };
 enum class WallTreatmentKind : std::uint8_t {
   resolved,
   equilibrium_wall_function
@@ -424,6 +441,7 @@ struct TurbulencePlanSpec {
   double vreman_coefficient{0.07};
   double turbulent_prandtl{0.9};
   double turbulent_schmidt{0.7};
+  double smagorinsky_coefficient{0.17};
 };
 
 struct TurbulenceUpdateInput {
@@ -549,6 +567,23 @@ struct WallFunctionResult {
   double scalar_flux_into_fluid{};
 };
 
+// Algebraic SGS state; dissipation includes molecular and SGS contributions.
+struct SgsState {
+  double kinematic_viscosity_m2_s{};
+  double kinetic_energy_m2_s2{};
+  double dissipation_w_m3{};
+  double specific_dissipation_m2_s3{};
+};
+
+Status sgs_state_from_viscosity(const VelocityGradient& gradient,
+                               double filter_width_m, double density_kg_m3,
+                               double molecular_viscosity_pa_s,
+                               double sgs_kinematic_viscosity_m2_s,
+                               SgsState& out) noexcept;
+
+Status smagorinsky_kinematic_viscosity(const VelocityGradient& gradient,
+                                      double filter_width, double coefficient,
+                                      double& out) noexcept;
 Status wale_kinematic_viscosity(const VelocityGradient& gradient,
                                 double filter_width, double coefficient,
                                 double& out) noexcept;
@@ -578,6 +613,14 @@ class TurbulencePlan {
   Status evaluate_candidate_effective_viscosity(
       const TurbulenceCandidateInput& input, FieldView effective_viscosity,
       TurbulenceCandidateCertificate& certificate) const noexcept;
+  Status evaluate_sgs_cell(Int3 cell, const VelocityGradient& gradient,
+                           double density_kg_m3, double molecular_viscosity_pa_s,
+                           SgsState& out) const noexcept;
+  // Pure two-pass query. Activity is empty (all fluid) or one 0/1 byte per cell.
+  // Outputs use x-fast owned-cell order and carry explicit SI units.
+  Status evaluate_sgs_state(const TurbulenceCandidateInput& input,
+                            Span<SgsState> output,
+                            Span<const std::uint8_t> activity = {}) const noexcept;
   Status evaluate_wall_function(const WallFunctionSample& sample,
                                 WallFunctionResult& result) const noexcept;
 

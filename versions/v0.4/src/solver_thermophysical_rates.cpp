@@ -7,6 +7,7 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_heat_boundary_detail.hpp"
 #include "solver_mixture_enthalpy_diffusion_detail.hpp"
 #include "solver_viscous_detail.hpp"
 #include "solver_ibm_scalar_transport_detail.hpp"
@@ -360,6 +361,12 @@ Status evaluate_thermophysical_rates(
   status = detail::MixtureEnthalpyDiffusion::add_rate(
         enthalpy_plan, input.state, rate_material, input.immersed_interface,
       box, output.diffusion_scratch);
+  if (status)
+    status = detail::apply_heat_flux_boundary(
+        enthalpy_plan, kernels, thermal_coordinate, thermal_coefficient,
+        box, output.diffusion_scratch,
+        input.immersed_interface ? input.immersed_interface->cell_activity()
+                                : Span<const std::uint8_t>{});
   if (!status) return status;
   if (input.immersed_interface != nullptr) {
     status = input.immersed_interface->correct_viscous_heating(

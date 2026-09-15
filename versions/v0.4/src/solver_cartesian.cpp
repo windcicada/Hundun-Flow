@@ -539,6 +539,7 @@ void CartesianKernelPlan::reset() noexcept {
     metric_centres_[axis].clear();
     metric_widths_[axis].clear();
     metric_inverse_widths_[axis].clear();
+    metric_face_geometry_[axis].clear();
     metrics_[axis] = {};
   }
 }
@@ -549,6 +550,7 @@ void CartesianKernelPlan::rebind_metrics() noexcept {
     metrics_[axis].centres = metric_centres_[axis].data();
     metrics_[axis].widths = metric_widths_[axis].data();
     metrics_[axis].inverse_widths = metric_inverse_widths_[axis].data();
+    metrics_[axis].face_geometry = metric_face_geometry_[axis].data();
   }
 }
 
@@ -571,6 +573,7 @@ void CartesianKernelPlan::move_from(CartesianKernelPlan&& other) noexcept {
     metric_widths_[axis] = std::move(other.metric_widths_[axis]);
     metric_inverse_widths_[axis] =
         std::move(other.metric_inverse_widths_[axis]);
+    metric_face_geometry_[axis] = std::move(other.metric_face_geometry_[axis]);
     metrics_[axis] = other.metrics_[axis];
   }
   rebind_metrics();
@@ -720,6 +723,31 @@ Status CartesianKernelPlan::compile(const SchemePlan& schemes,
         }
         candidate.metrics_[axis].cells = count;
         candidate.metrics_[axis].global_begin = reach;
+      }
+    }
+    candidate.rebind_metrics();
+    // Cache the immutable face geometry after periodic metric extension.
+    // The coordinate arithmetic matches the corresponding runtime kernel.
+    for (std::size_t axis=0; axis<3; ++axis) {
+      const auto& metric=candidate.metrics_[axis];
+      auto& cached=candidate.metric_face_geometry_[axis];
+      cached.resize(metric.cells+1U);
+      for (std::size_t i=0; i<cached.size(); ++i) {
+        const auto face=static_cast<std::int32_t>(i)-metric.global_begin;
+        const bool uniform=geometry.kind()==GeometryKind::uniform;
+        const double location=uniform ? detail::metric_face<true>(candidate,axis,face) :
+            detail::metric_face<false>(candidate,axis,face);
+        const double left=uniform ? detail::metric_centre<true>(candidate,axis,face-1) :
+            detail::metric_centre<false>(candidate,axis,face-1);
+        const double right=uniform ? detail::metric_centre<true>(candidate,axis,face) :
+            detail::metric_centre<false>(candidate,axis,face);
+        cached[i]={location-left,right-location,0.0};
+        // Preserve the original sum of the two distances in interpolation.
+        cached[i].inverse_distance=1.0/(cached[i].left_distance+cached[i].right_distance);
+        if (!(cached[i].left_distance>0.0) || !(cached[i].right_distance>0.0) ||
+            !std::isfinite(cached[i].left_distance) || !std::isfinite(cached[i].right_distance) ||
+            !std::isfinite(cached[i].inverse_distance))
+          return {StatusCode::invalid_plan,kKernelPlan};
       }
     }
     candidate.rebind_metrics();

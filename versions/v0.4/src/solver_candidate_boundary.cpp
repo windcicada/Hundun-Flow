@@ -674,6 +674,16 @@ Status prepare_physical_boundary_flux(
                          kCandidateBoundaryBackflow};
                 return false;
               }
+              if (impl.boundary->pressure_driven_backflow()) {
+                // Preserve the pressure equation's face flux. The incoming
+                // reservoir state already supplies h/Y and tangential U;
+                // replacing this flux by cell-centred rho*U would remove
+                // the pressure correction from the continuity equation.
+                destination.unchecked(face_index) = provisional;
+                local_outlet_hash = mix(local_outlet_hash, UINT64_C(1));
+                local_outlet_hash = mix(local_outlet_hash, double_bits(provisional));
+                return true;
+              }
               Real3 prescribed = vector_parameter(
                   *impl.boundary, face_plan->flow_parameter, true, false);
               if (impl.boundary->pressure_driven_backflow()) {

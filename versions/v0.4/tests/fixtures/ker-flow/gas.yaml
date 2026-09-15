@@ -1,0 +1,109 @@
+description: 624CF frozen gas thermodynamics diagnostic; transport fixture supplies backend query fields.
+units: {length: cm, time: s, quantity: mol, activation-energy: J/mol}
+elements:
+- {symbol: C, atomic-weight: 12.011200000000001}
+- {symbol: H, atomic-weight: 1.00797}
+- {symbol: N, atomic-weight: 14.0067}
+- {symbol: O, atomic-weight: 15.9994}
+phases:
+- name: kerosene-thermo
+  thermo: ideal-gas
+  elements: [O, H, C, N]
+  species: [H2, H2O, CO, CO2, O2, N2, C12H23]
+  kinetics: gas
+  reactions: none
+  hundun-chemistry: {model: kerosene_4_step_v1, interval: frozen_material}
+  transport: mixture-averaged
+  state: {T: 900.0, P: 1 atm, Y: {O2: 0.23, N2: 0.77}}
+species:
+- name: H2
+  composition: {H: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [2.3443311200000001, 0.0079805207499999992, -1.9478150999999999e-05, 2.01572094e-08, -7.3761176100000006e-12, -917.93517299999996, 0.68301023800000005]
+    - [2.9328657499999999, 0.00082660802599999995, -1.4640236400000001e-07, 1.54100414e-11, -6.8880479999999999e-16, -813.06558099999995, -1.02432865]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 4.0
+    well-depth: 150.0
+- name: H2O
+  composition: {O: 1, H: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [4.1986352, -0.0020364017, 6.5203416000000002e-06, -5.4879268999999999e-09, 1.771968e-12, -30293.725999999999, -0.84900900999999995]
+    - [2.6770388999999999, 0.0029731815999999999, -7.7376889000000002e-07, 9.4433514000000003e-11, -4.2689990999999999e-15, -29885.894, 6.8825500000000002]
+  transport:
+    model: gas
+    geometry: nonlinear
+    diameter: 4.0
+    well-depth: 150.0
+- name: CO
+  composition: {O: 1, C: 1}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [3.5795335000000001, -0.00061035368999999996, 1.0168142999999999e-06, 9.0700586000000002e-10, -9.0442448999999998e-13, -14344.085999999999, 3.5084092999999998]
+    - [3.0484859000000002, 0.0013517281, -4.8579404999999999e-07, 7.8853644000000001e-11, -4.6980746000000002e-15, -14266.117, 6.0170976999999999]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 4.0
+    well-depth: 150.0
+- name: CO2
+  composition: {O: 2, C: 1}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [2.3568129999999998, 0.0089841299000000003, -7.1220632000000003e-06, 2.4573008e-09, -1.4288547999999999e-13, -48371.970999999998, 9.9009035000000001]
+    - [4.6365110999999999, 0.0027414569000000001, -9.9589759000000001e-07, 1.6038666000000001e-10, -9.1619856999999996e-15, -49024.904000000002, -1.9348955000000001]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 4.0
+    well-depth: 150.0
+- name: O2
+  composition: {O: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [3.7824563599999999, -0.0029967341599999998, 9.84730201e-06, -9.6812950900000007e-09, 3.24372837e-12, -1063.9435599999999, 3.6576757299999998]
+    - [3.6609606499999998, 0.00065636581100000002, -1.4114962699999999e-07, 2.0579793499999999e-11, -1.2991343600000001e-15, -1215.9771800000001, 3.4153627900000001]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 4.0
+    well-depth: 150.0
+- name: N2
+  composition: {N: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [3.53100528, -0.000123660988, -5.0299943300000005e-07, 2.43530612e-09, -1.4088123500000001e-12, -1046.9762800000001, 2.96747038]
+    - [2.9525763700000001, 0.0013969004000000001, -4.9263160300000003e-07, 7.8601019500000002e-11, -4.6075520400000001e-15, -923.94868799999995, 5.8718876199999999]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 4.0
+    well-depth: 150.0
+- name: C12H23
+  composition: {H: 23, C: 12}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200, 1000, 6000]
+    data:
+    - [2.0869217, 0.13314965000000001, -8.1157452000000006e-05, 2.9409286000000001e-08, -6.5195212999999996e-12, -31310.966, 25.442305000000001]
+    - [24.880201, 0.078250048000000003, -3.1550973000000003e-05, 5.78789e-09, -3.9827968e-13, -38508.837, -95.568240000000003]
+  transport:
+    model: gas
+    geometry: nonlinear
+    diameter: 4.0
+    well-depth: 150.0

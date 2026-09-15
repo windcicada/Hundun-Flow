@@ -1908,11 +1908,19 @@ Status PressureEnergyPressureFluxOperator::apply_after_exchange(
 Status form_pressure_energy_thermo_jacobian(
     double pressure_absolute, double enthalpy, const ThermoState& state,
     PressureEnergyThermoJacobian& jacobian) noexcept {
+  if (!std::isfinite(state.temperature) || state.temperature <= 0.0 ||
+      !std::isfinite(state.cp) || state.cp <= 0.0)
+    return {StatusCode::numerical_failure, kPressureEnergyThermo};
+  return form_pressure_energy_density_jacobian(pressure_absolute,enthalpy,
+      {state.rho,state.drho_dp_hY,state.drho_dh_pY},jacobian);
+}
+
+Status form_pressure_energy_density_jacobian(
+    double pressure_absolute,double enthalpy,const PressureThermoState& state,
+    PressureEnergyThermoJacobian& jacobian) noexcept {
   if (!std::isfinite(pressure_absolute) || pressure_absolute <= 0.0 ||
       !std::isfinite(enthalpy) || !std::isfinite(state.rho) ||
-      state.rho <= 0.0 || !std::isfinite(state.temperature) ||
-      state.temperature <= 0.0 || !std::isfinite(state.cp) ||
-      state.cp <= 0.0 || !std::isfinite(state.drho_dp_hY) ||
+      state.rho <= 0.0 || !std::isfinite(state.drho_dp_hY) ||
       state.drho_dp_hY <= 0.0 || !std::isfinite(state.drho_dh_pY) ||
       state.drho_dh_pY >= 0.0) {
     return {StatusCode::numerical_failure, kPressureEnergyThermo};

@@ -82,6 +82,82 @@ struct ColdPressureRow {
   double rhs{};
 };
 
+// Full row residual evaluated together with its RHS, after halo exchange.
+inline double cold_row_residual(const ColdPressureRow& row, double value,
+    const std::array<double,6>& neighbours) noexcept {
+  double sum=-row.rhs, correction=0;
+  const auto add_product=[&](double coefficient,double operand) {
+    const double product=coefficient*operand;
+    correction+=std::fma(coefficient,operand,-product);
+    const double next=sum+product;
+    correction+=std::abs(sum)>=std::abs(product)
+        ? (sum-next)+product : (product-next)+sum;
+    sum=next;
+  };
+  add_product(row.diagonal,value);
+  for(unsigned f=0;f<6;++f)
+    if(row.neighbour[f]!=0) add_product(-row.neighbour[f],neighbours[f]);
+  return sum+correction;
+}
+
+// The global L2 linear criterion and the local continuity criterion use
+// different scales. Retain the configured L2 gate and additionally require
+// the pressure row to satisfy the density/time scale of each fluid cell.
+// Half the final 64-epsilon budget leaves room for the represented rho/flux
+// update. This audit reads the canonical true residual supplied by Krylov.
+class ColdPressureContinuityAudit final : public LinearConvergenceAudit {
+ public:
+  static constexpr double limit=32*std::numeric_limits<double>::epsilon();
+  ColdPressureContinuityAudit(ConstFieldView density,ConstFieldView pressure,
+      double reference,double dt,Span<const std::uint8_t> activity,
+      PlanFingerprint fingerprint) noexcept
+      : density_(density),pressure_(pressure),reference_(reference),dt_(dt),
+        activity_(activity),fingerprint_(fingerprint) {}
+  LinearConvergenceAuditCertificate certificate() const noexcept override {
+    return {fingerprint_};
+  }
+  Status evaluate(ConstFieldView solution,ConstFieldView residual,
+      ReductionEngine& reductions,LinearConvergenceAuditResult& out) noexcept override {
+    const auto cells=density_.interior;
+    const auto count=std::size_t(cells.x)*cells.y*cells.z;
+    auto status=reductions.consensus(
+        fingerprint_ && std::isfinite(dt_) && dt_>0 && std::isfinite(reference_) &&
+        valid_cell_view(density_,cells,0,1,0) && valid_cell_view(pressure_,cells,0,1,0) &&
+        valid_cell_view(solution,cells,0,1,0) && valid_cell_view(residual,cells,0,1,0) &&
+        ((!activity_.data && activity_.size==0) || (activity_.data && activity_.size==count))
+            ? Status{} : Status{StatusCode::invalid_plan,17856});
+    if(!status)return status;
+    double local[2]{};std::size_t i{};
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+      if(activity_.size && activity_.data[i]==0)continue;
+      const Int3 c{x,y,z};const double rho=density_.unchecked(c,0);
+      const double p=reference_+pressure_.unchecked(c,0),dp=solution.unchecked(c,0);
+      const double r=residual.unchecked(c,0);
+      if(!(rho>0) || !(p>0) || !std::isfinite(rho) || !std::isfinite(p) ||
+          !std::isfinite(dp) || !std::isfinite(r)) {local[1]=1;continue;}
+      const double updated=rho+(rho/p)*dp;
+      if(!(updated>0) || !std::isfinite(updated)) {local[1]=1;continue;}
+      const double metric=std::abs(r)*dt_/updated;
+      if(!std::isfinite(metric))local[1]=1;
+      else local[0]=std::max(local[0],metric);
+    }
+    double global[2]{};
+    status=reductions.checked_max({local,2},{global,2});
+    if(!status)return status;
+    if(global[1])return {StatusCode::numerical_failure,17857};
+    LinearConvergenceAuditResult candidate;
+    candidate.metric=candidate.unscaled_metric=global[0];candidate.limit=limit;
+    candidate.accepted=candidate.metric<=limit;
+    out=candidate;
+    return {};
+  }
+ private:
+  ConstFieldView density_,pressure_;
+  double reference_,dt_;
+  Span<const std::uint8_t> activity_;
+  PlanFingerprint fingerprint_;
+};
+
 inline bool assemble_cold_pressure_row(
     double volume, double dt, double density_pressure_derivative,
     double density_rate, const std::array<ColdPressureFace, 6>& faces,
@@ -349,6 +425,14 @@ class ColdPressureOperator final : public LinearOperator {
     return failure_;
   }
   Status apply(FieldView input, FieldView output) const noexcept override {
+    return evaluate(input,output,false);
+  }
+  Status residual(FieldView input, FieldView output) const noexcept {
+    return evaluate(input,output,true);
+  }
+
+ private:
+  Status evaluate(FieldView input, FieldView output, bool include_rhs) const noexcept {
     failure_ = {};
     HaloTicket ticket;
     auto status = halo_.begin(140U, {&input, 1U}, ticket);
@@ -367,11 +451,18 @@ class ColdPressureOperator final : public LinearOperator {
           const Int3 neighbour[] = {{x - 1, y, z}, {x + 1, y, z},
                                     {x, y - 1, z}, {x, y + 1, z},
                                     {x, y, z - 1}, {x, y, z + 1}};
-          double value = row.diagonal * input.unchecked(c, 0);
-          for (unsigned f = 0; f < 6; ++f)
-            if (row.neighbour[f] != 0)
-              value -= row.neighbour[f] * input.unchecked(neighbour[f], 0);
-          output.unchecked(c, 0) = value;
+          if(include_rhs) {
+            std::array<double,6> values{};
+            for(unsigned f=0;f<6;++f)
+              if(row.neighbour[f]!=0) values[f]=input.unchecked(neighbour[f],0);
+            output.unchecked(c,0)=cold_row_residual(row,input.unchecked(c,0),values);
+          } else {
+            double value = row.diagonal * input.unchecked(c, 0);
+            for (unsigned f = 0; f < 6; ++f)
+              if (row.neighbour[f] != 0)
+                value -= row.neighbour[f] * input.unchecked(neighbour[f], 0);
+            output.unchecked(c, 0) = value;
+          }
         }
     return {};
   }
@@ -389,6 +480,7 @@ class ColdPressureOperator final : public LinearOperator {
 // compress and volume normalization make the C++ pressure rows nonsymmetric.
 class ColdPressureDilu final : public LinearPreconditioner {
  public:
+  void reset_identity(LinearIdentity identity) noexcept { identity_=identity; }
   std::uint64_t owned_payload_bytes() const noexcept {
     return inverse_.capacity() * sizeof(double);
   }
@@ -493,16 +585,8 @@ inline Status close_cold_momentum_rows(
     periodic[axis] = rule->periodic;
   }
   const auto fluid = [&](Int3 c) {
-    Int3 g{c.x + patch.begin.x, c.y + patch.begin.y, c.z + patch.begin.z};
-    for (unsigned axis = 0; axis < 3; ++axis) {
-      auto& value = axis == 0 ? g.x : axis == 1 ? g.y : g.z;
-      const auto extent = coord(global_cells, axis);
-      if (value < 0 || value >= extent) {
-        if (!periodic[axis]) return true;
-        value = (value % extent + extent) % extent;
-      }
-    }
-    return !topology || topology->is_fluid_global(g);
+    const Int3 g{c.x + patch.begin.x, c.y + patch.begin.y, c.z + patch.begin.z};
+    return !topology || topology->is_fluid_stencil(g);
   };
   std::size_t index{};
   for (int z = 0; z < cells.z; ++z)
@@ -681,13 +765,32 @@ inline Status close_cold_momentum_rows(
   return {};
 }
 
+inline constexpr double kColdEosRoundoff =
+    16 * std::numeric_limits<double>::epsilon();
+
+// The pressure update and density-authoritative refresh share one EOS
+// roundoff contract. A perturbation update followed by an absolute-pressure
+// rebase can span multiple density ULPs inside that existing contract.
+// Retaining its valid pressure avoids a reciprocal refresh/correction cycle.
+inline double cold_density_pressure_candidate(double density, double psi,
+    double previous, double evaluated,
+    double maximum_pressure_change = std::numeric_limits<double>::infinity()) noexcept {
+  if (std::isfinite(density) && density>0 && std::isfinite(psi) && psi>0 &&
+      std::isfinite(previous) && previous>0 &&
+      std::abs(previous-evaluated)<=maximum_pressure_change &&
+      std::abs(previous*psi-density)<=kColdEosRoundoff*density)
+    return previous;
+  return evaluated;
+}
+
 // Upwind implicit splitting; the retained full residual supplies the higher
 // order convection, temperature conduction, pressure and viscous work.
 inline Status close_cold_enthalpy_rows(
     const CartesianKernelPlan& kernels, MeshPatch patch, Int3 global_cells,
     const EBTopology* topology, const BoundaryPlan& boundary,
     const EquationStateView& state, const EquationAssemblyContext& context,
-    const EquationSystemView& reference, std::vector<ColdPressureRow>& rows) {
+    const EquationSystemView& reference, std::vector<ColdPressureRow>& rows,
+    bool continuity_reduced = true) {
   auto cells = patch.cells;
   rows.resize(std::size_t(cells.x) * cells.y * cells.z);
   const auto coord = [](Int3 c, unsigned a) {
@@ -695,10 +798,7 @@ inline Status close_cold_enthalpy_rows(
   };
   const auto fluid = [&](Int3 c) {
     Int3 g{c.x + patch.begin.x, c.y + patch.begin.y, c.z + patch.begin.z};
-    if (g.x < 0 || g.y < 0 || g.z < 0 || g.x >= global_cells.x ||
-        g.y >= global_cells.y || g.z >= global_cells.z)
-      return true;
-    return !topology || topology->is_fluid_global(g);
+    return !topology || topology->is_fluid_stencil(g);
   };
   std::size_t index{};
   for (int z = 0; z < cells.z; ++z)
@@ -708,14 +808,13 @@ inline Status close_cold_enthalpy_rows(
         if (!fluid(c)) {
           rows[index] = {};
           rows[index].diagonal = 1;
-          rows[index].rhs = state.enthalpy.trial.unchecked(c, 0);
+          rows[index].rhs = 0;
           continue;
         }
         double volume = cell_volume(kernels, c),
                rho = state.density.trial.unchecked(c, 0),
                rho_old = state.density.accepted.unchecked(c, 0),
-               h = state.enthalpy.trial.unchecked(c, 0),
-               h_old = state.enthalpy.accepted.unchecked(c, 0);
+               h = state.enthalpy.trial.unchecked(c, 0);
         const Int3 nb[] = {{x - 1, y, z}, {x + 1, y, z}, {x, y - 1, z},
                            {x, y + 1, z}, {x, y, z - 1}, {x, y, z + 1}};
         std::array<ColdTransportFace, 6> faces;
@@ -741,6 +840,7 @@ inline Status close_cold_enthalpy_rows(
           diffusion_sum += diffusion;
           div += (f % 2 ? 1 : -1) * flux / volume;
           double upwind_diffusion =
+              context.mixture_transport ? 0.0 :
               (flux >= 0 ? 1 - weight : weight) * std::abs(flux);
           faces[f] = {diffusion + upwind_diffusion, weight, flux};
         }
@@ -751,6 +851,19 @@ inline Status close_cold_enthalpy_rows(
                              context.bdf.a0 * rho * volume - diffusion_sum) /
                             volume;
         for (unsigned f = 0; f < 6; ++f) {
+          const unsigned face_axis=f/2;
+          const Int3 source_face=f%2 ? nb[f] : c;
+          double prescribed{};
+          if (context.mixture_transport && context.immersed_interface &&
+              context.immersed_interface->prescribed_face_flux(
+                  static_cast<CartesianAxis>(face_axis),source_face,prescribed)) {
+            // The prescribed inlet enthalpy is independent of fluid h.
+            // Remove the central conservative-face derivative; retain the
+            // -h*div(phi) term paired with old-density advective storage.
+            const double owner=f%2 ? faces[f].lower_weight : 1.0-faces[f].lower_weight;
+            const double outward_flux=(f%2 ? 1.0 : -1.0)*faces[f].mass_flux;
+            spatial.diagonal-=owner*outward_flux/volume;
+          }
           if (!fluid(nb[f])) {
             spatial.diagonal -= physical_diffusion[f] / volume;
             spatial.neighbour[f] = 0;
@@ -773,22 +886,30 @@ inline Status close_cold_enthalpy_rows(
                             (f % 2 ? 1.0 : -1.0) *
                                 state.velocity.trial.unchecked(c, a) < 0.0);
           if (dirichlet)
-            spatial.diagonal += physical_diffusion[f] / volume;
+            spatial.diagonal += context.mixture_transport
+                ? spatial.neighbour[f] : physical_diffusion[f] / volume;
           else
             spatial.diagonal -= spatial.neighbour[f];
           spatial.neighbour[f] = 0;
         }
-        double action = spatial.diagonal * h;
-        for (unsigned f = 0; f < 6; ++f)
-          if (spatial.neighbour[f])
-            action -=
-                spatial.neighbour[f] * state.enthalpy.trial.unchecked(nb[f], 0);
-        const double unsteady = (rho * h - rho_old * h_old) / context.dt;
-        spatial.rhs = action - (reference.residual.unchecked(c, 0) / volume -
-                                unsteady - h * div);
-        if (!add_cold_backward_euler_storage(spatial, h_old, rho_old,
-                                             context.dt, rows[index]))
-          return {StatusCode::numerical_failure, 17816};
+        if (!add_cold_backward_euler_storage(spatial,0.0,rho_old,
+                                             context.dt,rows[index]))
+          return {StatusCode::numerical_failure,17816};
+        // Solve for delta-h. Its residual scale is independent of a constant
+        // formation-enthalpy offset in h and in the absolute-state RHS.
+        // This is rhs - A*h, using the conservative residual directly to
+        // retain accuracy when the two absolute-state terms nearly cancel.
+        const double continuity=(rho-rho_old)/context.dt+div;
+        rows[index].rhs=-reference.residual.unchecked(c,0)/volume;
+        if (continuity_reduced) {
+          rows[index].rhs+=h*continuity;
+        } else {
+          // Undo the advective mass row operation for the conservative
+          // defect solve, including its diagonal derivative at fixed rho.
+          rows[index].diagonal+=continuity;
+          if (!std::isfinite(rows[index].diagonal) || rows[index].diagonal<=0)
+            return {StatusCode::numerical_failure,17816};
+        }
       }
   return {};
 }
@@ -824,10 +945,7 @@ inline bool assemble_midpoint_cold_grid(
   };
   const auto fluid = [&](Int3 c) {
     const Int3 g{c.x + patch.begin.x, c.y + patch.begin.y, c.z + patch.begin.z};
-    if (g.x < 0 || g.y < 0 || g.z < 0 || g.x >= global_cells.x ||
-        g.y >= global_cells.y || g.z >= global_cells.z)
-      return true;  // external boundary ghosts are handled separately from IBM
-    return !topology || topology->is_fluid_global(g);
+    return !topology || topology->is_fluid_stencil(g);
   };
   const auto derivative = [&](Int3 c) {
     return rho.unchecked(c, 0) /
@@ -939,12 +1057,23 @@ inline bool assemble_midpoint_cold_grid(
                   ? gradient(lo, after) : face_gradient;
               f.mass_flux += 0.5 * dt * area *
                   (0.5 * (lower_gradient + upper_gradient) - face_gradient);
-              // Match vls: the positive-flow branch tests lo,hi,after activity.
-              f.limiter_diffusion = cold_pressure_limiter_diffusion(
-                  gradient(before, lo), gradient(lo, hi), gradient(hi, after),
-                  f.owner_lower_weight, f.density_flux,
-                  fluid(lo) && fluid(hi) && fluid(after), 1e-30,
-                  std::numeric_limits<double>::epsilon());
+              // The upwind pressure gradient has the same material
+              // authority as mixture transport. A missing fluid donor uses
+              // full upwind diffusion; solid placeholder pressure contributes
+              // to neither the gradient nor the resulting matrix.
+              const bool positive = f.density_flux > 0.0;
+              const bool upstream_fluid = positive ? fluid(before) : fluid(after);
+              if (upstream_fluid) {
+                f.limiter_diffusion = cold_pressure_limiter_diffusion(
+                    positive ? gradient(before, lo) : 0.0, face_gradient,
+                    positive ? 0.0 : gradient(hi, after),
+                    f.owner_lower_weight, f.density_flux, true, 1e-30,
+                    std::numeric_limits<double>::epsilon());
+              } else {
+                f.limiter_diffusion =
+                    (positive ? 1.0-f.owner_lower_weight : f.owner_lower_weight) *
+                    std::abs(f.density_flux);
+              }
               density_divergence += (side ? 1 : -1) * f.density_flux;
             }
         } else

@@ -488,7 +488,14 @@ class EBTopology {
   }
   ImmersedFluidSide fluid_side() const noexcept { return fluid_side_; }
   std::uint8_t region_halo_width() const noexcept { return region_halo_width_; }
+  // Global coordinates in the resident material halo, including unwrapped
+  // periodic images. Physical boundary ghosts belong to the boundary plan.
   bool is_fluid_global(Int3 global_index) const noexcept;
+  bool is_fluid_stencil(Int3 global_index) const noexcept;
+  bool periodic_axis(CartesianAxis axis) const noexcept {
+    const auto index = static_cast<std::size_t>(axis);
+    return index < periodic_axes_.size() && periodic_axes_[index];
+  }
   Int3 global_cells() const noexcept { return global_cells_; }
   RevisionToken geometry_revision() const noexcept {
     return geometry_revision_;
@@ -516,6 +523,7 @@ class EBTopology {
   IbmInterfaceMetricPlan interface_metric_;
   Int3 global_cells_{};
   MeshPatch patch_{};
+  std::array<bool, 3U> periodic_axes_{};
   std::size_t halo_stride_y_{};
   std::size_t halo_stride_z_{};
   ImmersedFluidSide fluid_side_{ImmersedFluidSide::outside};
@@ -535,7 +543,8 @@ class EBTopologyCompiler {
                         const ImmersedSurfacePlan& surface,
                         ImmersedFluidSide fluid_side,
                         ImmersedPlanLimits limits,
-                        EBTopology& out) noexcept;
+                        EBTopology& out,
+                        ImmersedDomainBoundaryPolicy boundary_policy = {}) noexcept;
 };
 
 // Compile a Cartesian immersed-boundary authority directly from an immutable,
@@ -550,7 +559,8 @@ class ImportedIbmCompiler {
                         PlanFingerprint marker_source,
                         ImmersedPlanLimits limits, EBTopology& topology,
                         BoundaryStencilPlan& boundary,
-                        SurfaceQuadraturePlan& quadrature) noexcept;
+                        SurfaceQuadraturePlan& quadrature,
+                        ImmersedDomainBoundaryPolicy boundary_policy = {}) noexcept;
 };
 
 class IbmInterfaceMetricCompiler {
@@ -813,6 +823,10 @@ class IbmEquationInterfacePlan {
  private:
   friend class detail::MixtureEnthalpyDiffusion;
   friend class detail::MixtureEnthalpyConvection;
+  friend Status prepare_cartesian_mixture_transport(
+      const CartesianKernelPlan&, Span<const ConstFieldView>, ConstFieldView,
+      ConstFieldView, ConstFaceFluxView, FaceFluxView, RevisionToken,
+      MixtureTransportFaces&, const IbmEquationInterfacePlan*, MixtureFlatStencilPolicy) noexcept;
   friend class detail::IbmScalarTransport;
   friend class IbmPhysicalBoundaryFluxAuthority;
   struct WallLinearization {

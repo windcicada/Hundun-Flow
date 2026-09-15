@@ -1,0 +1,40 @@
+{
+  "model": "COAST Perry/Wilke mixture with explicit kerosene vapor piecewise relation",
+  "reference": [
+    {
+      "remote": "/home/administrator/data8t/624cf_s25000/work/coast_thick_repair_20260912/SRC.Coast/viscos.F90",
+      "local": "check/j7/viscos.F90",
+      "sha256": "77c52122b7103e61717e7d0a9353076b217e111e3ca6ccf438b683a7a17f2f22"
+    },
+    {
+      "remote": "/home/administrator/data8t/624cf_s25000/work/coast_thick_repair_20260912/SRC.Coast/fieldpdf.F90",
+      "local": "check/j7/fieldpdf.F90",
+      "sha256": "324866ee5157b08688e72d6773dbf824dd41e167336087ec6613374eb3112a15"
+    },
+    {
+      "remote": "/home/administrator/data8t/624cf_s25000/work/coast_thick_repair_20260912/SRC.Coast/app/coast_legacy_driver.F90",
+      "local": "check/j7/driver.F90",
+      "sha256": "2dc385f80ecb784571388917911854c6e439ed4023be7326c0c82b258cc851f9"
+    }
+  ],
+  "columns": [
+    "temperature_K",
+    "H2",
+    "H2O",
+    "CO",
+    "CO2",
+    "O2",
+    "N2",
+    "C12H23",
+    "viscosity_Pa_s"
+  ],
+  "composition": "mass fractions, mapped by stable species names; N2 is the native dependent species",
+  "samples": 110,
+  "temperature_range_K": [
+    200,
+    6000
+  ],
+  "reference_precision": "FP64, gfortran -fdefault-real-8 -fdefault-double-8 -ffp-contract=off",
+  "scope": "Actual 624CF molecular viscosity relation and thermochemical assets. The 8^3 flow fixture uses explicit unity Lewis Pr/Sc=.7 and dt=1e-5 s with a uniform initial state.",
+  "reference_source_sha256": "77c52122b7103e61717e7d0a9353076b217e111e3ca6ccf438b683a7a17f2f22"
+}

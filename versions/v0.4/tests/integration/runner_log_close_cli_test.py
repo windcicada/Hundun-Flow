@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
-"""Real CLI end-of-run libc failures, after a durable accepted checkpoint."""
+"""Real CLI buffered-output/close failures after a durable checkpoint."""
 import argparse
 import errno
 import hashlib
@@ -51,21 +51,25 @@ def main():
     results = []
     baseline_payload = None
 
-    def run(name, stream, target, observe, flush_error=0, close_error=0, flush_at=1):
+    def run(name, stream, target, observe, flush_error=0, close_error=0, flush_at=1,
+            write_error=0, steps=1):
         nonlocal baseline_payload
         root = output / name
         prefix = output / (name + '-exit')
         env = dict(os.environ, LD_PRELOAD=str(args.probe.resolve()),
                    HUNDUN_LOG_TARGET=stream, HUNDUN_LOG_RANK=str(target),
                    HUNDUN_LOG_ROOT=str(root.resolve()),
+                   HUNDUN_LOG_RANKS=str(args.ranks),
                    HUNDUN_LOG_EXIT_PREFIX=str(prefix.resolve()))
         if flush_error:
             env.update(HUNDUN_LOG_FLUSH_ERRNO=str(flush_error), HUNDUN_LOG_FLUSH_AT=str(flush_at))
         if close_error:
             env['HUNDUN_LOG_CLOSE_ERRNO'] = str(close_error)
+        if write_error:
+            env['HUNDUN_LOG_WRITE_ERRNO'] = str(write_error)
         command = [args.mpi, '-n', str(args.ranks), str(args.binary.resolve()),
                    '--spec', str(spec.resolve()), '--case-root', str(case.resolve()),
-                   '--run-root', str(root.resolve()), '--steps', '1', '--visit-interval', '0']
+                   '--run-root', str(root.resolve()), '--steps', str(steps), '--visit-interval', '0']
         if observe:
             command.append('--observe-performance')
             if args.mg_only:
@@ -75,35 +79,48 @@ def main():
         result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, universal_newlines=True, timeout=45)
         (output / (name + '.log')).write_text(result.stdout)
+        assert all(Path(str(prefix) + '-{}.txt'.format(rank)).is_file()
+                   for rank in range(args.ranks)), (name, result.returncode, result.stdout)
         exits = [list(map(int, Path(str(prefix) + '-{}.txt'.format(rank)).read_text().split()))
                  for rank in range(args.ranks)]
         row = {'name': name, 'returncode': result.returncode, 'exits': exits, 'command': command}
         results.append(row)
         (output / 'results.json').write_text(json.dumps(results, indent=2))
-        generation = (root / 'Restart/current').read_text().strip()
+        # Compare the first accepted checkpoint even when a second step is
+        # used to populate buffers after the first durable publication.
+        marker = root / 'step-00000000000000000001.complete'
+        generation = next(line.split()[1] for line in marker.read_text().splitlines()
+                          if line.startswith('restart_generation '))
         payloads = sorted((root / 'Restart' / generation).glob('rank-*.bin'))
         assert len(payloads) == args.ranks, 'missing committed rank payload'
         payload = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in payloads}
         if baseline_payload is None:
             baseline_payload = payload
         assert payload == baseline_payload, 'I/O completion changed accepted checkpoint bytes'
-        assert (root / 'step-00000000000000000001.complete').is_file()
+        assert marker.is_file()
         observation_stream = stream == 'performance.csv' or stream.startswith(('solver-rank-', 'mg-rank-'))
-        active_failure = (flush_error or close_error) and (observe or not observation_stream)
+        active_failure = (flush_error or close_error or write_error) and (observe or not observation_stream)
         if active_failure:
             assert exits[target][3] == bool(flush_error), row
             assert exits[target][4] == bool(close_error), row
+            assert exits[target][6] == bool(write_error), row
             assert result.returncode == 6 and all(value[0] == 6 for value in exits), row
             assert 'COMPLETED steps=' not in result.stdout, result.stdout
             assert 'log_completion_failure' in result.stdout, result.stdout
             if flush_error and close_error:
                 assert 'operation=flush errno={}'.format(flush_error) in result.stdout, result.stdout
+            if write_error:
+                assert (root / 'Restart/current').read_text().strip() == generation
+                assert not (root / 'step-00000000000000000002.complete').exists()
+                # A failed per-step flush leaves the stream failed. Completion
+                # reports that existing write failure before attempting close.
+                assert 'operation=write errno={}'.format(errno.EIO) in result.stdout, result.stdout
         else:
             assert result.returncode == 0 and all(value[0] == 0 for value in exits), row
-            assert 'COMPLETED steps=1 final_step=1' in result.stdout, result.stdout
-            assert all(value[3:] == [0, 0] for value in exits), row
+            assert 'COMPLETED steps={} final_step={}'.format(steps, steps) in result.stdout, result.stdout
+            assert all([value[3], value[4], value[6]] == [0, 0, 0] for value in exits), row
         print('{} returncode={} rank_exits={}'.format(name, result.returncode, exits), flush=True)
-        return exits[target][1]
+        return exits[target]
 
     run('baseline-off', 'force.csv', 0, False)
     if not args.mg_only and not args.fgmres_only:
@@ -119,16 +136,24 @@ def main():
                 'performance.csv', 'solver-rank-{}.csv'.format(args.ranks - 1)))
     for index, stream in enumerate(streams):
         target = int(stream.split('-')[-1].split('.')[0]) if '-rank-' in stream else 0
-        count = run('baseline-{}'.format(index), stream, target, True)
-        # The baseline's last libc flush belongs to filebuf close. The repaired
-        # code may add an earlier explicit flush; select that final-stage call.
-        assert count >= 1
-        at = max(1, count - 1)
+        baseline = run('baseline-{}'.format(index), stream, target, True)
+        assert baseline[2] >= 1, 'active stream must close'
+        # libc++ sync/close uses fflush. libstdc++ empty sync has no I/O;
+        # exercise its real write path with a second step after checkpoint 1.
+        libc_flush = baseline[1] > 0
+        if not libc_flush:
+            populated = run('buffered-{}'.format(index), stream, target, True, steps=2)
+            assert populated[5] >= 1, 'buffered output probe must observe actual I/O'
+        at = max(1, baseline[1] - 1)
         for error in (errno.EIO, errno.ENOSPC):
             run('close-{}-{}'.format(index, error), stream, target, True, close_error=error)
-            run('flush-{}-{}'.format(index, error), stream, target, True, flush_error=error, flush_at=at)
-        run('first-error-{}'.format(index), stream, target, True,
-            flush_error=errno.EIO, close_error=errno.ENOSPC, flush_at=at)
+            if libc_flush:
+                run('flush-{}-{}'.format(index, error), stream, target, True, flush_error=error, flush_at=at)
+            else:
+                run('write-{}-{}'.format(index, error), stream, target, True, write_error=error, steps=2)
+        run('first-error-{}'.format(index), stream, target, True, close_error=errno.ENOSPC,
+            **({'flush_error': errno.EIO, 'flush_at': at} if libc_flush else
+               {'write_error': errno.EIO, 'steps': 2}))
 
 
 if __name__ == '__main__':

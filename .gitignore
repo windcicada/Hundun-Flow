@@ -1,5 +1,6 @@
 /build/
 /build-*/
+/b3/
 /output/
 /.cache/
 /.codegraphf/

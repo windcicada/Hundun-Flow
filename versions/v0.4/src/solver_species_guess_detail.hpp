@@ -6,6 +6,25 @@
 
 namespace hundun::v04::detail {
 
+// The contribution registry groups views by conserved field. Select a group
+// without allocating; assembly validates its stage, units, identity and count.
+inline bool select_species_sources(Span<const EquationContributionView> all,
+    FieldId field, Span<const EquationContributionView>& selected) noexcept {
+  selected = {};
+  if (all.size && !all.data) return false;
+  std::size_t begin = all.size, count = 0;
+  bool ended = false;
+  for (std::size_t i = 0; i < all.size; ++i) {
+    if (all.data[i].conserved_quantity == field) {
+      if (ended) return false;
+      if (begin == all.size) begin = i;
+      ++count;
+    } else if (count) ended = true;
+  }
+  if (count) selected = {all.data + begin, count};
+  return true;
+}
+
 // Controls work on rejected coupling iterates, never time-step acceptance.
 // A stalled composition update requests the complete inner solve next time.
 class SpeciesCouplingForcing {
@@ -44,6 +63,28 @@ class SpeciesCouplingForcing {
   double previous_{};
   bool sampled_{}, full_{};
 };
+
+// A single FP64 subtraction preserves a direction just beyond half an ULP.
+// An intermediate extended-precision subtraction can round that direction
+// to the midpoint before conversion back to the stored FP64 composition.
+inline double species_search_update(double value, double correction) noexcept {
+  return value-correction;
+}
+
+// A private search may exhaust the represented value's half-ULP response.
+// This predicate concerns an uncommitted guess, separately from final audit.
+inline bool species_search_quantized(double value, double proposal,
+    double diagonal, double residual) noexcept {
+  if (!std::isfinite(value) || value < 0 || value > 1 || proposal != value ||
+      !std::isfinite(diagonal) || diagonal <= 0 ||
+      !std::isfinite(residual) || residual == 0) return false;
+  const double adjacent=std::nextafter(value, residual > 0
+      ? -std::numeric_limits<double>::infinity()
+      : std::numeric_limits<double>::infinity());
+  if (adjacent < 0 || adjacent > 1) return false;
+  const long double spacing=std::abs(static_cast<long double>(adjacent)-value);
+  return std::abs(static_cast<long double>(residual)) <= .5L*diagonal*spacing;
+}
 
 // Positive local convective response used by the private nonlinear search.
 // The physical residual and public species assembly are independent of it.
@@ -93,7 +134,8 @@ Status assemble_species_guess(const SpeciesEquationPlan& plan,
 Status assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
-    EquationSystemView system) noexcept;
+    EquationSystemView system,
+    Span<const EquationContributionView> sources = {}) noexcept;
 
 // Re-evaluate the current species equation using system.diagonal prepared by
 // assemble_species_coupling_rows. The private caller holds density, material,
@@ -102,6 +144,7 @@ Status assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
 Status assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
-    EquationSystemView system) noexcept;
+    EquationSystemView system,
+    Span<const EquationContributionView> sources = {}) noexcept;
 
 } // namespace hundun::v04::detail

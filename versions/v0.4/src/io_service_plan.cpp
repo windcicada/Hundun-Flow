@@ -33,13 +33,28 @@ Status IoServicePlan::compile(
     return {StatusCode::invalid_plan, kIoServicePlan};
   }
   std::size_t snapshot_doubles = 0U;
+  std::size_t primary_count = 0U;
   for (std::size_t index = 0U; index < snapshot_fields.size; ++index) {
     const SnapshotFieldSpec field = snapshot_fields.data[index];
-    if (field.components == 0U) {
+    if (field.components == 0U ||
+        field.source > SnapshotSource::sgs_dissipation_specific) {
       return {StatusCode::invalid_plan, kIoServicePlan};
     }
+    if (field.source == SnapshotSource::registered_field) {
+      if (primary_count != index)
+        return {StatusCode::invalid_plan, kIoServicePlan};
+      ++primary_count;
+    } else {
+      bool velocity_origin = false;
+      for (std::size_t prior = 0U; prior < primary_count; ++prior)
+        velocity_origin |= snapshot_fields.data[prior].field == field.field &&
+                           snapshot_fields.data[prior].components == 3U;
+      if (!velocity_origin || field.components != 1U)
+        return {StatusCode::invalid_plan, kIoServicePlan};
+    }
     for (std::size_t prior = 0U; prior < index; ++prior) {
-      if (snapshot_fields.data[prior].field == field.field) {
+      if (snapshot_fields.data[prior].field == field.field &&
+          snapshot_fields.data[prior].source == field.source) {
         return {StatusCode::invalid_plan, kIoServicePlan};
       }
     }
@@ -83,6 +98,7 @@ Status IoServicePlan::compile(
   std::copy(services.data, services.data + services.size,
             candidate.services_.begin());
   candidate.snapshot_field_count_ = snapshot_fields.size;
+  candidate.primary_field_count_ = primary_count;
   candidate.service_count_ = services.size;
   candidate.maximum_staging_bytes_ = maximum_staging;
   std::uint64_t hash = kFnvOffset;
@@ -91,6 +107,8 @@ Status IoServicePlan::compile(
   for (std::size_t index = 0U; index < snapshot_fields.size; ++index) {
     hash = mix(hash, snapshot_fields.data[index].field);
     hash = mix(hash, snapshot_fields.data[index].components);
+    if (snapshot_fields.data[index].source != SnapshotSource::registered_field)
+      hash = mix(hash, static_cast<std::uint8_t>(snapshot_fields.data[index].source));
   }
   for (std::size_t index = 0U; index < services.size; ++index) {
     const RuntimeServiceCapacity service = services.data[index];

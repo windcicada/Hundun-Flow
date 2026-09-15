@@ -569,6 +569,37 @@ bool exact_transition(MPI_Comm communicator, const fs::path &directory,
            image.previous_fields.size() == expected_fields.size() &&
            image.accepted_rate_fields.size() == expected_rates.size() &&
            image.previous_rate_fields.size() == expected_rates.size();
+  if (signature != 0U && !cell_records) {
+    auto migrated = expected;
+    migrated.plan = kPlan + 9U;
+    migrated.schema = kSchema + 9U;
+    migrated.compatible_method_plan = kPlan;
+    migrated.compatible_method_schema = kSchema;
+    RestartImage changed;
+    const auto loaded = RestartReader::load(communicator,directory,migrated,changed);
+    passed &= loaded && changed.storage_layout_migrated && changed.plan == kPlan &&
+        changed.schema == kSchema && changed.method_history_signature == signature &&
+        changed.final_mass_flux == image.final_mass_flux &&
+        changed.previous_mass_flux == image.previous_mass_flux &&
+        changed.fields.size() == image.fields.size();
+    for (std::size_t i=0; passed && i<image.fields.size(); ++i)
+      passed &= changed.fields[i].values == image.fields[i].values &&
+          changed.previous_fields[i].values == image.previous_fields[i].values;
+    for (int mutation=0; mutation<4; ++mutation) {
+      auto wrong = migrated;
+      auto physical_fields = expected_fields;
+      if (mutation==0) wrong.compatible_method_schema = 0U;
+      if (mutation==1) ++wrong.compatible_method_schema;
+      if (mutation==2) ++wrong.compatible_method_plan;
+      if (mutation==3) {
+        physical_fields[0].components = 2U;
+        wrong.fields = {physical_fields.data(),physical_fields.size()};
+      }
+      const auto denied = RestartReader::load(communicator,directory,wrong,changed);
+      passed &= denied.code == StatusCode::invalid_plan && changed.plan == kPlan &&
+          changed.final_mass_flux == image.final_mass_flux;
+    }
+  }
   const auto dense_index = [](Int3 local, Int3 cells) {
     return (static_cast<std::size_t>(local.z) * cells.y + local.y) * cells.x +
            local.x;

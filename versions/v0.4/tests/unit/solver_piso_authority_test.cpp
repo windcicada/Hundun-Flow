@@ -9067,8 +9067,6 @@ bool test_candidate_boundary_compiler_fixture() {
   double backflow_cp = 0.0;
   double backflow_gas = 0.0;
   ThermoState inlet_thermo;
-  ThermoState backflow_thermo;
-  ThermoState wrong_backflow_thermo;
   Status multispecies_oracle_status =
       multispecies_initialized
           ? multispecies_fixture.thermodynamics.mixture_enthalpy(
@@ -9092,48 +9090,14 @@ bool test_candidate_boundary_compiler_fixture() {
             {backflow_composition.data(), backflow_composition.size()},
             backflow_h, backflow_cp, backflow_gas);
   }
-  if (multispecies_oracle_status) {
-    multispecies_oracle_status = multispecies_fixture.thermodynamics.evaluate(
-        multispecies_spec.outlet_pressure, backflow_h,
-        {backflow_composition.data(), backflow_composition.size()},
-        {multispecies_spec.backflow_velocity, 0.0, 0.0}, backflow_thermo,
-        multispecies_spec.backflow_temperature);
-  }
-  if (multispecies_oracle_status) {
-    double wrong_h = 0.0;
-    double wrong_cp = 0.0;
-    double wrong_gas = 0.0;
-    multispecies_oracle_status =
-        multispecies_fixture.thermodynamics.mixture_enthalpy(
-            multispecies_spec.backflow_temperature,
-            {inlet_composition.data(), inlet_composition.size()}, wrong_h,
-            wrong_cp, wrong_gas);
-    if (multispecies_oracle_status)
-      multispecies_oracle_status =
-          multispecies_fixture.thermodynamics.evaluate(
-              multispecies_spec.outlet_pressure, wrong_h,
-              {inlet_composition.data(), inlet_composition.size()},
-              {multispecies_spec.backflow_velocity, 0.0, 0.0},
-              wrong_backflow_thermo,
-              multispecies_spec.backflow_temperature);
-  }
   const double inlet_area =
       multispecies_initialized
           ? multispecies_fixture.face_area(CartesianAxis::x, {0, 0, 0})
           : 0.0;
   const Int3 outlet_face{multispecies_fixture.patch.cells.x, 0, 0};
   const Int3 outlet_owner{multispecies_fixture.patch.cells.x - 1, 0, 0};
-  const double outlet_area =
-      multispecies_initialized
-          ? multispecies_fixture.face_area(CartesianAxis::x, outlet_face)
-          : 0.0;
   const double expected_inlet_flux =
       inlet_thermo.rho * multispecies_spec.inlet_velocity * inlet_area;
-  const double expected_backflow_flux =
-      backflow_thermo.rho * multispecies_spec.backflow_velocity * outlet_area;
-  const double wrong_backflow_flux = wrong_backflow_thermo.rho *
-                                     multispecies_spec.backflow_velocity *
-                                     outlet_area;
   const auto close_flux = [](double actual, double expected) noexcept {
     return std::abs(actual - expected) <=
            64.0 * std::numeric_limits<double>::epsilon() *
@@ -9208,10 +9172,11 @@ bool test_candidate_boundary_compiler_fixture() {
           close_flux(multispecies_positive.final_flux.x.unchecked({0, 0, 0}),
                      expected_inlet_flux) &&
           close_flux(multispecies_backflow.final_flux.x.unchecked(outlet_face),
-                     expected_backflow_flux) &&
-          !close_flux(multispecies_backflow.final_flux.x.unchecked(outlet_face),
-                      wrong_backflow_flux),
-      "three-species/two-independent real chain binds semantic live scalar IDs to distinct candidate payloads and certifies inlet/backflow EOS flux");
+                     multispecies_backflow.mechanical_flux.x.unchecked(outlet_face)) &&
+          close_flux(0.5 * (multispecies_backflow.enthalpy.view.unchecked(outlet_owner, 0U) +
+                            multispecies_backflow.enthalpy.view.unchecked(outlet_face, 0U)),
+                     backflow_h),
+      "three-species real chain certifies inlet EOS flux, pressure-driven outlet flux and reservoir h/Y");
 
   CandidateBoundaryFixture mass_fixture;
   CandidateBoundaryFixtureSpec mass_spec;
@@ -9264,8 +9229,10 @@ bool test_candidate_boundary_compiler_fixture() {
               {backflow_fixture.patch.cells.x, 0, 0}) < 0.0 &&
           inward.final_flux.x.unchecked(
               {backflow_fixture.patch.cells.x, 0, 0}) < 0.0 &&
-          inward.final_boundary.outlet_fixed_point_iterations() == 1U,
-      "pressure outlet classifies first inward provisional flux and closes configured backflow");
+          inward.final_flux.x.unchecked({backflow_fixture.patch.cells.x, 0, 0}) ==
+              inward.mechanical_flux.x.unchecked({backflow_fixture.patch.cells.x, 0, 0}) &&
+          inward.final_boundary.outlet_fixed_point_iterations() == 0U,
+      "pressure outlet retains its first inward pressure-corrected face flux");
   const bool recovery_staged = backflow_initialized &&
       backflow_fixture.stage(1.0, 1000.0, 0.0, 27000U, recovered);
   if (!recovery_staged)

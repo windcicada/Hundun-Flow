@@ -5,13 +5,25 @@ hundun run /path/to/case --restart /path/to/old-run/Restart \
   --output /path/to/new-run --steps 10 --output-interval 0 --restart-interval 10
 ```
 
-输出必须使用独立目录。保留来源根目录的 `current`、所指 generation 的 manifest 和全部载荷、统计附件；不要手工改写文件或校验哈希。
+输出使用独立目录。来源根目录的 `current`、对应 generation 的 manifest、全部载荷及统计附件共同组成续算资产，按原始内容保存。
 
 ## 精确续算
 
-当前 V3 checkpoint 带方法历史签名；默认要求物理 plan、schema、geometry 和历史含义兼容，并验证文件完整性。有效状态、速率、质量目标和 BDF 历史按合同恢复。源格式版本不等于方法版本，也不等于产品版本。
+V3 原生检查点携带方法历史签名；V4／V5 还承载固定／可变长度模型记录。默认入口核对物理 plan、schema、geometry、方法历史及文件完整性，恢复已接受场、前一时刻场、方程速率、面质量通量和质量目标。
 
-支持满足网格/计划约束的跨分区读取，不承诺任意 rank 数都可用。重启一致性必须在相同有效时间历史下比较。
+跨分区读取遵循网格与计划约束；续算一致性以相同起点和有效时间历史进行比较。生产时间格式采用 `cn_be` 或 `backward_euler`。
+
+## 化学精度细化
+
+```sh
+hundun run /path/to/fine --restart /path/to/old-run/Restart \
+  --restart-refine-chemistry /path/to/source \
+  --output /path/to/fine-run --steps 10 --output-interval 0 --restart-interval 10
+```
+
+`source` 为写出检查点的原算例。`fine` 保持全部物理输入及资产内容，调整 `reaction.chemistry_solver` 中的误差控制：相对、绝对容差保持或收紧，其中至少一项收紧；`maximum_internal_steps` 保持或增加。入口适用于真实 Cantera 反应后端，包括具有明确模型标识的煤油关系。
+
+该入口使用 V3 及以上原生历史、严格存储布局和相同方法签名。当前场、历史场、速率及面通量直接恢复，后续步骤采用目标化学精度。来源算例身份写入 Evidence 的 `run_start.history.chemistry_source_case`，策略为 `refine_chemistry`。目标算例写出的新检查点继续使用普通精确续算入口。
 
 ## 显式方法恢复
 
@@ -21,12 +33,12 @@ hundun run /path/to/case --restart /path/to/old-run/Restart \
   --steps 10 --output-interval 0 --restart-interval 10
 ```
 
-该策略重新构造当前方法速率，保留合法来源的闭域质量目标，先执行必要的 BE 恢复，再恢复 BDF2。完整 V2 无方法签名时不能默认当作同方法历史；V1 确实缺历史的处理与主动恢复分开。
+该策略按当前方法重建方程速率并保存来源闭域质量目标，执行对应的 BE 恢复步骤后继续配置的生产时间格式。V1 的缺省历史重建、V2 的方法签名检查与主动方法恢复分别记录。
 
-圆柱 runner 使用 `--restart-root`；主动方法恢复会建立新统计 epoch，不混入旧 accumulator 样本，一个 BE 步不表示流场已充分发展。同方法精确续算可以继承有效统计。
+圆柱 runner 使用 `--restart-root`。主动方法恢复建立新的统计 epoch；同方法精确续算可继承有效统计。物理统计窗口另行检查流场发展状态。
 
 ## 已登记存储迁移
 
-`--restart-storage-compatibility mg-bundle-ghost-v1` 只处理已登记的 MG 外层 ghost 布局差异，不能与主动方法恢复一起使用。未知计划、物性、边界、几何或损坏载荷仍拒绝，不得靠修改 manifest 绕过。
+`--restart-storage-compatibility mg-bundle-ghost-v1` 处理已登记的 MG 外层 ghost 布局，采用对应来源身份及存储布局检查，独立于主动方法恢复和化学精度细化策略。
 
-签名组件、已知迁移表及链式回归见[方法历史合同](../verification/v04-method-history-contract.md)；文件提交规则见[Restart 格式](../api/restart-schema.md)。
+签名组件、迁移表及链式回归见[方法历史合同](../verification/v04-method-history-contract.md)；文件提交规则见[Restart 格式](../api/restart-schema.md)。

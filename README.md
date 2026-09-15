@@ -1,5 +1,7 @@
 # HUNDUN-FLOW
 
+在AI辅助编程加速模型实现背景下，针对湍流燃烧模型创新向真实燃烧室数值模拟转化所面临的多物理过程耦合、数值算法集成与软件架构协同难题，开发开源燃烧室模拟软件 HUNDUN-FLOW，为研究者快速实现与系统验证模型构想、构建自主可扩展的科研软件体系提供计算基础。
+
 近年来，AI技术推动了湍流燃烧建模研究和数值模拟技术的发展，研究者可以将物理认识与模型构思快速转化为算法和程序模块。HUNDUN-FLOW提供开放的核心实现、明确的模块接口和面向Coding Agent的工作规范，支持研究者开展方法开发与软件扩展。
 
 HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以笛卡尔网格、局部重构浸没边界方法（IBM）和SIMPLE/PISO压力耦合为基础，组织LES、PaSR/TCR-TPDF与拉格朗日喷雾模型。研发目标包括局部加密、几何自动标记及面向真实燃烧室的多物理过程模拟。软件采用Apache License 2.0，支持研究者按照许可条款开发、使用和分发自己的衍生程序，并自主选择衍生代码的开放方式。
@@ -27,7 +29,7 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 | 流动与压力耦合 | 组装低马赫数质量和动量方程，形成Rhie-Chow面通量，并通过SIMPLE或PISO满足连续性约束。 | `MeanState`、`FaceMassFlux`、压力校正报告 |
 | 反应标量输运 | 推进全部物种的$\rho Y_k$和包含生成焓的$\rho h_{\mathrm{tc}}$，计算分子与亚格子扩散通量，并保持组分、元素和能量一致性。 | 组分场、总热化学焓场、输运性质服务 |
 | 热力学与化学后端 | 根据$p_0$、$h_{\mathrm{tc}}$和组分恢复温度及物性，推进有限速率化学并返回积分物种增量和热化学报告。 | `ThermodynamicsService`、`TransportPropertyService`、`ChemistryBackend` |
-| LES湍流模型 | 由局部速度梯度和网格尺度计算亚格子黏度与标量扩散率，为动量输运和燃烧混合时间尺度提供闭合量。 | WALE、Vreman、$\nu_t$、$Sc_t$、滤波尺度$\Delta$ |
+| LES湍流模型 | 由局部速度梯度和网格尺度计算亚格子黏度与标量扩散率，为动量输运和燃烧混合时间尺度提供闭合量。 | Smagorinsky、WALE、Vreman、$\nu_t$、$Sc_t$、滤波尺度$\Delta$ |
 | 燃烧闭合 | 组织有限速率平均态、部分搅拌反应器（PaSR）和TCR-TPDF路径，使化学增量按照相应的湍流-化学相互作用关系进入守恒方程。 | 混合时间尺度、化学时间尺度、PaSR反应比例、TCR混合状态参数$\kappa$和闭合报告 |
 | TCR-TPDF | 管理平均态、随机场、参考反应状态、反应集合和微观混合。混合状态参数$\kappa$在根的可接受性和分支历史确定后恢复，并进入微观混合闭合。 | `StochasticFieldSet`、`ReactionEnsemble`、`PsrShadowState`、TCR根状态 |
 | 网格与IBM | 根据几何和笛卡尔网格生成流体/固体标记及局部重构模板，向流动、组分、焓和parcel模块提供边界状态与表面查询。 | `GeometryScene`、IBM标记、重构模板、表面法向 |
@@ -50,7 +52,11 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 
 ### 流动、燃烧与喷雾耦合
 
-稳态计算在SIMPLE外迭代中重复压力、速度和标量校正。瞬态计算采用BDF2时间推进和固定的两次PISO校正。反应组分与总热化学焓采用`C(dt/2)-T(dt)-C(dt/2)`耦合，其中`C`表示化学推进，`T`表示守恒输运。
+默认瞬态计算采用 CN/BE：动量使用 CN，守恒标量使用 BE，`outer_corrected` 外迭代按原方程残差收敛。`backward_euler` 配合 PISO 或 SIMPLE 调度。平均反应与代数 PaSR 通过公共组分源进入 CN/BE；ESF 使用其显式配置的化学、输运与混合顺序。
+
+Smagorinsky 通过 `"turbulence": {"model": "smagorinsky", "coefficient": 0.12}` 配置，系数默认值为 0.17。模型使用完整对称应变率和单元体积的立方根作为滤波尺度；`hundun check` 显示实际 SGS 模型与系数。
+
+LES 云图同时提供 `nu_sgs`（m²/s）、`k_sgs`（m²/s²）、`eps_sgs_volume`（W/m³）和 `eps_sgs_specific`（m²/s³）。耗散率采用 COAST 的分子＋SGS 黏度口径；这些代数量由已接受流场、物性和 IBM 梯度重建，随云图输出更新。`hundun check` 的 `derived_output_bytes` 显示每进程预分配的派生字段空间。
 
 | 顺序 | 计算阶段 | 状态处理 |
 | ---: | --- | --- |
@@ -65,6 +71,8 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 | 9 | 完成IBM碰撞、TAB子parcel生成和MPI迁移的分阶段登记，并检查有限性、守恒收支和全进程状态。 | 依据检查结果统一提交状态、历史、随机数时钟和parcel，或恢复时间步起点并重新计算。 |
 
 ### 燃烧闭合与化学后端
+
+机理文件可为指定反应配置低浓度级数延拓，瞬时化学源与反应器积分共享该速率关系；配置方式见[化学机理说明](docs/chem.md)。
 
 | 对象 | 数值处理 | 耦合规则 |
 | --- | --- | --- |
@@ -94,7 +102,7 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 | 设计问题 | 采用的设计 | 依据 |
 | --- | --- | --- |
 | 守恒量的一致表达 | 质量、动量、全部物种和总热化学焓采用有限体积守恒形式；化学与两相交换通过源项事务进入控制方程。 | 守恒变量和成对源项便于逐单元及全局检查质量、元素、动量和能量收支。 |
-| 空间与时间精度 | 空间离散采用二阶有限体积、局部重构IBM和Rhie-Chow面通量；时间推进采用BDF2、对称化学-输运分裂和固定压力校正顺序。 | 这些离散为变密度低马赫数反应流提供统一的二阶数值基线。 |
+| 空间与时间精度 | 空间离散采用二阶有限体积、局部重构IBM和Rhie-Chow面通量；时间格式采用CN/BE或BE，耦合调度独立配置。 | 动量、标量与多物理组合分别通过空间和时间细化检查离散精度。 |
 | 多物理耦合顺序 | TPDF/TCR、喷雾和IBM由职责完整的模块管理内部步骤，应用驱动只调用完整的时间步接口。 | 固定的数据依赖和调用顺序便于保持反应源、蒸发源、最终面通量和压力校正的一致性。 |
 | 时间步状态的一致提交与回退 | 流动、化学、随机场和parcel先更新尝试状态。全部MPI进程完成守恒与有限性检查后统一提交；需要重试时恢复时间步起点。 | 该机制使各物理量对应同一已接受时间步端点，并使全部MPI进程保持一致。 |
 | 模型与求解器分离 | 模型通过字段视图及热力学、输运、化学和几何服务获取数据，并返回候选增量与报告。 | 稳定接口限定第三方依赖和数据访问范围，也便于替换模型及独立验证数值内核。 |
@@ -104,26 +112,44 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 
 ## 构建
 
-要求CMake 3.21、支持C++17的编译器和MPI 3实现。
+Release 组合采用 CMake 3.21 及以上版本、Clang 15、libstdc++ ABI1、
+Ninja、MPI 3 及以上实现和固定 Cantera 3.2 程序包。配套 Linux 环境
+使用 glibc 2.35；构建保留 FP64，采用 ThinLTO 与 lld。
 
 ```sh
-cmake -S . -B build/release \
-  -DHUNDUN_SOURCE_VERSION=v0.4 \
-  -DHUNDUN_BUILD_TESTS=OFF \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release -j 2 --target hundun
-build/release/versions/v0.4/hundun --version
+HUNDUN_CANTERA_ROOT=/path/to/cantera cmake --preset release
+cmake --build --preset release -j 2
+b3/versions/v0.4/hundun --version
 ```
 
 ## 运行
 
+默认时间推进采用 CN/BE，局部 CFL 目标为 0.30，浮动范围为 0.25–0.35。
+时间格式通过 `time.scheme` 配置，耦合调度通过 `solver.coupling` 配置。
+当前 CN/BE 使用 `outer_corrected` 外迭代校正，`backward_euler` 使用
+PISO 或 SIMPLE。旧 CN/BE 输入按原实际行为转换为 `outer_corrected`，
+保持等价算例的原生续算身份。`hundun check` 显示实际时间格式、耦合方式和资源计划。
+`hundun init-case --output case` 生成对应配置；已有算例按其显式时间控制参数运行。
+
 计算开始前先检查算例和MPI分解：
 
 ```sh
-mpirun -np 4 build/release/versions/v0.4/hundun validate case --dry-plan
-mpirun -np 4 build/release/versions/v0.4/hundun run case \
+mpirun -np 4 b3/versions/v0.4/hundun check case --dry-plan
+mpirun -np 4 b3/versions/v0.4/hundun run case \
   --output run --steps 10 --output-interval 0 --restart-interval 10
 ```
+
+化学精度细化续算使用 `--restart-refine-chemistry` 指定原算例：
+
+```sh
+mpirun -np 4 b3/versions/v0.4/hundun run fine \
+  --restart run/Restart --restart-refine-chemistry case \
+  --output fine-run --steps 10 --output-interval 0 --restart-interval 10
+```
+
+`fine` 保持原算例的物理输入和资产内容，收紧化学相对／绝对容差，
+并保持或增加化学内部步数预算。当前场、历史场、面通量和方法历史
+继续沿用原生检查点，Evidence 记录来源算例身份。
 
 正式计算应检查边界方向、IBM重构、CFL、组分正性、质量与能量残差、limiter活性和统计窗口。Evidence记录保存在运行目录中。
 
@@ -132,6 +158,7 @@ mpirun -np 4 build/release/versions/v0.4/hundun run case \
 - [快速开始](docs/user-guide/quick-start.md)
 - [配置说明](docs/api/configuration-schema.md)
 - [控制方程](docs/numerics/governing-equations.md)
+- [气相分子输运](docs/visc.md)
 - [离散方法](docs/numerics/discretization.md)
 - [Restart](docs/user-guide/restart.md)
 - [诊断输出](docs/user-guide/diagnostics.md)
@@ -141,8 +168,20 @@ mpirun -np 4 build/release/versions/v0.4/hundun run case \
 
 HUNDUN-FLOW采用Apache License 2.0，见[LICENSE](LICENSE)。第三方组件及许可证见[THIRD_PARTY.md](THIRD_PARTY.md)。
 
-## 圆柱绕流瞬时场
+## GTMC 燃烧模拟示范
 
-Re = 3900，第 12500 步，t = 0.172611 s，展向截面 z/D = 0.8005。上图为速度大小（m/s），下图为压力扰动 π（Pa），圆柱轮廓取自算例 STL。
+真实 GTMC 续算场，第 32016 步，t = 21.815583 ms；网格规模
+153 × 325 × 151，采用 CN/BE、Vreman 和四随机场 ESF/TPDF，
+气相反应使用 methane/jl4 机理。
 
-![圆柱绕流速度与压力云图](docs/images/re3900-velocity-pressure-step12500.png)
+三维图展示完整半透明燃烧室几何、1400 K／1800 K 温度等值面，
+以及覆盖旋流器通道的瞬时流线。435 个种子点分布于五个高度的
+实际流体单元，流线按合速度着色。
+
+![GTMC 燃烧场半透明三维展示](docs/images/gtmc-3d.png)
+
+中央截面位于 z = −0.075 mm，展示合速度与物理平均焓／组分对应的
+温度；灰色表示 IBM 固体区域。二维图保留原始网格分辨率，三维
+展示沿各轴每隔一个单元采样。图面说明见[数据记录](docs/hot.md)。
+
+![GTMC 中央截面速度与温度](docs/images/gtmc-mid.png)

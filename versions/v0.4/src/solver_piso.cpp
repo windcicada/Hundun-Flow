@@ -1870,6 +1870,7 @@ struct PressureVelocityCoupler::Impl {
   // flux is fixed, not a pressure-Dirichlet flux response. Keep the linear
   // target and candidate baseline on that same physical branch.
   Status close_fixed_backflow_predictor(ConstFieldView velocity) noexcept {
+    if (boundary->pressure_driven_backflow()) return {};
     const FaceFieldView fluxes[]{workspace.phi_h_by_a.x,
         workspace.phi_h_by_a.y, workspace.phi_h_by_a.z};
     const FaceFieldView coefficients[]{workspace.x_pressure_coefficient,
@@ -4716,7 +4717,8 @@ Status PressureVelocityCoupler::stage_frozen_momentum_flux(
             local = impl.boundary->face(cartesian_face(axis, high), plan);
             Int3 owner = face;
             if (high) (axis_index == 0U ? owner.x : axis_index == 1U ? owner.y : owner.z)--;
-            if (local && impl.boundary->allow_backflow().data[plan->flow_parameter] != 0U &&
+            if (local && !impl.boundary->pressure_driven_backflow() &&
+                impl.boundary->allow_backflow().data[plan->flow_parameter] != 0U &&
                 (high ? 1.0 : -1.0) * impl.current_trial_velocity.unchecked(owner, axis_index) < 0.0) {
               output.unchecked(face) = bases[axis_index].unchecked(face);
               continue;

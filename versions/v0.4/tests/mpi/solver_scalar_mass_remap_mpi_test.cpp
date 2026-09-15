@@ -3,6 +3,7 @@
 
 #include "../support/candidate_boundary_fixture.hpp"
 #include "../../src/solver_scalar_mass_remap_detail.hpp"
+#include "../support/dense_solve.hpp"
 
 #include <mpi.h>
 #include <array>
@@ -119,6 +120,118 @@ bool history_contract() {
   return passed;
 }
 
+bool frozen_transport_pairing() {
+  CandidateBoundaryFixture fixture;
+  CandidateBoundaryFixtureSpec spec;
+  spec.multispecies=true; spec.cells_per_axis=9;
+  if (!fixture.initialize(MPI_COMM_WORLD,spec)) return false;
+  const auto cells=fixture.patch.cells;
+  const int nx=fixture.geometry.global_cells().x;
+  constexpr double a0=2.3;
+  const double pi=std::acos(-1.);
+  const auto face=[&](int x,double amplitude) {
+    return x==0 || x==nx ? 0. : amplitude*std::sin(2*pi*x/nx);
+  };
+  const auto star_mass=[&](int x) {return 1-(face(x+1,.12)-face(x,.12))/a0;};
+  const auto final_mass=[&](int x) {return 1-(face(x+1,.07)-face(x,.07))/a0;};
+  const auto value=[&](unsigned field,unsigned species,int x) {
+    const double angle=2*pi*(x+.5)/nx;
+    const double signal=std::sin(angle)+.4*std::cos(angle);
+    return species==0 ? .25+(.02+.01*field)*signal : .2-(.01+.005*field)*signal;
+  };
+  std::array<FieldId,2> ids;
+  std::array<FieldView,2> scalars;
+  const std::array<TransportedScalarRole,2> roles{
+      TransportedScalarRole::species,TransportedScalarRole::species};
+  for(unsigned s=0;s<2;++s) {scalars[s]=fixture.independent_species[s].view;ids[s]=scalars[s].field;}
+  detail::ScalarMassRemap remap;
+  auto status=remap.allocate(fixture.patch,{ids.data(),2},{roles.data(),2},2);
+  if(status)status=remap.bind(MPI_COMM_WORLD,fixture.boundary);
+  FaceFluxStorage storage; FaceFluxView base,final;
+  if(status)status=FaceFluxStorage::allocate_workspace(cells,2,storage);
+  if(status)status=storage.workspace_view(0,81,base);
+  if(status)status=storage.workspace_view(1,82,final);
+  if(!status)return false;
+  for(auto flux:{base,final})for(auto f:{flux.x,flux.y,flux.z})
+    for(int z=0;z<f.extents.z;++z)for(int y=0;y<f.extents.y;++y)for(int x=0;x<f.extents.x;++x)
+      f.unchecked({x,y,z})=0;
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<=cells.x;++x) {
+    base.x.unchecked({x,y,z})=face(x+fixture.patch.begin.x,.12);
+    final.x.unchecked({x,y,z})=face(x+fixture.patch.begin.x,.07);
+  }
+  const BoundaryResolvedValues boundary_values{
+      {fixture.boundary_scalar_values.data(),fixture.boundary_scalar_values.size()},
+      {fixture.boundary_vector_values.data(),fixture.boundary_vector_values.size()},
+      {fixture.boundary_normal_gradient_values.data(),fixture.boundary_normal_gradient_values.size()}};
+  bool passed=true;
+  double local[4]{};
+  for(unsigned field=0;field<4;++field) {
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+      const Int3 c{x,y,z};
+      fixture.density.view.unchecked(c,0)=1/fixture.cell_volume(c);
+      for(unsigned s=0;s<2;++s)scalars[s].unchecked(c,0)=value(field,s,x+fixture.patch.begin.x);
+    }
+    // Each stochastic realization keeps its own conservative transported
+    // inventory while sharing the same pressure-driven mass correction.
+    status=remap.capture_frozen_density(fixture.kernels,as_const(fixture.density.view),
+        {scalars.data(),2},as_const(base),a0);
+    if(!status)return false;
+    const auto bytes=remap.owned_payload_bytes();
+    const Int3 last{cells.x-1,cells.y-1,cells.z-1};
+    const double saved=scalars[1].unchecked(last,0);
+    scalars[1].unchecked(last,0)=std::numeric_limits<double>::quiet_NaN();
+    const auto invalid=remap.capture_frozen_density(fixture.kernels,as_const(fixture.density.view),
+        {scalars.data(),2},as_const(base),a0*2);
+    scalars[1].unchecked(last,0)=saved;
+    passed &= invalid.code==StatusCode::rejected_step && remap.owned_payload_bytes()==bytes;
+    const double rho_before=fixture.density.view.unchecked(last,0);
+    fixture.density.view.unchecked(last,0)=-1;
+    const auto negative=remap.capture_frozen_density(fixture.kernels,as_const(fixture.density.view),
+        {scalars.data(),2},as_const(base),a0*2);
+    fixture.density.view.unchecked(last,0)=rho_before;
+    passed &= negative.code==StatusCode::rejected_step;
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+      fixture.density.view.unchecked({x,y,z},0)=final_mass(x+fixture.patch.begin.x)/fixture.cell_volume({x,y,z});
+    detail::ScalarMassRemap::Report report;
+    status=remap.solve(fixture.kernels,as_const(fixture.density.view),as_const(fixture.velocity.view),
+        as_const(final),{scalars.data(),2},{},boundary_values,fixture.reductions,report);
+    if(!status)return false;
+    remap.copy_solution({scalars.data(),2},TransportedScalarRole::species);
+    local[1]=std::max(local[1],report.mass_pairing_residual);
+    for(unsigned s=0;s<2;++s) {
+      std::vector<std::vector<double>> matrix(nx,std::vector<double>(nx));
+      std::vector<double> rhs(nx);
+      for(int x=0;x<nx;++x) {
+        const double west=-(face(x,.07)-face(x,.12))/a0;
+        const double east=(face(x+1,.07)-face(x+1,.12))/a0;
+        matrix[x][x]=final_mass(x)+std::max(west,0.)+std::max(east,0.);
+        if(x>0)matrix[x][x-1]=std::min(west,0.);
+        if(x+1<nx)matrix[x][x+1]=std::min(east,0.);
+        rhs[x]=star_mass(x)*value(field,s,x);
+      }
+      const auto expected=dense_solve(matrix,rhs);
+      long double inventories[2]{};
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+        const int gx=x+fixture.patch.begin.x;
+        const double q=scalars[s].unchecked({x,y,z},0);
+        local[0]=std::max(local[0],std::abs(q-expected[gx]));
+        inventories[0]+=star_mass(gx)*value(field,s,gx);
+        inventories[1]+=final_mass(gx)*q;
+        passed &= q>=.1 && q<=.4;
+      }
+      MPI_Allreduce(MPI_IN_PLACE,inventories,2,MPI_LONG_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+      local[2]=std::max(local[2],double(std::abs(inventories[1]-inventories[0])/inventories[0]));
+    }
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+      passed &= scalars[0].unchecked({x,y,z},0)+scalars[1].unchecked({x,y,z},0)<=1;
+  }
+  double global[4]{};
+  MPI_Allreduce(local,global,4,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+  int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+  if(rank==0)std::cout<<"frozen_transport dense_error="<<global[0]<<" mass_pairing="<<global[1]<<" species_inventory="<<global[2]<<'\n';
+  return passed && global[0]<1e-12 && global[1]<1e-14 && global[2]<1e-12;
+}
+
 bool run() {
   CandidateBoundaryFixture fixture;
   CandidateBoundaryFixtureSpec spec;
@@ -205,7 +318,7 @@ bool run() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc,&argv) != MPI_SUCCESS) return 2;
-  int local=(run() && coupling_forcing_replay() && history_contract()) ? 1 : 0, global=0;
+  int local=(run() && coupling_forcing_replay() && history_contract() && frozen_transport_pairing()) ? 1 : 0, global=0;
   MPI_Allreduce(&local,&global,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
   MPI_Finalize();
   return global ? 0 : 1;

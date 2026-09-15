@@ -944,13 +944,18 @@ def validate_v6_run_start(record: Dict[str, Any],
         source = require_integer(history["source_signature"], f"{prefix}.source_signature", 0)
         target = require_integer(history["target_signature"], f"{prefix}.target_signature", 1)
         rebuild = history["policy"] == "rebuild_method_history"
+        refinement = history["policy"] == "refine_chemistry"
+        if refinement or "chemistry_source_case" in history:
+            require_integer(history.get("chemistry_source_case"), f"{prefix}.chemistry_source_case", 1)
+            if not refinement or version < 3:
+                raise EvidenceError(f"{prefix} has incompatible chemistry refinement")
         if "transport_source_case" in history:
             require_integer(history["transport_source_case"], f"{prefix}.transport_source_case", 1)
             if not rebuild or version < 3 or record.get("coupling") != "CN_BE":
                 raise EvidenceError(f"{prefix} has incompatible transport recovery")
         if (kind != "restart" or version not in (1, 2, 3, 4, 5) or
                 (version < 3 and source != 0) or (version >= 3 and source == 0) or
-                history["policy"] not in ("require_compatible", "rebuild_method_history") or
+                history["policy"] not in ("require_compatible", "rebuild_method_history", "refine_chemistry") or
                 (not rebuild and version != 1 and source != target) or
                 (first and record.get("restart_recovery") is not (version == 1 or rebuild))):
             raise EvidenceError(f"{prefix} has incompatible method/history policy")
@@ -1064,15 +1069,24 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         "momentum_residual", "enthalpy_residual", "species_residual",
         "solid_velocity_max", "normalization", "final_momentum",
         "final_pressure", "final_enthalpy"), prefix)
-    outer = require_integer(cold["outer_iterations"], prefix, 1, 16)
+    outer = require_integer(cold["outer_iterations"], prefix, 1, 64)
     species_count = cold.get("independent_species_count")
     if species_count is not None:
         require_integer(species_count, prefix)
+    retained = require_integer(cold.get("enthalpy_retained_calls", 0),
+                               f"{prefix}.enthalpy_retained_calls", 0, outer)
+    endpoint = require_integer(cold.get("species_endpoint_solve_calls", 0),
+                               f"{prefix}.species_endpoint_solve_calls", 0, outer)
+    if species_count == 0 and endpoint != 0:
+        raise EvidenceError(f"{prefix} reports endpoint work for zero independent species")
     for name in ("momentum", "pressure", "enthalpy", "species"):
         empty_species = name == "species" and species_count == 0
         calls = require_integer(cold[name + "_solve_calls"], prefix, 0 if empty_species else 1)
         expected_calls = 0 if empty_species else outer * (3 if name == "momentum" else 1)
-        if calls != expected_calls:
+        if name == "species":
+            expected_calls += endpoint
+        accounted_calls = calls + (retained if name == "enthalpy" else 0)
+        if accounted_calls != expected_calls:
             raise EvidenceError(f"{prefix} has incoherent {name} call counts")
         require_integer(cold[name + "_iterations"], prefix)
     if species_count == 0 and (cold["species_iterations"] != 0 or cold["species_residual"] != 0):
@@ -1110,6 +1124,10 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         raise EvidenceError(f"{prefix} EOS is outside the cold roundoff gate")
     reference_fields = ("reference_time", "reference_tolerances", "reference_residuals",
         "momentum_reference_scale", "enthalpy_reference_scale", "species_reference_scales")
+    if ('momentum_reference_origin' in cold and
+            (cold['normalization'] not in ('reference', 'coast_reference') or
+             cold['momentum_reference_origin'] != 'first_corrector')):
+        raise EvidenceError(f"{prefix} has an invalid momentum reference origin")
     if cold["normalization"] in ("reference", "coast_reference"):
         require_object_fields(cold, reference_fields, prefix)
         for name in ("reference_time", "momentum_reference_scale", "enthalpy_reference_scale"):
@@ -1156,6 +1174,12 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
     validate_v6_run_start(record, line_number)
 
     is_cold = record.get("schema") == COLD_RUNTIME_SCHEMA
+    if "algorithm" in record:
+        expected = {"time_scheme": "cn_be" if is_cold else "backward_euler",
+                    "coupling": "outer_corrected" if is_cold else record.get("coupling")}
+        if (record["algorithm"] != expected or
+                record.get("requested_bdf_order") != 1 or record.get("bdf_order") != 1):
+            raise EvidenceError(f"{prefix}.algorithm disagrees with the executed schedule")
     if is_cold:
         validate_v9_cold_record(record, line_number)
     if record.get("schema") == RUNTIME_SCHEMA:
@@ -3051,6 +3075,56 @@ def self_test() -> None:
             for name in V6_ADVECTIVE_CONVECTIVE_CFL_FIELDS}
         runtime_path.write_text(json.dumps(runtime_cold) + "\n", encoding="utf-8")
         validate_runtime(runtime_path)
+        retained = json.loads(json.dumps(runtime_cold))
+        retained['cold']['enthalpy_solve_calls'] = 1
+        retained['cold']['enthalpy_retained_calls'] = 1
+        runtime_path.write_text(json.dumps(retained) + '\n', encoding='utf-8')
+        validate_runtime(runtime_path)
+        for count in (0, 2, 3, -1, True):
+            bad = json.loads(json.dumps(retained))
+            bad['cold']['enthalpy_retained_calls'] = count
+            reject_runtime(bad, 'V9 accepted incoherent retained energy work')
+        # New producers identify time and schedule independently of the legacy tag.
+        scheduled = json.loads(json.dumps(runtime_cold))
+        scheduled['algorithm'] = {'time_scheme': 'cn_be', 'coupling': 'outer_corrected'}
+        runtime_path.write_text(json.dumps(scheduled) + '\n', encoding='utf-8')
+        validate_runtime(runtime_path)
+        for identity in (None, {}, {'time_scheme': 'backward_euler', 'coupling': 'outer_corrected'},
+                         {'time_scheme': 'cn_be', 'coupling': 'PISO'},
+                         {'time_scheme': 'cn_be', 'coupling': 'SIMPLE'}):
+            bad = json.loads(json.dumps(runtime_cold))
+            bad['algorithm'] = identity
+            reject_runtime(bad, 'V9 accepted a mismatched executed algorithm')
+        # CN/BE reserves 64 outer iterations in the runtime report. Exercise
+        # the former 16-iteration boundary and the shared capacity explicitly.
+        for outer in (21, 64, 65):
+            extended = json.loads(json.dumps(runtime_cold))
+            extended['cold']['outer_iterations'] = outer
+            for name in ('momentum', 'pressure', 'enthalpy', 'species'):
+                extended['cold'][name + '_solve_calls'] = outer * (3 if name == 'momentum' else 1)
+            if outer == 65:
+                reject_runtime(extended, 'V9 accepted an outer-iteration capacity overflow')
+            else:
+                runtime_path.write_text(json.dumps(extended) + '\n', encoding='utf-8')
+                validate_runtime(runtime_path)
+        for endpoints in (0, 1, 2, 3):
+            endpoint = json.loads(json.dumps(runtime_cold))
+            endpoint['cold']['species_endpoint_solve_calls'] = endpoints
+            endpoint['cold']['species_solve_calls'] += endpoints
+            if endpoints > endpoint['cold']['outer_iterations']:
+                reject_runtime(endpoint, 'V9 accepted excess endpoint solve calls')
+            else:
+                runtime_path.write_text(json.dumps(endpoint) + '\n', encoding='utf-8')
+                validate_runtime(runtime_path)
+                if endpoints:
+                    endpoint['cold']['species_solve_calls'] -= 1
+                    reject_runtime(endpoint, 'V9 omitted endpoint work from species totals')
+        seeded = json.loads(json.dumps(runtime_cold))
+        seeded['cold']['momentum_reference_origin'] = 'first_corrector'
+        runtime_path.write_text(json.dumps(seeded) + '\n', encoding='utf-8')
+        validate_runtime(runtime_path)
+        seeded['cold']['momentum_reference_origin'] = 'moving_candidate'
+        reject_runtime(seeded, 'V9 accepted a changing momentum reference origin')
         for mutation in range(11):
             bad = json.loads(json.dumps(runtime_cold))
             if mutation == 0: bad["cold"]["reference_residuals"][2] = 1e-3
@@ -3081,7 +3155,7 @@ def self_test() -> None:
                                 species_iterations=0, species_residual=0)
         runtime_path.write_text(json.dumps(pure_air) + "\n", encoding="utf-8")
         validate_runtime(runtime_path)
-        for field in ("species_solve_calls", "species_iterations", "species_residual"):
+        for field in ("species_solve_calls", "species_endpoint_solve_calls", "species_iterations", "species_residual"):
             bad = json.loads(json.dumps(pure_air))
             bad["cold"][field] = 1
             reject_runtime(bad, "V9 accepted fictitious single-gas transport work")

@@ -4,6 +4,7 @@
 #include "hundun/v04_boundary.hpp"
 #include "hundun/v04_execution.hpp"
 #include "../../src/solver_species_guess_detail.hpp"
+#include "../../src/solver_cartesian_detail.hpp"
 
 #include <mpi.h>
 
@@ -937,6 +938,30 @@ bool test_kernel_plan_owns_and_rebinds_metrics() {
                        assigned.fingerprint() != 0U &&
                        assigned.metric(0U).faces != nullptr,
                    "move assignment transfers metric ownership atomically");
+
+  // Compare the detached/moved plan against the original distance formula,
+  // including face indices beyond the owned metric slice.
+  bool constant_preserved = true;
+  for (std::size_t axis=0;axis<3;++axis) {
+    const auto n=axis==0 ? assigned.cells().x : axis==1 ? assigned.cells().y : assigned.cells().z;
+    for (int face=-int(assigned.reach())-3;face<=n+int(assigned.reach())+3;++face) {
+      const double xf=detail::metric_face<false>(assigned,axis,face);
+      const double dl=xf-detail::metric_centre<false>(assigned,axis,face-1);
+      const double dr=detail::metric_centre<false>(assigned,axis,face)-xf;
+      const double left=1.2+std::sin(double(face));
+      const double right=.7*std::cos(double(face));
+      const double reference=(dr*left+dl*right)/(dl+dr);
+      const double actual=detail::metric_interpolate_face<false>(assigned,axis,face,left,right);
+      for (double constant : {0.0, 0.1, 1.0, 3.0, 300.0, -300.0, 1e-12})
+        constant_preserved &= detail::metric_interpolate_face<false>(
+            assigned, axis, face, constant, constant) == constant;
+      passed &= expect(std::abs(actual-reference)<=8*std::numeric_limits<double>::epsilon()*
+          std::max(1.0,std::abs(reference)),
+          "moved interpolation preserves the face-distance oracle and ghost extension");
+    }
+  }
+  passed &= expect(constant_preserved,
+      "stretched face interpolation preserves a constant exactly across cache and ghost extension");
 
   const Int3 cells = assigned.cells();
   OwnedField q = make_field(90U, cells, 1U, 1U, 901U);

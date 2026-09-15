@@ -161,7 +161,10 @@ add_test(NAME v04_runner_visit_allocation_mpi_2
     --probe "$<TARGET_FILE:v04_checkpoint_allocation_probe>"
     --mpi "${MPIEXEC_EXECUTABLE}" --ranks 2 --visit)
 set_tests_properties(v04_runner_visit_allocation_mpi_2 PROPERTIES
-  PROCESSORS 2 TIMEOUT 240 LABELS allocation_audit)
+  # Exhaustive rank-0/rank-1 injection starts a fresh MPI job at every site.
+  # The Release ABI1 build needs about 354 s for 124 launches; each launch
+  # retains the harness's independent 40 s failure timeout.
+  PROCESSORS 2 TIMEOUT 480 LABELS allocation_audit)
 
 foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_runner_mg_profile_mpi_${rank_count}
@@ -427,7 +430,10 @@ foreach(portable_ranks IN ITEMS 1 2 4)
   set_tests_properties(v04_models_portable_composition_mpi_${portable_ranks} PROPERTIES TIMEOUT 20)
 endforeach()
 
-if(HUNDUN_BUILD_PORTABLE_CANTERA)
+if(HUNDUN_BUILD_PORTABLE_CANTERA OR HUNDUN_ENABLE_REACTING_CANTERA)
+  if(NOT HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM)
+    set(HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/gas.yaml")
+  endif()
   if(NOT EXISTS "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}")
     message(FATAL_ERROR "Portable Cantera tests require an explicit synthetic mechanism")
   endif()
@@ -436,8 +442,47 @@ if(HUNDUN_BUILD_PORTABLE_CANTERA)
     hundun_v04_portable_cantera)
   target_include_directories(v04_models_cantera_backend_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
   add_test(NAME v04_models_cantera_backend COMMAND v04_models_cantera_backend_test
-    "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}")
+    "${HUNDUN_PORTABLE_CANTERA_TEST_MECHANISM}" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nasa.yaml")
   set_tests_properties(v04_models_cantera_backend PROPERTIES TIMEOUT 30)
+  add_executable(v04_models_cantera_kerosene_test unit/models_cantera_kerosene_test.cpp)
+  target_link_libraries(v04_models_cantera_kerosene_test PRIVATE hundun_v04_portable_cantera)
+  add_test(NAME v04_models_cantera_kerosene COMMAND v04_models_cantera_kerosene_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/kerosene.yaml" "e9e7b828f2705f2948a6910b6e18949fd2757b8e33dc722a7f9fbfb97dd69597")
+  set_tests_properties(v04_models_cantera_kerosene PROPERTIES TIMEOUT 30)
+  add_test(NAME v04_kerosene_input COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/kerosene_input_test.py"
+    "$<TARGET_FILE:v04_models_cantera_kerosene_test>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/kerosene.yaml")
+  set_tests_properties(v04_kerosene_input PROPERTIES TIMEOUT 30)
+  add_executable(v04_models_cantera_pairs_test unit/models_cantera_pairs_test.cpp)
+  target_link_libraries(v04_models_cantera_pairs_test PRIVATE hundun_v04_portable_cantera)
+  add_test(NAME v04_models_cantera_pairs COMMAND v04_models_cantera_pairs_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-pairs/mechanism.yaml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-pairs/points.dat")
+  set_tests_properties(v04_models_cantera_pairs PROPERTIES TIMEOUT 30)
+  add_executable(v04_models_cantera_refinement_test unit/models_cantera_refinement_test.cpp)
+  target_link_libraries(v04_models_cantera_refinement_test PRIVATE hundun_v04_portable_cantera)
+  add_test(NAME v04_models_cantera_refinement COMMAND v04_models_cantera_refinement_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-pairs/mechanism.yaml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-pairs/reject.dat")
+  set_tests_properties(v04_models_cantera_refinement PROPERTIES TIMEOUT 30)
+  add_executable(v04_models_spray_film_cantera_test unit/models_spray_film_cantera_test.cpp)
+  target_include_directories(v04_models_spray_film_cantera_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  target_link_libraries(v04_models_spray_film_cantera_test PRIVATE hundun_v04_portable_cantera)
+  add_test(NAME v04_models_spray_film_cantera COMMAND v04_models_spray_film_cantera_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/film.yaml")
+  set_tests_properties(v04_models_spray_film_cantera PROPERTIES TIMEOUT 15)
+  add_executable(v04_models_orders_test unit/models_orders_test.cpp)
+  target_link_libraries(v04_models_orders_test PRIVATE hundun_v04_portable_cantera)
+  target_include_directories(v04_models_orders_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  add_test(NAME v04_models_orders COMMAND v04_models_orders_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/orders.yaml")
+  set_tests_properties(v04_models_orders PROPERTIES TIMEOUT 30)
+  add_test(NAME v04_orders_input COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/orders_input_test.py"
+    $<TARGET_FILE:v04_models_orders_test>
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/orders.yaml")
+  set_tests_properties(v04_orders_input PROPERTIES TIMEOUT 30)
 endif()
 
 add_executable(v04_models_combustion_test
@@ -445,13 +490,30 @@ add_executable(v04_models_combustion_test
 target_link_libraries(v04_models_combustion_test PRIVATE hundun_v04_test_core)
 add_test(NAME v04_models_combustion COMMAND v04_models_combustion_test)
 
-foreach(portable_slice IN ITEMS esf esf_reaction esf_backend tcr)
+foreach(portable_slice IN ITEMS esf esf_state esf_reaction esf_backend tcr)
   add_executable(v04_models_${portable_slice}_test unit/models_${portable_slice}_test.cpp)
   target_include_directories(v04_models_${portable_slice}_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
   target_link_libraries(v04_models_${portable_slice}_test PRIVATE hundun_v04_test_core)
   add_test(NAME v04_models_${portable_slice} COMMAND v04_models_${portable_slice}_test)
   set_tests_properties(v04_models_${portable_slice} PROPERTIES TIMEOUT 15)
 endforeach()
+
+add_executable(v04_models_kerosene_test unit/models_kerosene_test.cpp)
+target_include_directories(v04_models_kerosene_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_kerosene_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_kerosene COMMAND v04_models_kerosene_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/kerosene-rates.dat")
+set_tests_properties(v04_models_kerosene PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_esf_roundoff_test unit/models_esf_roundoff_test.cpp)
+target_include_directories(v04_models_esf_roundoff_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_esf_roundoff_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_esf_roundoff COMMAND v04_models_esf_roundoff_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/esf-noise.dat")
+set_tests_properties(v04_models_esf_roundoff PROPERTIES TIMEOUT 15)
+add_test(NAME v04_models_esf_bound_roundoff COMMAND v04_models_esf_roundoff_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/esf-bound.dat" 0)
+set_tests_properties(v04_models_esf_bound_roundoff PROPERTIES TIMEOUT 15)
 
 add_executable(v04_models_exchange_batch_test unit/models_exchange_batch_test.cpp)
 target_include_directories(v04_models_exchange_batch_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
@@ -479,7 +541,7 @@ target_include_directories(v04_models_spray_parcel_test PRIVATE "${CMAKE_CURRENT
 target_link_libraries(v04_models_spray_parcel_test PRIVATE hundun_v04_test_core)
 add_test(NAME v04_models_spray_parcel COMMAND v04_models_spray_parcel_test)
 
-foreach(spray_slice IN ITEMS breakup mechanics source transfer events)
+foreach(spray_slice IN ITEMS breakup mechanics source transfer events thick)
   add_executable(v04_models_spray_${spray_slice}_test
     unit/models_spray_${spray_slice}_test.cpp)
   target_include_directories(v04_models_spray_${spray_slice}_test PRIVATE
@@ -536,6 +598,11 @@ add_test(NAME v04_solver_low_mach_mms
   COMMAND v04_solver_low_mach_mms_test)
 set_tests_properties(v04_solver_low_mach_mms PROPERTIES TIMEOUT 120)
 
+add_executable(v04_reaction_response_test numerical/reaction_response_test.cpp)
+target_link_libraries(v04_reaction_response_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_reaction_response COMMAND v04_reaction_response_test)
+set_tests_properties(v04_reaction_response PROPERTIES TIMEOUT 30)
+
 add_executable(v04_solver_enthalpy_terms_test
   numerical/solver_enthalpy_terms_test.cpp)
 target_link_libraries(v04_solver_enthalpy_terms_test PRIVATE
@@ -564,6 +631,37 @@ target_link_libraries(v04_solver_species_conservation_test PRIVATE
 add_test(NAME v04_solver_species_conservation
   COMMAND v04_solver_species_conservation_test)
 set_tests_properties(v04_solver_species_conservation PROPERTIES TIMEOUT 120)
+add_executable(v04_composition_balance_mpi_test mpi/composition_balance_mpi_test.cpp)
+target_link_libraries(v04_composition_balance_mpi_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_composition_balance_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_composition_balance_mpi_test>" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_composition_balance_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 30 RUN_SERIAL TRUE)
+endforeach()
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_iem_transport_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_species_conservation_test>"
+            --iem-solve ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_iem_transport_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+  add_test(NAME v04_frozen_transport_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_solver_species_conservation_test>"
+            --frozen-solve ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_frozen_transport_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+  add_test(NAME v04_esf_enthalpy_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_solver_species_conservation_test>"
+            --esf-h-solve ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_esf_enthalpy_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+endforeach()
 
 add_executable(v04_solver_sampled_direction_test
   numerical/solver_sampled_direction_test.cpp)
@@ -893,7 +991,7 @@ add_executable(v04_mesh_ibm_import_mpi_test
 target_link_libraries(v04_mesh_ibm_import_mpi_test PRIVATE
   hundun_v04_test_core
   MPI::MPI_C)
-foreach(rank_count IN ITEMS 1 2)
+foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_mesh_ibm_import_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
             ${MPIEXEC_PREFLAGS}
@@ -1168,6 +1266,55 @@ target_compile_definitions(v04_app_init_case_test PRIVATE
 add_test(NAME v04_app_init_case COMMAND v04_app_init_case_test)
 set_tests_properties(v04_app_init_case PROPERTIES TIMEOUT 120)
 
+set(hundun_algorithm_cli_options)
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  list(APPEND hundun_algorithm_cli_options --cantera)
+endif()
+add_test(NAME v04_app_algorithm_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/app_algorithm_cli_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py"
+    ${hundun_algorithm_cli_options})
+set_tests_properties(v04_app_algorithm_cli PROPERTIES PROCESSORS 4 TIMEOUT 120)
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  add_executable(v04_chemistry_restart_test integration/chemistry_restart_test.cpp)
+  target_link_libraries(v04_chemistry_restart_test PRIVATE hundun_v04_core MPI::MPI_C)
+  add_test(NAME v04_chemistry_restart COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/chemistry_restart_test.py"
+    "$<TARGET_FILE:hundun>" "$<TARGET_FILE:v04_chemistry_restart_test>" "${MPIEXEC_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py")
+  set_tests_properties(v04_chemistry_restart PROPERTIES PROCESSORS 4 TIMEOUT 120)
+  add_test(NAME v04_species_terminal_refinement COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/species_terminal_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py")
+  set_tests_properties(v04_species_terminal_refinement PROPERTIES PROCESSORS 4 TIMEOUT 120)
+  add_executable(v04_kerosene_transport_test integration/kerosene_transport_test.cpp)
+  target_link_libraries(v04_kerosene_transport_test PRIVATE hundun_v04_core MPI::MPI_C)
+  foreach(hundun_ker_ranks IN ITEMS 1 2 4)
+    add_test(NAME v04_kerosene_transport_mpi_${hundun_ker_ranks}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${hundun_ker_ranks}"
+      "$<TARGET_FILE:v04_kerosene_transport_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow/viscosity.dat")
+    set_tests_properties(v04_kerosene_transport_mpi_${hundun_ker_ranks}
+      PROPERTIES PROCESSORS ${hundun_ker_ranks} TIMEOUT 60)
+  endforeach()
+  add_test(NAME v04_kerosene_flow COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/kerosene_flow_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py")
+  set_tests_properties(v04_kerosene_flow PROPERTIES PROCESSORS 4 TIMEOUT 120)
+  add_executable(v04_kerosene_esf_test integration/kerosene_esf_test.cpp)
+  target_link_libraries(v04_kerosene_esf_test PRIVATE hundun_v04_core MPI::MPI_C)
+  add_test(NAME v04_kerosene_esf COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/kerosene_esf_test.py"
+    "$<TARGET_FILE:hundun>" "$<TARGET_FILE:v04_kerosene_esf_test>" "${MPIEXEC_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py")
+  set_tests_properties(v04_kerosene_esf PROPERTIES PROCESSORS 4 TIMEOUT 120)
+endif()
+
 add_executable(v04_app_driver_test
   integration/app_driver_test.cpp)
 target_link_libraries(v04_app_driver_test PRIVATE
@@ -1270,6 +1417,12 @@ foreach(rank_count IN ITEMS 1 2 4)
   set_tests_properties(v04_product_generic_thermal_halo_mpi_${rank_count}
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180)
 endforeach()
+
+add_executable(v04_product_cn_time_test integration/product_cn_time_test.cpp)
+target_link_libraries(v04_product_cn_time_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+add_test(NAME v04_product_cn_time COMMAND v04_product_cn_time_test)
+add_test(NAME v04_product_be_shear_time COMMAND v04_product_cn_time_test --be)
+set_tests_properties(v04_product_cn_time v04_product_be_shear_time PROPERTIES TIMEOUT 120)
 
 add_executable(v04_product_pressure_energy_temporal_convergence_test
   integration/product_pressure_energy_temporal_convergence_test.cpp)
@@ -2045,6 +2198,10 @@ foreach(spray_ranks IN ITEMS 1 2 4)
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-ibm-wale")
   set_tests_properties(v04_product_spray_esf_ibm_wale_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
+  add_test(NAME v04_product_smag_mpi_${spray_ranks}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
+      $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/smag")
+  set_tests_properties(v04_product_smag_mpi_${spray_ranks} PROPERTIES TIMEOUT 60 PROCESSORS ${spray_ranks})
   add_test(NAME v04_product_spray_esf_ibm_mpi_${spray_ranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${spray_ranks}
       $<TARGET_FILE:v04_product_spray_mpi_test> "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-spray-esf-ibm")
@@ -2065,6 +2222,7 @@ endforeach()
 
 add_executable(v04_product_reaction_mpi_test mpi/product_reaction_mpi_test.cpp)
 target_link_libraries(v04_product_reaction_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+target_compile_definitions(v04_product_reaction_mpi_test PRIVATE HUNDUN_V04_ENABLE_TEST_ACCESS=1)
 foreach(reaction_ranks IN ITEMS 1 2 4)
   add_test(NAME v04_product_reaction_mpi_${reaction_ranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${reaction_ranks}
@@ -2089,6 +2247,27 @@ foreach(rank_count IN ITEMS 1 2 4)
 endforeach()
 
 if(HUNDUN_ENABLE_REACTING_CANTERA)
+  add_executable(v04_esf_seed_test mpi/esf_seed_test.cpp)
+  target_link_libraries(v04_esf_seed_test PRIVATE hundun_v04_core MPI::MPI_C)
+  foreach(rank_count IN ITEMS 1 2 4)
+    add_test(NAME v04_esf_seed_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+        "$<TARGET_FILE:v04_esf_seed_test>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-cantera-esf")
+    set_tests_properties(v04_esf_seed_mpi_${rank_count}
+      PROPERTIES TIMEOUT 120 PROCESSORS ${rank_count} RUN_SERIAL TRUE)
+  endforeach()
+  add_executable(v04_esf_cn_test mpi/esf_cn_test.cpp)
+  target_link_libraries(v04_esf_cn_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+  target_compile_definitions(v04_esf_cn_test PRIVATE HUNDUN_V04_ENABLE_TEST_ACCESS)
+  foreach(rank_count IN ITEMS 1 2 4)
+    add_test(NAME v04_esf_cn_heat_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+        "$<TARGET_FILE:v04_esf_cn_test>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-cantera-esf")
+    set_tests_properties(v04_esf_cn_heat_mpi_${rank_count}
+      PROPERTIES TIMEOUT 120 PROCESSORS ${rank_count} RUN_SERIAL TRUE)
+  endforeach()
   foreach(rank_count IN ITEMS 1 2 4)
     add_test(NAME v04_product_cantera_case_mpi_${rank_count}
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
@@ -2104,6 +2283,16 @@ foreach(rank_count IN ITEMS 1 2 4)
       ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
       "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-esf" ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_esf_case_mpi_${rank_count} PROPERTIES TIMEOUT 60 PROCESSORS ${rank_count})
+endforeach()
+
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_esf_restart_capacity_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_reaction_mpi_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-esf" --restart-capacity
+      ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_esf_restart_capacity_mpi_${rank_count}
+    PROPERTIES TIMEOUT 120 PROCESSORS ${rank_count} RUN_SERIAL TRUE)
 endforeach()
 
 foreach(tcr_mode IN ITEMS shadow experimental)
@@ -2126,13 +2315,24 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   endforeach()
 endif()
 
-set(coupled_cli_cases reacting-esf-ibm reacting-spray-esf-ibm reacting-spray-esf-wall reacting-spray-esf-outlet reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
+set(coupled_cli_cases smag reacting-esf-ibm reacting-spray-esf-ibm reacting-spray-esf-wall reacting-spray-esf-outlet reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
-  list(APPEND coupled_cli_cases reacting-cantera-esf reacting-spray-esf-cantera reacting-spray-esf-ibm-cantera)
+  list(APPEND coupled_cli_cases esf-cn reacting-cantera-esf reacting-spray-esf-cantera reacting-spray-esf-ibm-cantera)
+  add_test(NAME v04_composition_balance_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/composition_balance_cli_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/esf-cn"
+      "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}"
+      "${CMAKE_CURRENT_BINARY_DIR}/composition-cli"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py")
+  set_tests_properties(v04_composition_balance_cli PROPERTIES TIMEOUT 90 PROCESSORS 4 RUN_SERIAL TRUE)
 endif()
 foreach(coupled_case IN LISTS coupled_cli_cases)
   set(coupled_initial_state "101325,300,0,0,0,0.25")
-  if(coupled_case MATCHES "^reacting-spray-")
+  if(coupled_case STREQUAL "esf-cn")
+    set(coupled_initial_state "101325,300,0.1,0,0,0.25")
+  endif()
+  if(coupled_case STREQUAL "smag" OR coupled_case MATCHES "^reacting-spray-")
     set(coupled_initial_state "101325,400,0,0,0,0.01")
   endif()
   if(coupled_case MATCHES "^reacting-spray-(esf-)?outlet$")
@@ -2193,10 +2393,129 @@ set_tests_properties(v04_solver_shared_faces PROPERTIES TIMEOUT 15 LABELS "v04_f
 
 add_executable(v04_cold_outlet_test mpi/cold_outlet_test.cpp)
 target_link_libraries(v04_cold_outlet_test PRIVATE hundun_v04_core MPI::MPI_C)
+add_executable(v04_heat_wall_test mpi/heat_wall_test.cpp)
+target_link_libraries(v04_heat_wall_test PRIVATE hundun_v04_core MPI::MPI_C)
+target_compile_definitions(v04_heat_wall_test PRIVATE
+  HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
 foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_heat_wall_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_heat_wall_test>")
+  set_tests_properties(v04_heat_wall_mpi_${rank_count}
+    PROPERTIES PROCESSORS ${rank_count} TIMEOUT 120)
+endforeach()
+add_executable(v04_mixture_run_test mpi/mixture_run_test.cpp)
+target_link_libraries(v04_mixture_run_test PRIVATE hundun_v04_core MPI::MPI_C)
+add_executable(v04_esf_mixture_test mpi/esf_mixture_test.cpp)
+add_executable(v04_esf_implicit_test mpi/esf_implicit_test.cpp)
+add_executable(v04_esf_energy_test mpi/esf_energy_test.cpp)
+add_executable(v04_cold_pressure_audit_test mpi/cold_pressure_audit_test.cpp)
+target_link_libraries(v04_cold_pressure_audit_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_cold_pressure_audit_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_cold_pressure_audit_test>")
+  set_tests_properties(v04_cold_pressure_audit_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
+target_link_libraries(v04_esf_energy_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_esf_energy_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_esf_energy_test>")
+  set_tests_properties(v04_esf_energy_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+  add_test(NAME v04_esf_energy_flux_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_esf_energy_test>" --pressure-flux)
+  set_tests_properties(v04_esf_energy_flux_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+  add_test(NAME v04_esf_energy_trace_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_esf_energy_test>" --trace)
+  set_tests_properties(v04_esf_energy_trace_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
+add_executable(v04_esf_flux_test mpi/esf_flux_test.cpp)
+target_link_libraries(v04_esf_flux_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_esf_flux_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_esf_flux_test>")
+  set_tests_properties(v04_esf_flux_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
+add_executable(v04_esf_source_test mpi/esf_source_test.cpp)
+target_link_libraries(v04_esf_source_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_esf_source_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_esf_source_test>")
+  set_tests_properties(v04_esf_source_mpi_${rank_count} PROPERTIES TIMEOUT 120)
+endforeach()
+target_link_libraries(v04_esf_implicit_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_esf_implicit_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_esf_implicit_test>")
+  set_tests_properties(v04_esf_implicit_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+  foreach(pressure_mode IN ITEMS pressure pressure-history reacting-cn)
+    add_test(NAME v04_esf_${pressure_mode}_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+        "$<TARGET_FILE:v04_esf_implicit_test>" "--${pressure_mode}")
+    set_tests_properties(v04_esf_${pressure_mode}_mpi_${rank_count}
+      PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+  endforeach()
+endforeach()
+add_executable(v04_statistical_roundoff_test unit/statistical_roundoff_test.cpp)
+target_link_libraries(v04_statistical_roundoff_test PRIVATE hundun_v04_core)
+add_test(NAME v04_statistical_roundoff COMMAND v04_statistical_roundoff_test)
+target_link_libraries(v04_esf_mixture_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_esf_mixture_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_esf_mixture_test>")
+  set_tests_properties(v04_esf_mixture_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+  add_test(NAME v04_esf_zero_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_esf_mixture_test>" --zero)
+  set_tests_properties(v04_esf_zero_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
+  add_test(NAME v04_mixture_run_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_mixture_run_test>")
+  set_tests_properties(v04_mixture_run_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
   add_test(NAME v04_cold_outlet_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
       "$<TARGET_FILE:v04_cold_outlet_test>")
   set_tests_properties(v04_cold_outlet_mpi_${rank_count}
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
 endforeach()
+
+add_executable(v04_statistical_energy_workspace_test unit/statistical_energy_workspace_test.cpp)
+target_include_directories(v04_statistical_energy_workspace_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_statistical_energy_workspace_test PRIVATE hundun_v04_test_core)
+add_test(NAME v04_statistical_energy_workspace COMMAND v04_statistical_energy_workspace_test)
+set_tests_properties(v04_statistical_energy_workspace PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_kerosene_test unit/models_spray_kerosene_test.cpp)
+target_include_directories(v04_models_spray_kerosene_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_kerosene_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_kerosene COMMAND v04_models_spray_kerosene_test)
+set_tests_properties(v04_models_spray_kerosene PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_density_test unit/models_spray_density_test.cpp)
+target_include_directories(v04_models_spray_density_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_density_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_density COMMAND v04_models_spray_density_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset")
+set_tests_properties(v04_models_spray_density PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_film_thick_test unit/models_spray_film_thick_test.cpp)
+target_include_directories(v04_models_spray_film_thick_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_film_thick_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_film_thick COMMAND v04_models_spray_film_thick_test)
+set_tests_properties(v04_models_spray_film_thick PROPERTIES TIMEOUT 15)

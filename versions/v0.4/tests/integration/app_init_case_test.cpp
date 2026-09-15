@@ -41,11 +41,20 @@ bool run() {
             fs::is_regular_file(case_root / "thermophysics.d");
   passed &= ApplicationService::initialize_case_directory(case_root).code ==
             StatusCode::invalid_case;
+  ValidatedModel generated;
+  const bool cfl_defaults = CaseCompiler::load_and_compile(MPI_COMM_SELF,case_root,generated) &&
+      generated.time.convective_cfl == 0.30 && generated.time.convective_cfl_margin == 0.05 &&
+      generated.time.scheme == TimeScheme::cn_be &&
+      generated.solver.coupling == CouplingKind::outer_corrected;
+  if (!cfl_defaults) std::cerr << "generated case uses CN/BE with CFL 0.30 +/- 0.05\n";
+  passed &= cfl_defaults;
   CaseValidationReport report;
   passed &= static_cast<bool>(
       ApplicationService::validate(MPI_COMM_SELF, case_root, report));
   passed &= report.case_model != 0U && report.product != 0U &&
-            report.summary.sealed && report.summary.pressure_correctors == 2U;
+            report.summary.sealed && report.summary.pressure_correctors == 2U &&
+            report.summary.coupling == CouplingKind::outer_corrected &&
+            report.summary.time_scheme == TimeScheme::cn_be;
   passed &= static_cast<bool>(ApplicationService::validate_run_directories(
       case_root, root / "run", HUNDUN_V04_SOURCE_ROOT));
   passed &= static_cast<bool>(ApplicationService::validate_run_directories(
@@ -72,7 +81,9 @@ bool run() {
   run_options.restart_interval = 1U;
   passed &= static_cast<bool>(
       ApplicationService::run(MPI_COMM_SELF, run_options, run_report));
-  passed &= run_report.piso.cold.active &&
+  passed &= run_report.piso.committed_convective_cfl_limit == 0.35 &&
+      run_report.piso.committed_convective_cfl_out_max <= 0.35 &&
+      run_report.piso.cold.active &&
       run_report.piso.cold.momentum_solve_calls == 3U * run_report.piso.cold.outer_iterations &&
       run_report.piso.cold.species_solve_calls == 0U;
   passed &= run_report.case_model == report.case_model &&

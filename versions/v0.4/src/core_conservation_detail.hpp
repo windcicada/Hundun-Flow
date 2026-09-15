@@ -2,9 +2,11 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #pragma once
+#include "core_esf_energy_detail.hpp"
 
 #include "hundun/v04_app.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_heat_boundary_detail.hpp"
 #include "solver_mixture_enthalpy_diffusion_detail.hpp"
 #include "solver_mixture_enthalpy_convection_detail.hpp"
 #include "solver_viscous_detail.hpp"
@@ -169,7 +171,10 @@ inline Status collect_boundary_balance(
     std::uint64_t accepted_step, const ProductBoundaryBalanceHistory& history,
     ReductionEngine& reductions, DriverConservationReport& out,
     ProductBoundaryBalanceHistory& pending,
-    const IbmEquationInterfacePlan* immersed_interface = nullptr) noexcept {
+    const IbmEquationInterfacePlan* immersed_interface = nullptr,
+    const MixtureTransportFaces* mixture = nullptr,
+    bool provisional_flux = false,
+    const StatisticalEnergyBalanceView* statistical = nullptr) noexcept {
   out = {};
   pending = {};
   const bool direct_h = enthalpy_plan.unity_lewis_total_enthalpy();
@@ -209,18 +214,24 @@ inline Status collect_boundary_balance(
                               IbmInterfaceInletFieldKind inlet_field) {
     const std::array<ConstFieldView, 1U> reads{field};
     const std::array<FieldView, 1U> writes{scratch};
-    Status status = cartesian_convection(
-        kernels, scheme, flux,
-        {{reads.data(), reads.size()}, {writes.data(), writes.size()},
-         box, 0U, 0U, 1U, flux.revision, nullptr});
+    const KernelInvocation invocation{
+        {reads.data(), reads.size()}, {writes.data(), writes.size()},
+        box, 0U, 0U, 1U, flux.revision, nullptr};
+    const bool common=mixture && inlet_field==IbmInterfaceInletFieldKind::enthalpy;
+    Status status = common
+        ? cartesian_mixture_convection(kernels,*mixture,flux,invocation)
+        : provisional_flux
+            ? cartesian_provisional_convection(kernels,scheme,flux,invocation)
+            : cartesian_convection(kernels,scheme,flux,invocation);
     if (status && immersed_interface != nullptr)
       status = immersed_interface->add_source_convection_correction(
-          {inlet_field, 0U}, scheme, field, 1.0, scratch, box);
+          {inlet_field, 0U}, common ? ConvectionScheme::central2 : scheme,
+          field, 1.0, scratch, box);
     return status;
   };
   if (local) local = convection(state.enthalpy.trial, schemes.enthalpy(),
                                 IbmInterfaceInletFieldKind::enthalpy);
-  if (local) local = MixtureEnthalpyConvection::add_correction(
+  if (local && !mixture) local = MixtureEnthalpyConvection::add_correction(
       enthalpy_plan,state,flux,immersed_interface,box,scratch);
   if (local)
     for (std::int32_t z = 0; z < cells.z; ++z)
@@ -313,10 +324,15 @@ inline Status collect_boundary_balance(
               return interpolate_face(kernels, axis, normal,
                                       f.unchecked(left, c), f.unchecked(face, c));
             };
-            sum[9U] += sign * positive_transmissibility(
-                kernels, thermal_coefficient, axis, face) *
-                (thermal_coordinate.unchecked(face, 0U) -
-                 thermal_coordinate.unchecked(left, 0U));
+            double prescribed_heat{};
+            if (enthalpy_plan.prescribed_heat_flux(
+                    external_faces[2U * axis_index + (high ? 1U : 0U)], prescribed_heat))
+              sum[9U] -= prescribed_heat * face_area(kernels, axis, face);
+            else
+              sum[9U] += sign * positive_transmissibility(
+                  kernels, thermal_coefficient, axis, face) *
+                  (thermal_coordinate.unchecked(face, 0U) -
+                   thermal_coordinate.unchecked(left, 0U));
             double species_heat = 0.0;
             if (local)
               local = MixtureEnthalpyDiffusion::face_flux(
@@ -341,12 +357,35 @@ inline Status collect_boundary_balance(
     status = reductions.checked_sum(
         {values.data() + 8U, 4U}, {global.data() + 8U, 4U}, {});
   if (!status) return status;
+  double statistical_global[2]{};
+  if(statistical) {
+    if(!statistical->generation || !valid_cell_view(statistical->source,cells,0,1,0))
+      local={StatusCode::invalid_plan,10212U};
+    for(unsigned a=0;a<3;++a)
+      if(!valid_equation_face_view(statistical->correction[a],static_cast<CartesianAxis>(a),cells))
+        local={StatusCode::invalid_plan,10212U};
+    long double terms[2]{};
+    if(local)for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+      const Int3 c{x,y,z};if(!fluid(c))continue;
+      for(unsigned a=0;a<3;++a) {
+        Int3 upper=c;++(a==0 ? upper.x : a==1 ? upper.y : upper.z);
+        terms[0]+=static_cast<long double>(statistical->correction[a].unchecked(upper))-
+            statistical->correction[a].unchecked(c);
+      }
+      terms[1]+=static_cast<long double>(cell_volume(kernels,c))*statistical->source.unchecked(c,0);
+    }
+    const double values[2]{static_cast<double>(terms[0]),static_cast<double>(terms[1])};
+    if(!std::isfinite(values[0]) || !std::isfinite(values[1]))local={StatusCode::numerical_failure,10212U};
+    status=reductions.checked_sum({values,2},{statistical_global,2},local);
+    if(!status)return status;
+  }
   const long double mass = history.valid ? history.mass : global[1U];
   const long double previous_mass = history.valid ? history.previous_mass : global[2U];
   const long double energy = history.valid ? history.energy : global[4U];
   const long double previous_energy = history.valid ? history.previous_energy : global[5U];
   const long double energy_out = static_cast<long double>(global[7U]) +
-                                global[8U] - global[9U] - global[10U] - global[11U];
+                                global[8U] - global[9U] - global[10U] - global[11U] +
+                                statistical_global[0] - statistical_global[1];
   ProductBoundaryBalanceHistory next;
   next.valid = true;
   next.epoch_start_step = history.valid ? history.epoch_start_step : accepted_step;
@@ -362,6 +401,8 @@ inline Status collect_boundary_balance(
   report.conductive_heat_input = global[9U];
   report.species_enthalpy_diffusion_input = global[11U];
   report.viscous_work_input = global[10U];
+  report.statistical_enthalpy_outflow=statistical_global[0];
+  report.statistical_enthalpy_source=statistical_global[1];
   report.mass_bdf_rate = static_cast<double>(
       static_cast<long double>(bdf.a0) * global[0U] +
       static_cast<long double>(bdf.a1) * global[1U] +

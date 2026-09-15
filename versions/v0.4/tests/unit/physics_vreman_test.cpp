@@ -181,12 +181,93 @@ bool test_static_model_binding() {
   return passed;
 }
 
+bool test_sgs_state_units_and_precision() {
+  VelocityGradient g;
+  g.value[0]=g.value[4]=g.value[8]=1.;
+  SgsState state;
+  bool passed=expect(sgs_state_from_viscosity(g,.25,2.,.01,.02,state) &&
+      state.kinematic_viscosity_m2_s==.02 &&
+      std::abs(state.kinetic_energy_m2_s2-std::pow(.03,2./3.))<1e-14 &&
+      std::abs(state.dissipation_w_m3-.3)<1e-14 &&
+      std::abs(state.specific_dissipation_m2_s3-.15)<1e-14,
+      "SGS energy and both dissipation units match COAST algebra");
+  SgsState marker{1.,2.,3.,4.};state=marker;
+  passed &= expect(!sgs_state_from_viscosity(g,.25,-2.,.01,.02,state) &&
+      std::memcmp(&state,&marker,sizeof(state))==0,"invalid SGS input preserves output");
+  for(auto& v:g.value)v*=1e-160;
+  passed &= expect(sgs_state_from_viscosity(g,.25,1e-100,1e-5,1e-160,state) &&
+      state.kinetic_energy_m2_s2>0. && state.dissipation_w_m3==0. &&
+      std::abs(state.specific_dissipation_m2_s3/6e-225-1.)<1e-13,
+      "SGS scaling preserves representable specific dissipation after volumetric underflow");
+  return passed;
+}
+
+bool test_smagorinsky_parameters_and_dilatation() {
+  VelocityGradient gradient;
+  gradient.value[0]=gradient.value[4]=gradient.value[8]=1.;
+  double value=-1.;
+  const double expected=.125*.125*.25*.25*std::sqrt(6.);
+  bool passed=expect(smagorinsky_kinematic_viscosity(gradient,.25,.125,value) &&
+      std::abs(value-expected)<=1e-14*expected, "Smagorinsky retains dilatational strain");
+  double doubled{};
+  passed &= expect(smagorinsky_kinematic_viscosity(gradient,.25,.25,doubled) &&
+      doubled==4*value, "Smagorinsky coefficient enters quadratically");
+  for(double scale : {1e-300,1e-100,1e100,1e300}) {
+    auto scaled=gradient;
+    for(auto& v:scaled.value)v*=scale;
+    double result{};
+    passed &= expect(smagorinsky_kinematic_viscosity(scaled,.25,.125,result) &&
+        result>0. && std::abs(result/(expected*scale)-1.)<1e-13,
+        "Smagorinsky preserves strain scaling through extreme finite gradients");
+  }
+  value=-1.;
+  passed &= expect(!smagorinsky_kinematic_viscosity(gradient,.25,-.1,value) && value==-1.,
+                   "invalid coefficient preserves output");
+  gradient.value[2]=std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(!smagorinsky_kinematic_viscosity(gradient,.25,.1,value) && value==-1.,
+                   "invalid gradient preserves output");
+  return passed;
+}
+
+bool test_smagorinsky_strain_and_volume_filter() {
+  TurbulencePlanSpec spec;
+  spec.kind = TurbulenceKind::smagorinsky;
+  bool passed = true;
+  for (auto geometry : {GeometryKind::uniform, GeometryKind::tensor_stretched}) {
+    TurbulenceFixture fixture;
+    if (!expect(fixture.initialize(spec, geometry), "Smagorinsky plan compiles"))
+      return false;
+    for (auto& g : fixture.gradients) g.value[1] = 2.;
+    TurbulenceCertificate certificate;
+    passed &= expect(bool(fixture.plan.update(fixture.input(), fixture.effective.view, certificate)),
+                     "Smagorinsky shear update succeeds");
+    std::size_t i{};
+    for (int z=0;z<fixture.patch.cells.z;++z)
+      for (int y=0;y<fixture.patch.cells.y;++y)
+        for (int x=0;x<fixture.patch.cells.x;++x,++i) {
+          const double volume=fixture.geometry.x().widths().data[x] *
+              fixture.geometry.y().widths().data[y] * fixture.geometry.z().widths().data[z];
+          const double length=.17*std::cbrt(volume);
+          const double expected=1.8e-5+1.2*length*length*2.;
+          passed &= expect(std::abs(fixture.effective.storage[i]-expected)<=1e-13*expected,
+                           "Smagorinsky uses full strain and volume filter on stretched cells");
+        }
+    for (auto& g : fixture.gradients) g.value[3] = -2.;
+    passed &= expect(bool(fixture.plan.update(fixture.input(105U), fixture.effective.view, certificate)),
+                     "rigid rotation update succeeds");
+    for (double value : fixture.effective.storage)
+      passed &= expect(value==1.8e-5,"rigid rotation has molecular viscosity");
+  }
+  return passed;
+}
+
 bool test_candidate_effective_viscosity_is_stateless_and_model_exact() {
-  std::array<TurbulencePlanSpec, 4U> specs{};
+  std::array<TurbulencePlanSpec, 5U> specs{};
   specs[0].kind = TurbulenceKind::none;
   specs[1].kind = TurbulenceKind::wale;
   specs[2].kind = TurbulenceKind::vreman_wall_function;
   specs[3].kind = TurbulenceKind::vreman;
+  specs[4].kind = TurbulenceKind::smagorinsky;
 
   bool passed = true;
   for (std::size_t model = 0U; model < specs.size(); ++model) {
@@ -239,6 +320,37 @@ bool test_candidate_effective_viscosity_is_stateless_and_model_exact() {
                          fixture.plan.update_count() == count_before,
                      "candidate evaluation leaves live values and count unchanged");
 
+    std::vector<SgsState> states(fixture.gradients.size());
+    passed &= expect(fixture.plan.evaluate_sgs_state(input,{states.data(),states.size()}) &&
+        fixture.plan.update_count()==count_before,"SGS state query preserves the live cache");
+    for (std::size_t cell=0;cell<states.size();++cell)
+      passed &= expect(fixture.molecular.storage[cell]+fixture.density.storage[cell]*
+          states[cell].kinematic_viscosity_m2_s==live_before[cell] &&
+          states[cell].kinetic_energy_m2_s2>=0. && states[cell].dissipation_w_m3>0. &&
+          std::abs(states[cell].dissipation_w_m3/fixture.density.storage[cell]-
+                   states[cell].specific_dissipation_m2_s3)<1e-14,
+          "SGS state uses the selected model and explicit density conversion");
+    const auto saved_states=states;
+    SgsState cell_marker{1.,2.,3.,4.}, invalid_cell=cell_marker;
+    passed &= expect(!fixture.plan.evaluate_sgs_cell({-1,0,0},fixture.gradients[0],1.2,1.8e-5,invalid_cell) &&
+        std::memcmp(&cell_marker,&invalid_cell,sizeof(cell_marker))==0,
+        "SGS point query rejects cells outside its compiled patch");
+    const double saved_density=fixture.density.storage.back();
+    fixture.density.storage.back()=-1.;
+    passed &= expect(!fixture.plan.evaluate_sgs_state(input,{states.data(),states.size()}) &&
+        std::memcmp(states.data(),saved_states.data(),states.size()*sizeof(SgsState))==0,
+        "late invalid SGS cell preserves the entire output");
+    std::vector<std::uint8_t> activity(states.size(),1U);activity.back()=0U;
+    passed &= expect(fixture.plan.evaluate_sgs_state(input,{states.data(),states.size()},
+        {activity.data(),activity.size()}) && states.back().kinetic_energy_m2_s2==0. &&
+        states.back().dissipation_w_m3==0.,"solid SGS placeholder skips fluid-state evaluation");
+    fixture.density.storage.back()=saved_density;
+    passed &= expect(!fixture.plan.evaluate_sgs_state(input,
+        {reinterpret_cast<SgsState*>(fixture.density.storage.data()),states.size()}),
+        "SGS query rejects output aliases of input fields");
+    passed &= expect(!fixture.plan.evaluate_sgs_state(input,{states.data(),states.size()},
+        {reinterpret_cast<const std::uint8_t*>(states.data()),states.size()}),
+        "SGS query rejects output aliases of the activity mask");
     TurbulenceCertificate cached_certificate;
     passed &= expect(
         fixture.plan.update(fixture.input(), fixture.effective.view,
@@ -396,6 +508,9 @@ int main(int argc, char** argv) {
     return 2;
   }
   bool passed = test_vreman_invariants();
+  passed &= test_sgs_state_units_and_precision();
+  passed &= test_smagorinsky_strain_and_volume_filter();
+  passed &= test_smagorinsky_parameters_and_dilatation();
   passed &= test_static_model_binding();
   passed &= test_candidate_effective_viscosity_is_stateless_and_model_exact();
   passed &=

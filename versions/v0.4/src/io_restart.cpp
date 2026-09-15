@@ -11,6 +11,7 @@
 #include <mpi.h>
 
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -560,6 +561,7 @@ bool valid_field_catalog(Span<const RestartFieldView> fields,
   bool pressure = false;
   bool enthalpy = false;
   bool enthalpy_rate = false;
+  bool auxiliary = false;
   for (std::size_t index = 0U; index < fields.size; ++index) {
     const RestartFieldView& field = fields.data[index];
     detail::FieldStorageInterval interval{};
@@ -590,12 +592,18 @@ bool valid_field_catalog(Span<const RestartFieldView> fields,
       case RestartFieldRole::transported_scalar:
         if (rates || field.values.components != 1U) return false;
         break;
+      case RestartFieldRole::stochastic_auxiliary:
+        if (rates || auxiliary || field.values.components < 2U) return false;
+        auxiliary = true;
+        break;
       case RestartFieldRole::stochastic_field:
         if (rates || field.values.components < 2U)
         return false;
         break;
       case RestartFieldRole::stochastic_transport:
-        if (rates || field.values.components != 2U)
+        // Cache shape is recorded explicitly; the case's expected field
+        // schema selects legacy diffusion-only or current material caches.
+        if (rates || (field.values.components != 2U && field.values.components != 4U))
         return false;
         break;
       case RestartFieldRole::enthalpy_nonadvective_rate:
@@ -820,7 +828,8 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
          role !=
              static_cast<std::uint8_t>(RestartFieldRole::stochastic_field) &&
          role != static_cast<std::uint8_t>(
-                     RestartFieldRole::stochastic_transport)) ||
+                     RestartFieldRole::stochastic_transport) &&
+         role != static_cast<std::uint8_t>(RestartFieldRole::stochastic_auxiliary)) ||
         field.components == 0U) {
       return false;
     }
@@ -1381,7 +1390,8 @@ Status validate_expected(const RestartExpected& expected,
       manifest.format_version >= kExactHistoryFormatVersion &&
       expected.compatible_method_plan != 0U &&
       expected.compatible_method_plan == manifest.plan &&
-      expected.schema == manifest.schema;
+      (expected.compatible_method_schema != 0U ? expected.compatible_method_schema
+                                               : expected.schema) == manifest.schema;
   if (!valid_global_patch(expected.global_cells, expected.target_patch) ||
       !same(expected.global_cells, manifest.global_cells) ||
       expected.plan == 0U || expected.schema == 0U || expected.geometry == 0U ||
@@ -1421,6 +1431,54 @@ struct GenerationKey {
   std::uint64_t tick{};
 };
 
+// Keep directory traversal allocations in the caller's exception boundary.
+// The production libstdc++ directory_iterator can terminate inside its
+// internal directory-entry update when allocation fails. POSIX enumeration
+// owns only a DIR handle; path allocations below propagate to local_stage.
+template <class Visitor>
+bool visit_directory(const fs::path& directory, std::error_code& error,
+                     Visitor&& visitor) {
+  struct Handle {
+    DIR* value;
+    ~Handle() { if (value != nullptr) ::closedir(value); }
+  } handle{::opendir(directory.c_str())};
+  if (handle.value == nullptr) {
+    error = std::error_code(errno, std::generic_category());
+    return false;
+  }
+  while (!error) {
+    errno = 0;
+    const dirent* entry = ::readdir(handle.value);
+    if (entry == nullptr) {
+      if (errno != 0) error = std::error_code(errno, std::generic_category());
+      break;
+    }
+    if (std::strcmp(entry->d_name, ".") == 0 ||
+        std::strcmp(entry->d_name, "..") == 0) continue;
+    visitor(directory / entry->d_name);
+  }
+  return !error;
+}
+
+// Match remove_all's symlink semantics while allowing allocation failures
+// during recursive enumeration to reach Restart's collective status gate.
+void remove_generation_tree(const fs::path& path, std::error_code& error) {
+  struct stat metadata{};
+  if (::lstat(path.c_str(), &metadata) != 0) {
+    if (errno != ENOENT) error = std::error_code(errno, std::generic_category());
+    return;
+  }
+  if (S_ISDIR(metadata.st_mode)) {
+    if (!visit_directory(path, error, [&](const fs::path& child) {
+          remove_generation_tree(child, error);
+        })) return;
+    if (::rmdir(path.c_str()) != 0)
+      error = std::error_code(errno, std::generic_category());
+  } else if (::unlink(path.c_str()) != 0) {
+    error = std::error_code(errno, std::generic_category());
+  }
+}
+
 bool generation_key(std::string_view name, GenerationKey& key) noexcept {
   constexpr std::string_view prefix = "generation-";
   if (name.substr(0U, prefix.size()) != prefix) return false;
@@ -1443,15 +1501,14 @@ Status prune_generations(const fs::path& directory, std::uint32_t keep_last,
     GenerationKey key;
   };
   std::vector<Generation> generations;
-  for (fs::directory_iterator iterator(directory, error), end;
-       !error && iterator != end; iterator.increment(error)) {
-    const std::string name = iterator->path().filename().string();
+  visit_directory(directory, error, [&](const fs::path& path) {
+    const std::string name = path.filename().string();
     GenerationKey key;
-    if (fs::is_directory(iterator->symlink_status(error)) && !error &&
+    if (fs::is_directory(fs::symlink_status(path, error)) && !error &&
         generation_key(name, key)) {
-      generations.push_back({iterator->path(), key});
+      generations.push_back({path, key});
     }
-  }
+  });
   if (error) {
     detail::output_record_failure(failure, IoFailureOperation::read, error.value(), directory);
     return {StatusCode::io_failure, kRestartPublication};
@@ -1469,7 +1526,7 @@ Status prune_generations(const fs::path& directory, std::uint32_t keep_last,
            selected->path.filename().string() == current)
       ++selected;
     if (selected == generations.end()) break;
-    fs::remove_all(selected->path, error);
+    remove_generation_tree(selected->path, error);
     if (error) {
       detail::output_record_failure(failure, IoFailureOperation::remove,
                                     error.value(), selected->path);
@@ -1483,28 +1540,27 @@ Status prune_generations(const fs::path& directory, std::uint32_t keep_last,
 
 bool remove_stale_pending(const fs::path& directory, IoFailureContext* failure) {
   std::error_code error;
-  for (fs::directory_iterator iterator(directory, error), end;
-       !error && iterator != end; iterator.increment(error)) {
-    const std::string name = iterator->path().filename().string();
+  visit_directory(directory, error, [&](const fs::path& path) {
+    const std::string name = path.filename().string();
     if (name.size() >= 8U &&
         name.compare(name.size() - 8U, 8U, "-pending") == 0) {
       std::string_view owned(name.data(), name.size() - 8U);
       const bool pointer = owned.substr(0U, 8U) == "current-";
       if (pointer) owned.remove_prefix(8U);
       GenerationKey key;
-      if (!generation_key(owned, key)) continue;
-      const auto type = iterator->symlink_status(error);
-      if (error) return false;
+      if (!generation_key(owned, key)) return;
+      const auto type = fs::symlink_status(path, error);
+      if (error) return;
       if (pointer ? !fs::is_regular_file(type) : !fs::is_directory(type))
-        continue;
-      fs::remove_all(iterator->path(), error);
+        return;
+      remove_generation_tree(path, error);
       if (error) {
         detail::output_record_failure(failure, IoFailureOperation::remove,
-                                      error.value(), iterator->path());
-        return false;
+                                      error.value(), path);
+        return;
       }
     }
-  }
+  });
   if (error)
     detail::output_record_failure(failure, IoFailureOperation::read, error.value(), directory);
   return !error && sync_directory(directory, failure);
@@ -2022,9 +2078,12 @@ Status RestartReader::load(MPI_Comm communicator,
     candidate.plan = manifest.plan;
     candidate.schema = manifest.schema;
     candidate.storage_layout_migrated =
-        (manifest.plan != expected.plan || manifest.schema != expected.schema) &&
-        manifest.plan == expected.compatible_storage_plan &&
-        manifest.schema == expected.compatible_storage_schema;
+        ((manifest.plan != expected.plan || manifest.schema != expected.schema) &&
+         manifest.plan == expected.compatible_storage_plan &&
+         manifest.schema == expected.compatible_storage_schema) ||
+        (manifest.schema != expected.schema &&
+         manifest.plan == expected.compatible_method_plan &&
+         manifest.schema == expected.compatible_method_schema);
     candidate.geometry = manifest.geometry;
     candidate.time = manifest.time;
     candidate.dt = manifest.dt;

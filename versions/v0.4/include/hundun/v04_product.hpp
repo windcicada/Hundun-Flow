@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <string_view>
 
 namespace hundun::v04 {
 
@@ -32,7 +33,10 @@ enum class ProductFreezePhase : std::uint8_t {
 };
 
 struct PlanSummary {
+  TurbulenceKind turbulence{TurbulenceKind::none};
+  double smagorinsky_coefficient{};
   CouplingKind coupling{CouplingKind::piso};
+  TimeScheme time_scheme{TimeScheme::backward_euler};
   Int3 global_cells{};
   Int3 local_cells{};
   std::size_t field_count{};
@@ -41,6 +45,7 @@ struct PlanSummary {
   std::size_t graph_node_count{};
   std::size_t maximum_workspace_bytes{};
   std::size_t service_staging_bytes{};
+  std::size_t derived_output_bytes{};
   std::uint8_t pressure_correctors{};
   double pressure_absolute_tolerance{};
   double pressure_relative_tolerance{};
@@ -58,6 +63,15 @@ struct PlanSummary {
   bool exact_numeric_certified{};
   bool preconditioner_setup_certified{};
   bool sealed{};
+  ReactionMode reaction_mode{ReactionMode::none};
+  bool interval_chemistry{};
+  // Model labels have static storage and remain valid after plan destruction.
+  std::string_view reaction_model{"none"};
+  std::size_t reaction_workspace_bytes{};
+  std::size_t esf_energy_workspace_bytes{};
+  double interval_source_relative_tolerance{};
+  double interval_source_absolute_tolerance{};
+  bool conservative_total_energy{};
 };
 
 class CompiledCasePlan {
@@ -134,12 +148,16 @@ struct ProductCouplingBindings {
 
 class ProductCompiler {
  public:
+  static Status compile_chemistry_restart(MPI_Comm communicator,
+      const ValidatedModel& source, const std::filesystem::path& source_root,
+      const ValidatedModel& target, const std::filesystem::path& target_root,
+      CompiledCasePlan& out) noexcept;
   static Status compile(MPI_Comm communicator,
                         const ValidatedModel& model,
                         const std::filesystem::path& case_root,
                         CompiledCasePlan& out,
                         ProductCouplingBindings coupling = {}) noexcept;
-  // Bind one validated source plan for explicit cold transport/outlet history recovery.
+  // Bind one validated source plan for explicit cold transport/outlet or linear-solver history recovery.
   static Status compile_transport_restart(MPI_Comm communicator,
       const ValidatedModel& source, const std::filesystem::path& source_root,
       const ValidatedModel& target, const std::filesystem::path& target_root,

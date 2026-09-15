@@ -16,14 +16,24 @@ Status wale_kinematic_viscosity(const VelocityGradient& gradient,
     return {StatusCode::invalid_plan, 2301U};
   }
   double g[3][3]{};
+  double maximum_gradient = 0.0;
   for (std::size_t i = 0U; i < 3U; ++i) {
     for (std::size_t j = 0U; j < 3U; ++j) {
       g[i][j] = gradient.value[i * 3U + j];
+      maximum_gradient = std::max(maximum_gradient, std::abs(g[i][j]));
       if (!std::isfinite(g[i][j])) {
         return {StatusCode::numerical_failure, 2302U};
       }
     }
   }
+  // WALE is homogeneous of degree one in the velocity gradient. Rescale
+  // extreme inputs before powers through degree six, then restore that scale.
+  // Keep the established arithmetic for ordinary resolved gradients.
+  const double gradient_scale = maximum_gradient > 0.0 &&
+      (maximum_gradient < 1e-30 || maximum_gradient > 1e30) ? maximum_gradient : 1.0;
+  if (gradient_scale != 1.0)
+    for (auto& row : g)
+      for (double& value : row) value /= gradient_scale;
   double strain_squared = 0.0;
   double squared_gradient[3][3]{};
   for (std::size_t i = 0U; i < 3U; ++i) {
@@ -61,7 +71,7 @@ Status wale_kinematic_viscosity(const VelocityGradient& gradient,
   const double denominator = std::pow(strain_squared, 2.5) +
                              std::pow(traceless_squared, 1.25);
   const double length = coefficient * filter_width;
-  const double candidate = length * length * numerator / denominator;
+  const double candidate = (length * length * numerator / denominator) * gradient_scale;
   if (!std::isfinite(numerator) || !std::isfinite(denominator) ||
       !(denominator > 0.0) || !std::isfinite(candidate) || candidate < 0.0) {
     return {StatusCode::numerical_failure, 2302U};

@@ -209,7 +209,8 @@ inline bool finite_face_flux(ConstFaceFluxView flux, KernelBox box) noexcept {
   return true;
 }
 
-inline bool valid_equation_face_view(FaceFieldView view, CartesianAxis axis,
+template<class Scalar>
+inline bool valid_equation_face_view(BasicFaceFieldView<Scalar> view, CartesianAxis axis,
                                      Int3 cells) noexcept {
   Int3 expected = cells;
   if (axis == CartesianAxis::x) {
@@ -354,11 +355,16 @@ inline double positive_transmissibility(const CartesianKernelPlan& kernels,
   }
   const double left_value = coefficient.unchecked(left, 0U);
   const double right_value = coefficient.unchecked(face, 0U);
-  const double face_location = face_coordinate(kernels, axis, normal);
-  const double left_distance =
-      face_location - centre_coordinate(kernels, axis, normal - 1);
-  const double right_distance =
-      centre_coordinate(kernels, axis, normal) - face_location;
+  const auto* cached=cached_face_metric(kernels,static_cast<std::size_t>(axis),normal);
+  double left_distance{},right_distance{};
+  if (cached) {
+    left_distance=cached->left_distance;
+    right_distance=cached->right_distance;
+  } else {
+    const double face_location=face_coordinate(kernels,axis,normal);
+    left_distance=face_location-centre_coordinate(kernels,axis,normal-1);
+    right_distance=centre_coordinate(kernels,axis,normal)-face_location;
+  }
   if (!std::isfinite(left_value) || !std::isfinite(right_value) ||
       left_value <= 0.0 || right_value <= 0.0 ||
       !std::isfinite(left_distance) || !std::isfinite(right_distance) ||

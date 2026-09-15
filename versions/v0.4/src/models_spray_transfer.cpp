@@ -313,6 +313,151 @@ bool make_euler_state(const SprayParcelState& initial,
 
 }  // namespace
 
+ThickExchangeReport evaluate_thick_exchange(
+    const ThickExchangeInput& input) noexcept {
+  const auto failure = [](ThickExchangeStatus status) {
+    ThickExchangeReport out;
+    out.status = status;
+    return out;
+  };
+  const auto& old = input.parcel;
+  const auto& liquid = input.liquid_properties;
+  const double positive[]{
+      input.gas_temperature_k,          input.gas_cp_j_per_kg_k,
+      input.gas_dynamic_viscosity_pa_s, input.prandtl_number,
+      input.boiling_temperature_k,      liquid.latent_heat_j_per_kg};
+  if (validate_parcel_state(old) != ParcelStateStatus::success ||
+      !valid_liquid_properties(liquid) ||
+      std::any_of(std::begin(positive), std::end(positive),
+                  [](double v) { return !std::isfinite(v) || v <= 0; }) ||
+      !std::isfinite(input.vapor_absolute_thermochemical_enthalpy_j_per_kg) ||
+      !std::isfinite(input.duration_s) || input.duration_s < 0)
+    return failure(ThickExchangeStatus::invalid_input);
+  if (!geometry_consistent(old, liquid.density_kg_per_m3))
+    return failure(ThickExchangeStatus::inconsistent_droplet_geometry);
+  ThickExchangeReport out;
+  out.candidate_parcel = old;
+  out.exchange.available = true;
+  if (input.duration_s == 0) {
+    out.status = ThickExchangeStatus::success;
+    return out;
+  }
+  const double diameter = old.droplet_diameter_m, mass = old.droplet_mass_kg;
+  const double delta_t = input.gas_temperature_k - old.temperature_k;
+  const double bt =
+      input.gas_cp_j_per_kg_k * delta_t / liquid.latent_heat_j_per_kg;
+  const double tm = std::min(
+      550.0, .5 * (input.boiling_temperature_k + input.gas_temperature_k));
+  const double gas_lambda =
+      -.0246663 + .00015589255 * tm - 8.22954822e-8 * tm * tm;
+  const double lambda = .4 * .18 + .6 * gas_lambda;
+  const double thermal_ratio = std::sqrt(
+      (input.gas_temperature_k + old.temperature_k) / (2 * old.temperature_k));
+  double nu = 2 * thermal_ratio, loss = 0;
+  if (bt > 0) {
+    const double logarithm_ratio =
+        bt < 1e-6 ? 1 - bt / 2 + bt * bt / 3 : std::log(1 + bt) / bt;
+    const double rayleigh =
+        9.80665 * 1.10e-3 * delta_t * diameter * diameter * diameter /
+        (lambda * input.gas_dynamic_viscosity_pa_s /
+         (input.gas_cp_j_per_kg_k * liquid.density_kg_per_m3));
+    constexpr double layer_delta = 6e-6;
+    const double buoyancy = std::pow(rayleigh, 1.0 / 3.0) *
+                            std::pow(input.prandtl_number, 1.0 / 3.0);
+    nu = 2 * logarithm_ratio * thermal_ratio +
+         (2 / (3 * layer_delta)) * bt * bt * buoyancy / (1 + bt);
+    loss = 4 * nu * bt * lambda /
+           (input.gas_cp_j_per_kg_k * liquid.density_kg_per_m3);
+  }
+  if (!std::isfinite(bt) || !std::isfinite(lambda) || lambda <= 0 ||
+      !std::isfinite(nu) || nu <= 0 || !std::isfinite(loss) || loss < 0)
+    return failure(ThickExchangeStatus::non_finite_output);
+  const double d2 = diameter * diameter;
+  const double final_d2 = std::max(0., d2 - loss * input.duration_s);
+  auto& next = out.candidate_parcel;
+  // The zero-transfer limit preserves the accepted geometry bit for bit.
+  if (loss > 0) {
+    next.droplet_diameter_m = std::sqrt(final_d2);
+    const double ratio = next.droplet_diameter_m / diameter;
+    next.droplet_mass_kg = mass * ratio * ratio * ratio;
+  }
+  const double mass_delta = next.droplet_mass_kg - mass;
+  const double conductance = kPi * diameter * nu * lambda;
+  if (next.droplet_mass_kg > 0) {
+    const double change = (conductance * delta_t * input.duration_s +
+                           mass_delta * liquid.latent_heat_j_per_kg) /
+                          (next.droplet_mass_kg * liquid.cp_j_per_kg_k +
+                           conductance * input.duration_s);
+    const double unrestricted = old.temperature_k + change;
+    const double ceiling = .999 * input.boiling_temperature_k;
+    out.temperature_limited = unrestricted > ceiling;
+    next.temperature_k = std::min(unrestricted, ceiling);
+    if (out.temperature_limited)
+      out.temperature_limit_energy_one_droplet_j =
+          conductance * (input.gas_temperature_k - next.temperature_k) *
+              input.duration_s -
+          (next.droplet_mass_kg * liquid.cp_j_per_kg_k *
+               (next.temperature_k - old.temperature_k) -
+           mass_delta * liquid.latent_heat_j_per_kg);
+  }
+  out.complete_evaporation = next.droplet_mass_kg == 0;
+  if (out.complete_evaporation) out.event_time_s = d2 / loss;
+  out.advanced_duration_s = out.complete_evaporation
+                                ? std::min(input.duration_s, out.event_time_s)
+                                : input.duration_s;
+  next.age_s += out.advanced_duration_s;
+  if (!std::isfinite(next.temperature_k) || next.temperature_k <= 0 ||
+      !std::isfinite(next.age_s) || !std::isfinite(conductance) ||
+      !std::isfinite(out.temperature_limit_energy_one_droplet_j))
+    return failure(ThickExchangeStatus::non_finite_output);
+  const double vapor_h = input.vapor_absolute_thermochemical_enthalpy_j_per_kg;
+  // This model defines its thermal source from the same backward-Euler
+  // endpoint enthalpy increment as the liquid update, including its T limit.
+  const double enthalpy_delta =
+      next.droplet_mass_kg * liquid.cp_j_per_kg_k *
+          (next.temperature_k - old.temperature_k) +
+      mass_delta * (vapor_h - liquid.latent_heat_j_per_kg);
+  auto& exchange = out.exchange;
+  exchange.parcel_liquid_mass_delta_kg = mass_delta * old.multiplicity;
+  exchange.gas_mass_delta_kg = -exchange.parcel_liquid_mass_delta_kg;
+  exchange.vapor_mass_to_gas_kg = exchange.gas_mass_delta_kg;
+  for (unsigned c = 0; c < 3; ++c) {
+    exchange.parcel_momentum_delta_kg_m_per_s[c] =
+        exchange.parcel_liquid_mass_delta_kg * old.velocity_m_per_s[c];
+    exchange.gas_momentum_delta_kg_m_per_s[c] =
+        -exchange.parcel_momentum_delta_kg_m_per_s[c];
+    exchange.vapor_momentum_to_gas_kg_m_per_s[c] =
+        exchange.gas_momentum_delta_kg_m_per_s[c];
+  }
+  exchange.parcel_kinetic_energy_delta_j =
+      .5 * exchange.parcel_liquid_mass_delta_kg *
+      dot(old.velocity_m_per_s, old.velocity_m_per_s);
+  exchange.parcel_thermochemical_enthalpy_delta_j =
+      enthalpy_delta * old.multiplicity;
+  exchange.thermal_exchange_to_gas_j =
+      -exchange.parcel_thermochemical_enthalpy_delta_j;
+  exchange.vapor_absolute_thermochemical_enthalpy_to_gas_j =
+      exchange.vapor_mass_to_gas_kg * vapor_h;
+  exchange.convective_heat_to_parcel_j =
+      exchange.vapor_absolute_thermochemical_enthalpy_to_gas_j +
+      exchange.parcel_thermochemical_enthalpy_delta_j;
+  out.spalding_heat_number = bt;
+  out.layer_conductivity_w_per_m_k = lambda;
+  out.nusselt_number = nu;
+  out.diameter_squared_loss_rate_m2_per_s = loss;
+  out.convective_heat_transfer_w_per_k = conductance;
+  out.mean_evaporation_rate_one_droplet_kg_per_s =
+      -mass_delta / input.duration_s;
+  out.mean_liquid_enthalpy_rate_one_droplet_w =
+      enthalpy_delta / input.duration_s;
+  if (!finite_exchange(exchange) ||
+      !std::isfinite(out.mean_evaporation_rate_one_droplet_kg_per_s) ||
+      !std::isfinite(out.mean_liquid_enthalpy_rate_one_droplet_w))
+    return failure(ThickExchangeStatus::non_finite_output);
+  out.status = ThickExchangeStatus::success;
+  return out;
+}
+
 AbramzonSirignanoReport evaluate_abramzon_sirignano(
     const AbramzonSirignanoInput& input) noexcept {
   if (validate_parcel_state(input.parcel) != ParcelStateStatus::success ||

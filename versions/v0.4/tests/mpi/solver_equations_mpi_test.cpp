@@ -1189,6 +1189,122 @@ bool test_distributed_momentum_tensor_stretched_oracle(MPI_Comm world,
   return passed;
 }
 
+bool test_pressure_outlet_momentum_response(MPI_Comm world, int rank) {
+  bool passed = true;
+  for (unsigned face = 0; face < 6; ++face) {
+    auto selected = open_boundary_model();
+    const auto outlet = selected.boundaries[1];
+    selected.boundaries = model(selected.mesh).boundaries;
+    selected.boundaries[face] = outlet;
+    Dependencies dependencies;
+    EquationPlanSet plan;
+    auto spec = plan_spec();
+    spec.pressure_reference = PressureReferenceKind::boundary_absolute;
+    spec.closed_mass_service_stage = 0;
+    if (!expect(make_dependencies(world, dependencies, selected), rank,
+                "outlet response dependencies compile")) return false;
+    const auto plan_status = compile(world, dependencies, spec, plan);
+    if (!expect(bool(plan_status), rank, "outlet response equation compiles")) return false;
+    const auto patch = dependencies.patch;
+    const auto n = patch.cells;
+    const auto axis = face / 2;
+    const bool high = face % 2;
+    const auto coord = [](Int3 p, unsigned a) { return a == 0 ? p.x : (a == 1 ? p.y : p.z); };
+    const bool owns = high ? coord(patch.begin, axis) + coord(n, axis) ==
+                                coord(plan.global_cells(), axis)
+                          : coord(patch.begin, axis) == 0;
+    auto velocity = make_field(1, n, 3, 1, 401, 51000 + rank);
+    auto diagonal = make_field(30, n, 3, 0, 402, 52000 + rank);
+    auto rhs = make_field(31, n, 3, 0, 403, 53000 + rank);
+    auto residual = make_field(32, n, 3, 0, 404, 54000 + rank);
+    std::array<OwnedFaceField, 3> coefficients{
+        make_face(CartesianAxis::x, n, 55000 + rank),
+        make_face(CartesianAxis::y, n, 55000 + rank),
+        make_face(CartesianAxis::z, n, 55000 + rank)};
+    std::array<OwnedFaceField, 3> mass{
+        make_face(CartesianAxis::x, n, 56000 + rank),
+        make_face(CartesianAxis::y, n, 56000 + rank),
+        make_face(CartesianAxis::z, n, 56000 + rank)};
+    for (auto& c : coefficients) std::fill(c.bytes.begin(), c.bytes.end(), 0.0);
+    for (auto& f : mass) std::fill(f.bytes.begin(), f.bytes.end(), 0.0);
+    fill(diagonal, 4.0);
+    fill(residual, 0.0);
+    LinearWorkspaceRequirements requirements;
+    ReductionEngine reductions;
+    if (!expect(bool(make_linear_workspace_requirements(LinearAlgorithm::fgmres, n, 1, 12,
+          ReductionMode::mpi_allreduce, 910, requirements)),
+        rank, "outlet response workspace requirements compile")) return false;
+    if (!expect(bool(ReductionEngine::compile(world, ReductionMode::mpi_allreduce,
+          requirements.reduction_capacity, reductions)), rank, "outlet response reductions compile")) return false;
+    auto vectors = make_field(92, n, requirements.vector_slots, 1, 911, 57000 + rank);
+    auto scalars = make_field(93, {int(requirements.scalar_doubles), 1, 1}, 1, 0, 912, 57000 + rank);
+    SolverWorkspace workspace;
+    HaloEngine halo;
+    const HaloFieldSpec halo_field{92, 1, 1};
+    if (!expect(bool(SolverWorkspace::bind(requirements, vectors.view, scalars.view, workspace)),
+                rank, "outlet response workspace binds")) return false;
+    if (!expect(bool(halo.reserve(world, patch, {&halo_field, 1}, dependencies.boundary.halo_topology())),
+                rank, "outlet response halo reserves")) return false;
+    EquationSystemView system{diagonal.view, rhs.view, residual.view,
+        coefficients[0].view, coefficients[1].view, coefficients[2].view};
+    for (bool inward : {false, true}) {
+      const double normal = (high ? 1.0 : -1.0) * (inward ? -2.0 : 2.0);
+      const double flow = (high ? 1.0 : -1.0) * (inward ? -0.25 : 0.25);
+      fill(velocity, 2.0);
+      for (int z = 0; z < n.z; ++z)
+        for (int y = 0; y < n.y; ++y)
+          for (int x = 0; x < n.x; ++x) {
+            const Int3 c{x,y,z};
+            velocity.view.unchecked(c, axis) = normal;
+            for (unsigned d = 0; d < 3; ++d)
+              rhs.view.unchecked(c, d) = 4 * velocity.view.unchecked(c,d) + 8;
+          }
+      if (owns) {
+        const auto ext = mass[axis].view.extents;
+        for (int z = 0; z < ext.z; ++z)
+          for (int y = 0; y < ext.y; ++y)
+            for (int x = 0; x < ext.x; ++x) {
+              const Int3 f{x,y,z};
+              if (coord(f,axis) != (high ? coord(n,axis) : 0)) continue;
+              mass[axis].view.unchecked(f) = flow;
+              coefficients[axis].view.unchecked(f) = 1;
+            }
+      }
+      const FaceFluxView flux{mass[0].view, mass[1].view, mass[2].view, 420, {}};
+      const EquationAssemblyCertificate assembly{plan.momentum().fingerprint(),
+          EquationAssemblyScope::momentum_predictor, 421,
+          dependencies.geometry.topology_revision(), 420, 422, 0.01};
+      MomentumPredictorSolveReport report;
+      const auto status = solve_momentum_predictor(world, plan.momentum(),
+          dependencies.boundary, patch, assembly, as_const(flux), {}, system,
+          velocity.view, halo, workspace, reductions, nullptr, report, true);
+      double error = 0;
+      for (int z = 0; z < n.z; ++z)
+        for (int y = 0; y < n.y; ++y)
+          for (int x = 0; x < n.x; ++x) {
+            const Int3 c{x,y,z};
+            const bool boundary_cell = owns && coord(c,axis) == (high ? coord(n,axis)-1 : 0);
+            for (unsigned d = 0; d < 3; ++d) {
+              // dUghost/dUowner is +1 normally, and -1 for an incoming
+              // reservoir's tangential component. Flow is frozen throughout
+              // the solve even when the normal velocity changes sign.
+              const double derivative = inward && d != axis ? -1.0 : 1.0;
+              const double a = boundary_cell ? 1.0 + (inward ? 0.25 : 0.0) : 0.0;
+              const double expected = (d == axis ? normal : 2.0) + 8.0 / (4.0 - a * derivative);
+              error = std::max(error, std::abs(velocity.view.unchecked(c,d) - expected));
+            }
+          }
+      MPI_Allreduce(MPI_IN_PLACE, &error, 1, MPI_DOUBLE, MPI_MAX, world);
+      if (rank == 0) std::cerr << "outlet_matrix face=" << face << " inward=" << inward
+                              << " error=" << error << " status=" << unsigned(status.code)
+                              << '/' << status.detail << '\n';
+      passed &= expect(status && error < 1e-11, rank,
+                       "static outlet momentum matrix matches frozen physical boundary derivative");
+    }
+  }
+  return passed;
+}
+
 bool test_conservative_momentum_predictor_limiter(MPI_Comm world, int rank) {
   int size = 0;
   MPI_Comm_size(world, &size);
@@ -2466,6 +2582,7 @@ int main(int argc, char** argv) {
                                                               rank);
   passed &= test_conservative_momentum_predictor_limiter(MPI_COMM_WORLD,
                                                          rank);
+  passed &= test_pressure_outlet_momentum_response(MPI_COMM_WORLD, rank);
   passed &= test_open_boundary_one_sided_momentum_limiter(MPI_COMM_WORLD,
                                                           rank);
   passed &= test_piso_intermediate_halo_oracle(MPI_COMM_WORLD, rank);

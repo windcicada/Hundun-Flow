@@ -393,6 +393,39 @@ bool test_selection_edge(int rank, EBTopology& topology,
   return passed;
 }
 
+bool test_periodic_marker(const CartesianGeometryPlan& geometry,
+                          const MeshPatch& patch, int rank) {
+  const auto marker = plane_marker();
+  ImmersedDomainBoundaryPolicy policy;
+  // The plane is extruded through both periodic seams.
+  for (unsigned face = 2; face < 6; ++face)
+    policy.allow_periodic_images[face] = true;
+  EBTopology topology;
+  BoundaryStencilPlan boundary;
+  SurfaceQuadraturePlan quadrature;
+  const auto status = ImportedIbmCompiler::compile(MPI_COMM_WORLD, geometry,
+      patch, {marker.data(), marker.size()}, kMarkerSource, {}, topology,
+      boundary, quadrature, policy);
+  bool passed = expect(static_cast<bool>(status), rank,
+      "periodic imported material compiles");
+  if (!all_true(passed)) return false;
+  std::size_t mismatches = 0;
+  for (int z = -4; z < patch.cells.z + 4; ++z)
+    for (int y = -4; y < patch.cells.y + 4; ++y)
+      for (int x = -4; x < patch.cells.x + 4; ++x) {
+        const Int3 g{patch.begin.x + x, patch.begin.y + y, patch.begin.z + z};
+        const bool physical = g.x < 0 || g.x >= kGlobal.x;
+        const bool fluid = g.x >= 8 && g.x < kGlobal.x;
+        mismatches += topology.is_fluid_global(g) != fluid;
+        mismatches += topology.is_fluid_stencil(g) != (physical || fluid);
+      }
+  passed &= expect(mismatches == 0, rank,
+      "imported periodic and physical ghosts preserve material authority");
+  passed &= expect(sum(topology.links().size) == 256U, rank,
+      "periodic extrusion preserves the plane interface area");
+  return all_true(passed);
+}
+
 bool run(int rank) {
   CartesianGeometryPlan geometry;
   MeshPatch patch;
@@ -416,6 +449,7 @@ bool run(int rank) {
                             quadrature);
 
   passed &= test_selection_edge(rank, topology, boundary, quadrature);
+  passed &= test_periodic_marker(geometry, patch, rank);
 
   const PlanFingerprint retained_topology = topology.fingerprint();
   const PlanFingerprint retained_boundary = boundary.fingerprint();

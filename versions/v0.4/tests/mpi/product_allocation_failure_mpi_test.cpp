@@ -3,6 +3,7 @@
 // windcicada | Year.M: 2026.09
 
 #include <mpi.h>
+#include <dirent.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -485,6 +486,14 @@ bool memory_profile(bool immersed, bool scalars, int rank) {
 }
 // Exercise real C++ allocations through the public writer, including root-only
 // publication/cleanup. Every trial starts with one readable generation.
+int open_descriptor_count() {
+  DIR* directory = ::opendir("/proc/self/fd");
+  if (directory == nullptr) return -1;
+  int count = 0;
+  while (::readdir(directory) != nullptr) ++count;
+  return ::closedir(directory) == 0 ? count : -1;
+}
+
 bool writer_allocations(int rank, int ranks, long first, long requested_last) {
   using namespace hundun::v04;
   auto model = test::product_model({8, 8, 8});
@@ -540,6 +549,7 @@ bool writer_allocations(int rank, int ranks, long first, long requested_last) {
       std::cerr << "writer allocation target=" << target << " sites=" << count << '\n';
     for (long index = first; index <= last && passed; ++index) {
       seed();
+      const int descriptors_before = open_descriptor_count();
       if (rank == 0) std::cerr << "writer allocation index=" << index << '\n';
       injected = false;
       observing = true;
@@ -559,7 +569,9 @@ bool writer_allocations(int rank, int ranks, long first, long requested_last) {
                   (status && publication.publication == RestartPublicationState::durable &&
                    publication.cleanup_status.code == StatusCode::allocation_failure &&
                    publication.cleanup_failure.rank == target)) &&
-                 live_count == 0U && comm_count == 0U && request_count == 0U;
+                 live_count == 0U && comm_count == 0U && request_count == 0U &&
+                 descriptors_before >= 0 &&
+                 open_descriptor_count() == descriptors_before;
       RestartImage loaded;
       const Status read = RestartReader::load(MPI_COMM_WORLD, root, expected, loaded);
       okay &= read && loaded.step == snapshot.step && loaded.time == snapshot.time &&

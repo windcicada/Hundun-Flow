@@ -46,6 +46,7 @@ inline ValidatedModel product_model(Int3 cells = {17, 11, 7}) {
   model.time.minimum_dt = 1.0e-8;
   model.time.maximum_dt = 0.1;
   model.time.convective_cfl = 0.8;
+  model.time.convective_cfl_margin = 0.0;
   model.time.viscous_cfl = 0.5;
   model.time.thermal_cfl = 0.5;
   model.time.species_cfl = 0.5;

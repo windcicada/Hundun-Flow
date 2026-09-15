@@ -240,6 +240,68 @@ double species_h_oracle(const SpeciesThermophysicalSpec& species,
   return kUniversalGasConstant * h_over_r / species.molecular_weight;
 }
 
+bool test_transport_coordinate() {
+  auto spec = base_spec();
+  spec.species = {varying_species("A", 20, 3.5, 0.001),
+                  varying_species("B", 40, 4.0, 0.002)};
+  const std::array<TransportedScalarSpec,1> catalog{{
+      {"B", TransportedScalarRole::species}}};
+  ThermodynamicsPlan original, shifted;
+  bool passed = bool(ThermodynamicsPlan::compile(
+      spec, {catalog.data(),catalog.size()}, original));
+  for (std::size_t i=0;i<spec.species.size();++i) {
+    const double offset = (i==0 ? 12000000.0 : -9000000.0) *
+        spec.species[i].molecular_weight/kUniversalGasConstant;
+    spec.species[i].nasa7_low[5] += offset;
+    spec.species[i].nasa7_high[5] += offset;
+  }
+  passed &= bool(ThermodynamicsPlan::compile(
+      spec, {catalog.data(),catalog.size()}, shifted));
+  const std::array<double,1> y{{.3}};
+  for (double t : {300.0, 1000.0, 1800.0}) {
+    double a{},b{},h{},cp{},r{};
+    passed &= bool(original.mixture_enthalpy(t,{y.data(),1},h,cp,r));
+    {
+      allocation_observer::Guard guard;
+      passed &= bool(original.transport_enthalpy_coordinate(t,{y.data(),1},a));
+      passed &= bool(shifted.transport_enthalpy_coordinate(t,{y.data(),1},b));
+      passed &= allocation_observer::count.load()==0;
+    }
+    passed &= expect(std::abs(a-h)<1e-9 && std::abs(a-b)<1e-8,
+        "thermal transport coordinate preserves cp and species mapping across NASA branches");
+    double shifted_h{}, from_h{};
+    passed &= bool(shifted.mixture_enthalpy(t,{y.data(),1},shifted_h,cp,r));
+    {
+      allocation_observer::Guard guard;
+      passed &= bool(shifted.transport_enthalpy_coordinate_from_h(
+          shifted_h,{y.data(),1},from_h));
+      passed &= allocation_observer::count.load()==0;
+    }
+    passed &= expect(std::abs(from_h-a)<1e-8,
+        "transported h removes the same formation reference without PH inversion");
+  }
+  const std::array<double,1> reflected{{-.2}};
+  double ghost{};
+  passed &= expect(bool(shifted.transport_enthalpy_coordinate(
+      300,{reflected.data(),1},ghost)) &&
+      std::abs(ghost-kUniversalGasConstant*(1.2*1095/20-.2*1290/40))<1e-8,
+      "reflected boundary weights retain their linear thermal coordinate");
+  double ghost_from_h{};
+  passed &= expect(bool(shifted.transport_enthalpy_coordinate_from_h(
+      ghost+1.2*12000000.0+.2*9000000.0,{reflected.data(),1},ghost_from_h)) &&
+      std::abs(ghost_from_h-ghost)<1e-8,
+      "transported boundary h retains reflected signed weights");
+  double sentinel=123.0;
+  passed &= expect(!shifted.transport_enthalpy_coordinate(0,{y.data(),1},sentinel)
+      && sentinel==123.0,"thermal transport range validation is atomic");
+  const std::array<double,1> invalid{{std::numeric_limits<double>::quiet_NaN()}};
+  passed &= expect(!shifted.transport_enthalpy_coordinate(300,{invalid.data(),1},sentinel)
+      && sentinel==123.0,"thermal transport composition validation is atomic");
+  passed &= expect(!shifted.transport_enthalpy_coordinate_from_h(300,{invalid.data(),1},sentinel)
+      && sentinel==123.0,"transported h coordinate composition failure is atomic");
+  return passed;
+}
+
 bool test_constant_cp_path() {
   ThermophysicalSpec spec = base_spec();
   spec.species.push_back(constant_species("A", 20.0, 1000.0));
@@ -998,11 +1060,33 @@ bool test_nasa7_inversion_and_validation() {
 }
 
 bool test_thermophysical_text_contract() {
+  // Published Konnov N2 fits carry a 3.63e-7 cp jump at 1000 K.
+  // Preserve their bounded fit error while using continuous native enthalpy.
+  constexpr std::string_view nitrogen = R"(HUNDUN_THERMOPHYSICS_V1
+temperature_bounds 300 3000
+temperature_inversion 1e-12 64
+closed_mass_newton 1e-12 32 0.2
+species_count 1
+species N2
+molecular_weight 28.014
+temperature_switch 1000
+nasa7_low 3.298677 .0014082404 -3.963222e-6 5.641515e-9 -2.444854e-12 -1020.8999 3.950372
+nasa7_high 2.92664 .0014879768 -5.68476e-7 1.0097038e-10 -6.753351e-15 -922.7977 5.980528
+transport_sutherland 1e-5 300 0 .7
+end_species
+end
+)";
+  ThermophysicalSpec nitrogen_spec;
+  const bool nitrogen_admitted = static_cast<bool>(
+      detail::parse_thermophysical_text(nitrogen, nitrogen_spec));
+  bool nitrogen_passed = expect(nitrogen_admitted,
+      "published N2 NASA fits enter the native thermophysical pipeline");
   ThermophysicalSpec parsed;
   bool passed = expect(static_cast<bool>(
                            detail::parse_thermophysical_text(
                                kThermophysicalText, parsed)),
                        "versioned thermophysical .d parses strictly");
+  passed &= nitrogen_passed;
   passed &= expect(parsed.species.size() == 1U &&
                        parsed.species[0].stable_name == "air" &&
                        parsed.species[0].transport_law ==
@@ -1163,10 +1247,80 @@ bool test_thermophysical_text_contract() {
   return passed;
 }
 
+bool test_binary_affine_equivalence() {
+  auto binary = base_spec();
+  binary.species = {varying_species("A", 32, 3.7, .001),
+                    varying_species("B", 28, 3.5, .0005)};
+  auto generic = binary;
+  generic.species.insert(generic.species.begin() + 1, binary.species[1]);
+  generic.species[1].stable_name = "C";
+  const std::array<TransportedScalarSpec, 2> catalog{{
+      {"A", TransportedScalarRole::species}, {"C", TransportedScalarRole::species}}};
+  ThermodynamicsPlan pair, full;
+  bool passed = bool(ThermodynamicsPlan::compile(binary, {catalog.data(), 1}, pair)) &&
+      bool(ThermodynamicsPlan::compile(generic, {catalog.data(), 2}, full));
+  if (!passed) return false;
+  // A zero-weight duplicate forces the general mixture kernel with exactly
+  // the same physical composition, including both choices of reference.
+  for (double temperature : {200., 300., 999., 1000., 1001., 1800.})
+    for (double fraction : {0., 1e-14, .1, .232, .499, .5, .501, .7, 1.-1e-14, 1.}) {
+      const std::array<double, 2> y{{fraction, 0}};
+      double h{}, cp{}, r{}, expected_h{}, expected_cp{}, expected_r{};
+      ThermoState state, expected;
+      passed &= bool(pair.mixture_enthalpy(temperature, {y.data(), 1}, h, cp, r)) &&
+          bool(full.mixture_enthalpy(temperature, {y.data(), 2}, expected_h, expected_cp, expected_r)) &&
+          bool(pair.evaluate(101325, h, {y.data(), 1}, {}, state, temperature)) &&
+          bool(full.evaluate(101325, expected_h, {y.data(), 2}, {}, expected, temperature));
+      passed &= expect(h == expected_h && cp == expected_cp && r == expected_r &&
+          state.temperature == expected.temperature && state.rho == expected.rho,
+          "binary affine specialization matches general mixture thermodynamics exactly");
+    }
+  return passed;
+}
+
+bool test_isomer_composition_invariance() {
+  bool passed = true;
+  for (bool varying : {false, true}) {
+    auto spec = base_spec();
+    const auto first = varying ? varying_species("A", 28.96546, 3.5, .001)
+                               : constant_species("A", 28.96546, 1004.0);
+    spec.species = {first, first, first};
+    spec.species[1].stable_name = "B";
+    spec.species[2].stable_name = "C";
+    const std::array<TransportedScalarSpec, 2> catalog{{
+        {"A", TransportedScalarRole::species}, {"B", TransportedScalarRole::species}}};
+    ThermodynamicsPlan plan;
+    passed &= bool(ThermodynamicsPlan::compile(spec, {catalog.data(), catalog.size()}, plan));
+    for (double temperature : {300.0, 1000.0, 1800.0}) {
+      std::array<double, 2> zero{};
+      double h0{}, cp0{}, r0{}, coordinate0{};
+      ThermoState reference;
+      passed &= bool(plan.mixture_enthalpy(temperature, {zero.data(), 2}, h0, cp0, r0)) &&
+          bool(plan.transport_enthalpy_coordinate(temperature, {zero.data(), 2}, coordinate0)) &&
+          bool(plan.evaluate(101325, h0, {zero.data(), 2}, {}, reference));
+      for (const auto y : {std::array<double, 2>{{.1, .3}}, {{.2495, .5}},
+                           {{.25, .25}}, {{.7, .2}}, {{1, 0}}, {{1e-14, .1}}}) {
+        double h{}, cp{}, r{}, coordinate{};
+        ThermoState state;
+        passed &= bool(plan.mixture_enthalpy(temperature, {y.data(), 2}, h, cp, r)) &&
+            bool(plan.transport_enthalpy_coordinate(temperature, {y.data(), 2}, coordinate)) &&
+            bool(plan.evaluate(101325, h0, {y.data(), 2}, {}, state));
+        passed &= expect(h == h0 && cp == cp0 && r == r0 && coordinate == coordinate0 &&
+            state.temperature == reference.temperature && state.rho == reference.rho,
+            "thermodynamically identical species preserve h/cp/R/T/rho exactly across composition changes");
+      }
+    }
+  }
+  return passed;
+}
+
 }  // namespace
 
 int main() {
   bool passed = test_constant_cp_path();
+  passed &= test_transport_coordinate();
+  passed &= test_isomer_composition_invariance();
+  passed &= test_binary_affine_equivalence();
   passed &= test_conserved_enthalpy_bounds();
   passed &= test_nasa7_inversion_and_validation();
   passed &= test_seeded_small_enthalpy_response();

@@ -141,13 +141,8 @@ double coast_pressure_link_correction(const CartesianKernelPlan& kernels,
   const unsigned a = static_cast<unsigned>(axis);
   const Int3 cell = link.fluid_local_index;
   const Int3 minus = offset(cell, axis, -1), plus = offset(cell, axis, 1);
-  const auto extent = topology.global_cells();
   const auto fluid = [&](Int3 global) {
-    // Physical ghost values remain owned by the ordinary boundary plan.
-    if (global.x < 0 || global.y < 0 || global.z < 0 ||
-        global.x >= extent.x || global.y >= extent.y || global.z >= extent.z)
-      return true;
-    return topology.is_fluid_global(global);
+    return topology.is_fluid_stencil(global);
   };
   const bool fm = fluid(offset(link.fluid_global_index, axis, -1));
   const bool fp = fluid(offset(link.fluid_global_index, axis, 1));
@@ -2482,7 +2477,38 @@ Status detail::IbmScalarTransport::constrain_rows(
 
 Status detail::IbmScalarTransport::convection(const IbmEquationInterfacePlan& plan,
     std::size_t species,ConvectionScheme scheme,ConstFieldView q,
-    ConstFaceFluxView flux,KernelBox box,FieldView rate) noexcept {
+    ConstFaceFluxView flux,KernelBox box,FieldView rate,
+    const MixtureTransportFaces* mixture) noexcept {
+  return convection(plan,{Quantity::independent_species,species},scheme,q,flux,box,rate,mixture);
+}
+
+Status detail::IbmScalarTransport::convection(const IbmEquationInterfacePlan& plan,
+    Field field,ConvectionScheme scheme,ConstFieldView q,
+    ConstFaceFluxView flux,KernelBox box,FieldView rate,
+    const MixtureTransportFaces* mixture) noexcept {
+  return convection_impl(plan,field,scheme,q,flux,box,rate,mixture,{});
+}
+
+Status detail::IbmScalarTransport::transport(const IbmEquationInterfacePlan& plan,
+    std::size_t species,ConstFieldView q,ConstFieldView gamma,
+    ConstFaceFluxView flux,KernelBox box,FieldView rate,
+    const MixtureTransportFaces& mixture) noexcept {
+  return transport(plan,{Quantity::independent_species,species},q,gamma,flux,box,rate,mixture);
+}
+
+Status detail::IbmScalarTransport::transport(const IbmEquationInterfacePlan& plan,
+    Field field,ConstFieldView q,ConstFieldView gamma,
+    ConstFaceFluxView flux,KernelBox box,FieldView rate,
+    const MixtureTransportFaces& mixture) noexcept {
+  if (!gamma.base) return {StatusCode::invalid_plan,kIbmEquationApply};
+  return convection_impl(plan,field,ConvectionScheme::central2,q,flux,box,rate,
+                         &mixture,gamma);
+}
+
+Status detail::IbmScalarTransport::convection_impl(const IbmEquationInterfacePlan& plan,
+    Field field,ConvectionScheme scheme,ConstFieldView q,
+    ConstFaceFluxView flux,KernelBox box,FieldView rate,
+    const MixtureTransportFaces* mixture,ConstFieldView physical) noexcept {
   Status status=validate_bound(plan,plan.kernels_,plan.topology_,plan.boundary_,plan.metric_);
   if(!status) return status;
   const auto& kernels=*plan.kernels_; const Int3 cells=kernels.cells();
@@ -2494,10 +2520,19 @@ Status detail::IbmScalarTransport::convection(const IbmEquationInterfacePlan& pl
      detail::cell_face_views_overlap(rate,flux.y) ||
      detail::cell_face_views_overlap(rate,flux.z))
     return {StatusCode::invalid_plan,kIbmEquationApply};
+  if (physical.base && (!detail::valid_cell_view(physical,cells,0U,1U,1U) ||
+      detail::field_views_overlap(physical,rate)))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
   status=plan.validate_interface_flux(flux);
   if(!status) return status;
+  if (field.quantity!=Quantity::independent_species &&
+      field.quantity!=Quantity::dependent_species && field.quantity!=Quantity::enthalpy)
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  if (field.quantity!=Quantity::independent_species && field.component!=0)
+    return {StatusCode::invalid_plan,kIbmEquationApply};
   if(!plan.prescribed_interface_fluxes_.empty() &&
-     (!plan.inlet_state_bound_ || species>=plan.independent_species_count_))
+     (!plan.inlet_state_bound_ || (field.quantity==Quantity::independent_species &&
+      field.component>=plan.independent_species_count_)))
     return {StatusCode::invalid_plan,kIbmEquationApply};
   const auto links=plan.topology_->links();
   const auto physical_row=[&](Int3 c,const std::array<std::size_t,6U>& cut,double& value) noexcept -> Status {
@@ -2507,24 +2542,102 @@ Status detail::IbmScalarTransport::convection(const IbmEquationInterfacePlan& pl
       Int3 face=c;
       if(positive) (axis==CartesianAxis::x ? face.x : axis==CartesianAxis::y ? face.y : face.z)++;
       const double mass=detail::select(flux,axis).unchecked(face);
-      if(mass==0.0) continue;
+      if(mass==0.0 && (!physical.base || cut[d]<links.size)) continue;
       long double face_q=0.0L;
       if(cut[d]<links.size) {
         const auto* source=plan.inlet_for_link(static_cast<std::uint32_t>(cut[d]));
-        if(source==nullptr || !source->has_inlet_state ||
-           source->independent_species_begin>=plan.prescribed_independent_species_.size() ||
-           species>=plan.prescribed_independent_species_.size()-source->independent_species_begin)
+        if(source==nullptr || !source->has_inlet_state)
           return {StatusCode::invalid_plan,kIbmEquationApply};
-        face_q=plan.prescribed_independent_species_[source->independent_species_begin+species];
+        if (field.quantity==Quantity::enthalpy) face_q=source->enthalpy;
+        else {
+          const auto begin=source->independent_species_begin;
+          if (begin>plan.prescribed_independent_species_.size() ||
+              plan.independent_species_count_>plan.prescribed_independent_species_.size()-begin)
+            return {StatusCode::invalid_plan,kIbmEquationApply};
+          if (field.quantity==Quantity::independent_species)
+            face_q=plan.prescribed_independent_species_[begin+field.component];
+          else {
+            face_q=1.0L;
+            for (std::size_t s=0;s<plan.independent_species_count_;++s)
+              face_q-=plan.prescribed_independent_species_[begin+s];
+          }
+        }
       } else {
         face_q=detail::precise_scalar_convection_face(kernels,scheme,q,axis,face,mass);
       }
-      sum+=(positive ? 1.0L : -1.0L)*mass*face_q;
+      long double transported=mass*face_q;
+      if (physical.base && cut[d]>=links.size) {
+        auto lower=face;
+        (d/2==0 ? lower.x : d/2==1 ? lower.y : lower.z)--;
+        const std::array<ConstFaceFieldView,3> extra{mixture->x,mixture->y,mixture->z};
+        const double D=detail::positive_transmissibility(kernels,physical,axis,face)+
+            extra[d/2].unchecked(face);
+        const int normal=d/2==0 ? face.x : d/2==1 ? face.y : face.z;
+        const double weight=detail::interpolate_face(kernels,axis,normal,1.0,0.0);
+        const double lo=q.unchecked(lower,0U),hi=q.unchecked(face,0U);
+        if (!std::isfinite(D) || D<0.0)
+          return {StatusCode::numerical_failure,kIbmEquationNumerical};
+        transported=mass>=0.0
+            ? static_cast<long double>(mass)*lo+(mass*(1.0-weight)-D)*(hi-lo)
+            : static_cast<long double>(mass)*hi+(mass*weight+D)*(lo-hi);
+      } else if (mixture && cut[d]>=links.size) {
+        const std::array<ConstFaceFieldView,3> extra{mixture->x,mixture->y,mixture->z};
+        auto lower=face;
+        (d/2==0 ? lower.x : d/2==1 ? lower.y : lower.z)--;
+        transported-=extra[d/2].unchecked(face)*
+            (q.unchecked(face,0U)-q.unchecked(lower,0U));
+      }
+      sum+=(positive ? 1.0L : -1.0L)*transported;
     }
     value=static_cast<double>(sum/detail::cell_volume(kernels,c));
     return std::isfinite(value) ? Status{} : Status{StatusCode::numerical_failure,kIbmEquationNumerical};
   };
   return replace_cut_scalar_rows(links,cells,box,rate,physical_row);
+}
+
+Status detail::IbmScalarTransport::constrain_flux(const IbmEquationInterfacePlan& plan,
+    Field field,ConstFaceFluxView mass_flux,std::array<FaceFieldView,3> output) noexcept {
+  auto status=validate_bound(plan,plan.kernels_,plan.topology_,plan.boundary_,plan.metric_);
+  if(status)status=plan.validate_interface_flux(mass_flux);
+  if(!status)return status;
+  if((field.quantity!=Quantity::independent_species && field.quantity!=Quantity::dependent_species &&
+      field.quantity!=Quantity::enthalpy) || (field.quantity!=Quantity::independent_species && field.component!=0))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  const std::array<ConstFaceFieldView,3> mass{mass_flux.x,mass_flux.y,mass_flux.z};
+  for(unsigned a=0;a<3;++a) {
+    if(!detail::valid_equation_face_view(output[a],static_cast<CartesianAxis>(a),plan.kernels_->cells()))
+      return {StatusCode::invalid_plan,kIbmEquationApply};
+    for(unsigned b=0;b<3;++b)
+      if(detail::face_views_overlap(output[a],mass[b]) ||
+          (b<a && detail::face_views_overlap(output[a],output[b])))
+        return {StatusCode::invalid_plan,kIbmEquationApply};
+  }
+  const auto links=plan.topology_->links();
+  const auto value=[&](std::size_t i,double& out) -> Status {
+    const auto face=interface_face(links.data[i]);
+    const double phi=mass[static_cast<unsigned>(face.axis)].unchecked(face.index);
+    if(phi==0) {out=0;return {};}
+    const auto* source=plan.inlet_for_link(static_cast<std::uint32_t>(i));
+    if(!source || !source->has_inlet_state)return {StatusCode::invalid_plan,kIbmEquationApply};
+    long double q=source->enthalpy;
+    if(field.quantity!=Quantity::enthalpy) {
+      const auto begin=source->independent_species_begin;
+      if(begin>plan.prescribed_independent_species_.size() ||
+          plan.independent_species_count_>plan.prescribed_independent_species_.size()-begin ||
+          (field.quantity==Quantity::independent_species && field.component>=plan.independent_species_count_))
+        return {StatusCode::invalid_plan,kIbmEquationApply};
+      if(field.quantity==Quantity::independent_species)q=plan.prescribed_independent_species_[begin+field.component];
+      else {q=1;for(std::size_t j=0;j<plan.independent_species_count_;++j)q-=plan.prescribed_independent_species_[begin+j];}
+    }
+    out=static_cast<double>(phi*q);
+    return std::isfinite(out) ? Status{} : Status{StatusCode::numerical_failure,kIbmEquationNumerical};
+  };
+  for(std::size_t i=0;i<links.size;++i) {double q{};status=value(i,q);if(!status)return status;}
+  for(std::size_t i=0;i<links.size;++i) {
+    double q{};status=value(i,q);if(!status)return status;
+    const auto face=interface_face(links.data[i]);output[static_cast<unsigned>(face.axis)].unchecked(face.index)=q;
+  }
+  return {};
 }
 
 Status detail::IbmScalarTransport::diffusion(const IbmEquationInterfacePlan& plan,

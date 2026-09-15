@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 
@@ -16,7 +17,7 @@ def main():
     parser.add_argument("--mpi", required=True)
     parser.add_argument("--ranks", type=int, required=True)
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="hundun-app-history-") as directory:
+    with tempfile.TemporaryDirectory(prefix="hf-history-") as directory:
         root = Path(directory)
         case = root / "case"
         binary = str(args.binary.resolve())
@@ -42,11 +43,30 @@ def main():
             assert result.returncode == 0, result.stdout
             rows = [json.loads(line) for line in (path / "evidence.jsonl").read_text().splitlines()]
             assert len(rows) == 2
+            assert all(r['schema'] == 'HUNDUN_V04_EVIDENCE_V9' and
+                       r['coupling'] == 'CN_BE' and
+                       r['pressure_solve_contract'] == 'cn_be' and
+                       r['requested_bdf_order'] == r['bdf_order'] == 1
+                       for r in rows)
+            validator = Path(__file__).resolve().parents[4] / 'tools' / 'v04_evidence_validate.py'
+            validation = [sys.executable, str(validator), 'runtime', str(path / 'evidence.jsonl')]
             if source:
-                assert [r["bdf_order"] for r in rows] == ([1, 2] if method else [2, 2])
+                generation = (source / 'Restart' / 'current').read_text().strip()
+                manifest = source / 'Restart' / generation / 'manifest.bin'
+                validation += ['--run-start-manifest', str(manifest)]
+            checked = subprocess.run(validation,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     universal_newlines=True, timeout=20)
+            assert checked.returncode == 0, checked.stdout
+            if source:
                 assert [r["restart_recovery"] for r in rows] == [method, False]
                 assert all(r["run_start"]["history"]["policy"] ==
                            ("rebuild_method_history" if method else "require_compatible") for r in rows)
+                previous = json.loads((source / 'evidence.jsonl').read_text().splitlines()[-1])
+                assert rows[0]['step'] == previous['step'] + 1
+                assert rows[0]['previous_committed_time'] == previous['time']
+                digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+                assert all(r['run_start']['restart_manifest_sha256'] == digest for r in rows)
             return path
 
         source = accepted("source")

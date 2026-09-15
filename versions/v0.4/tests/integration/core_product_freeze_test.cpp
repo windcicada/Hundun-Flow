@@ -906,7 +906,7 @@ bool test_freeze() {
                          contains_trial(graph.invalidations(50U), field),
                      "C1/C2 declare the complete same-target primitive state");
   }
-  passed &= expect(plan.io_services()->snapshot_fields().size == 3U &&
+  passed &= expect(plan.io_services()->snapshot_fields().size == 7U &&
                        plan.io_services()->services().size == 5U,
                    "all cold services share the committed snapshot schema");
 

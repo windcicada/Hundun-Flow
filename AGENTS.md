@@ -8,6 +8,15 @@
 - Use short file and directory names and a shallow layout for cases, builds and debugging. Reuse existing flat working directories such as `check` and `cases/g`.
 - Remove obsolete generated source and debug artifacts when retiring an experiment, without making backups. Preserve files belonging to active work.
 
+### COAST 数值算法基线
+
+- Hundun-Flow 优先采用 COAST 的成熟方法，以 Hundun 风格的 C++ 实现，继承已验证有效的修正和优化；COAST 源码作为只读参考。
+- 每项迁移先固定 COAST 的版本、编译配置及算例实际运行后端，再对齐方程系数、IBM、物性、边界条件、时间推进、耦合顺序、线性求解和收敛判据。逐模块记录对应关系及验收状态。
+- 替代算法成为默认配置须提供同网格、同场、同时间步、同硬件的完整方法对照，统一原方程残差与物理精度标准，并证明确切收益；收益相当时采用 COAST 方法。
+- 通用替代工作按 `docs/alg.md` 的阶段和验收门槛推进。单个算例或单个算法组件的测试，按实际覆盖范围报告。
+- 用户于 2026-09-13 将湍流模型范围确定为现有 Vreman 的通用验收。动态 Lilly／Piomelli、额外 SGS 模型及 COAST 模型目录复制已退出本期开发范围；保留已有有效实现，优先公共方程、选定物理组合和算例能力。
+- 燃烧与蒸发接入先读 `docs/rc.md`：用户指定 rsfz-143 的 GTMC 和 admin-253 的 624CF 为续算调试参考。保持参考长测和检查点，遇到影响物理定义或验收标准的冲突时暂停依赖工作并请用户决策。
+
 ### Issue tracker
 
 Issues and specs live as GitHub issues, operated with the `gh` CLI. See `docs/agents/issue-tracker.md`.

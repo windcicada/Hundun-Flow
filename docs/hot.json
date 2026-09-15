@@ -1,0 +1,122 @@
+{
+  "schema": "hundun_gtmc_figure_v1",
+  "step": 32016,
+  "time_s": 0.021815582522232955,
+  "grid": [
+    153,
+    325,
+    151
+  ],
+  "snapshot": "check/jk/run/Restart/generation-32016-777638149960332",
+  "manifest_sha256": "3777392fd14fb9f589e09a59b936858aa2552dfbaa365dd7fec4750dca907401",
+  "candidate_identity": {
+    "schema": "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2",
+    "head": "e8d96a5a9247755e6e1f4961a4ccbd2e5613e930",
+    "tree": "4f220636c60897ac0b0d884c4253b41eec8e4bc9",
+    "build_manifest_sha256": "88260dbb3bd1a2240dad4898ac1f688cb24d92429223b2a0146c96bf31e23060",
+    "executable_sha256": "1726628bace387117e70f5a1c84d7dbf1cbe458aa1bf327b6285e11ebb88f4cb",
+    "identity_sha256": "54442f46901cd7ae3438f37f34bc057c937a4cf7123fa2de789fd93421f0b578"
+  },
+  "physical_temperature": "NASA7 inverse of primary physical mean h/Y, with formation enthalpy; separate field0 density excluded from temperature recovery",
+  "center_slice_z_m": -7.500000000001792e-05,
+  "ranges": {
+    "T": [
+      287.1994721398913,
+      2257.907991264637
+    ],
+    "slice_T": [
+      290.9817939707808,
+      2242.747742378399
+    ],
+    "slice_U": [
+      0.6535099002578578,
+      146.99906009602125
+    ]
+  },
+  "native_thermo_samples": 2068,
+  "native_thermo_max_temperature_error_K": 9.094947017729282e-13,
+  "render": {
+    "geometry": "check/j5/gtmc13_si.stl",
+    "isosurfaces_K": [
+      1400,
+      1800
+    ],
+    "streamline_points": 119497,
+    "streamline_cells": 606,
+    "seed_count": 435,
+    "seed_levels": [
+      {
+        "y_mm": -44.1,
+        "seeds": 90
+      },
+      {
+        "y_mm": -31.675000000000022,
+        "seeds": 90
+      },
+      {
+        "y_mm": -18.17500000000005,
+        "seeds": 90
+      },
+      {
+        "y_mm": -7.375000000000041,
+        "seeds": 75
+      },
+      {
+        "y_mm": 1.8249999999999993,
+        "seeds": 90
+      }
+    ],
+    "geometry_view": "complete shell",
+    "temperature_view": "isosurfaces",
+    "geometry_triangles": 22848,
+    "field_stride": 2,
+    "center_slice": "original cell resolution",
+    "color_ranges": {
+      "temperature_K": [
+        290,
+        2300
+      ],
+      "speed_m_s": [
+        0,
+        150
+      ]
+    },
+    "python_versions": {
+      "pyvista": "0.49.0",
+      "matplotlib": "3.11.2",
+      "numpy": "2.4.6"
+    },
+    "qa": "passed visual inspection"
+  },
+  "visual_review": {
+    "status": "passed",
+    "checks": [
+      "both panels retain physical coordinates and original center-plane resolution",
+      "numeric color scales, units, time and slice position readable",
+      "footer clear of colorbar labels",
+      "true STL shell present and transparent; selected isotherms and streamline semantics labeled",
+      "complete transparent STL shell with no section in 3D",
+      "435 seeds across five swirler levels, all inside fluid-cell interpolation domain",
+      "swirler passages carry visible velocity streamlines"
+    ]
+  },
+  "source_files_sha256": {
+    "check/j5/case.json": "0d9f5d404539c63e70ace549f4609b9be59d96bfff3837c79233ff84c51a7a58",
+    "check/j5/thermophysics.d": "2b110bad612d8a6ad8a5f1c175f8162f4cf2c19d3834f8d2510303c6755a2415",
+    "check/j5/mechanism.yaml": "a1ca61b0b97847c59ea59e2c0373451c0d1c4cb6a46d3ddde21f7a1d64c05fa1",
+    "check/j5/axes.dat": "fdadacad6509844c621be6b31e2be3ddf5aca078d8a1920b4b58b17064c3f410",
+    "check/j5/global_marker.d": "02134154ad9e45e9dcf38f3ac0f0d45569785c4f8bbdb2122b077083ba0c5256",
+    "check/j5/gtmc13_si.stl": "af139fd7f5049f93b805fb5ab3fcb5f48d2f66f38397e6ede7b607007cf3bbb9"
+  },
+  "figure_files_sha256": {
+    "docs/images/gtmc-mid.png": "20fdcd89e5997813b390cee57b388aacbccbd7856c2f6069c4d3cb7c2a42b2fb",
+    "docs/images/gtmc-mid.pdf": "03cedabf790fd89516aaeccb6b8c063e6ae11a76d2eabfcb444f54170306d145",
+    "docs/images/gtmc-mid.svg": "9de48948a7e918ae2190217d0c639768dd8c95edfcb06df24251979c638d1ee7",
+    "docs/images/gtmc-3d.png": "8d67f8a0215455fe6c68bc5ea4e5c867ef30d5fdaa8b7c6d185e020accb892f4",
+    "docs/images/gtmc-3d.pdf": "20b4d111783a1dabea7bf007298d5588258a1b90dbead3e545b9321bff5a3082",
+    "docs/images/gtmc-3d.svg": "578da951a9827bc093596e96b1ef9b0287b3de788258cd6e753732fb607070fd"
+  },
+  "reproducible_renderer": "tools/gtmc_fig.py",
+  "data_audit": "check/js/data.json",
+  "scope": "Accepted instantaneous GTMC field demonstration; broader model, statistics and performance acceptance follows docs/alg.md"
+}

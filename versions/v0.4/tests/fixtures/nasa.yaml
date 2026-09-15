@@ -1,0 +1,24 @@
+description: Published nitrogen NASA7 fit for enthalpy continuity validation.
+units: {length: m, time: s, quantity: kmol, activation-energy: J/kmol}
+phases:
+- name: nitrogen
+  thermo: ideal-gas
+  elements: [N]
+  species: [N2]
+  kinetics: gas
+  reactions: none
+  transport: mixture-averaged
+species:
+- name: N2
+  composition: {N: 2}
+  thermo:
+    model: NASA7
+    temperature-ranges: [300.0, 1000.0, 3000.0]
+    data:
+    - [3.298677, 0.0014082404, -3.963222e-6, 5.641515e-9, -2.444854e-12, -1020.8999, 3.950372]
+    - [2.92664, 0.0014879768, -5.68476e-7, 1.0097038e-10, -6.753351e-15, -922.7977, 5.980528]
+  transport:
+    model: gas
+    geometry: linear
+    diameter: 3.621
+    well-depth: 97.53

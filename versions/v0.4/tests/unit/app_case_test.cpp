@@ -1257,7 +1257,7 @@ bool test_case_and_reference_security() {
   passed &= rejects("unsupported turbulence", case_json(
       kUniformMesh, R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
       R"json({"coupling":"PISO","pressure_correctors":2})json",
-      R"json({"model":"smagorinsky"})json"));
+      R"json({"model":"unknown_sgs"})json"));
 
   const auto reference_mesh = [](std::string_view data,
                                  std::string_view immersed) {
@@ -1417,6 +1417,7 @@ bool test_cold_time_method() {
               "CN momentum and BE transport have an explicit case method"))
     return false;
   bool passed = expect(model.time.scheme == TimeScheme::cn_be &&
+      model.solver.coupling == CouplingKind::outer_corrected &&
       model.fingerprint != legacy.fingerprint &&
       model.legacy_time_fingerprint == legacy.fingerprint &&
       legacy.legacy_time_fingerprint == 0U,
@@ -1428,10 +1429,40 @@ bool test_cold_time_method() {
       wire.size() == legacy_wire.size() + sizeof(std::uint64_t) + 1U &&
       hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
       restored.time.scheme == TimeScheme::cn_be &&
+      restored.solver.coupling == CouplingKind::outer_corrected &&
       restored.fingerprint == model.fingerprint &&
       restored.legacy_time_fingerprint == legacy.fingerprint,
       "cold wire carries both identities and leaves the legacy envelope size unchanged");
   if (!passed) return false;
+  // An explicit schedule must preserve the algorithm and native restart
+  // identity of the historical CN/BE input (whose PISO spelling was implicit).
+  auto explicit_input = input;
+  replace_once(explicit_input, "\"PISO\"", "\"outer_corrected\"");
+  fixture.write("case.json", explicit_input);
+  ValidatedModel explicit_model;
+  std::vector<std::uint8_t> explicit_wire;
+  passed &= expect(compile(fixture.root(), explicit_model) &&
+      explicit_model.solver.coupling == CouplingKind::outer_corrected &&
+      explicit_model.fingerprint == model.fingerprint &&
+      explicit_model.legacy_time_fingerprint == model.legacy_time_fingerprint &&
+      hundun::v04::detail::serialize_model_for_test(explicit_model, explicit_wire) &&
+      explicit_wire == wire,
+      "explicit outer_corrected preserves the historical CN/BE algorithm identity");
+  auto legacy_named_input = input;
+  replace_once(legacy_named_input, "\"PISO\"", "\"CN_BE\"");
+  fixture.write("case.json", legacy_named_input);
+  ValidatedModel legacy_named;
+  passed &= expect(compile(fixture.root(), legacy_named) &&
+      legacy_named.solver.coupling == CouplingKind::outer_corrected &&
+      legacy_named.fingerprint == model.fingerprint,
+      "legacy CN_BE coupling canonicalizes to the same explicit schedule");
+  auto mismatched_input = explicit_input;
+  replace_once(mismatched_input, "cn_be", "backward_euler");
+  fixture.write("case.json", mismatched_input);
+  ValidatedModel retained = model;
+  passed &= expect(!compile(fixture.root(), retained) && retained.fingerprint == model.fingerprint,
+      "an unsupported time/schedule pair is rejected transactionally");
+  fixture.write("case.json", input);
   const auto reject_wire = [&](std::vector<std::uint8_t> bad) {
     ValidatedModel retained = legacy;
     return !hundun::v04::detail::deserialize_model_for_test(bad, retained) &&
@@ -1551,13 +1582,20 @@ bool test_cfl_band_configuration() {
   fixture.write("case.json", input);
   ValidatedModel original, band, restored;
   if (!compile(fixture.root(), original)) return false;
+  std::vector<std::uint8_t> legacy_wire;
+  const bool legacy_preserved = expect(original.time.convective_cfl == 0.8 &&
+      original.time.convective_cfl_margin == 0.0 &&
+      hundun::v04::detail::serialize_model_for_test(original,legacy_wire) &&
+      hundun::v04::detail::deserialize_model_for_test(legacy_wire,restored) &&
+      restored.time.convective_cfl_margin == 0.0 && restored.fingerprint == original.fingerprint,
+      "explicit legacy target and exact-target stepping survive JSON and wire publication");
   replace_once(input, "\"convective_cfl\":0.8",
       "\"convective_cfl\":0.3,\"convective_cfl_margin\":0.05");
   fixture.write("case.json", input);
   if (!expect(static_cast<bool>(compile(fixture.root(), band)),
               "CFL target and floating band compile")) return false;
   std::vector<std::uint8_t> wire;
-  bool passed = expect(band.fingerprint != original.fingerprint &&
+  bool passed = legacy_preserved && expect(band.fingerprint != original.fingerprint &&
       hundun::v04::detail::serialize_model_for_test(band, wire) &&
       hundun::v04::detail::deserialize_model_for_test(wire, restored) &&
       restored.fingerprint == band.fingerprint &&
@@ -1577,6 +1615,47 @@ bool test_cfl_band_configuration() {
     fixture.write("case.json", bad);
     passed &= expect(!compile(fixture.root(), restored), "CFL band is finite and narrower than its target");
   }
+  return passed;
+}
+
+bool test_solver_change_compatibility() {
+  ScratchCase source_case("solver-source"), target_case("solver-target");
+  auto input = case_json(kUniformMesh);
+  replace_once(input,"backward_euler","cn_be");
+  if (!replace_once(input,"\"pressure_correctors\":2",R"json("pressure_correctors":2,
+      "pressure_linear":{"absolute_tolerance":1e-13,"relative_tolerance":1e-13,
+        "maximum_iterations":400,"true_residual_interval":4,"krylov_restart":12},
+      "terminal_tolerances":{"eos":1e-10,"continuity":1e-10,"closed_mass":1e-10,"gauge":1e-10})json")) return false;
+  auto changed = input;
+  replace_once(changed,"\"krylov_restart\":12","\"krylov_restart\":0,\"algorithm\":\"bicgstab\"");
+  source_case.write("case.json",input);
+  target_case.write("case.json",changed);
+  source_case.write("thermophysics.d",kPlaceholderThermophysics);
+  target_case.write("thermophysics.d",kPlaceholderThermophysics);
+  ValidatedModel source,target;
+  if (!compile(source_case.root(),source) || !compile(target_case.root(),target)) return false;
+  const auto check = [&]() { return CaseCompiler::validate_transport_change(MPI_COMM_SELF,
+      source_case.root(),source,target_case.root(),target); };
+  bool passed=expect(bool(check()),"solver change preserves the full physical case identity");
+  passed &= expect(bool(CaseCompiler::validate_transport_change(MPI_COMM_SELF,
+      target_case.root(),target,source_case.root(),source)),"solver migration supports either direction");
+  for (const auto& edit : std::vector<std::pair<std::string,std::string>>{
+      {"\"initial_dt\":0.001","\"initial_dt\":0.002"},
+      {"\"absolute_tolerance\":1e-13","\"absolute_tolerance\":1e-12"},
+      {"\"velocity\":[1,0,0]","\"velocity\":[2,0,0]"}}) {
+    auto altered=changed;
+    if (!expect(replace_once(altered,edit.first,edit.second),"solver migration counterexample applies")) return false;
+    target_case.write("case.json",altered);
+    passed &= expect(compile(target_case.root(),target) && !check(),
+        "solver migration binds dt, residual limits and physical boundary targets");
+  }
+  target_case.write("case.json",changed);
+  target_case.write("thermophysics.d",std::string(kPlaceholderThermophysics)+"# changed asset\n");
+  passed &= expect(compile(target_case.root(),target) && !check(),
+      "solver migration binds the exact thermophysical asset bytes");
+  target_case.write("thermophysics.d",kPlaceholderThermophysics);
+  passed &= expect(compile(target_case.root(),target) && check(),
+      "restored case restores solver migration compatibility");
   return passed;
 }
 
@@ -1715,6 +1794,41 @@ bool test_defaults_and_enums() {
       hundun::v04::detail::deserialize_model_for_test(resolved_wire, restored_vreman) &&
       restored_vreman.turbulence == TurbulenceKind::vreman,
       "resolved Vreman is explicit, hashed and round-trips without changing the default");
+  ScratchCase smag("smag");
+  auto smag_json = case_json(kUniformMesh,
+      R"json({"model":"single_phase_low_mach_compressible","pressure_reference":"boundary_absolute","reacting":false})json",
+      R"json({"coupling":"PISO","pressure_correctors":2})json",
+      R"json({"model":"smagorinsky","coefficient":0.12})json");
+  smag.write("case.json", smag_json);
+  smag.write("thermophysics.d", kPlaceholderThermophysics);
+  ValidatedModel smag_model, smag_restored;
+  std::vector<std::uint8_t> smag_wire;
+  passed &= expect(compile(smag.root(), smag_model) &&
+      smag_model.turbulence == TurbulenceKind::smagorinsky &&
+      smag_model.smagorinsky_coefficient == .12 &&
+      hundun::v04::detail::serialize_model_for_test(smag_model, smag_wire) &&
+      hundun::v04::detail::deserialize_model_for_test(smag_wire, smag_restored) &&
+      smag_restored.smagorinsky_coefficient == .12 &&
+      smag_restored.turbulence == TurbulenceKind::smagorinsky,
+      "Smagorinsky coefficient survives canonical MPI wire");
+  const auto first_smag = smag_model.fingerprint;
+  auto other_smag = smag_json;
+  replace_once(other_smag, "0.12", "0.18");
+  smag.write("case.json", other_smag);
+  passed &= expect(compile(smag.root(), smag_model) && smag_model.fingerprint != first_smag,
+                   "Smagorinsky coefficient binds case and Restart identity");
+  for (const auto* invalid : {"-0.1", "1e999", "true"}) {
+    auto bad = smag_json;
+    replace_once(bad, "0.12", invalid);
+    smag.write("case.json", bad);
+    ValidatedModel rejected;
+    passed &= expect(!compile(smag.root(), rejected), "invalid Smagorinsky coefficient rejects");
+  }
+  if (smag_wire.size() > 9 && smag_wire[0] == 21U) {
+    smag_wire.erase(smag_wire.begin(), smag_wire.begin()+9);
+    passed &= expect(!hundun::v04::detail::deserialize_model_for_test(smag_wire, smag_restored),
+                     "Smagorinsky wire requires its coefficient envelope");
+  } else passed = false;
   simple.write(
       "case.json",
       case_json(
@@ -2200,6 +2314,7 @@ int main(int argc, char** argv) {
   passed &= test_cfl_band_configuration();
   passed &= test_coast_perry_transport();
   passed &= test_transport_change_compatibility();
+  passed &= test_solver_change_compatibility();
   passed &= test_immersed_reconstruction_policy_is_typed_and_hashed();
   passed &= test_reaction_wire();
   passed &= test_spray_json();

@@ -56,11 +56,13 @@ class ScalarMassRemap {
     bool target_species_evaluated{};
     bool provisional_target_species{};
     bool accelerated_coupling_guess{};
+    bool quantized_coupling_guess{}; // Usable provisional state; final audit required.
     unsigned iterations{};
     double initial_species_residual{};
     double residual{};
     double convergence_residual{}; // Quantization-aware, with a trace scale for target species.
     double mass_pairing_residual{};
+    double requested_residual_ratio{}; // Maximum row residual / caller budget.
   };
 
   // Declare this consumer's batch requirement before the shared engine is
@@ -300,40 +302,82 @@ class ScalarMassRemap {
   Status capture(const CartesianKernelPlan& kernels, ConstFieldView density,
                  Span<const FieldView> scalars, ConstFaceFluxView flux,
                  double a0) noexcept {
+    return capture_basis(kernels,density,scalars,flux,a0,{},false);
+  }
+
+  // rho_n (q_star-q_n)/dt + div(F_star*q_star) - q_star div(F_star)
+  // has the conservative storage M_star=rho_n V-sum(F_star)/a0.
+  // Capture that mass after frozen-density transport (a0=1/dt). Chemistry
+  // added to this transported state shares M_star in its extensive ledger.
+  // EOS/statistical densities retain separate identities in the scheduler.
+  Status capture_frozen_density(const CartesianKernelPlan& kernels,
+                 ConstFieldView density, Span<const FieldView> scalars,
+                 ConstFaceFluxView flux, double a0,
+                 Span<const std::uint8_t> activity={}) noexcept {
+    return capture_basis(kernels,density,scalars,flux,a0,activity,true);
+  }
+
+ private:
+  Status capture_basis(const CartesianKernelPlan& kernels, ConstFieldView density,
+                 Span<const FieldView> scalars, ConstFaceFluxView flux,
+                 double a0, Span<const std::uint8_t> activity,
+                 bool frozen_density) noexcept {
     if (!std::isfinite(a0) || a0 <= 0.0 ||
-        scalars.size != views_.size() ||
+        kernels.fingerprint()==0 || kernels.cells().x!=cells_.x ||
+        kernels.cells().y!=cells_.y || kernels.cells().z!=cells_.z ||
+        scalars.size != views_.size() || !scalars.data ||
         !valid_cell_view(density, cells_, 0U, 1U, 0U) ||
-        !valid_flux_view(flux, cells_, flux.revision))
+        !valid_flux_view(flux, cells_, flux.revision) ||
+        (activity.size && (activity.size!=count_ || !activity.data)))
       return {StatusCode::invalid_plan, kInvalid};
-    a0_ = a0;
     const std::array<ConstFaceFieldView, 3U> source{flux.x, flux.y, flux.z};
     const std::array<FaceFieldView, 3U> target{
         predictor_flux_.x, predictor_flux_.y, predictor_flux_.z};
-    for (std::size_t a = 0U; a < 3U; ++a)
-      for (int z = 0; z < source[a].extents.z; ++z)
-        for (int y = 0; y < source[a].extents.y; ++y)
-          for (int x = 0; x < source[a].extents.x; ++x)
-            target[a].unchecked({x, y, z}) = source[a].unchecked({x, y, z});
     for (std::size_t s = 0U; s < scalars.size; ++s)
       if (scalars.data[s].field != views_[s].field ||
           !valid_cell_view(as_const(scalars.data[s]), cells_, 0U, 1U, 0U))
         return {StatusCode::invalid_plan, kInvalid};
-    std::size_t i = 0U;
-    for (int z = 0; z < cells_.z; ++z)
-      for (int y = 0; y < cells_.y; ++y)
-        for (int x = 0; x < cells_.x; ++x, ++i) {
-          const Int3 c{x, y, z};
-          mass_[i] = density.unchecked(c, 0U) * cell_volume(kernels, c);
-          if (!std::isfinite(mass_[i]) || mass_[i] <= 0.0)
-            return {StatusCode::rejected_step, kInvalid};
-          for (std::size_t s = 0U; s < scalars.size; ++s) {
-            const double q = scalars.data[s].unchecked(c, 0U);
-            if (!std::isfinite(q)) return {StatusCode::rejected_step, kInvalid};
-            quantity_[s * count_ + i] = mass_[i] * q;
-          }
-        }
+    for (auto face:source)
+      for (int z=0;z<face.extents.z;++z)for (int y=0;y<face.extents.y;++y)
+        for (int x=0;x<face.extents.x;++x)
+          if (!std::isfinite(face.unchecked({x,y,z})))
+            return {StatusCode::rejected_step,kInvalid};
+    const auto mass_at=[&](Int3 c,std::size_t i) noexcept {
+      const double accepted=density.unchecked(c,0)*cell_volume(kernels,c);
+      if (!frozen_density || (activity.size && activity.data[i]==0)) return accepted;
+      return frozen_density_carrier_mass(flux,c,accepted,a0);
+    };
+    // Preserve the last complete basis on a local failure. The caller agrees
+    // capture status across ranks before using the next collective solve.
+    std::size_t i=0;
+    for (int z=0;z<cells_.z;++z)for (int y=0;y<cells_.y;++y)
+      for (int x=0;x<cells_.x;++x,++i) {
+        const Int3 c{x,y,z};
+        const double mass=mass_at(c,i),rho=density.unchecked(c,0);
+        if (!std::isfinite(rho) || rho<=0 || !std::isfinite(mass) || mass<=0)
+          return {StatusCode::rejected_step,kInvalid};
+        for (std::size_t s=0;s<scalars.size;++s)
+          if (!std::isfinite(scalars.data[s].unchecked(c,0)) ||
+              !std::isfinite(mass*scalars.data[s].unchecked(c,0)))
+            return {StatusCode::rejected_step,kInvalid};
+      }
+    a0_=a0;
+    for (std::size_t a=0;a<3;++a)
+      for (int z=0;z<source[a].extents.z;++z)for (int y=0;y<source[a].extents.y;++y)
+        for (int x=0;x<source[a].extents.x;++x)
+          target[a].unchecked({x,y,z})=source[a].unchecked({x,y,z});
+    i=0;
+    for (int z=0;z<cells_.z;++z)for (int y=0;y<cells_.y;++y)
+      for (int x=0;x<cells_.x;++x,++i) {
+        const Int3 c{x,y,z};
+        mass_[i]=mass_at(c,i);
+        for (std::size_t s=0;s<scalars.size;++s)
+          quantity_[s*count_+i]=mass_[i]*scalars.data[s].unchecked(c,0);
+      }
     return {};
   }
+
+ public:
 
   Status solve(const CartesianKernelPlan& kernels, ConstFieldView density,
                ConstFieldView velocity, ConstFaceFluxView flux, Span<const FieldView> scalars,
@@ -495,11 +539,27 @@ class ScalarMassRemap {
       FieldView diffusivity, Span<const FieldView> input,
       Span<const std::uint8_t> activity, BoundaryResolvedValues boundary_values,
       ReductionEngine& reductions, Report& report,
-      bool intermediate_coupling = false) noexcept {
+      bool intermediate_coupling = false,
+      const ThermodynamicsPlan* thermo = nullptr,
+      ConstFieldView temperature = {}, Span<double> enthalpy_residual = {},
+      bool continuity_reduced = false,
+      Span<const EquationContributionView> contributions = {},
+      Span<const double> residual_limits = {}) noexcept {
     if(species_indices_.empty()) return {};
     Status local;
     const auto& kernels=equations.kernels();
     const auto& species=equations.species();
+    // COAST's advective BE row is R_Y-Y*R_mass with old-density storage.
+    // This row operation supplies an uncommitted coupling guess. The public
+    // target-time assembler and final conservation audit retain R_Y itself.
+    if (continuity_reduced && (!intermediate_coupling ||
+        context.scope != EquationAssemblyScope::momentum_predictor ||
+        !context.provisional_mass_flux || context.bdf.a2 != 0.0 ||
+        context.bdf.a0 != 1.0/context.dt || context.bdf.a1 != -context.bdf.a0))
+      local={StatusCode::invalid_plan,kInvalid};
+    if (thermo && (!valid_cell_view(temperature,cells_,0U,1U,0U) ||
+        enthalpy_residual.size!=count_ || enthalpy_residual.data==nullptr))
+      local={StatusCode::invalid_plan,kInvalid};
     if(species.size()!=species_indices_.size() ||
         state.independent_species.size!=species.size() ||
         state.independent_species.data==nullptr || input.size!=views_.size() ||
@@ -508,7 +568,13 @@ class ScalarMassRemap {
         !valid_cell_view(material.effective_viscosity,cells_,0U,1U,1U) ||
         (activity.size!=0U && (activity.size!=count_ || activity.data==nullptr)))
       local={StatusCode::invalid_plan,kInvalid};
+    if (residual_limits.size && (residual_limits.size != species.size() ||
+        !residual_limits.data)) local={StatusCode::invalid_plan,kInvalid};
     for(std::size_t s=0U;s<species.size() && local;++s) {
+      if (residual_limits.size && (!(residual_limits.data[s] > 0) ||
+          !std::isfinite(residual_limits.data[s]))) {
+        local={StatusCode::invalid_plan,kInvalid}; break;
+      }
       const auto slot=species_indices_[s];
       if(!valid_cell_view(as_const(input.data[slot]),cells_,0U,1U,0U) ||
           input.data[slot].field!=views_[slot].field) {
@@ -544,10 +610,17 @@ class ScalarMassRemap {
       if(!status) return status;
       for(std::size_t s=0U;s<species.size();++s)
         target_species_history_[s].trial=as_const(views_[species_indices_[s]]);
-      double maximum[3]{};
+      double maximum[5]{}; // relative, absolute, converged, requested ratio, unresolved row
+      if (thermo) std::fill(enthalpy_residual.data,
+          enthalpy_residual.data+enthalpy_residual.size,0.0);
       for(std::size_t s=0U;s<species.size() && local;++s) {
         const auto slot=species_indices_[s];
         const auto& spec=*species.spec(s);
+        Span<const EquationContributionView> sources;
+        if (!select_species_sources(contributions, spec.field, sources)) {
+          local = {StatusCode::invalid_plan, kInvalid};
+          break;
+        }
         // Same molecular/turbulent Schmidt coefficient as the persisted
         // physical species rate. Only face slabs are stencil consumers.
         for(int z=-1;z<=cells_.z && local;++z)
@@ -568,7 +641,7 @@ class ScalarMassRemap {
         // flux remain fixed; each new solve rebuilds the diagonal at iteration 0.
         if (local && iteration == 0U) {
           local = assemble_species_coupling_rows(species, s, state, material,
-                                                 context, scratch);
+                                                 context, scratch, sources);
           std::size_t cell_index = s * count_;
           for (int z = 0; z < cells_.z && local; ++z)
             for (int y = 0; y < cells_.y; ++y)
@@ -583,7 +656,23 @@ class ScalarMassRemap {
                 scratch.diagonal.unchecked({x, y, z}, 0U) =
                     target_species_diagonal_[cell_index];
           local = assemble_species_coupling_residual(species, s, state, material,
-                                                     context, scratch);
+                                                     context, scratch, sources);
+        }
+        if (local && continuity_reduced) {
+          std::size_t index{};
+          for (int z=0;z<cells_.z;++z) for (int y=0;y<cells_.y;++y)
+            for (int x=0;x<cells_.x;++x,++index) {
+              if (activity.size && activity.data[index]==0U) continue;
+              const Int3 c{x,y,z};
+              const double divergence=(context.mass_flux.x.unchecked({x+1,y,z})-
+                  context.mass_flux.x.unchecked(c)+context.mass_flux.y.unchecked({x,y+1,z})-
+                  context.mass_flux.y.unchecked(c)+context.mass_flux.z.unchecked({x,y,z+1})-
+                  context.mass_flux.z.unchecked(c))/cell_volume(kernels,c);
+              const double continuity=(state.density.trial.unchecked(c,0)-
+                  state.density.accepted.unchecked(c,0))/context.dt+divergence;
+              scratch.diagonal.unchecked(c,0)-=continuity;
+              scratch.residual.unchecked(c,0)-=views_[slot].unchecked(c,0)*continuity;
+            }
         }
         if (local && target_solver_ == SpeciesCouplingSolver::dilu &&
             iteration == 0U) {
@@ -612,13 +701,28 @@ class ScalarMassRemap {
                   Int3 face = face_id % 2 ? neighbours[face_id] : c;
                   double D = diffusion[axis].unchecked(face),
                          F = flux[axis].unchecked(face) * (face_id % 2 ? 1 : -1);
-                  row.diagonal += std::max(F, 0.0) / volume;
+                  double convective_diagonal=std::max(F,0.0)/volume;
                   row.neighbour[face_id] = (D + std::max(-F, 0.0)) / volume;
+                  if (context.mixture_transport) {
+                    const int normal=axis==0 ? face.x : axis==1 ? face.y : face.z;
+                    const double lower=interpolate_face(kernels,
+                        static_cast<CartesianAxis>(axis),normal,1.0,0.0);
+                    const double owner=face_id%2 ? lower : 1.0-lower;
+                    convective_diagonal=F*owner/volume;
+                    row.neighbour[face_id]=(D-F*(1.0-owner))/volume;
+                  }
+                  // Common VLS diffusion already contains the upwind
+                  // stabilization. Use its actual central/VLS coefficients;
+                  // adding another upwind operator changes trace directions.
+                  row.diagonal += convective_diagonal;
                   double imposed{};
                   if (context.immersed_interface &&
                       context.immersed_interface->prescribed_face_flux(
-                          static_cast<CartesianAxis>(axis), face, imposed))
+                          static_cast<CartesianAxis>(axis), face, imposed)) {
+                    if (context.mixture_transport)
+                      row.diagonal-=convective_diagonal;
                     row.neighbour[face_id] = 0;
+                  }
                   int coordinate = axis == 0   ? x
                                    : axis == 1 ? y
                                                : z,
@@ -635,13 +739,15 @@ class ScalarMassRemap {
                   switch (boundary_face->flow_kind) {
                     case BoundaryKind::velocity_inlet:
                     case BoundaryKind::mass_flow_inlet:
-                      row.diagonal += D / volume;
+                      row.diagonal += context.mixture_transport
+                          ? row.neighbour[face_id] : D / volume;
                       break;
                     case BoundaryKind::pressure_outlet:
                       if (boundary_->allow_backflow().data[boundary_face->flow_parameter] != 0 &&
                           (face_id % 2 ? 1.0 : -1.0) *
                               state.velocity.trial.unchecked(c, axis) < 0.0)
-                        row.diagonal += D / volume;
+                        row.diagonal += context.mixture_transport
+                            ? row.neighbour[face_id] : D / volume;
                       else
                         row.diagonal -= row.neighbour[face_id];
                       break;
@@ -673,6 +779,13 @@ class ScalarMassRemap {
               next_[slot*count_+i]=q;
               if(activity.size!=0U && activity.data[i]==0U) continue;
               const double residual=scratch.residual.unchecked(c,0U);
+              if (thermo) {
+                double difference{};
+                local=thermo->independent_species_enthalpy_difference(
+                    s,temperature.unchecked(c,0U),difference);
+                if (!local) break;
+                enthalpy_residual.data[i]+=difference*residual;
+              }
               const double diagonal=species_coupling_search_diagonal(kernels,
                   species.convection(),context.mass_flux,c,scratch.diagonal.unchecked(c,0U));
               const long double scale=std::abs(static_cast<long double>(diagonal)*q)+
@@ -690,21 +803,26 @@ class ScalarMassRemap {
               const double converged=scale==0.0L ? 0.0 : static_cast<double>(std::max(0.0L,std::abs(static_cast<long double>(residual))-floor)/std::max(scale,reference_scale));
               const double mass_scale=context.bdf.a0*
                   (state.density.trial.unchecked(c,0U)+state.density.accepted.unchecked(c,0U));
-              const double value=static_cast<double>(static_cast<long double>(q)-
-                  (target_solver_ == SpeciesCouplingSolver::dilu
-                       ? static_cast<long double>(scratch.rhs.unchecked(c,0U))
-                       : static_cast<long double>(residual)/diagonal));
+              const double correction=target_solver_ == SpeciesCouplingSolver::dilu
+                  ? scratch.rhs.unchecked(c,0U) : residual/diagonal;
+              const double value=species_search_update(q,correction);
               if(!std::isfinite(value) || !std::isfinite(norm) || !std::isfinite(diagonal) || diagonal<=0.0 || mass_scale<=0.0) {
                 local={StatusCode::rejected_step,kInvalid}; break;
               }
               maximum[0]=std::max(maximum[0],norm);
               maximum[1]=std::max(maximum[1],std::abs(residual)/mass_scale);
               maximum[2]=std::max(maximum[2],converged);
+              if (residual_limits.size) {
+                const double ratio=std::abs(residual)/residual_limits.data[s];
+                maximum[3]=std::max(maximum[3],ratio);
+                if (ratio>1 && !species_search_quantized(q,value,diagonal,residual))
+                  maximum[4]=1;
+              }
               next_[slot*count_+i]=value;
             }
       }
-      double global[3]{};
-      status=reductions.checked_max({maximum,3U},{global,3U},local);
+      double global[5]{};
+      status=reductions.checked_max({maximum,5U},{global,5U},local);
       if(!status) return status;
       if(iteration==0U) {
         report.initial_species_residual=global[1];
@@ -714,10 +832,22 @@ class ScalarMassRemap {
       }
       report.iterations=passive_iterations+iteration;
       report.residual=global[0]; report.convergence_residual=global[2];
-      if(report.convergence_residual<=tolerance) return {};
+      report.requested_residual_ratio=global[3];
+      if(report.convergence_residual<=tolerance && global[3]<=1.0) return {};
+      // The caller's extra inner margin can be smaller than half one
+      // represented composition ULP. Return this state as a provisional
+      // guess only when every over-budget row is quantization-limited.
+      // The unmodified final conservative equations still decide acceptance.
+      if (intermediate_coupling && report.provisional_target_species &&
+          residual_limits.size && iteration>0 && global[3]>1 && global[4]==0 &&
+          report.convergence_residual<=tolerance) {
+        report.quantized_coupling_guess=true;
+        return {};
+      }
       // An explicit uncommitted outer update may use inexact inner solves.
       // Its caller still owns the complete final species/equation audit.
-      if (intermediate_coupling && target_solver_ == SpeciesCouplingSolver::dilu &&
+      if (intermediate_coupling && residual_limits.size == 0U &&
+          target_solver_ == SpeciesCouplingSolver::dilu &&
           iteration >= 2U &&
           global[1] <= std::max(0.01 * report.initial_species_residual,
                                64.0 * std::numeric_limits<double>::epsilon())) return {};
@@ -729,12 +859,29 @@ class ScalarMassRemap {
         double theta=1.0; long double sum=0.0L, delta_sum=0.0L;
         for(const auto slot:species_indices_) {
           const double q=views_[slot].unchecked(c,0U), delta=next_[slot*count_+i]-q;
-          sum+=q; delta_sum+=delta;
+          sum+=q; delta_sum+=static_cast<long double>(next_[slot*count_+i])-q;
           if(delta<0.0 && q+delta<0.0) theta=std::min(theta,0.9*q/(-delta));
           if(delta>0.0 && q+delta>1.0) theta=std::min(theta,0.9*(1.0-q)/delta);
         }
         if(delta_sum>0.0L && sum+delta_sum>1.0L)
           theta=std::min(theta,static_cast<double>(0.9L*(1.0L-sum)/delta_sum));
+        // Check the represented candidate, including rounding in each update.
+        // A sum of rounded deltas can hide an excess of half a double ULP
+        // when the dependent species is exactly zero. Search the common step
+        // length; the equation residual and the composition stay authoritative.
+        const auto admissible=[&](double step) {
+          long double total=0.0L;
+          for (const auto slot:species_indices_) {
+            const double q=views_[slot].unchecked(c,0U);
+            const double value=step==1.0 ? next_[slot*count_+i]
+                : q+step*(next_[slot*count_+i]-q);
+            if (!std::isfinite(value) || value<0.0 || value>1.0) return false;
+            total+=value;
+          }
+          return total<=1.0L;
+        };
+        for (unsigned search=0; !admissible(theta); ++search)
+          theta=search<64 ? 0.5*theta : 0.0;
         for(const auto slot:species_indices_) {
           auto& q=views_[slot].unchecked(c,0U);
           q=theta==1.0 ? next_[slot*count_+i] : q+theta*(next_[slot*count_+i]-q);
@@ -789,6 +936,11 @@ class ScalarMassRemap {
         target.data[slot].unchecked(c,0U)=guess(slot);
     }
     return {};
+  }
+
+  // Borrowed until the next remap/target solve. Includes the converged halo.
+  ConstFieldView target_species(std::size_t species) const noexcept {
+    return as_const(views_[species_indices_[species]]);
   }
 
   void copy_solution(Span<const FieldView> target,

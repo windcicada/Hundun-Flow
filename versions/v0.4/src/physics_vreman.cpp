@@ -215,7 +215,10 @@ Status TurbulencePlan::compile(MPI_Comm communicator,
   SubgridKind subgrid = SubgridKind::none;
   WallTreatmentKind wall = WallTreatmentKind::resolved;
   double coefficient = 0.0;
-  if (spec.kind == TurbulenceKind::wale) {
+  if (spec.kind == TurbulenceKind::smagorinsky) {
+    subgrid = SubgridKind::smagorinsky;
+    coefficient = spec.smagorinsky_coefficient;
+  } else if (spec.kind == TurbulenceKind::wale) {
     subgrid = SubgridKind::wale;
     coefficient = spec.wale_coefficient;
   } else if (spec.kind == TurbulenceKind::vreman_wall_function ||
@@ -228,7 +231,8 @@ Status TurbulencePlan::compile(MPI_Comm communicator,
   const bool supported = spec.kind == TurbulenceKind::none ||
                          spec.kind == TurbulenceKind::wale ||
                          spec.kind == TurbulenceKind::vreman_wall_function ||
-                         spec.kind == TurbulenceKind::vreman;
+                         spec.kind == TurbulenceKind::vreman ||
+                         spec.kind == TurbulenceKind::smagorinsky;
   const bool declared = std::binary_search(contributions.declared_fields_.begin(),
                                            contributions.declared_fields_.end(),
                                            effective_viscosity_output);
@@ -239,6 +243,8 @@ Status TurbulencePlan::compile(MPI_Comm communicator,
               spec.wale_coefficient < 0.0 ||
               !std::isfinite(spec.vreman_coefficient) ||
               spec.vreman_coefficient < 0.0 ||
+              !std::isfinite(spec.smagorinsky_coefficient) ||
+              spec.smagorinsky_coefficient < 0.0 ||
               !std::isfinite(spec.turbulent_prandtl) ||
               !(spec.turbulent_prandtl > 0.0) ||
               !std::isfinite(spec.turbulent_schmidt) ||
@@ -259,6 +265,8 @@ Status TurbulencePlan::compile(MPI_Comm communicator,
   semantic = mix(semantic, static_cast<std::uint64_t>(spec.kind));
   semantic = mix(semantic, bits(spec.wale_coefficient));
   semantic = mix(semantic, bits(spec.vreman_coefficient));
+  if (spec.kind == TurbulenceKind::smagorinsky)
+    semantic = mix(semantic, bits(spec.smagorinsky_coefficient));
   semantic = mix(semantic, bits(spec.turbulent_prandtl));
   semantic = mix(semantic, bits(spec.turbulent_schmidt));
   semantic = mix(semantic, effective_viscosity_output);
@@ -395,7 +403,10 @@ Status TurbulencePlan::update(const TurbulenceUpdateInput& input,
           gradient = &input.velocity_gradient.data[flat];
         }
         Status evaluated;
-        if (subgrid_ == SubgridKind::wale) {
+        if (subgrid_ == SubgridKind::smagorinsky) {
+          evaluated = smagorinsky_kinematic_viscosity(
+              *gradient, filter_metrics_[flat].isotropic, coefficient_, kinematic);
+        } else if (subgrid_ == SubgridKind::wale) {
           evaluated = wale_kinematic_viscosity(
               *gradient,
               filter_metrics_[flat].isotropic, coefficient_, kinematic);
@@ -474,7 +485,10 @@ Status TurbulencePlan::evaluate_candidate_effective_viscosity(
     }
     double kinematic = 0.0;
     Status evaluated;
-    if (subgrid_ == SubgridKind::wale) {
+    if (subgrid_ == SubgridKind::smagorinsky) {
+      evaluated = smagorinsky_kinematic_viscosity(
+          gradient, filter_metrics_[flat].isotropic, coefficient_, kinematic);
+    } else if (subgrid_ == SubgridKind::wale) {
       evaluated = wale_kinematic_viscosity(
           gradient, filter_metrics_[flat].isotropic, coefficient_, kinematic);
     } else if (subgrid_ == SubgridKind::vreman) {
@@ -545,6 +559,74 @@ Status TurbulencePlan::evaluate_candidate_effective_viscosity(
     }
   }
   certificate = next;
+  return {};
+}
+
+Status TurbulencePlan::evaluate_sgs_cell(Int3 cell, const VelocityGradient& gradient,
+                                        double density_kg_m3, double molecular_viscosity_pa_s,
+                                        SgsState& out) const noexcept {
+  if (fingerprint_ == 0U || !authority_.claimed() || cell.x < 0 || cell.y < 0 || cell.z < 0 ||
+      cell.x >= cells_.x || cell.y >= cells_.y || cell.z >= cells_.z)
+    return {StatusCode::invalid_plan, kTurbulenceView};
+  const std::size_t flat = (std::size_t(cell.z)*cells_.y + cell.y)*cells_.x + cell.x;
+  const auto& metric = filter_metrics_[flat];
+  double nu{};
+  Status status;
+  if (subgrid_ == SubgridKind::smagorinsky)
+    status = smagorinsky_kinematic_viscosity(gradient,metric.isotropic,coefficient_,nu);
+  else if (subgrid_ == SubgridKind::wale)
+    status = wale_kinematic_viscosity(gradient,metric.isotropic,coefficient_,nu);
+  else if (subgrid_ == SubgridKind::vreman)
+    status = vreman_kinematic_viscosity(gradient,{metric.x,metric.y,metric.z},coefficient_,nu);
+  return status ? sgs_state_from_viscosity(gradient,metric.isotropic,density_kg_m3,
+                                           molecular_viscosity_pa_s,nu,out) : status;
+}
+
+Status TurbulencePlan::evaluate_sgs_state(const TurbulenceCandidateInput& input,
+                                         Span<SgsState> output,
+                                         Span<const std::uint8_t> activity) const noexcept {
+  static_assert(sizeof(SgsState) == 4 * sizeof(double));
+  const std::size_t count = filter_metrics_.size();
+  if (fingerprint_ == 0U || !authority_.claimed() || output.data == nullptr ||
+      output.size != count || count > std::numeric_limits<std::size_t>::max()/4 ||
+      !valid_scalar(input.density, cells_) ||
+      !valid_scalar(input.molecular_viscosity, cells_) ||
+      !valid_gradient(input.velocity_gradient, cells_) || input.gradient_revision == 0U ||
+      input.gradient_revision != input.velocity_gradient.revision ||
+      (activity.size != 0U && (activity.data == nullptr || activity.size != count)))
+    return {StatusCode::invalid_plan, kTurbulenceView};
+  for (ConstFieldView field : {input.density, input.molecular_viscosity, input.velocity_gradient})
+    if (detail::field_view_overlaps_storage(field,
+        reinterpret_cast<const double*>(output.data), 4 * count))
+      return {StatusCode::invalid_plan, kTurbulenceView};
+  if (activity.size) {
+    const auto begin = reinterpret_cast<std::uintptr_t>(output.data);
+    const auto activity_begin = reinterpret_cast<std::uintptr_t>(activity.data);
+    if (activity.size > std::numeric_limits<std::uintptr_t>::max() - activity_begin ||
+        detail::storage_intervals_overlap({begin,begin+count*sizeof(SgsState)},
+                                          {activity_begin,activity_begin+activity.size}))
+      return {StatusCode::invalid_plan, kTurbulenceView};
+  }
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    std::size_t flat{};
+    for (int z = 0; z < cells_.z; ++z)
+      for (int y = 0; y < cells_.y; ++y)
+        for (int x = 0; x < cells_.x; ++x, ++flat) {
+          if (activity.size && activity.data[flat] > 1U)
+            return {StatusCode::invalid_plan, kTurbulenceView};
+          SgsState state;
+          if (activity.size == 0U || activity.data[flat]) {
+            const Int3 cell{x,y,z};
+            VelocityGradient gradient;
+            for (unsigned c = 0; c < 9; ++c)
+              gradient.value[c] = input.velocity_gradient.unchecked(cell,c);
+            const auto status = evaluate_sgs_cell(cell,gradient,input.density.unchecked(cell,0),
+                                                   input.molecular_viscosity.unchecked(cell,0),state);
+            if (!status) return status;
+          }
+          if (pass == 1U) output.data[flat] = state;
+        }
+  }
   return {};
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include "physics_kerosene_detail.hpp"
 #include "hundun/v04_physics.hpp"
 
 #include "physics_input_detail.hpp"
@@ -239,7 +240,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   if (!detail::canonicalize_thermophysical_spec(canonical_spec)) {
     return {StatusCode::invalid_plan, kTransportInput};
   }
-  const bool coast_perry = canonical_spec.species.front().transport_law == TransportLaw::coast_perry;
+  const bool coast_perry = coast_mixture_transport(canonical_spec.species.front().transport_law);
   std::array<std::uint8_t, kMaximumSpecies> seen{};
   seen[thermodynamics.dependent_species_] = 1U;
   for (const std::uint16_t mapped :
@@ -260,6 +261,9 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
     if (coast_perry) {
       candidate.perry_temperature_.resize(count);
       candidate.perry_scale_.resize(count);
+      if (std::any_of(canonical_spec.species.begin(), canonical_spec.species.end(), [](const auto& item) {
+            return item.transport_law == TransportLaw::kerosene_vapor;
+          })) candidate.kerosene_vapor_.resize(count);
     }
     candidate.molecular_weight_.resize(count);
     candidate.viscosity_reference_.resize(count);
@@ -291,7 +295,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
         canonical_spec.species[species];
     if (!finite_positive(input.molecular_weight) ||
         (input.transport_law != TransportLaw::coast_native_air &&
-         input.transport_law != TransportLaw::coast_perry &&
+         !coast_mixture_transport(input.transport_law) &&
          !finite_positive(input.viscosity_reference)) ||
         !finite_positive(input.temperature_switch) ||
         std::abs(input.molecular_weight *
@@ -347,6 +351,15 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
             std::pow(input.critical_temperature, 1.0 / 6.0) * 1e-7;
         if (!finite_positive(candidate.perry_scale_[species]))
           return {StatusCode::invalid_plan, kTransportSpecies};
+        candidate.reference_temperature_[species] = 0.0;
+        candidate.sutherland_temperature_[species] = 0.0;
+        candidate.prandtl_[species] = 0.70;
+        candidate.conductivity_[species] = 0.0;
+        break;
+      case TransportLaw::kerosene_vapor:
+        candidate.kerosene_vapor_[species] = 1U;
+        candidate.perry_temperature_[species] = 1.0;
+        candidate.perry_scale_[species] = 0.0;
         candidate.reference_temperature_[species] = 0.0;
         candidate.sutherland_temperature_[species] = 0.0;
         candidate.prandtl_[species] = 0.70;
@@ -461,6 +474,11 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   for (const std::uint16_t mapped : candidate.independent_to_species_) {
     hash.integer(mapped);
   }
+  if (!candidate.kerosene_vapor_.empty()) {
+    constexpr char model[] = "kerosene-vapor-viscosity-v1";
+    hash.bytes(model, sizeof(model) - 1U);
+    for (auto value : candidate.kerosene_vapor_) hash.integer(value);
+  }
   candidate.fingerprint_ = hash.finish();
   out = std::move(candidate);
   return {};
@@ -485,6 +503,7 @@ Status TransportPlan::evaluate(
           (kernel_ == TransportKernel::constant ? count * count : 0U) ||
       perry_temperature_.size() != (kernel_ == TransportKernel::coast_perry ? count : 0U) ||
       perry_scale_.size() != perry_temperature_.size() ||
+      (!kerosene_vapor_.empty() && kerosene_vapor_.size() != count) ||
       independent_to_species_.size() + 1U != count ||
       dependent_species_ >= count) {
     return {StatusCode::invalid_plan, kTransportInput};
@@ -524,7 +543,8 @@ Status TransportPlan::evaluate(
   for (std::size_t species = 0U; species < count; ++species) {
     const double moles = mass_fraction[species] / molecular_weight_[species];
     const double reduced = perry ? temperature / perry_temperature_[species] : 0.0;
-    const double mu = perry ?
+    const bool kerosene = !kerosene_vapor_.empty() && kerosene_vapor_[species];
+    const double mu = kerosene ? detail::kerosene_vapor_viscosity(temperature) : perry ?
         (4.610 * std::pow(reduced, 0.618) - 2.04 * std::exp(-0.449 * reduced) +
          1.94 * std::exp(-4.058 * reduced) + 0.1) * perry_scale_[species] : species_viscosity(
         {viscosity_reference_.data(), viscosity_reference_.size()},

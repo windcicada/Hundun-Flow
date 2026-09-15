@@ -419,12 +419,16 @@ Int3 shifted(Int3 cell, CartesianAxis axis, int direction) noexcept {
 struct MomentumBoundaryRelations {
   std::array<BoundaryRelation, 6U> relation{};
   std::array<bool, 6U> physical{};
+  std::array<bool, 6U> pressure_outlet{};
+  std::array<bool, 6U> allow_backflow{};
+  ConstFaceFluxView flux{};
 };
 
 Status resolve_momentum_boundary_relations(
-    const BoundaryPlan& boundary, FieldId velocity,
+    const BoundaryPlan& boundary, FieldId velocity, ConstFaceFluxView flux,
     MomentumBoundaryRelations& result) noexcept {
   MomentumBoundaryRelations candidate;
+  candidate.flux = flux;
   std::array<bool, 6U> found{};
   for (std::size_t index = 0U; index < candidate.relation.size(); ++index) {
     const auto face = static_cast<CartesianFace>(index);
@@ -434,6 +438,12 @@ Status resolve_momentum_boundary_relations(
                                                            kMomentumSolve}
                                                  : status;
     candidate.physical[index] = plan->local_owner && !plan->periodic;
+    candidate.pressure_outlet[index] = candidate.physical[index] &&
+        boundary.pressure_driven_backflow() &&
+        plan->flow_kind == BoundaryKind::pressure_outlet;
+    if (candidate.pressure_outlet[index])
+      candidate.allow_backflow[index] =
+          boundary.allow_backflow().data[plan->flow_parameter] != 0;
   }
   const Span<const BoundaryIndexSpan> spans = boundary.spans();
   for (std::size_t index = 0U; index < spans.size; ++index) {
@@ -469,6 +479,18 @@ double homogeneous_neighbor(ConstFieldView field, Int3 cells,
   if (!boundary.physical[selected_index])
     return field.unchecked(neighbor, field_component);
   const double centre = field.unchecked(cell, field_component);
+  if (boundary.pressure_outlet[selected_index]) {
+    // Use the assembly's immutable face flow to freeze the reservoir branch
+    // across all three component solves. The normal velocity remains a
+    // zero-gradient unknown; only incoming tangential velocity is prescribed.
+    const Int3 face = direction < 0 ? cell : neighbor;
+    const double mass = axis == CartesianAxis::x ? boundary.flux.x.unchecked(face)
+        : axis == CartesianAxis::y ? boundary.flux.y.unchecked(face)
+                                  : boundary.flux.z.unchecked(face);
+    const bool incoming_tangent = boundary.allow_backflow[selected_index] &&
+        direction * mass < 0.0 && velocity_component != static_cast<std::uint8_t>(axis);
+    return incoming_tangent ? -centre : centre;
+  }
   switch (boundary.relation[selected_index]) {
     case BoundaryRelation::dirichlet:
     case BoundaryRelation::convective:
@@ -1320,7 +1342,7 @@ Status limit_momentum_predictor_correction(
 
   MomentumBoundaryRelations relations;
   Status status = resolve_momentum_boundary_relations(
-      boundary, velocity.field, relations);
+      boundary, velocity.field, mass_flux, relations);
   status = collective_status(communicator, status);
   if (!status) return status;
 
@@ -2173,7 +2195,7 @@ Status solve_momentum_predictor(
   if (!preflight) return preflight;
   MomentumBoundaryRelations relations;
   Status status = resolve_momentum_boundary_relations(
-      boundary, velocity.field, relations);
+      boundary, velocity.field, mass_flux, relations);
   status = collective_status(communicator, status);
   if (!status) return status;
 

@@ -1,0 +1,57 @@
+description: |-
+  Analytic isomer fixture for concentration-regularized reaction orders.
+
+generator: hundun-flow-stage4-p0
+cantera-version: 3.2.0
+date: 2026-08-09
+
+units: {length: m, time: s, quantity: kmol, activation-energy: J/kmol}
+
+phases:
+- name: synthetic-gas
+  thermo: ideal-gas
+  elements: [H]
+  species: [A, B]
+  kinetics: gas
+  reactions: all
+  transport: mixture-averaged
+  state: {T: 1000.0, P: 1 atm, X: {A: 0.9, B: 0.1}}
+
+species:
+- name: A
+  composition: {H: 1}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200.0, 1000.0, 5000.0]
+    data:
+    - [2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    - [2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  transport:
+    model: gas
+    geometry: atom
+    diameter: 2.5
+    well-depth: 100.0
+- name: B
+  composition: {H: 1}
+  thermo:
+    model: NASA7
+    temperature-ranges: [200.0, 1000.0, 5000.0]
+    data:
+    - [2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    - [2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  transport:
+    model: gas
+    geometry: atom
+    diameter: 3.0
+    well-depth: 150.0
+
+reactions:
+- equation: A => B
+  rate-constant: {A: 2.0e-4, b: 0.0, Ea: 0.0}
+  orders: {A: 0.25, B: -0.75}
+  negative-orders: true
+  nonreactant-orders: true
+  hundun-order-regularization:
+    model: concentration_c1_v1
+    negative-floor: 0.1 kmol/m^3
+    fractional-floor: 0.01 kmol/m^3

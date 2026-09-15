@@ -612,6 +612,8 @@ void EquationPlanSet::move_from(EquationPlanSet&& other) noexcept {
       other.enthalpy_.unity_lewis_total_enthalpy_;
   enthalpy_.thermodynamics_ = std::move(other.enthalpy_.thermodynamics_);
   enthalpy_.species_specs_ = std::move(other.enthalpy_.species_specs_);
+  enthalpy_.heat_flux_ = other.enthalpy_.heat_flux_;
+  enthalpy_.heat_flux_mask_ = other.enthalpy_.heat_flux_mask_;
   enthalpy_.density_ = other.enthalpy_.density_;
   enthalpy_.velocity_ = other.enthalpy_.velocity_;
   enthalpy_.pressure_ = other.enthalpy_.pressure_;
@@ -858,6 +860,17 @@ Status EquationPlanSet::compile(
         child_fingerprint(semantic, UINT64_C(0x6d6f6d656e74), spec.velocity);
 
     candidate.enthalpy_.cells_ = patch.cells;
+    for (unsigned index = 0U; index < 6U; ++index) {
+      const BoundaryFacePlan* face{};
+      const auto viewed = boundary.face(static_cast<CartesianFace>(index), face);
+      if (!viewed) return viewed;
+      if (face == nullptr) return {StatusCode::invalid_plan, kEquationPlan};
+      if (face->local_owner && face->thermal_kind == BoundaryKind::heat_flux_wall) {
+        candidate.enthalpy_.heat_flux_mask_ |= static_cast<std::uint8_t>(1U << index);
+        candidate.enthalpy_.heat_flux_[index] =
+            boundary.heat_flux_targets().data[face->thermal_parameter];
+      }
+    }
     candidate.enthalpy_.unity_lewis_total_enthalpy_ =
         spec.unity_lewis_total_enthalpy;
     candidate.enthalpy_.thermodynamics_ = thermodynamics;

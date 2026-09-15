@@ -4,6 +4,7 @@
 #include "hundun/v04_physics.hpp"
 
 #include "physics_input_detail.hpp"
+#include "physics_nasa_detail.hpp"
 
 #include <mpi.h>
 
@@ -37,7 +38,9 @@ constexpr std::uint32_t kMaximumTemperatureIterations = 256U;
 constexpr std::uint32_t kMaximumClosedMassIterations = 256U;
 constexpr unsigned kMaximumBernsteinDepth = 48U;
 constexpr std::size_t kMaximumBernsteinNodes = 4096U;
-constexpr long double kContinuityRelativeTolerance = 1.0e-8L;
+// Published NASA fits retain finite tabulation precision (Konnov N2 has
+// a 3.63e-7 cp jump). Bound fit mismatch separately from PH solve accuracy.
+constexpr long double kContinuityRelativeTolerance = 1.0e-6L;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
@@ -331,21 +334,8 @@ bool continuous(long double left, long double right) noexcept {
 
 double canonical_high_enthalpy_constant(
     const SpeciesThermophysicalSpec& species) noexcept {
-  const double temperature = species.temperature_switch;
-  const double t2 = temperature * temperature;
-  const double t3 = t2 * temperature;
-  const double t4 = t3 * temperature;
-  const auto without_constant =
-      [&](const std::array<double, 7U>& coefficients) noexcept {
-        return coefficients[0U] * temperature +
-               coefficients[1U] * t2 * 0.5 +
-               coefficients[2U] * t3 / 3.0 +
-               coefficients[3U] * t4 * 0.25 +
-               coefficients[4U] * t4 * temperature * 0.2;
-      };
-  const double low_at_switch =
-      without_constant(species.nasa7_low) + species.nasa7_low[5U];
-  return low_at_switch - without_constant(species.nasa7_high);
+  return detail::nasa_high_enthalpy_constant(species.temperature_switch,
+      species.nasa7_low, species.nasa7_high);
 }
 
 bool valid_spec(const ThermophysicalSpec& spec) noexcept {
@@ -374,7 +364,7 @@ bool valid_spec(const ThermophysicalSpec& spec) noexcept {
         species.temperature_switch <= spec.minimum_temperature ||
         species.temperature_switch >= spec.maximum_temperature ||
         (species.transport_law != TransportLaw::coast_native_air &&
-         species.transport_law != TransportLaw::coast_perry &&
+         !coast_mixture_transport(species.transport_law) &&
          !finite_positive(species.viscosity_reference)) ||
         (species.transport_law != TransportLaw::coast_perry &&
          (species.critical_temperature != 0.0 || species.critical_pressure != 0.0))) {
@@ -408,13 +398,15 @@ bool valid_spec(const ThermophysicalSpec& spec) noexcept {
           !finite_positive(species.prandtl) || species.conductivity != 0.0) {
         return false;
       }
-    } else if (species.transport_law == TransportLaw::coast_perry) {
-      if (!finite_positive(species.critical_temperature) ||
-          !finite_positive(species.critical_pressure) || species.prandtl != 0.70 ||
+    } else if (coast_mixture_transport(species.transport_law)) {
+      if ((species.transport_law == TransportLaw::coast_perry &&
+           (!finite_positive(species.critical_temperature) || !finite_positive(species.critical_pressure))) ||
+          (species.transport_law == TransportLaw::kerosene_vapor && species.stable_name != "C12H23") ||
+          species.prandtl != 0.70 ||
           species.viscosity_reference != 0.0 || species.transport_reference_temperature != 0.0 ||
           species.sutherland_temperature != 0.0 || species.conductivity != 0.0 ||
           std::any_of(spec.species.begin(), spec.species.end(), [](const auto& item) {
-            return item.transport_law != TransportLaw::coast_perry;
+            return !coast_mixture_transport(item.transport_law);
           })) return false;
     } else if (species.transport_law == TransportLaw::coast_native_air) {
       if (spec.species.size() != 1U || !coast_native_air_species(species)) {
@@ -654,6 +646,9 @@ Status parse_text(std::string_view text, ThermophysicalSpec& out) noexcept {
         species.prandtl = 0.70;
         if (!tokens.real(species.critical_temperature) ||
             !tokens.real(species.critical_pressure)) return invalid(kSyntax);
+      } else if (tokens.exact("transport_kerosene")) {
+        species.transport_law = TransportLaw::kerosene_vapor;
+        species.prandtl = 0.70;
       } else if (tokens.exact("transport_coast_native_air")) {
         species.transport_law = TransportLaw::coast_native_air;
       } else {

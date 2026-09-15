@@ -263,7 +263,7 @@
   },
   "time": {
     "control": "fixed",
-    "scheme": "variable_bdf2",
+    "scheme": "backward_euler",
     "initial_dt": 0.001,
     "minimum_dt": 0.001,
     "maximum_dt": 0.001,

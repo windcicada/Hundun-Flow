@@ -444,12 +444,20 @@ bool test_inward_directions(const CartesianGeometryPlan& geometry,
   ValidatedModel backflow = open_model();
   backflow.boundaries[1U].allow_backflow = true;
   backflow.boundaries[1U].backflow_temperature = 300.0;
-  backflow.boundaries[1U].backflow_velocity = Real3{1.0, 0.0, 0.0};
+  for (TimeScheme scheme : {TimeScheme::cn_be, TimeScheme::backward_euler}) {
+    backflow.time.scheme = scheme;
+    for (double normal : {-1.0, 0.0, 1.0}) {
+      backflow.boundaries[1U].backflow_velocity = {normal, 0.5, 0.0};
+      BoundaryPlan plan;
+      passed &= expect(compile(backflow, geometry, patch, &plan) &&
+                           plan.pressure_driven_backflow(),
+                       "static outlet uses pressure-driven normal flow for both time schemes");
+    }
+  }
+  backflow.boundaries[1U].flow_kind = BoundaryKind::nscbc_outlet;
+  backflow.boundaries[1U].backflow_velocity = {1.0, 0.0, 0.0};
   passed &= expect(!compile(backflow, geometry, patch),
-                   "declared outlet backflow rejects an outward target velocity");
-  backflow.boundaries[1U].backflow_velocity = Real3{-1.0, 0.0, 0.0};
-  passed &= expect(static_cast<bool>(compile(backflow, geometry, patch)),
-                   "declared outlet backflow accepts an inward target velocity");
+                   "NSCBC backflow requires an inward characteristic target");
   return passed;
 }
 

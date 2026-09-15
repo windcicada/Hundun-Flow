@@ -29,6 +29,11 @@ struct CanteraBackendConfig final {
   CanteraMechanismConfig mechanism;
   ChemistrySolverConfig chemistry;
   std::vector<std::string> species_names;
+  bool continuous_enthalpy{false};
+  // Zero uses the mechanism interval. An explicit pair uses the case's
+  // thermodynamic admission interval with the same source polynomials.
+  double minimum_temperature{};
+  double maximum_temperature{};
 };
 
 // Runtime/pool construction may throw. Each backend owns one exclusive lane;
@@ -48,6 +53,8 @@ public:
   const CompositionIdentity &composition() const noexcept;
   std::string_view mechanism_sha256() const noexcept;
   std::string_view mechanism_phase() const noexcept;
+  // A static model label, also suitable for a detached plan summary.
+  std::string_view reaction_model() const noexcept;
 
 private:
   bool matches(const CanteraBackendConfig &) const;

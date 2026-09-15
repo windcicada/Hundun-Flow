@@ -290,7 +290,7 @@ Result run(bool species, bool uniform, double dt) {
       result.ran=false; break;
     }
     result.history &= report.attempts==1U && !report.temporal_method_fallback &&
-        report.effective_bdf.order==(i==0 ? 1U : 2U) && report.proposal.dt==dt;
+        report.effective_bdf.order==1U && report.proposal.dt==dt;
     result.correction_active &= report.scalar_transport.active;
     if (species) {
       const auto& perf = report.pressure_energy_performance;
@@ -424,7 +424,7 @@ bool isothermal_contact_contract() {
       DriverStepReport report;
       if(step!=0U) status=driver.advance({dt,dt,dt,dt,dt},report);
       if(!all_pass(status && (step==0U || (report.accepted && report.attempts==1U &&
-          report.effective_bdf.order==(step==1U ? 1U : 2U))))) {
+          report.effective_bdf.order==1U)))) {
         if(rank==0) std::cout<<"ISOTHERMAL_CONTACT multiple="<<multiple<<" different_cp="<<different_cp<<" formation="<<formation<<" step="<<step
             <<" status="<<unsigned(status.code)<<'/'<<status.detail
             <<" stage="<<report.failed_stage<<" sweeps="<<report.scalar_transport.coupling_sweeps
@@ -583,17 +583,25 @@ bool open_budget(bool species, bool reverse) {
           : old_phi[side][f]*predictor_face+delta*correction_face;
       if(dirichlet) {
         MolecularTransportState material;
-        // A fixed physical inlet now supplies its own molecular face state.
-        // Conditional pressure-outlet backflow keeps the old owner material
-        // contract. Keep the same conservation threshold and independent
-        // analytic flux oracle; do not read the solver's computed flux here.
+        // Fixed inlets use their physical molecular face state. A pressure
+        // outlet stores reservoir material in its incoming ghost and uses
+        // harmonic diffusion across equal owner/ghost half distances.
+        // Reconstruct that budget independently from primitive states.
         const bool physical_inlet=!reverse && side==0;
         const double boundary_owner=species ? after.scalar[cell] : before.scalar[cell];
         const double composition=physical_inlet ? target : boundary_owner;
         const double temperature=physical_inlet ? 320.0 : initial(patch.begin.x+x,species,false).temperature;
         if(!transport_plan.evaluate(temperature,
             species ? Span<const double>{&composition,1U} : Span<const double>{},material)) { valid=false; continue; }
-        diffusion+=2*material.viscosity*(target-boundary_owner)/width(0,patch.begin.x+x)*
+        double face_viscosity=material.viscosity;
+        if (species && reverse) {
+          MolecularTransportState reservoir;
+          if (!transport_plan.evaluate(320.0, {&target,1U}, reservoir)) {
+            valid=false; continue;
+          }
+          face_viscosity=2.0/(1.0/material.viscosity+1.0/reservoir.viscosity);
+        }
+        diffusion+=2*face_viscosity*(target-boundary_owner)/width(0,patch.begin.x+x)*
             width(1,patch.begin.y+y)*width(2,patch.begin.z+z);
         if(delta<0.0) inward_correction+=std::abs(delta);
       }
@@ -616,6 +624,9 @@ bool open_budget(bool species, bool reverse) {
   if(rank==0) std::cout<<std::setprecision(15)<<"OPEN_SCALAR family="<<(species?"EOS":"passive")
       <<" reverse="<<reverse<<" defect="<<defect<<" delta_inventory="<<static_cast<double>(after.inventory-before.inventory)
       <<" boundary_advection="<<static_cast<double>(total[0])<<" boundary_diffusion="<<static_cast<double>(total[1])
+      <<" species_residual="<<report.scalar_transport.final_species_residual
+      <<" pairing_residual="<<report.scalar_transport.mass_pairing_residual
+      <<" coupling_sweeps="<<report.scalar_transport.coupling_sweeps
       <<" incoming_correction="<<incoming<<" constant_error="<<after.constant_error
       <<" minimum="<<after.minimum<<" before_minimum="<<before.minimum<<" maximum="<<after.maximum
       <<" mass_scale="<<report.thermophysical_predictor.mass_flux_scale<<" source_alpha="<<report.thermophysical_predictor.source_endpoint_alpha
@@ -896,7 +907,7 @@ bool restart_contract(bool species) {
     if(!all_pass(static_cast<bool>(s))) return false;
     const auto x=snapshot_payload(left,true,true),y=snapshot_payload(right,true,true);
     passed &= x.size()==y.size() && left.step==right.step &&
-        a.effective_bdf.order==2U && b.effective_bdf.order==2U &&
+        a.effective_bdf.order==1U && b.effective_bdf.order==1U &&
         left.closed_mass_target==mass_target && right.closed_mass_target==mass_target;
     for(std::size_t i=0;i<std::min(x.size(),y.size());++i) {
       const double difference=std::abs(x[i]-y[i])/std::max({1.0,std::abs(x[i]),std::abs(y[i])});
@@ -933,7 +944,7 @@ bool restart_contract(bool species) {
   if(s) s=recovered.advance({1,1,1,1,1},report);
   passed &= s && report.accepted && report.effective_bdf.order==1U;
   if(s) s=recovered.advance({1,1,1,1,1},report);
-  passed &= s && report.accepted && report.effective_bdf.order==2U;
+  passed &= s && report.accepted && report.effective_bdf.order==1U;
   // Force a real numerical attempt to fail, not a malformed CLI/proposal.
   auto limited=m; limited.solver.pressure.maximum_iterations=1U;
   s=create(limited,failing);
@@ -1011,7 +1022,8 @@ int main(int argc,char** argv) {
     std::array<Result,3U> results;
     for (std::size_t level=0; level<(near_pure || immersed ? 1U : 3U); ++level) {
       if (coupling_probe && level!=1U) continue;
-      const double dt=coarse_dt/static_cast<double>(1U<<level);
+      // Fixed-time BE refinement uses 32/64/128 steps to reach the asymptotic range.
+      const double dt=coarse_dt/static_cast<double>(1U<<(level+2U));
       results[level]=run(species,uniform,dt); const auto& r=results[level];
       const bool conservative=r.ran && r.maximum_inventory_defect<1e-12;
       passed &= r.ran && r.history && r.constant && r.bounded && r.eos && conservative && r.correction_active;
@@ -1045,10 +1057,11 @@ int main(int argc,char** argv) {
     }
     if (!uniform && !near_pure && !coupling_probe && !immersed) {
       const double order=std::log(rms(results[0].terminal,results[1].terminal)/rms(results[1].terminal,results[2].terminal))/std::log(2.0);
-      const bool second_order=results[0].ran && results[1].ran && results[2].ran &&
-          std::isfinite(order) && order>=1.8;
-      passed &= second_order;
-      if (rank==0) std::cout << "SCALAR_ORDER family=" << (species?"EOS_species":"passive") << " order=" << order << " accepted=" << second_order << '\n';
+      // The production scalar schedule is BE; this is dt refinement at fixed mesh.
+      const bool first_order=results[0].ran && results[1].ran && results[2].ran &&
+          std::isfinite(order) && order>=0.9;
+      passed &= first_order;
+      if (rank==0) std::cout << "SCALAR_ORDER family=" << (species?"EOS_species":"passive") << " order=" << order << " accepted=" << first_order << '\n';
     }
   }
   int local=passed?1:0, global=0;

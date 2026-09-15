@@ -92,13 +92,17 @@ if (mesh.get("kind") != "uniform" or
         mesh.get("data_files") != [] or
         mesh.get("immersed_boundary") is not None):
     raise SystemExit("init-case mesh template changed, refusing an unreviewed mutation")
-if flow.get("pressure_reference") != "closed_mass":
+if flow.get("pressure_reference") != "boundary_absolute":
     raise SystemExit("init-case pressure-reference template changed")
 if set(boundaries) != {"x_min", "x_max", "y_min", "y_max", "z_min", "z_max"}:
     raise SystemExit("init-case boundary catalog changed")
-if any(face.get("flow_kind") != "periodic" for face in boundaries.values()):
+expected_flow = {"x_min": "velocity_inlet", "x_max": "pressure_outlet",
+                 "y_min": "periodic", "y_max": "periodic",
+                 "z_min": "periodic", "z_max": "periodic"}
+if any(face.get("flow_kind") != expected_flow[name]
+       for name, face in boundaries.items()):
     raise SystemExit("init-case boundary template changed")
-if (time.get("scheme") != "variable_bdf2" or
+if (time.get("scheme") != "cn_be" or
         time.get("initial_dt") != 0.001 or
         time.get("minimum_dt") != 1e-8 or
         time.get("maximum_dt") != 0.1):
@@ -116,6 +120,11 @@ mesh["immersed_boundary"] = {
 }
 flow["pressure_reference"] = "boundary_absolute"
 document["turbulence"]["model"] = "none"
+# This fixture audits the PISO pressure-energy lifecycle. Select that
+# supported schedule explicitly while init-case retains CN/BE defaults.
+document["solver"]["coupling"] = "PISO"
+document["schemes"]["momentum"] = "limited_central2"
+time["scheme"] = "backward_euler"
 
 directions = {
     "x_min": [1.0, 0.0, 0.0],
@@ -192,8 +201,8 @@ import sys
 fixed_dt = float(sys.argv[1])
 paths = [pathlib.Path(value) for value in sys.argv[2:]]
 expected = (
-    (3, 2, 2, False),
-    (4, 2, 2, False),
+    (3, 1, 1, False),
+    (4, 1, 1, False),
 )
 all_rows = []
 for path in paths:

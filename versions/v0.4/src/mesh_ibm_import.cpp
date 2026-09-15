@@ -524,7 +524,8 @@ PlanFingerprint marker_fingerprint(const CartesianGeometryPlan& geometry,
 PlanFingerprint compile_contract(const CartesianGeometryPlan& geometry,
                                  const MeshPatch& patch,
                                  PlanFingerprint surface_fingerprint,
-                                 ImmersedPlanLimits limits, int size) noexcept {
+                                 ImmersedPlanLimits limits, int size,
+                                 ImmersedDomainBoundaryPolicy boundary_policy) noexcept {
   Hash64 hash;
   hash.integer(kImportSchemaRevision);
   hash.integer(geometry.fingerprint());
@@ -547,6 +548,13 @@ PlanFingerprint compile_contract(const CartesianGeometryPlan& geometry,
   hash.integer(limits.maximum_peak_bytes_per_rank);
   hash.integer(limits.maximum_local_links);
   hash.integer(limits.maximum_local_quadrature_points);
+  if (boundary_policy.allow_periodic_images[0] ||
+      boundary_policy.allow_periodic_images[2] ||
+      boundary_policy.allow_periodic_images[4]) {
+    hash.integer(UINT64_C(0x706572696f646963));
+    for (const bool periodic : boundary_policy.allow_periodic_images)
+      hash.integer(static_cast<std::uint8_t>(periodic));
+  }
   return hash.finish();
 }
 
@@ -557,7 +565,8 @@ Status ImportedIbmCompiler::compile(
     const MeshPatch& patch, Span<const std::uint8_t> global_marker,
     PlanFingerprint marker_source, ImmersedPlanLimits limits,
     EBTopology& topology, BoundaryStencilPlan& boundary,
-    SurfaceQuadraturePlan& quadrature) noexcept {
+    SurfaceQuadraturePlan& quadrature,
+    ImmersedDomainBoundaryPolicy boundary_policy) noexcept {
   int rank = -1;
   int size = 0;
   const Status context = mpi_context(communicator, rank, size);
@@ -594,6 +603,10 @@ Status ImportedIbmCompiler::compile(
       }
     }
   }
+  for (unsigned axis = 0; axis < 3; ++axis)
+    if (boundary_policy.allow_periodic_images[2 * axis] !=
+        boundary_policy.allow_periodic_images[2 * axis + 1])
+      local = {StatusCode::invalid_plan, kImportInput};
   int lowest = -1;
   Status agreed = consensus(communicator, rank, size, local, lowest);
   if (!agreed) return agreed;
@@ -601,7 +614,7 @@ Status ImportedIbmCompiler::compile(
   const PlanFingerprint imported_surface =
       marker_fingerprint(geometry, marker_source, global_marker);
   const PlanFingerprint contract =
-      compile_contract(geometry, patch, imported_surface, limits, size);
+      compile_contract(geometry, patch, imported_surface, limits, size, boundary_policy);
   PlanFingerprint root_contract = contract;
   if (MPI_Bcast(&root_contract, 1, MPI_UINT64_T, 0, communicator) !=
       MPI_SUCCESS) {
@@ -613,6 +626,9 @@ Status ImportedIbmCompiler::compile(
   if (!agreed) return agreed;
 
   EBTopology topology_candidate;
+  for (unsigned axis = 0; axis < 3; ++axis)
+    topology_candidate.periodic_axes_[axis] =
+        boundary_policy.allow_periodic_images[2 * axis];
   BoundaryStencilPlan boundary_candidate;
   SurfaceQuadraturePlan quadrature_candidate;
   const std::int64_t halo_x =
@@ -673,9 +689,15 @@ Status ImportedIbmCompiler::compile(
     for (std::int32_t z = 0; z < halo_shape.z; ++z) {
       for (std::int32_t y = 0; y < halo_shape.y; ++y) {
         for (std::int32_t x = 0; x < halo_shape.x; ++x) {
-          const Int3 global_cell{patch.begin.x + x - kRegionHalo,
-                                 patch.begin.y + y - kRegionHalo,
-                                 patch.begin.z + z - kRegionHalo};
+          Int3 global_cell{patch.begin.x + x - kRegionHalo,
+                          patch.begin.y + y - kRegionHalo,
+                          patch.begin.z + z - kRegionHalo};
+          for (unsigned axis = 0; axis < 3; ++axis) {
+            if (!topology_candidate.periodic_axes_[axis]) continue;
+            auto& index = axis == 0 ? global_cell.x : axis == 1 ? global_cell.y : global_cell.z;
+            const auto extent = axis == 0 ? global.x : axis == 1 ? global.y : global.z;
+            index = (index % extent + extent) % extent;
+          }
           if (inside(global_cell, global)) {
             topology_candidate.halo_region_[flat(halo_shape, {x, y, z})] =
                 global_marker.data[static_cast<std::size_t>(
@@ -902,6 +924,12 @@ Status ImportedIbmCompiler::compile(
   topology_hash.integer(global_count);
   topology_hash.integer(global_xor);
   topology_hash.integer(global_sum);
+  if (topology_candidate.periodic_axes_[0] || topology_candidate.periodic_axes_[1] ||
+      topology_candidate.periodic_axes_[2]) {
+    topology_hash.integer(UINT64_C(0x706572696f646963));
+    for (const bool periodic : boundary_policy.allow_periodic_images)
+      topology_hash.integer(static_cast<std::uint8_t>(periodic));
+  }
   topology_candidate.fingerprint_ = topology_hash.finish();
 
   IbmInterfaceMetricPlan& metric_plan = topology_candidate.interface_metric_;

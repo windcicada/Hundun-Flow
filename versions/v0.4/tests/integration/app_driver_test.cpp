@@ -244,7 +244,8 @@ bool terminal_physical_certificate(ProductDriver& driver,
 }
 
 bool open_x_boundary_flux_certificate(const RestartSnapshot& snapshot,
-                                      double mass_flow_target = 0.0) {
+                                      double mass_flow_target = 0.0,
+                                      bool allow_backflow = false) {
   if (snapshot.patch.begin.x != 0 || snapshot.patch.begin.y != 0 ||
       snapshot.patch.begin.z != 0 ||
       snapshot.patch.cells.x != snapshot.global_cells.x ||
@@ -258,7 +259,7 @@ bool open_x_boundary_flux_certificate(const RestartSnapshot& snapshot,
           snapshot.final_mass_flux.x.unchecked({0, y, z});
       const double outlet = snapshot.final_mass_flux.x.unchecked(
           {snapshot.patch.cells.x, y, z});
-      if (!(inlet > 0.0) || outlet < 0.0) return false;
+      if (!(inlet > 0.0) || (!allow_backflow && outlet < 0.0)) return false;
       inlet_mass_flow += inlet;
     }
   for (std::int32_t z = 0; z < snapshot.patch.cells.z; ++z)
@@ -1555,6 +1556,11 @@ bool retry_consumes_warm_seed_and_restart_starts_cold() {
   base_model.boundaries[0U].velocity = {1.0, 0.0, 0.0};
   base_model.boundaries[0U].mass_flow_rate = 0.25;
   base_model.boundaries[1U].flow_kind = BoundaryKind::pressure_outlet;
+  // This lifecycle fixture uses an open static-pressure reservoir, including
+  // resolved signed flux at the initially stagnant outlet. The explicit
+  // one-way boundary fixtures retain their separate directional checks.
+  base_model.boundaries[1U].allow_backflow = true;
+  base_model.boundaries[1U].backflow_temperature = 315.0;
 
   // The strict linear-work policy makes the initial proposal recover through
   // one or more BE retries.  The exact count and rejected residual are not a
@@ -1590,7 +1596,8 @@ bool retry_consumes_warm_seed_and_restart_starts_cold() {
       retried.proposal.attempt > 0U && retried.proposal.bdf.order == 1U &&
       retried.effective_bdf.order == 1U &&
       open_x_boundary_flux_certificate(
-          retry_restart, retry_model.boundaries[0U].mass_flow_rate);
+          retry_restart, retry_model.boundaries[0U].mass_flow_rate,
+          retry_model.boundaries[1U].allow_backflow);
   if (!retry_certificate) {
     std::cerr << "warm retry fixture first="
               << static_cast<unsigned>(status.code) << '/' << status.detail

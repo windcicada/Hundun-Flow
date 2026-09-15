@@ -448,6 +448,49 @@ bool run_case(const fs::path& root, bool stretched,
                          !fs::exists(tight / "step-00000000000000000025.visit"),
                      "file-size-only budget rejects live metadata overhead "
                      "before publication");
+    std::array<SnapshotFieldSpec,6U> extended_specs{{specs[0],specs[1],
+        {0U,1U,SnapshotSource::sgs_kinematic_viscosity},
+        {0U,1U,SnapshotSource::sgs_kinetic_energy},
+        {0U,1U,SnapshotSource::sgs_dissipation_volume},
+        {0U,1U,SnapshotSource::sgs_dissipation_specific}}};
+    IoServicePlan undersized;
+    passed &= expect(!IoServicePlan::compile({extended_specs.data(),extended_specs.size()},
+        {capacities.data(),capacities.size()},local_cells,undersized),
+        "SGS output capacity includes all derived fields");
+    auto extended_capacity=capacities;
+    for (auto& capacity:extended_capacity)
+      capacity.maximum_snapshot_bytes_per_rank=local_cells*8U*sizeof(double);
+    IoServicePlan extended;
+    passed &= expect(bool(IoServicePlan::compile({extended_specs.data(),extended_specs.size()},
+        {extended_capacity.data(),extended_capacity.size()},local_cells,extended)) &&
+        extended.primary_field_count()==2U,"SGS suffix binds its registered velocity origin");
+    passed &= expect(bool(VisitWriter::write(MPI_COMM_SELF,root/"primary",extended,snapshot)),
+        "primary snapshot remains valid for a plan with derived output capability");
+    std::array<test::OwnedField,4U> derived;
+    std::array<SnapshotFieldView,6U> extended_fields{{fields[0],fields[1]}};
+    for (unsigned q=0;q<4;++q) {
+      derived[q]=test::make_field(0U,patch.cells,1U,0U,11U,31U+q);
+      std::fill(derived[q].storage.begin(),derived[q].storage.end(),double(q+1U));
+      extended_fields[q+2U]={q==0 ? "nu_sgs" : q==1 ? "k_sgs" : q==2 ? "eps_sgs_volume" : "eps_sgs_specific",
+                            as_const(derived[q].view),11U,extended_specs[q+2U].source};
+    }
+    auto derived_snapshot=snapshot;
+    derived_snapshot.fields={extended_fields.data(),extended_fields.size()};
+    passed &= expect(bool(VisitWriter::write(MPI_COMM_SELF,root/"derived",extended,derived_snapshot)),
+        "VTI/VTR write the complete explicit SGS suffix");
+    derived_snapshot.fields.size=3U;
+    passed &= expect(!VisitWriter::write(MPI_COMM_SELF,root/"partial",extended,derived_snapshot),
+        "partial derived suffix is rejected before publication");
+    derived_snapshot.fields.size=extended_fields.size();
+    extended_fields[2U].source=SnapshotSource::registered_field;
+    passed &= expect(!VisitWriter::write(MPI_COMM_SELF,root/"source",extended,derived_snapshot),
+        "derived data requires its sealed source identity");
+    auto orphan_specs=extended_specs;
+    orphan_specs[2U].field=1U;
+    IoServicePlan orphan;
+    passed &= expect(!IoServicePlan::compile({orphan_specs.data(),orphan_specs.size()},
+        {extended_capacity.data(),extended_capacity.size()},local_cells,orphan),
+        "derived SGS origin must be a registered velocity vector");
     const double original = pressure.view.unchecked({0, 0, 0}, 0U);
     pressure.view.unchecked({0, 0, 0}, 0U) =
         std::numeric_limits<double>::quiet_NaN();
@@ -576,6 +619,50 @@ bool run_case(const fs::path& root, bool stretched,
       cold_text.find("\"coupling\":\"CN_BE\"") != std::string::npos &&
       cold_text.find("\"pressure\":[]") != std::string::npos &&
       cold_text.find("\"cold\":{\"outer_iterations\":1") != std::string::npos;
+  // The driver can need more than sixteen corrections for a variable-density
+  // mixture; evidence must represent the same bounded runtime capability.
+  for (unsigned outer : {21U,64U,65U}) {
+    auto extended=cold;
+    extended.cold.outer_iterations=outer;
+    extended.cold.momentum_solve_calls=3U*outer;
+    extended.cold.pressure_solve_calls=extended.cold.enthalpy_solve_calls=
+        extended.cold.species_solve_calls=outer;
+    const bool accepted=bool(EvidenceWriter::append(MPI_COMM_SELF,
+        root / "evidence" / "extended.jsonl",services,extended));
+    if (accepted!=(outer<=64U))
+      std::cerr << "cold evidence outer=" << outer << " accepted=" << accepted << '\n';
+    passed &= accepted==(outer<=64U);
+  }
+  // ESF closes physical fields after pressure updates before candidate audits.
+  // Each endpoint call is included in the actual species solve total.
+  for (unsigned endpoints : {0U, 1U, 2U}) {
+    auto endpoint = cold;
+    endpoint.cold.species_endpoint_solve_calls = endpoints;
+    endpoint.cold.species_solve_calls += endpoints;
+    const bool accepted = bool(EvidenceWriter::append(MPI_COMM_SELF,
+        root / "evidence" / "endpoint.jsonl", services, endpoint));
+    passed &= accepted == (endpoints <= endpoint.cold.outer_iterations);
+    if (endpoints == 1U) {
+      --endpoint.cold.species_solve_calls;
+      passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+          root / "evidence" / "endpoint-omitted.jsonl", services, endpoint);
+    }
+  }
+  auto retained=cold;
+  retained.cold.outer_iterations=2U;
+  retained.cold.momentum_solve_calls=6U;
+  retained.cold.pressure_solve_calls=retained.cold.species_solve_calls=2U;
+  retained.cold.enthalpy_retained_calls=1U;
+  passed &= static_cast<bool>(EvidenceWriter::append(MPI_COMM_SELF,
+      root / "evidence" / "retained.jsonl",services,retained));
+  passed &= read(root / "evidence" / "retained.jsonl").find(
+      "\"enthalpy_retained_calls\":1")!=std::string::npos;
+  for (unsigned count : {0U,2U,3U}) {
+    auto bad=retained;
+    bad.cold.enthalpy_retained_calls=count;
+    passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+        root / "evidence" / "bad-retained.jsonl",services,bad);
+  }
   auto reference = cold;
   reference.cold.stopping = ColdStoppingSpec{0.002, 1e-4, 2e-4, 3e-4};
   reference.cold.momentum_reference_scale = 10.0;
@@ -605,6 +692,22 @@ bool run_case(const fs::path& root, bool stretched,
         root / "evidence" / "cold-invalid.jsonl", services, bad);
   }
   auto relabelled = cold;
+  auto scheduled = cold;
+  scheduled.algorithm = {true, TimeScheme::cn_be, CouplingKind::outer_corrected};
+  passed &= static_cast<bool>(EvidenceWriter::append(MPI_COMM_SELF,
+      root / "evidence" / "algorithm.jsonl", services, scheduled));
+  const auto algorithm_text = read(root / "evidence" / "algorithm.jsonl");
+  passed &= algorithm_text.find(
+      "\"algorithm\":{\"time_scheme\":\"cn_be\",\"coupling\":\"outer_corrected\"}") !=
+      std::string::npos;
+  for (unsigned mutation = 0; mutation < 3; ++mutation) {
+    auto bad = scheduled;
+    if (mutation == 0) bad.algorithm.time_scheme = TimeScheme::backward_euler;
+    if (mutation == 1) bad.algorithm.coupling = CouplingKind::piso;
+    if (mutation == 2) bad.algorithm.coupling = CouplingKind::simple;
+    passed &= !EvidenceWriter::append(MPI_COMM_SELF,
+        root / "evidence" / "cold-invalid.jsonl", services, bad);
+  }
   auto air = cold;
   air.cold.independent_species_count = 0U;
   air.cold.species_solve_calls = 0U;

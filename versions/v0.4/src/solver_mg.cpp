@@ -3348,24 +3348,11 @@ Status point_smooth(Implementation& implementation, std::size_t level_index,
   return status;
 }
 
-template <class Implementation>
-Status line_smooth(Implementation& implementation, std::size_t level_index,
-                   std::uint32_t sweeps, bool reverse,
-                   StageId& stage,
-                   Status& deferred,
-                   std::uint8_t selected_mask = 0U) noexcept {
+template <CartesianAxis axis, class Implementation>
+Status line_smooth_axis(Implementation& implementation, std::size_t level_index,
+                       std::uint32_t sweeps, bool reverse,
+                       StageId& stage, Status& deferred) noexcept {
   const detail::MgLevelStorage& level = implementation.levels[level_index];
-  const std::uint8_t mask = selected_mask == 0U
-                                ? level.view.line_axis_mask
-                                : selected_mask;
-  if (mask == 0U || (mask & (mask - 1U)) != 0U) {
-    return point_smooth(implementation, level_index, sweeps, reverse, false,
-                        stage, deferred);
-  }
-  const CartesianAxis axis =
-      mask == detail::kMgAxisX
-          ? CartesianAxis::x
-          : (mask == detail::kMgAxisY ? CartesianAxis::y : CartesianAxis::z);
   const Int3 cells = level.view.local_shape;
   const std::int32_t extent = axis == CartesianAxis::x
                                   ? cells.x
@@ -3546,6 +3533,26 @@ Status line_smooth(Implementation& implementation, std::size_t level_index,
   if (status) status = implementation.services.workspace->revise_level(
       level_index, MgWorkspaceSlot::residual);
   return status;
+}
+
+// Dispatch once per sweep group so cell/face indexing and transverse
+// neighbour selection specialize for the active line direction.
+template <class Implementation>
+Status line_smooth(Implementation& implementation, std::size_t level_index,
+                   std::uint32_t sweeps, bool reverse, StageId& stage,
+                   Status& deferred, std::uint8_t selected_mask = 0U) noexcept {
+  const auto mask = selected_mask == 0U
+      ? implementation.levels[level_index].view.line_axis_mask : selected_mask;
+  if (mask == detail::kMgAxisX)
+    return line_smooth_axis<CartesianAxis::x>(implementation,level_index,sweeps,
+                                             reverse,stage,deferred);
+  if (mask == detail::kMgAxisY)
+    return line_smooth_axis<CartesianAxis::y>(implementation,level_index,sweeps,
+                                             reverse,stage,deferred);
+  if (mask == detail::kMgAxisZ)
+    return line_smooth_axis<CartesianAxis::z>(implementation,level_index,sweeps,
+                                             reverse,stage,deferred);
+  return point_smooth(implementation,level_index,sweeps,reverse,false,stage,deferred);
 }
 
 template <class Implementation>

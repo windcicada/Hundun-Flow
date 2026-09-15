@@ -217,6 +217,7 @@ bool test_backflow_skips_inactive_outlet_faces(MPI_Comm world, int rank) {
   std::uint64_t local_inactive = 0U;
   std::uint64_t local_active_backflow = 0U;
   std::uint64_t local_inactive_nonzero = 0U;
+  std::uint64_t local_changed_active_flux = 0U;
   if (fixture.local_face_owner(CartesianFace::x_min)) {
     const std::int32_t face_x = 0;
     const std::int32_t owner_x = 0;
@@ -226,9 +227,13 @@ bool test_backflow_skips_inactive_outlet_faces(MPI_Comm world, int rank) {
             region.data[cell_offset(fixture.patch.cells, {owner_x, y, z})] ==
             static_cast<std::uint8_t>(RegionFlag::fluid);
         const double flux = candidate.final_flux.x.unchecked({face_x, y, z});
-        if (active)
+        if (active) {
           local_active_backflow += flux > 0.0 ? 1U : 0U;
-        else {
+          // The static-pressure outlet retains the pressure equation's
+          // corrected face flux while reservoir h/Y close incoming material.
+          local_changed_active_flux +=
+              flux != candidate.mechanical_flux.x.unchecked({face_x, y, z});
+        } else {
           ++local_inactive;
           local_inactive_nonzero += flux == 0.0 ? 0U : 1U;
         }
@@ -237,27 +242,31 @@ bool test_backflow_skips_inactive_outlet_faces(MPI_Comm world, int rank) {
   std::uint64_t global_inactive = local_inactive;
   std::uint64_t global_active_backflow = local_active_backflow;
   std::uint64_t global_inactive_nonzero = local_inactive_nonzero;
+  std::uint64_t global_changed_active_flux = local_changed_active_flux;
   MPI_Allreduce(MPI_IN_PLACE, &global_inactive, 1, MPI_UINT64_T, MPI_SUM,
                 world);
   MPI_Allreduce(MPI_IN_PLACE, &global_active_backflow, 1, MPI_UINT64_T, MPI_SUM,
                 world);
   MPI_Allreduce(MPI_IN_PLACE, &global_inactive_nonzero, 1, MPI_UINT64_T,
                 MPI_SUM, world);
+  MPI_Allreduce(MPI_IN_PLACE, &global_changed_active_flux, 1, MPI_UINT64_T,
+                MPI_SUM, world);
   if (!(global_inactive > 0U && global_active_backflow > 0U &&
-        global_inactive_nonzero == 0U &&
-        candidate.final_boundary.outlet_fixed_point_iterations() == 1U))
+        global_inactive_nonzero == 0U && global_changed_active_flux == 0U &&
+        candidate.final_boundary.outlet_fixed_point_iterations() == 0U))
     std::cerr << "rank " << rank << " outlet inactive=" << global_inactive
               << " active-backflow=" << global_active_backflow
               << " inactive-nonzero=" << global_inactive_nonzero << " fixed="
               << candidate.final_boundary.outlet_fixed_point_iterations()
+              << " changed-active=" << global_changed_active_flux
               << '\n';
   passed &=
       expect(global_inactive > 0U && global_active_backflow > 0U &&
-                 global_inactive_nonzero == 0U &&
-                 candidate.final_boundary.outlet_fixed_point_iterations() == 1U,
+                 global_inactive_nonzero == 0U && global_changed_active_flux == 0U &&
+                 candidate.final_boundary.outlet_fixed_point_iterations() == 0U,
              rank,
-             "outlet backflow EOS closure skips inactive faces and preserves "
-             "active fixed point");
+             "outlet backflow closes reservoir material, zeros inactive faces "
+             "and preserves pressure-corrected active flux");
   return all_true(passed, world);
 }
 

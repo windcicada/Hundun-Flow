@@ -420,7 +420,8 @@ CompositionWorkspace::prepare_cells(const CompositionInput &q,
                             pressures,
                             densities,
                             q.start_time_s,
-                            q.duration_s},
+                            q.duration_s,
+                            esf::detail::ReactionIntervals::two_halves},
                            *q.chemistry);
     } else {
       reacted.status = Status::success;

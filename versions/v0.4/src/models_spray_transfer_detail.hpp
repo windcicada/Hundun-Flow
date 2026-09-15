@@ -16,7 +16,9 @@ namespace hundun::v04::spray::detail {
 // evaluated by Horner's rule.  A constant correlation consumes only c[0].
 enum class TemperatureCorrelationKind : std::uint8_t {
   constant,
-  polynomial_cubic
+  polynomial_cubic,
+  // Fixed Rachner saturated-liquid coefficients; density only. c[] stays zero.
+  kerosene_density_v1
 };
 
 struct TemperatureCorrelation {
@@ -223,6 +225,55 @@ struct AbramzonSirignanoReport {
 
 [[nodiscard]] AbramzonSirignanoReport evaluate_abramzon_sirignano(
     const AbramzonSirignanoInput& input) noexcept;
+
+enum class ThickExchangeStatus : std::uint8_t {
+  success,
+  invalid_input,
+  inconsistent_droplet_geometry,
+  non_finite_output
+};
+
+// Frozen-property THICK_EX evaporation interval. The gas-property adapter
+// supplies the local-pressure boiling temperature separately from drop T.
+// Drag, trajectory and subsequent density/diameter refresh belong to the
+// parcel interval driver; all exchange entries here include multiplicity once.
+struct ThickExchangeInput {
+  SprayParcelState parcel{};
+  LiquidProperties liquid_properties{};
+  double gas_temperature_k{};
+  double gas_cp_j_per_kg_k{};
+  double gas_dynamic_viscosity_pa_s{};
+  double prandtl_number{};
+  double boiling_temperature_k{};
+  double vapor_absolute_thermochemical_enthalpy_j_per_kg{};
+  double duration_s{};
+};
+
+struct ThickExchangeReport {
+  ThickExchangeStatus status{ThickExchangeStatus::invalid_input};
+  std::string_view model_id{"thick_exchange_layer_v1"};
+  double spalding_heat_number{};
+  double layer_conductivity_w_per_m_k{};
+  double nusselt_number{};
+  double diameter_squared_loss_rate_m2_per_s{};
+  double convective_heat_transfer_w_per_k{};
+  // Requested-interval averages, matching the reference dmdt/dhdt outputs.
+  double mean_evaporation_rate_one_droplet_kg_per_s{};
+  double mean_liquid_enthalpy_rate_one_droplet_w{};
+  bool temperature_limited{};
+  double temperature_limit_energy_one_droplet_j{};
+  bool complete_evaporation{};
+  double event_time_s{};
+  double advanced_duration_s{};
+  SprayParcelState candidate_parcel{};
+  TransferExchangeCandidate exchange{};
+  [[nodiscard]] bool succeeded() const noexcept {
+    return status == ThickExchangeStatus::success && exchange.available;
+  }
+};
+
+[[nodiscard]] ThickExchangeReport evaluate_thick_exchange(
+    const ThickExchangeInput& input) noexcept;
 
 struct GasTransferEnvironment {
   Vector3 gas_velocity_m_per_s{};

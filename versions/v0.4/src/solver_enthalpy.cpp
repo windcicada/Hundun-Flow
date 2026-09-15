@@ -8,9 +8,11 @@
 #include "field_view_interval_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
+#include "solver_heat_boundary_detail.hpp"
 #include "solver_conservative_energy_detail.hpp"
 #include "solver_mixture_enthalpy_diffusion_detail.hpp"
 #include "solver_mixture_enthalpy_convection_detail.hpp"
+#include "solver_mixture_transport_detail.hpp"
 #include "solver_viscous_detail.hpp"
 
 #include <array>
@@ -864,9 +866,13 @@ Status evaluate_pressure_material_derivative(
       !std::isfinite(point.velocity.z)) {
     return {StatusCode::numerical_failure, kEnthalpyPoint};
   }
-  const double candidate =
-      bdf.a0 * point.pressure + bdf.a1 * point.accepted_pressure +
-      bdf.a2 * point.previous_pressure +
+  // Form the BE increment on the absolute pressure reference before scaling
+  // by inverse dt, preserving small represented acoustic pressure changes.
+  const double pressure_rate = bdf.a2 == 0.0 && bdf.a1 == -bdf.a0
+      ? bdf.a0 * (point.pressure - point.accepted_pressure)
+      : bdf.a0 * point.pressure + bdf.a1 * point.accepted_pressure +
+            bdf.a2 * point.previous_pressure;
+  const double candidate = pressure_rate +
       point.velocity.x * point.pressure_gradient.x +
       point.velocity.y * point.pressure_gradient.y +
       point.velocity.z * point.pressure_gradient.z;
@@ -961,6 +967,8 @@ void form_enthalpy_linear_terms(
           ? detail::IbmScalarTransport::diffusion_diagonal(
                 *context.immersed_interface,material.enthalpy_diffusivity,cell)
           : detail::diffusion_diagonal(kernels, material.enthalpy_diffusivity, cell);
+  terms.diffusion_diagonal +=
+      detail::mixture_diffusion_diagonal(context.mixture_transport,cell);
   terms.diagonal = (context.bdf.a0 * rho + terms.sink) * volume +
                    terms.diffusion_diagonal;
 }
@@ -1099,12 +1107,16 @@ Status combine_enthalpy_cell_system(
     EnthalpyCellSystem& system) noexcept {
   const double rho = state.density.trial.unchecked(cell, 0U);
   const double h = state.enthalpy.trial.unchecked(cell, 0U);
-  const double unsteady =
-      context.bdf.a0 * rho * h +
-      context.bdf.a1 * state.density.accepted.unchecked(cell, 0U) *
-          state.enthalpy.accepted.unchecked(cell, 0U) +
-      context.bdf.a2 * state.density.previous.unchecked(cell, 0U) *
-          state.enthalpy.previous.unchecked(cell, 0U);
+  const double old_rho=state.density.accepted.unchecked(cell,0U);
+  const double old_h=state.enthalpy.accepted.unchecked(cell,0U);
+  // Form BE increments before the inverse timestep multiplication. The
+  // conservative operator then resolves small heat changes on a large
+  // absolute/formation-enthalpy reference, as in the species storage row.
+  const double unsteady = context.bdf.a2==0.0 && context.bdf.a1==-context.bdf.a0
+      ? context.bdf.a0*((rho-old_rho)*h+old_rho*(h-old_h))
+      : context.bdf.a0 * rho * h + context.bdf.a1 * old_rho * old_h +
+        context.bdf.a2 * state.density.previous.unchecked(cell,0U) *
+            state.enthalpy.previous.unchecked(cell,0U);
   const double volume = detail::cell_volume(kernels, cell);
   EnthalpyCellSystem candidate;
   candidate.residual =
@@ -1176,6 +1188,8 @@ Status assemble_enthalpy_impl(
   if (!valid_flux_context(*plan.kernels_, context, box) ||
       (!allow_partial && !detail::full_equation_box(box, plan.cells_)) ||
       !valid_linear_system(system, plan.cells_, linear) || !linear ||
+      !detail::valid_mixture_transport(context.mixture_transport,plan.cells_,
+                                       context.face_flux,system) ||
       !detail::finite_face_flux(context.mass_flux, box) ||
       !detail::finite_face_neighbour_slabs(
           state.enthalpy.trial, box, 0U, 1U, plan.convection_reach_) ||
@@ -1247,7 +1261,10 @@ Status assemble_enthalpy_impl(
                                     0U, 0U, 1U, context.face_flux,
                                     context.counters};
   Status status;
-  if (context.scope == EquationAssemblyScope::final_conservative) {
+  if (context.mixture_transport != nullptr) {
+    status = cartesian_mixture_convection(*plan.kernels_,
+        *context.mixture_transport,context.mass_flux,convection);
+  } else if (context.scope == EquationAssemblyScope::final_conservative) {
     status = cartesian_convection(*plan.kernels_, plan.convection_,
                                   context.mass_flux, convection);
   } else if (context.scope == EquationAssemblyScope::target_coupled) {
@@ -1262,12 +1279,14 @@ Status assemble_enthalpy_impl(
   }
   if (context.immersed_interface != nullptr) {
     status = context.immersed_interface->add_source_convection_correction(
-        {IbmInterfaceInletFieldKind::enthalpy, 0U}, plan.convection_,
+        {IbmInterfaceInletFieldKind::enthalpy, 0U},
+        context.mixture_transport ? ConvectionScheme::central2 : plan.convection_,
         state.enthalpy.trial, 1.0, system.residual, box);
     if (!status) return status;
   }
-  status = detail::MixtureEnthalpyConvection::add_correction(
-      plan,state,context.mass_flux,context.immersed_interface,box,system.residual);
+  if (context.mixture_transport == nullptr)
+    status = detail::MixtureEnthalpyConvection::add_correction(
+        plan,state,context.mass_flux,context.immersed_interface,box,system.residual);
   if (!status) return status;
   status = add_kinetic_convection(plan, state, *plan.kernels_, context,
                                   box, system.residual);
@@ -1303,6 +1322,12 @@ Status assemble_enthalpy_impl(
   if (status)
     status = detail::MixtureEnthalpyDiffusion::add_rate(
         plan, state, material, context.immersed_interface, box, system.residual);
+  if (status)
+    status = detail::apply_heat_flux_boundary(
+        plan, *plan.kernels_, thermal_reads[0U],
+        plan.unity_lewis_total_enthalpy_ ? material.enthalpy_diffusivity : material.thermal_conductivity,
+        box, system.residual, context.immersed_interface ? context.immersed_interface->cell_activity()
+                                          : Span<const std::uint8_t>{});
   if (status && context.immersed_interface != nullptr)
     status = context.immersed_interface->correct_viscous_heating(
         state.velocity.trial, velocity_gradient, state.density.trial,
@@ -1343,6 +1368,9 @@ Status assemble_enthalpy_impl(
   }
   RevisionToken assembled_state =
       state_revision(state, material, velocity_gradient, contributions);
+  detail::add_mixture_face_coefficients(context.mixture_transport,box,system);
+  if (context.mixture_transport)
+    assembled_state=hash_mix(assembled_state,context.mixture_transport->linearization);
   if (context.wall_treatment != nullptr)
     assembled_state = hash_mix(assembled_state, context.wall_treatment->fingerprint());
   if (context.immersed_interface != nullptr) {
@@ -1475,6 +1503,10 @@ Status assemble_target_coupled_enthalpy_residual(
   const std::array<FieldView, 4U> outputs{
       residual, workspace.pressure_work, workspace.viscous_dissipation,
       workspace.diffusion};
+  for (const auto output : outputs)
+    if (!detail::valid_mixture_transport(context.mixture_transport,plan.cells_,
+                                         context.face_flux,{{},{},output}))
+      return {StatusCode::invalid_plan,kEnthalpyAssembly};
   for (std::size_t left = 0U; left < outputs.size(); ++left) {
     for (std::size_t right = left + 1U; right < outputs.size(); ++right) {
       if (detail::field_views_overlap(as_const(outputs[left]),
@@ -1553,19 +1585,24 @@ Status assemble_target_coupled_enthalpy_residual(
       {enthalpy_reads.data(), enthalpy_reads.size()},
       {convection_writes.data(), convection_writes.size()}, box,
       0U, 0U, 1U, context.face_flux, context.counters};
-  Status status = cartesian_target_convection(
-      *plan.kernels_, plan.convection_, context.mass_flux, convection);
+  Status status = context.mixture_transport
+      ? cartesian_mixture_convection(*plan.kernels_,*context.mixture_transport,
+                                     context.mass_flux,convection)
+      : cartesian_target_convection(
+            *plan.kernels_, plan.convection_, context.mass_flux, convection);
   if (!status) return status;
   // Match the full assembly: a prescribed internal inlet transports h_in,
   // not a reconstruction through the arbitrary solid-side placeholder.
   if (context.immersed_interface != nullptr) {
     status = context.immersed_interface->add_source_convection_correction(
-        {IbmInterfaceInletFieldKind::enthalpy, 0U}, plan.convection_,
+        {IbmInterfaceInletFieldKind::enthalpy, 0U},
+        context.mixture_transport ? ConvectionScheme::central2 : plan.convection_,
         state.enthalpy.trial, 1.0, residual, box);
     if (!status) return status;
   }
-  status = detail::MixtureEnthalpyConvection::add_correction(
-      plan,state,context.mass_flux,context.immersed_interface,box,residual);
+  if (context.mixture_transport == nullptr)
+    status = detail::MixtureEnthalpyConvection::add_correction(
+        plan,state,context.mass_flux,context.immersed_interface,box,residual);
   if (!status) return status;
   status = add_kinetic_convection(plan, state, *plan.kernels_, context,
                                   box, residual);
@@ -1587,6 +1624,12 @@ Status assemble_target_coupled_enthalpy_residual(
   if (status)
     status = detail::MixtureEnthalpyDiffusion::add_rate(
         plan, state, material, context.immersed_interface, box, workspace.diffusion);
+  if (status)
+    status = detail::apply_heat_flux_boundary(
+        plan, *plan.kernels_, thermal_reads[0U],
+        plan.unity_lewis_total_enthalpy_ ? material.enthalpy_diffusivity : material.thermal_conductivity,
+        box, workspace.diffusion, context.immersed_interface ? context.immersed_interface->cell_activity()
+                                          : Span<const std::uint8_t>{});
   if (status && context.immersed_interface != nullptr)
     status = context.immersed_interface->correct_viscous_heating(
         state.velocity.trial, velocity_gradient, state.density.trial,
@@ -1643,6 +1686,8 @@ Status assemble_target_coupled_enthalpy_residual(
     }
   }
   RevisionToken assembled_state = state_revision(state, material, velocity_gradient, contributions);
+  if (context.mixture_transport)
+    assembled_state=hash_mix(assembled_state,context.mixture_transport->linearization);
   if (context.wall_treatment != nullptr)
     assembled_state =
         hash_mix(assembled_state, context.wall_treatment->fingerprint());

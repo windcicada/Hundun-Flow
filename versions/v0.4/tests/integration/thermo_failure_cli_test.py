@@ -3,8 +3,10 @@
 # Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 """Real public CLIs: local inversion exhaustion, common evidence and no commit.
 
-The three-iteration fixture intentionally exhausts inversion. It is not the
+The four-iteration fixture intentionally exhausts inversion. It is not the
 production 200-iteration Re3900 configuration or a replay of step 7232.
+Four iterations resolve the uniform state's final Newton polish while the
+localized accepted-rate perturbation still exhausts the same public PH solve.
 """
 import argparse
 import csv
@@ -19,7 +21,7 @@ import tempfile
 
 THERMO = """HUNDUN_THERMOPHYSICS_V1
 temperature_bounds 273.15 6000
-temperature_inversion 1e-12 3
+temperature_inversion 1e-12 4
 closed_mass_newton 1e-12 32 0.2
 species_count 1
 species air
@@ -173,7 +175,7 @@ def main():
             context = dict(word.split("=", 1) for word in contexts[0].split()[1:])
             assert context["status"] == "5/804" and context["stage"] == "15", context
             assert int(context["rank"]) == target, context
-            assert context["inversion_iterations"] == "3", context
+            assert context["inversion_iterations"] == "4", context
             assert "step_failure_completion_v1" in result.stdout, result.stdout
             assert not list(run.rglob("*.complete")) and not list(run.rglob("current"))
             assert original == {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
