@@ -291,14 +291,16 @@ Status evaluate_thermophysical_rates(
   };
   std::size_t expected_contributions = 0U;
   const auto validate_descriptors = [&](Span<const CompiledContribution> all) {
-    Span<const CompiledContribution> selected;
-    if (!detail::select_contribution_stage(
-            all, input.contribution_stage, selected)) {
-      return false;
-    }
-    expected_contributions += selected.size;
-    for (std::size_t index = 0U; index < selected.size; ++index) {
-      if (descriptor_count(selected.data[index]) != 1U) return false;
+    if (all.size && !all.data) return false;
+    // Scalar plans group registrations by equation, then by stage. With
+    // chemistry and parcels, one stage spans several disjoint field groups.
+    // Validate each selected registration directly; history owns only this
+    // stage even when a target equation consumes additional producers.
+    for (std::size_t index = 0U; index < all.size; ++index) {
+      const auto& descriptor=all.data[index];
+      if (descriptor.stage!=input.contribution_stage) continue;
+      ++expected_contributions;
+      if (descriptor_count(descriptor) != 1U) return false;
     }
     return true;
   };

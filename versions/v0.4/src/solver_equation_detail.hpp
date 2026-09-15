@@ -50,6 +50,29 @@ inline bool equation_same_cells(Int3 left, Int3 right) noexcept {
   return left.x == right.x && left.y == right.y && left.z == right.z;
 }
 
+// Two immutable producer groups can contribute to one physical equation.
+// Keep their individual registrations; EX2 history still selects one stage.
+struct EquationContributionSelection {
+  Span<const CompiledContribution> first{}, second{};
+  std::size_t size{};
+  const CompiledContribution& operator[](std::size_t index) const noexcept {
+    return index < first.size ? first.data[index] : second.data[index-first.size];
+  }
+};
+
+inline bool select_equation_contributions(Span<const CompiledContribution> all,
+    StageId primary, StageId additional, EquationContributionSelection& selected) noexcept {
+  selected={};
+  if (primary==0 || (additional!=0 && primary==additional)) return false;
+  if (additional && additional<primary) std::swap(primary,additional);
+  if (!select_contribution_stage(all,primary,selected.first) ||
+      (additional && !select_contribution_stage(all,additional,selected.second))) {
+    selected={};return false;
+  }
+  selected.size=selected.first.size+selected.second.size;
+  return true;
+}
+
 inline bool full_equation_box(KernelBox box, Int3 cells) noexcept {
   return box.begin.x == 0 && box.begin.y == 0 && box.begin.z == 0 &&
          equation_same_cells(box.cells, cells);

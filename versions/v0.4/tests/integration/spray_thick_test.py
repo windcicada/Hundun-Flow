@@ -11,7 +11,10 @@ import sys
 
 
 def main():
-    binary, fixture, mpi, work, validator = map(Path, sys.argv[1:])
+    binary, fixture, mpi, work, validator = map(Path, sys.argv[1:6])
+    scheme = sys.argv[6] if len(sys.argv) > 6 else "backward_euler"
+    assert scheme in ("backward_euler", "cn_be")
+    method = "CN/BE" if scheme == "cn_be" else "BE/PISO"
     work.mkdir(parents=True, exist_ok=True)
     case = json.loads((fixture / "case.json").read_text())
     for name in ("gas.yaml", "thermophysics.d", "viscosity.dat"):
@@ -59,9 +62,16 @@ end
                         cone_half_angle_rad=0., speed_m_per_s=2.,
                         mass_flow_rate_kg_per_s=1., represented_mass_per_parcel_kg=1e-9,
                         droplet_diameter_m=1e-4, temperature_k=350.)])
-    case["solver"]["coupling"] = "PISO"
+    if scheme == "cn_be":
+        # A resolved synthetic exchange makes omission of gas kinetic energy
+        # visible to the total-inventory balance, while retaining one parcel
+        # per step and the same thermophysical assets.
+        case["spray"]["injectors"][0].update(
+            speed_m_per_s=200., mass_flow_rate_kg_per_s=1e5,
+            represented_mass_per_parcel_kg=1e-4)
+    case["solver"]["coupling"] = "outer_corrected" if scheme == "cn_be" else "PISO"
     case["solver"].pop("cold_stopping", None)
-    case["time"]["scheme"] = "backward_euler"
+    case["time"]["scheme"] = scheme
     for key in ("initial_dt", "minimum_dt", "maximum_dt"):
         case["time"][key] = 1e-9
     (work / "case.json").write_text(json.dumps(case, indent=2) + "\n")
@@ -73,7 +83,10 @@ end
             raise RuntimeError(path.read_text())
 
     command([binary, "check", work], work / "check.log")
-    assert "evaporation=thick_exchange" in (work / "check.log").read_text()
+    check = (work / "check.log").read_text()
+    assert "evaporation=thick_exchange" in check
+    reaction_model = "kerosene_4_step_v1/frozen_material"
+    assert "reaction_model=" + reaction_model in check
     records = {}
 
     def run(label, ranks, count, restart=None):
@@ -105,6 +118,10 @@ end
             assert abs(p["mass_balance_defect_kg_s"] * p["dt"]) / p["mass_kg"] < 1e-12
             scale = max(1., abs(p["internal_energy_J"]) + p["kinetic_energy_J"])
             assert abs(p["total_energy_balance_defect_W"] * p["dt"]) / scale < 1e-12
+            if scheme == "cn_be":
+                assert p["kinetic_energy_J"] > 1e-11 * scale
+                assert abs(p["total_energy_balance_defect_W"]) / max(
+                    1., abs(p["phase_energy_input_W"])) < 1e-6
         records[label] = rows
         return output
 
@@ -116,12 +133,13 @@ end
                 "phase_mass_input_kg_s", "phase_energy_input_W"):
         a, b = (records[label][-1]["payload"][key] for label in ("2", "r"))
         assert abs(a-b) < 1e-10 * max(1., abs(a), abs(b)), (key, a, b)
-    report = dict(scope="BE/PISO real kerosene thermophysical spray, zero gas reaction rates",
+    report = dict(scope=method + " THICK_EX spray with native kerosene four-step chemistry",
+                  reaction_model=reaction_model,
                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                   ranks=[1, 2, 4], restart_steps=[4, 5], passed=True,
                   records=records)
     (work / "result.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("native_thick thermo=kerosene time=BE/PISO phase_balance=pass restart=1/2/4 pass")
+    print("native_thick thermo=kerosene time=" + method + " phase_balance=pass restart=1/2/4 pass")
 
 
 if __name__ == "__main__":

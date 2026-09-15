@@ -228,8 +228,7 @@ double pressure_gradient_component(const CartesianKernelPlan& kernels,
 }
 
 bool valid_contributions(Span<const EquationContributionView> contributions,
-                         Span<const CompiledContribution> descriptors,
-                         StageId stage, Int3 cells) noexcept {
+                         detail::EquationContributionSelection descriptors, Int3 cells) noexcept {
   const std::size_t expected = descriptors.size;
   if (contributions.size != expected ||
       (contributions.size != 0U && contributions.data == nullptr)) {
@@ -239,22 +238,22 @@ bool valid_contributions(Span<const EquationContributionView> contributions,
     const EquationContributionView view = contributions.data[i];
     if (!detail::valid_cell_view(view.explicit_source_density, cells, 0U, 1U,
                                  0U) ||
-        view.stage != stage || view.stage != descriptors.data[i].stage ||
-        view.conserved_quantity != descriptors.data[i].conserved_quantity ||
-        !(view.units == descriptors.data[i].units) ||
-        view.capability != descriptors.data[i].capability ||
-        view.source_identity != descriptors.data[i].source_identity ||
-        view.explicit_source_field != descriptors.data[i].explicit_source ||
+        view.stage != descriptors[i].stage ||
+        view.conserved_quantity != descriptors[i].conserved_quantity ||
+        !(view.units == descriptors[i].units) ||
+        view.capability != descriptors[i].capability ||
+        view.source_identity != descriptors[i].source_identity ||
+        view.explicit_source_field != descriptors[i].explicit_source ||
         view.explicit_source_density.field !=
-            descriptors.data[i].explicit_source ||
+            descriptors[i].explicit_source ||
         view.has_implicit_sink !=
-            descriptors.data[i].supplies_implicit_diagonal ||
+            descriptors[i].supplies_implicit_diagonal ||
         (view.has_implicit_sink &&
          (!detail::valid_cell_view(view.implicit_sink_density, cells, 0U, 1U,
                                    0U) ||
-          view.implicit_sink_field != descriptors.data[i].implicit_diagonal ||
+          view.implicit_sink_field != descriptors[i].implicit_diagonal ||
           view.implicit_sink_density.field !=
-              descriptors.data[i].implicit_diagonal))) {
+              descriptors[i].implicit_diagonal))) {
       return false;
     }
   }
@@ -1143,10 +1142,10 @@ Status assemble_enthalpy_impl(
     Span<const EquationContributionView> contributions,
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial) noexcept {
-  Span<const CompiledContribution> selected_descriptors{};
-  if (!detail::select_contribution_stage(
+  detail::EquationContributionSelection selected_descriptors{};
+  if (!detail::select_equation_contributions(
           {plan.contributions_.data(), plan.contributions_.size()},
-          context.contribution_stage, selected_descriptors)) {
+          context.contribution_stage, context.additional_contribution_stage, selected_descriptors)) {
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
   if (plan.kernels_ == nullptr || plan.fingerprint_ == 0U ||
@@ -1175,8 +1174,7 @@ Status assemble_enthalpy_impl(
                                1U, 1U) ||
       velocity_gradient.field != plan.velocity_gradient_ ||
       !detail::valid_cell_view(velocity_gradient, plan.cells_, 0U, 9U, 1U) ||
-      !valid_contributions(contributions, selected_descriptors,
-          context.contribution_stage, plan.cells_)) {
+      !valid_contributions(contributions, selected_descriptors, plan.cells_)) {
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
   const Status mixture_status = detail::MixtureEnthalpyDiffusion::validate(plan, state, material);
@@ -1441,12 +1439,11 @@ Status assemble_target_coupled_enthalpy_residual(
     TargetCoupledEnthalpyResidualWorkspace workspace,
     EquationAssemblyCertificate &certificate,
     Span<const EquationContributionView> contributions) noexcept {
-  Span<const CompiledContribution> selected_descriptors{};
-  if (!detail::select_contribution_stage(
+  detail::EquationContributionSelection selected_descriptors{};
+  if (!detail::select_equation_contributions(
           {plan.contributions_.data(), plan.contributions_.size()},
-          context.contribution_stage, selected_descriptors) ||
-      !valid_contributions(contributions, selected_descriptors,
-                           context.contribution_stage, plan.cells_)) {
+          context.contribution_stage, context.additional_contribution_stage, selected_descriptors) ||
+      !valid_contributions(contributions, selected_descriptors, plan.cells_)) {
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
 

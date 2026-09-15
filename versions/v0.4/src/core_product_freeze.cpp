@@ -3714,7 +3714,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   const bool unsupported_cold = cold_model &&
       ((model.reaction.mode != ReactionMode::none &&
         model.reaction.mode != ReactionMode::finite_rate_mean &&
-        model.reaction.mode != ReactionMode::pasr_algebraic_v1 && !implicit_esf) || model.spray ||
+        model.reaction.mode != ReactionMode::pasr_algebraic_v1 && !implicit_esf) ||
+       (model.spray && implicit_esf) ||
        model.pressure_reference != PressureReferenceKind::boundary_absolute ||
        schedule != CouplingKind::outer_corrected ||
        (model.solver.pressure.algorithm != LinearAlgorithm::fgmres &&
@@ -4482,6 +4483,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         source.stage = 2U; // current exchange is excluded from stored EX2 rates
         if (status)
           status = candidate->contributions.register_contribution(source);
+        if (cold_model)
+          for (std::size_t s=0;s<candidate->fields.coupled_species_sources.size() && status;++s) {
+            source.conserved_quantity=candidate->fields.reaction_conserved[s];
+            source.explicit_source=candidate->fields.coupled_species_sources[s];
+            source.units.si_exponents={1,-3,-1,0,0,0,0};
+            status=candidate->contributions.register_contribution(source);
+          }
       }
       if (status) status = candidate->reaction.bind(
           {candidate->fields.reaction_conserved.data(), candidate->fields.reaction_conserved.size()},
@@ -4585,7 +4593,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     // CN/BE interval and stochastic chemistry share the conservative energy row already
     // used by cold flow: h - p/rho + |U|^2/2. Its kinetic storage/flux matches
     // the accepted velocity even during strong heat-driven acceleration.
-    equation_spec.conservative_total_energy = !candidate->spray.enabled() &&
+    equation_spec.conservative_total_energy = (!candidate->spray.enabled() || cold_model) &&
         (!candidate->reaction.enabled() || candidate->reaction.interval_enabled() ||
          (cold_model && candidate->esf.implicit_transport()));
     equation_spec.density = candidate->fields.rho;
@@ -9429,6 +9437,8 @@ Status ProductDriver::Impl::execute_attempt(
   std::array<FieldView, UINT8_MAX> spray_sources{}, combined_sources{};
   std::array<EquationContributionView, 1> momentum_sources{},
       enthalpy_sources{};
+  std::array<EquationContributionView,UINT8_MAX> parcel_species_sources{};
+  std::array<EquationContributionView,2*UINT8_MAX> coupled_species_sources{};
   Span<const EquationContributionView> momentum_contributions,
       enthalpy_contributions;
   double attempt_closed_mass_target = closed_mass_target;
@@ -9488,7 +9498,9 @@ Status ProductDriver::Impl::execute_attempt(
           const double scale = 1. / (row.volume_m3 * step.dt);
           spray_mass.unchecked(cell, 0) = row.gas.gas_mass_delta_kg * scale;
           spray_enthalpy.unchecked(cell, 0) =
-              row.gas.gas_thermochemical_enthalpy_delta_j * scale;
+              (row.gas.gas_thermochemical_enthalpy_delta_j +
+               (product.equations.enthalpy().conservative_total_energy()
+                    ? row.gas.gas_kinetic_energy_delta_j : 0.)) * scale;
           for (unsigned d = 0; d < 3; ++d)
             spray_momentum.unchecked(cell, d) =
                 row.gas.gas_momentum_delta_kg_m_per_s[d] * scale;
@@ -9535,10 +9547,37 @@ Status ProductDriver::Impl::execute_attempt(
       enthalpy_sources[0].explicit_source_field =
           product.fields.coupled_enthalpy_source;
       enthalpy_contributions = {enthalpy_sources.data(), 1};
+      if (cold_method)
+        for (std::size_t s=0;s<product.fields.coupled_species_sources.size();++s) {
+          auto& species=parcel_species_sources[s];
+          species=source;
+          species.explicit_source_density=as_const(spray_sources[s]);
+          species.conserved_quantity=product.fields.reaction_conserved[s];
+          species.units.si_exponents={1,-3,-1,0,0,0,0};
+          species.stage=2;
+          species.explicit_source_field=product.fields.coupled_species_sources[s];
+        }
       for (std::size_t s = 0; s < species_rate_history.size(); ++s)
         species_rate_history[s].current = as_const(spray_sources[s]);
     }
   }
+  const auto current_species_contributions=[&]() -> Span<const EquationContributionView> {
+    const auto chemistry=product.reaction.coupling_contributions();
+    if (!cold_method || !product.spray.enabled()) return chemistry;
+    const auto count=product.fields.coupled_species_sources.size();
+    if (chemistry.size!=count) return {};
+    for(std::size_t s=0;s<count;++s) {
+      // Source buffers are refreshed by the chemistry correction. Rebuild
+      // these views at consumption so their revisions remain authoritative.
+      const auto chemical=chemistry.data[s];
+      const auto parcel=parcel_species_sources[s];
+      if(chemical.conserved_quantity!=parcel.conserved_quantity)return {};
+      const bool chemical_first=chemical.stage<parcel.stage;
+      coupled_species_sources[2*s]=chemical_first ? chemical : parcel;
+      coupled_species_sources[2*s+1]=chemical_first ? parcel : chemical;
+    }
+    return {coupled_species_sources.data(),2*count};
+  };
   FieldView post_h, post_rho, post_cache, post_h_rate, post_diffusivity;
   std::array<FieldView, UINT8_MAX> post_species{}, post_passives{},
       post_species_rates{}, post_passive_rates{};
@@ -12880,6 +12919,7 @@ Status ProductDriver::Impl::execute_attempt(
           y_context.face_flux = provisional_flux.revision;
           y_context.provisional_mass_flux = true;
           y_context.contribution_stage = product.reaction.coupling_source_stage();
+          if (product.spray.enabled()) y_context.additional_contribution_stage=2;
           detail::ScalarMassRemap::Report y_report;
           status = product.reductions.consensus(status);
           if (!status)
@@ -12908,7 +12948,7 @@ Status ProductDriver::Impl::execute_attempt(
               &product.thermodynamics,as_const(trial_temperature),
               {mixture_energy_residual.data(),mixture_energy_residual.size()},
               species_residual_limits.empty(),
-              product.reaction.coupling_contributions(),
+              current_species_contributions(),
               {species_residual_limits.data(), species_residual_limits.size()});
           ++report.cold.species_solve_calls;
           report.cold.species_iterations += y_report.iterations;
@@ -14601,6 +14641,7 @@ Status ProductDriver::Impl::execute_attempt(
               return status;
             auto yc = cold_energy_context;
             yc.contribution_stage=product.reaction.coupling_source_stage();
+            if(product.spray.enabled())yc.additional_contribution_stage=2;
             yc.scope = EquationAssemblyScope::momentum_predictor;
             yc.provisional_mass_flux = true;
             yc.mass_flux = as_const(provisional_flux);
@@ -14647,7 +14688,7 @@ Status ProductDriver::Impl::execute_attempt(
                             spec.turbulent_schmidt;
                   }
               Span<const EquationContributionView> sources;
-              if (!detail::select_species_sources(product.reaction.coupling_contributions(),
+              if (!detail::select_species_sources(current_species_contributions(),
                     spec.field, sources)) {
                 status = {StatusCode::invalid_plan, kProductBinding};
                 break;
@@ -14824,7 +14865,8 @@ Status ProductDriver::Impl::execute_attempt(
                 time.accepted_step(), balance_history, product.reductions,
                 candidate_balance, candidate_history,
                 product.ibm_equations ? &*product.ibm_equations : nullptr,
-                &balance_mixture, true,dual_esf ? &statistical_balance : nullptr);
+                &balance_mixture, true,dual_esf ? &statistical_balance : nullptr,
+                phase_sources);
             status = product.reductions.consensus(status);
             if (!status) return status;
             const double scale = std::max({1.0,
@@ -14833,7 +14875,8 @@ Status ProductDriver::Impl::execute_attempt(
                 std::abs(candidate_balance.kinetic_energy_outflow),
                 std::abs(candidate_balance.conductive_heat_input),
                 std::abs(candidate_balance.species_enthalpy_diffusion_input),
-                std::abs(candidate_balance.viscous_work_input)});
+                std::abs(candidate_balance.viscous_work_input),
+                std::abs(candidate_balance.phase_energy_input)});
             const double relative = std::abs(candidate_balance.total_energy_balance_defect)/scale;
             if (outer_rank==0) std::fprintf(stdout,
                 "reacting_energy_balance outer=%u relative=%.17g limit=1e-6 step_committed=0\n",
@@ -15752,6 +15795,10 @@ Status ProductDriver::Impl::execute_attempt(
                                         cold_audit_state};
           if (!pending_pressure_reference.valid() || !pending_balance.valid)
             return {StatusCode::invalid_plan, 17836};
+          if (product.spray.enabled()) {
+            status = product.spray.preflight_commit();
+            if (status) pending_closed_mass_target = attempt_closed_mass_target;
+          }
           const auto prepare_status =
               transaction.collective_prepare(communicator, status, prepared);
           if (!prepare_status)

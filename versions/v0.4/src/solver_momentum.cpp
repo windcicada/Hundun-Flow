@@ -741,10 +741,10 @@ Status assemble_momentum_impl(
         context.immersed_interface->validate_interface_flux(context.mass_flux);
     if (!source_flux) return source_flux;
   }
-  Span<const CompiledContribution> selected_descriptors{};
-  if (!detail::select_contribution_stage(
+  detail::EquationContributionSelection selected_descriptors{};
+  if (!detail::select_equation_contributions(
           {plan.contributions_.data(), plan.contributions_.size()},
-          context.contribution_stage, selected_descriptors)) {
+          context.contribution_stage, context.additional_contribution_stage, selected_descriptors)) {
     return {StatusCode::invalid_plan, kMomentumAssembly};
   }
   if (plan.kernels_ == nullptr || plan.fingerprint_ == 0U ||
@@ -819,8 +819,8 @@ Status assemble_momentum_impl(
   for (std::size_t index = 0U; index < contributions.size; ++index) {
     if (index >= selected_descriptors.size ||
         !valid_contribution(contributions.data[index],
-                            selected_descriptors.data[index],
-                            context.contribution_stage, plan.cells_, system,
+                            selected_descriptors[index],
+                            selected_descriptors[index].stage, plan.cells_, system,
                             linear) ||
         (produce_low_order_delta &&
          (detail::field_views_overlap(

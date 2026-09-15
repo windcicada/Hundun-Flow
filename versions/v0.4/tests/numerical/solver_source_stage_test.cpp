@@ -564,6 +564,27 @@ bool test_enthalpy_sources_are_selected_by_stage() {
   passed &= expect(close(residual.view.unchecked(probe, 0U), -5.0 * volume),
                    "second stage assembles only the second source");
 
+  const std::array together{first,second};
+  for (bool reverse : {false,true}) {
+    context.contribution_stage=reverse ? kSecondStage : kFirstStage;
+    context.additional_contribution_stage=reverse ? kFirstStage : kSecondStage;
+    passed &= expect(bool(assemble_enthalpy(fixture.equations.enthalpy(),state,
+        material,as_const(velocity_gradient.view),{together.data(),together.size()},
+        context,system,certificate)),"two selected producer stages assemble together");
+    passed &= expect(close(residual.view.unchecked(probe,0U),-7.*volume),
+        "joint source balance equals the two independent physical inputs");
+  }
+  const auto before_missing=snapshot(diagonal,rhs,residual,x,y,z,certificate);
+  passed &= expect(!assemble_enthalpy(fixture.equations.enthalpy(),state,material,
+      as_const(velocity_gradient.view),{first_only.data(),first_only.size()},
+      context,system,certificate) && unchanged(before_missing,diagonal,rhs,residual,x,y,z,certificate),
+      "missing selected source is rejected before output writes");
+  context.additional_contribution_stage=context.contribution_stage;
+  passed &= expect(!assemble_enthalpy(fixture.equations.enthalpy(),state,material,
+      as_const(velocity_gradient.view),{together.data(),together.size()},
+      context,system,certificate),"duplicate stage selection is rejected");
+  context.additional_contribution_stage=0;
+
   reset_outputs(diagonal, rhs, residual, x, y, z, -2000.0);
   certificate = {901U, EquationAssemblyScope::momentum_predictor, 902U, 903U,
                  904U, 905U, 906.0};

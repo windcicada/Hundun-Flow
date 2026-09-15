@@ -243,6 +243,10 @@ struct EquationAssemblyContext {
   // this endpoint owns the additional reaction storage at the same density.
   // Empty for an unsplit equation. The physical chemical source is retained.
   ConstFieldView reaction_endpoint{};
+  // Optional second registered source stage for a common target-step solve.
+  // Views retain producer identity and follow ascending stage/registration
+  // order within each equation. Zero selects contribution_stage alone.
+  StageId additional_contribution_stage{};
 };
 
 struct EquationSystemView {

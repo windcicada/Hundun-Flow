@@ -142,6 +142,22 @@ bool valid_contribution(EquationContributionView contribution, Int3 cells,
                                         system, true));
 }
 
+// Cancel interval storage and each physical producer in one compensated
+// sum. Summing producers first can erase a small parcel source beside a
+// large chemical rate even when the latter cancels storage exactly.
+double interval_source_balance(double storage,
+    Span<const EquationContributionView> sources, Int3 cell) noexcept {
+  double sum=storage, correction=0.;
+  for (std::size_t i=0;i<sources.size;++i) {
+    const double term=-sources.data[i].explicit_source_density.unchecked(cell,0U);
+    const double next=sum+term;
+    correction+=std::abs(sum)>=std::abs(term)
+        ? (sum-next)+term : (term-next)+sum;
+    sum=next;
+  }
+  return sum+correction;
+}
+
 bool matches_contribution(EquationContributionView view,
                           const CompiledContribution& descriptor,
                           StageId stage) noexcept {
@@ -250,9 +266,10 @@ Status assemble_transport(
     const EnthalpyEquationPlan* statistical_enthalpy=nullptr) noexcept {
   const auto* mixture = (spec.role == TransportedScalarRole::species || statistical_enthalpy)
       ? context.mixture_transport : nullptr;
-  Span<const CompiledContribution> descriptors{};
-  if (!detail::select_contribution_stage(
-          all_descriptors, context.contribution_stage, descriptors)) {
+  detail::EquationContributionSelection descriptors{};
+  if (!detail::select_equation_contributions(
+          all_descriptors, context.contribution_stage,
+          context.additional_contribution_stage, descriptors)) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
   const std::uint8_t required_ghosts =
@@ -295,8 +312,7 @@ Status assemble_transport(
     if (!valid_contribution(contributions.data[index], cells, scalar.trial,
                             state.density.trial, system) ||
         !matches_contribution(contributions.data[index],
-                              descriptors.data[index],
-                              context.contribution_stage)) {
+                              descriptors[index], descriptors[index].stage)) {
       return {StatusCode::invalid_plan, kScalarAssembly};
     }
   }
@@ -376,7 +392,9 @@ Status assemble_transport(
             diffusion_diagonal;
         const double reaction_storage = context.reaction_endpoint.base
             ? rho_trial*(context.reaction_endpoint.unchecked(cell,0U)-q_trial)/context.dt : 0.0;
-        const double source_balance = reaction_storage-explicit_source;
+        const double source_balance = context.reaction_endpoint.base && contributions.size>1
+            ? interval_source_balance(reaction_storage,contributions,cell)
+            : reaction_storage-explicit_source;
         const double non_diffusive_without_convection =
             (unsteady + source_balance + implicit_sink * q_trial) * volume;
         if (!finite_positive(diagonal) ||
@@ -488,7 +506,9 @@ Status assemble_transport(
         // original values for the independent source/conservation ledger.
         const double reaction_storage = context.reaction_endpoint.base
             ? rho_trial*(context.reaction_endpoint.unchecked(cell,0U)-q_trial)/context.dt : 0.0;
-        const double source_balance = reaction_storage-explicit_source;
+        const double source_balance = context.reaction_endpoint.base && contributions.size>1
+            ? interval_source_balance(reaction_storage,contributions,cell)
+            : reaction_storage-explicit_source;
         const double non_diffusive =
             (unsteady + system.residual.unchecked(cell, 0U) +
              source_balance + implicit_sink * q_trial) *

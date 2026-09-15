@@ -172,7 +172,8 @@ bool make_production_fixture(std::int32_t n, ProductionFixture& out,
                              bool mixture = false, int inlet_face = -1,
                              bool physical_material = true,
                              double mixing_cell_volume = 0,
-                             MPI_Comm communicator = MPI_COMM_SELF) {
+                             MPI_Comm communicator = MPI_COMM_SELF,
+                             bool interval_sources = false) {
   const auto checked = [](Status status, const char* stage) {
     if (!status) std::cerr << stage << " status=" << unsigned(status.code) << "/" << status.detail << '\n';
     return bool(status);
@@ -262,7 +263,7 @@ bool make_production_fixture(std::int32_t n, ProductionFixture& out,
       kPassive,          kEffectiveViscosity,
       kCompressibility,  kVelocityGradient, 10U, 11U, 12U, 13U};
   if (!out.contributions.configure({declared.data(),
-          mixing_cell_volume>0 ? declared.size() : declared.size()-4})) return false;
+          mixing_cell_volume>0 || interval_sources ? declared.size() : declared.size()-4})) return false;
   if (mixing_cell_volume > 0) {
     ContributionSpec mixing;
     mixing.conserved_quantity=kSpecies;
@@ -280,6 +281,18 @@ bool make_production_fixture(std::int32_t n, ProductionFixture& out,
     mixing.reads={heat_reads.data(),heat_reads.size()};
     mixing.explicit_source=12U; mixing.implicit_diagonal=13U;
     if (!checked(out.contributions.register_contribution(mixing),"enthalpy IEM registration")) return false;
+  }
+  if (interval_sources) {
+    ContributionSpec source;
+    source.conserved_quantity=kSpecies;
+    source.units.si_exponents={1,-3,-1,0,0,0,0};
+    const std::array<FieldId,2> reads{kSpecies,kDensity};
+    source.reads={reads.data(),reads.size()};
+    for (unsigned i=0;i<2;++i) {
+      source.stage=i ? 47U : 31U;
+      source.explicit_source=10U+i;
+      if (!checked(out.contributions.register_contribution(source),"interval source registration")) return false;
+    }
   }
   if (!checked(out.contributions.freeze(),"scalar contribution freeze")) return false;
 
@@ -678,7 +691,7 @@ bool test_mixture_face_closure() {
 
 bool test_species_storage_increment() {
   ProductionFixture fixture;
-  if (!make_production_fixture(8,fixture)) return false;
+  if (!make_production_fixture(8,fixture,false,-1,true,0,MPI_COMM_SELF,true)) return false;
   const auto cells=fixture.patch.cells;
   auto rho=make_field(kDensity,cells,1U,2U,501U);
   auto q=make_field(kSpecies,cells,1U,2U,502U);
@@ -743,6 +756,37 @@ bool test_species_storage_increment() {
       {diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view},certificate);
   passed &= expect(!rejected && residual.view.unchecked(c,0)==91.0,
       "split endpoint bounds are checked before equation output writes");
+  // A frozen chemical endpoint can cancel a large interval source while
+  // a small parcel source still drives the physical species residual.
+  auto first_source=make_field(10U,cells,1U,0U,610U);
+  auto second_source=make_field(11U,cells,1U,0U,611U);
+  std::array<EquationContributionView,2> sources{};
+  for (unsigned i=0;i<2;++i) {
+    sources[i].explicit_source_density=as_const(i ? second_source.view : first_source.view);
+    sources[i].conserved_quantity=kSpecies;
+    sources[i].units.si_exponents={1,-3,-1,0,0,0,0};
+    sources[i].stage=i ? 47U : 31U;
+    sources[i].explicit_source_field=10U+i;
+  }
+  fill_field(rho,1.); fill_field(q,.5); fill_field(old,.5);
+  context.dt=std::ldexp(1.,-55);
+  context.bdf={1/context.dt,-1/context.dt,0,1U};
+  context.contribution_stage=31U; context.additional_contribution_stage=47U;
+  for (double direction : {-1.,1.}) for (double parcel : {-.25,.25})
+    for (bool chemical_first : {false,true}) {
+      fill_field(endpoint,.5+direction*.25);
+      const double chemical=direction*std::ldexp(1.,53);
+      fill_field(first_source,chemical_first ? chemical : parcel);
+      fill_field(second_source,chemical_first ? parcel : chemical);
+      const auto assembled=assemble_species(fixture.equations.species(),0U,state,material,
+          {sources.data(),sources.size()},context,
+          {diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view},certificate);
+      const double actual=residual.view.unchecked(c,0)/volume;
+      std::cout << "species_interval chemical=" << chemical << " parcel=" << parcel
+                << " chemical_first=" << chemical_first << " residual=" << actual << '\n';
+      passed &= expect(bool(assembled) && actual == -parcel,
+          "species residual preserves a small parcel source after chemical cancellation");
+    }
   return passed;
 }
 

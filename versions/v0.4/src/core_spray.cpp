@@ -27,7 +27,8 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
   if (!model.spray)
     return {};
   if (enabled() || !reaction.gas_query() ||
-      model.time.scheme != TimeScheme::backward_euler)
+      (model.time.scheme != TimeScheme::backward_euler &&
+       model.time.scheme != TimeScheme::cn_be))
     return invalid();
   std::array<bool, 6> walls{};
   for (unsigned d = 0; d < 3; ++d) {
