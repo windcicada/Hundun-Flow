@@ -39,7 +39,8 @@ Status ProductParcelAdvance::configure(MPI_Comm comm,
   if (MPI_Comm_rank(comm, &rank_) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, 10263};
   Status local;
-  if (geometry_ || spec.liquid_fingerprint != asset_.content_fingerprint ||
+  if (geometry_ || spec.evaporation != film_.evaporation() || !film_.compatible() ||
+      spec.liquid_fingerprint != asset_.content_fingerprint ||
       !geometry.fingerprint() || !spec.maximum_local_parcels ||
       !spec.maximum_local_segments || !std::isfinite(spec.maximum_substep_s) ||
       !std::isfinite(spec.minimum_substep_s) || spec.minimum_substep_s <= 0 ||
@@ -51,17 +52,18 @@ Status ProductParcelAdvance::configure(MPI_Comm comm,
   auto status = agree(local);
   if (!status)
     return status;
-  std::uint64_t controls[4]{}, minima[4]{}, maxima[4]{};
+  std::uint64_t controls[5]{}, minima[5]{}, maxima[5]{};
   std::memcpy(controls, &spec.maximum_substep_s, 8);
   std::memcpy(controls + 1, &spec.minimum_substep_s, 8);
   std::memcpy(controls + 2, &spec.relative_tolerance, 8);
   controls[3] = spec.tab_breakup;
-  if (MPI_Allreduce(controls, minima, 4, MPI_UINT64_T, MPI_MIN, comm_) !=
+  controls[4] = static_cast<std::uint8_t>(spec.evaporation);
+  if (MPI_Allreduce(controls, minima, 5, MPI_UINT64_T, MPI_MIN, comm_) !=
           MPI_SUCCESS ||
-      MPI_Allreduce(controls, maxima, 4, MPI_UINT64_T, MPI_MAX, comm_) !=
+      MPI_Allreduce(controls, maxima, 5, MPI_UINT64_T, MPI_MAX, comm_) !=
           MPI_SUCCESS)
     return {StatusCode::mpi_failure, 10263};
-  if (!std::equal(minima, minima + 4, maxima))
+  if (!std::equal(minima, minima + 5, maxima))
     return invalid();
   const std::uint64_t nc =
       std::uint64_t(patch.cells.x) * patch.cells.y * patch.cells.z;
@@ -122,6 +124,7 @@ Status ProductParcelAdvance::configure(MPI_Comm comm,
   minimum_step_ = spec.minimum_substep_s;
   relative_tolerance_ = spec.relative_tolerance;
   tab_enabled_ = spec.tab_breakup;
+  evaporation_ = spec.evaporation;
   minimum_width_ = std::numeric_limits<double>::max();
   for (unsigned d = 0; d < 3; ++d) {
     const auto widths = geometry.axis(static_cast<CartesianAxis>(d)).widths();
@@ -231,7 +234,9 @@ Status ProductParcelAdvance::wave(portable::Revision revision, double start,
     in.accepted_auxiliary = {job.value.tab_deformation,
                              job.value.tab_deformation_rate_per_s,
                              job.value.breakup_ordinal};
-    in.interval = &interval_;
+    in.interval = evaporation_ == spray::EvaporationModel::thick_exchange
+        ? static_cast<const spray::detail::ParcelIntervalProvider *>(&thick_interval_)
+        : &interval_;
     in.geometry = &events_;
     in.tab_evolution = tab_enabled_ ? &tab_ : nullptr;
     in.breakup = tab_enabled_ ? &breakup_ : nullptr;

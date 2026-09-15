@@ -10,6 +10,39 @@
 #include <vector>
 
 namespace hundun::v04::detail {
+// Cold-owned scratch; borrows the same immutable molecular plan as the flow.
+class ProductSprayTransport final : public spray::detail::FilmTransportProvider {
+public:
+  ProductSprayTransport(const TransportPlan &plan, PlanFingerprint composition,
+                        Span<const std::size_t> indices)
+      : plan_(plan), composition_(composition), indices_(indices),
+        scratch_(indices.size) {}
+  spray::detail::FilmTransportReport
+  query(const portable::GasQuery &q) const noexcept override {
+    spray::detail::FilmTransportReport out;
+    if (!plan_.fingerprint() || q.composition_fingerprint != composition_ ||
+        q.coordinates != portable::GasStateCoordinates::pressure_temperature ||
+        !q.mass_fractions || q.species_count != indices_.size + 1 ||
+        q.revision.algorithm_version != 1 || !q.revision.input_revision)
+      return out;
+    for (std::size_t i = 0; i < indices_.size; ++i) {
+      if (indices_.data[i] >= q.species_count) return out;
+      scratch_[i] = q.mass_fractions[indices_.data[i]];
+    }
+    MolecularTransportState state;
+    if (!plan_.evaluate(q.temperature_k, {scratch_.data(), scratch_.size()}, state))
+      return out;
+    out.status = portable::Status::success;
+    out.revision = q.revision;
+    out.dynamic_viscosity_pa_s = state.viscosity;
+    return out;
+  }
+private:
+  const TransportPlan &plan_;
+  PlanFingerprint composition_;
+  Span<const std::size_t> indices_;
+  mutable std::vector<double> scratch_;
+};
 // Borrows one accepted native MeanState/Halo snapshot. Every query uses the
 // same global stencil that the exchange depositor consumes. No hot allocation
 // or per-parcel MPI call; a trajectory beyond available Halo is unavailable.

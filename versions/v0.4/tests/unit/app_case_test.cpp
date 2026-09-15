@@ -2068,6 +2068,20 @@ bool test_reaction_wire() {
           recovered.spray->injectors[0].mass_flow_rate_kg_per_s == 1e-5,
       "spray asset, exact integer lineage, injector physics survive broadcast");
   const auto spray_bytes = bytes;
+  spray.evaporation = hundun::v04::spray::EvaporationModel::thick_exchange;
+  passed &= expect(
+      bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+      bytes != spray_bytes &&
+      bool(hundun::v04::detail::deserialize_model_for_test(bytes, recovered)) &&
+      recovered.spray && recovered.spray->evaporation == spray.evaporation,
+      "THICK_EX selection survives the native model wire");
+  bytes[1] = 255;
+  passed &= expect(!hundun::v04::detail::deserialize_model_for_test(bytes, recovered),
+                   "unknown evaporation wire value is rejected");
+  spray.evaporation = hundun::v04::spray::EvaporationModel::abramzon_sirignano;
+  passed &= expect(bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+                    bytes == spray_bytes,
+                   "A-S wire remains byte compatible");
   spray.injectors.push_back(spray.injectors[0]);
   passed &=
       expect(!hundun::v04::detail::serialize_model_for_test(model, bytes) &&

@@ -18,7 +18,7 @@ public:
                        const spray::detail::LiquidAsset &asset,
                        spray::detail::FilmEnvironmentBridge &film)
       : gas_(gas), events_(geometry), asset_(asset), film_(film),
-        interval_(film), tab_(film), breakup_(film, 2) {}
+        interval_(film), thick_interval_(film), tab_(film), breakup_(film, 2) {}
   Status configure(MPI_Comm, const CartesianGeometryPlan &, MeshPatch,
                    const SpraySpec &, std::uint64_t maximum_bytes) noexcept;
   Status prepare(Span<const Parcel>, Span<Injector *const>, portable::Revision,
@@ -63,6 +63,8 @@ private:
   const spray::detail::LiquidAsset &asset_;
   spray::detail::FilmEnvironmentBridge &film_;
   spray::detail::FixedAsParcelIntervalProvider interval_;
+  spray::detail::FixedThickParcelIntervalProvider thick_interval_;
+  spray::EvaporationModel evaporation_{spray::EvaporationModel::abramzon_sirignano};
   spray::detail::FixedTabEvolutionProvider tab_;
   spray::detail::FixedTabEventBreakupProvider breakup_;
   MPI_Comm comm_{MPI_COMM_NULL};

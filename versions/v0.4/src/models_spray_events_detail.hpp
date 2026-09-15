@@ -55,6 +55,10 @@ struct ParcelIntervalReport {
   // service. Used solely to bound binary64 endpoint quantization, not LTE.
   double liquid_heat_capacity_bound_j_per_kg_k{};
   bool complete_evaporation{};
+  // THICK_EX sources are algebraic endpoint inventory differences. Their
+  // temporal error is controlled by m/U/T; independent flux quadratures keep
+  // the additional increment error checks below.
+  bool exchange_from_endpoints{};
   TransferExchangeCandidate exchange{};
 };
 class ParcelIntervalProvider {
@@ -177,6 +181,8 @@ struct ParcelTransferEnvironment {
   double liquid_absolute_enthalpy_j_per_kg{};
   double far_gas_density_kg_per_m3{}; // never substitute one-third film density
                                       // for TAB forcing
+  double far_gas_dynamic_viscosity_pa_s{};
+  double boiling_temperature_k{}, vapor_prandtl_number{};
 };
 class ParcelTransferEnvironmentProvider {
 public:
@@ -194,6 +200,18 @@ public:
                                ParcelPass,
                                portable::Revision) const noexcept override;
 
+private:
+  const ParcelTransferEnvironmentProvider &provider_;
+};
+// Frozen THICK_EX coefficients, implicit retained drag, and an endpoint
+// inventory ledger. The shared event driver controls time/geometry refinement.
+class FixedThickParcelIntervalProvider final : public ParcelIntervalProvider {
+public:
+  explicit FixedThickParcelIntervalProvider(
+      const ParcelTransferEnvironmentProvider &provider) : provider_(provider) {}
+  ParcelIntervalReport advance(const SprayParcelState &, double, double,
+                               ParcelPass,
+                               portable::Revision) const noexcept override;
 private:
   const ParcelTransferEnvironmentProvider &provider_;
 };

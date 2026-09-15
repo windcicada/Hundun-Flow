@@ -46,10 +46,22 @@ struct KerosenePhaseReport {
 };
 KerosenePhaseReport evaluate_kerosene_phase(double temperature_k,
     double pressure_pa, double reference_temperature_k) noexcept;
+struct FilmTransportReport {
+  portable::Status status{portable::Status::unavailable};
+  portable::Revision revision{};
+  double dynamic_viscosity_pa_s{};
+};
+// Queries the admitted molecular transport law at the sampled far PT/Y.
+class FilmTransportProvider {
+ public:
+  virtual ~FilmTransportProvider() = default;
+  virtual FilmTransportReport query(const portable::GasQuery&) const noexcept = 0;
+};
 struct KeroseneFilmInput {
   portable::GasQuery far_gas;
   portable::Revision expected_revision{}, transport_revision{};
   double surface_temperature_k{}, far_dynamic_viscosity_pa_s{};
+  const FilmTransportProvider* transport{};
 };
 struct KeroseneFilmReport {
   portable::Status status{portable::Status::invalid_input};
@@ -59,6 +71,7 @@ struct KeroseneFilmReport {
   double gas_cp_j_per_kg_k{}, gas_dynamic_viscosity_pa_s{};
   double vapor_cp_j_per_kg_k{}, vapor_prandtl_number{};
   double vapor_absolute_enthalpy_j_per_kg{}, surface_vapor_mass_fraction{};
+  double far_density_kg_per_m3{}, far_dynamic_viscosity_pa_s{};
   bool available{};
 };
 // THICK_EX evaluates cp at film T with far composition and Pr from vapor.

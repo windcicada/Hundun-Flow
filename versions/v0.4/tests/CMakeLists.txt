@@ -2318,6 +2318,13 @@ endif()
 set(coupled_cli_cases smag reacting-esf-ibm reacting-spray-esf-ibm reacting-spray-esf-wall reacting-spray-esf-outlet reacting-spray-ibm reacting-spray-outlet reacting-spray-wall reacting-esf reacting-tcr-experimental reacting-spray-mean reacting-spray-esf reacting-spray-esf-passive)
 if(HUNDUN_ENABLE_REACTING_CANTERA)
   list(APPEND coupled_cli_cases esf-cn reacting-cantera-esf reacting-spray-esf-cantera reacting-spray-esf-ibm-cantera)
+  add_test(NAME v04_spray_thick_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_thick_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/thick-cli"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py")
+  set_tests_properties(v04_spray_thick_cli PROPERTIES TIMEOUT 90 PROCESSORS 4 RUN_SERIAL TRUE)
   add_test(NAME v04_composition_balance_cli
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/composition_balance_cli_test.py"
@@ -2535,3 +2542,9 @@ target_include_directories(v04_models_spray_film_thick_test PRIVATE "${CMAKE_CUR
 target_link_libraries(v04_models_spray_film_thick_test PRIVATE hundun_v04_core)
 add_test(NAME v04_models_spray_film_thick COMMAND v04_models_spray_film_thick_test)
 set_tests_properties(v04_models_spray_film_thick PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_interval_test unit/models_spray_interval_test.cpp)
+target_include_directories(v04_models_spray_interval_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_interval_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_interval COMMAND v04_models_spray_interval_test)
+set_tests_properties(v04_models_spray_interval PROPERTIES TIMEOUT 15)

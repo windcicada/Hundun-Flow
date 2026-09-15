@@ -918,7 +918,7 @@ static Status run_application(MPI_Comm communicator,
             terminal.final_flux == 0U ||
             terminal.final_flux != step.piso.final_flux_revision)
           return Status{StatusCode::invalid_plan, kApplicationDiagnostics};
-        const std::array<std::pair<const char*, double>, 18U> values{{
+        const std::array<std::pair<const char*, double>, 20U> values{{
             {"dt", step.proposal.dt},
             {"mass_kg", terminal.mass},
             {"internal_energy_J", terminal.internal_energy},
@@ -931,6 +931,8 @@ static Status run_application(MPI_Comm communicator,
             {"viscous_work_input_W", balance.viscous_work_input},
             {"statistical_enthalpy_outflow_W", balance.statistical_enthalpy_outflow},
             {"statistical_enthalpy_source_W", balance.statistical_enthalpy_source},
+            {"phase_mass_input_kg_s", balance.phase_mass_input},
+            {"phase_energy_input_W", balance.phase_energy_input},
             {"mass_bdf_rate_kg_s", balance.mass_bdf_rate},
             {"total_energy_bdf_rate_W", balance.total_energy_bdf_rate},
             {"mass_balance_defect_kg_s", balance.mass_balance_defect},

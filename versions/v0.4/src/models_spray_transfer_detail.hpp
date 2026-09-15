@@ -164,8 +164,9 @@ struct TransferExchangeCandidate {
   // source and contains neither kinetic energy nor a pressure-work repair.
   double thermal_exchange_to_gas_j{};
   // parcel_delta_H_tc + thermal_exchange_to_gas.  A nonzero value is reported
-  // to the later admission/refinement layer; this kernel never corrects it by
-  // silently replacing the physical flux with -parcel_delta_H_tc.
+  // to the later admission/refinement layer. A-S reports its independently
+  // integrated heat flux; THICK_EX defines its source from the same endpoint
+  // increment as the liquid update and its explicit temperature limit.
   double thermal_exchange_state_residual_j{};
 
   // Momentum needed to force an exact endpoint-state balance beyond the

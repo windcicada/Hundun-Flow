@@ -67,6 +67,7 @@ struct PlanSummary {
   bool interval_chemistry{};
   // Model labels have static storage and remain valid after plan destruction.
   std::string_view reaction_model{"none"};
+  std::string_view evaporation_model{"none"};
   std::size_t reaction_workspace_bytes{};
   std::size_t esf_energy_workspace_bytes{};
   double interval_source_relative_tolerance{};

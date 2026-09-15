@@ -148,7 +148,8 @@ bool accurate(const ParcelIntervalReport &a, const ParcelIntervalReport &b,
                eb = enthalpy_roundoff(before, b);
   if (!std::isfinite(ea + eb))
     return false;
-  if (a.complete_evaporation != b.complete_evaporation ||
+  if (a.exchange_from_endpoints != b.exchange_from_endpoints ||
+      a.complete_evaporation != b.complete_evaporation ||
       !near(a.elapsed_duration_s, b.elapsed_duration_s,
             in.event_time_tolerance_s, in.relative_tolerance) ||
       !near(a.parcel.droplet_mass_kg, b.parcel.droplet_mass_kg,
@@ -165,10 +166,11 @@ bool accurate(const ParcelIntervalReport &a, const ParcelIntervalReport &b,
               in.position_absolute_tolerance_m, in.relative_tolerance) ||
         !near(a.parcel.velocity_m_per_s[d], b.parcel.velocity_m_per_s[d],
               in.velocity_absolute_tolerance_m_per_s, in.relative_tolerance) ||
-        !near(a.exchange.parcel_momentum_delta_kg_m_per_s[d],
+        (!a.exchange_from_endpoints &&
+         !near(a.exchange.parcel_momentum_delta_kg_m_per_s[d],
               b.exchange.parcel_momentum_delta_kg_m_per_s[d],
               in.momentum_absolute_tolerance_kg_m_per_s + ma + mb,
-              in.relative_tolerance) ||
+              in.relative_tolerance)) ||
         !near(b.exchange.momentum_quadrature_residual_kg_m_per_s[d], 0,
               in.momentum_absolute_tolerance_kg_m_per_s + mb +
                   in.relative_tolerance *
@@ -176,13 +178,14 @@ bool accurate(const ParcelIntervalReport &a, const ParcelIntervalReport &b,
               0))
       return false;
   }
-  return near(a.exchange.parcel_thermochemical_enthalpy_delta_j,
+  return (a.exchange_from_endpoints ||
+         (near(a.exchange.parcel_thermochemical_enthalpy_delta_j,
               b.exchange.parcel_thermochemical_enthalpy_delta_j,
               in.energy_absolute_tolerance_j + ea + eb,
               in.relative_tolerance) &&
          near(a.exchange.parcel_kinetic_energy_delta_j,
               b.exchange.parcel_kinetic_energy_delta_j,
-              in.energy_absolute_tolerance_j, in.relative_tolerance) &&
+              in.energy_absolute_tolerance_j, in.relative_tolerance))) &&
          near(
              b.exchange.thermal_exchange_state_residual_j, 0,
              in.energy_absolute_tolerance_j + eb +
@@ -804,6 +807,110 @@ ParcelIntervalReport FixedAsParcelIntervalProvider::advance(
   out.exchange.thermal_exchange_state_residual_j =
       out.exchange.parcel_thermochemical_enthalpy_delta_j +
       out.exchange.thermal_exchange_to_gas_j;
+  return out;
+}
+ParcelIntervalReport FixedThickParcelIntervalProvider::advance(
+    const SprayParcelState &state, double elapsed, double dt,
+    ParcelPass pass_kind, portable::Revision revision) const noexcept {
+  ParcelIntervalReport out;
+  if (!std::isfinite(elapsed) || elapsed < 0 || !std::isfinite(dt) || dt < 0 ||
+      revision.algorithm_version != 1 || !revision.input_revision ||
+      (pass_kind != ParcelPass::predictor && pass_kind != ParcelPass::corrector))
+    return out;
+  const auto before = provider_.sample(state, elapsed, pass_kind, revision);
+  if (!before.available || before.revision != revision || !before.liquid ||
+      !std::isfinite(before.liquid_absolute_enthalpy_j_per_kg))
+    return out;
+  const auto initial = before.liquid->evaluate(
+      {state.liquid_material_fingerprint, state.temperature_k});
+  if (!initial.succeeded()) return out;
+  ThickExchangeInput request;
+  request.parcel = state;
+  request.liquid_properties = initial.properties;
+  request.gas_temperature_k = before.gas.gas_temperature_k;
+  request.gas_cp_j_per_kg_k = before.gas.film_cp_j_per_kg_k;
+  request.gas_dynamic_viscosity_pa_s = before.gas.film_dynamic_viscosity_pa_s;
+  request.prandtl_number = before.vapor_prandtl_number;
+  request.boiling_temperature_k = before.boiling_temperature_k;
+  request.vapor_absolute_thermochemical_enthalpy_j_per_kg =
+      before.gas.vapor_absolute_thermochemical_enthalpy_j_per_kg;
+  request.duration_s = dt;
+  const auto thermal = evaluate_thick_exchange(request);
+  if (!thermal.succeeded()) return out;
+  const auto drag = evaluate_schiller_naumann_drag(
+      {before.gas.gas_velocity_m_per_s, state.velocity_m_per_s,
+       before.far_gas_density_kg_per_m3,
+       before.far_gas_dynamic_viscosity_pa_s, state.droplet_diameter_m,
+       state.droplet_mass_kg, state.multiplicity, 0.});
+  if (!drag.succeeded()) return out;
+  auto next = thermal.candidate_parcel;
+  const double duration = thermal.advanced_duration_s;
+  unsigned axis = 0;
+  Vector3 slip{};
+  for (unsigned d = 0; d < 3; ++d) {
+    slip[d] = before.gas.gas_velocity_m_per_s[d] - state.velocity_m_per_s[d];
+    if (std::abs(slip[d]) > std::abs(slip[axis])) axis = d;
+  }
+  const long double response = slip[axis] == 0 ? 0.L :
+      static_cast<long double>(duration) * drag.acceleration_m_per_s2[axis] /
+          slip[axis];
+  if (!std::isfinite(response) || response < 0) return out;
+  for (unsigned d = 0; d < 3; ++d) {
+    next.velocity_m_per_s[d] = static_cast<double>(
+        state.velocity_m_per_s[d] + response / (1.L + response) * slip[d]);
+    next.position_m[d] = static_cast<double>(
+        static_cast<long double>(state.position_m[d]) + .5L *
+        (static_cast<long double>(state.velocity_m_per_s[d]) +
+         next.velocity_m_per_s[d]) * duration);
+  }
+  double h = before.liquid_absolute_enthalpy_j_per_kg;
+  double cp = initial.properties.cp_j_per_kg_k;
+  if (!thermal.complete_evaporation) {
+    const auto liquid = before.liquid->evaluate(
+        {state.liquid_material_fingerprint, next.temperature_k});
+    if (!liquid.succeeded()) return out;
+    cp = std::max(cp, liquid.properties.cp_j_per_kg_k);
+    // The d-squared law advances mass at frozen density; the endpoint uses
+    // the refreshed liquid density and preserves that mass exactly.
+    if (next.temperature_k != state.temperature_k)
+      next.droplet_diameter_m = std::cbrt(
+          6 * next.droplet_mass_kg / (std::acos(-1.) * liquid.properties.density_kg_per_m3));
+    const auto final = provider_.sample(next, elapsed + duration, pass_kind, revision);
+    if (!final.available || final.revision != revision ||
+        final.liquid != before.liquid ||
+        !std::isfinite(final.liquid_absolute_enthalpy_j_per_kg)) return out;
+    h = final.liquid_absolute_enthalpy_j_per_kg;
+  }
+  out.parcel = next;
+  out.revision = revision;
+  out.elapsed_duration_s = duration;
+  out.complete_evaporation = thermal.complete_evaporation;
+  out.exchange_from_endpoints = true;
+  out.initial_liquid_absolute_enthalpy_j_per_kg = before.liquid_absolute_enthalpy_j_per_kg;
+  out.liquid_absolute_enthalpy_j_per_kg = h;
+  out.liquid_heat_capacity_bound_j_per_kg_k = cp;
+  auto &e = out.exchange;
+  e = thermal.exchange;
+  e.parcel_thermochemical_enthalpy_delta_j = specific_inventory_delta(
+      state, next, before.liquid_absolute_enthalpy_j_per_kg, h);
+  e.thermal_exchange_to_gas_j = -e.parcel_thermochemical_enthalpy_delta_j;
+  e.convective_heat_to_parcel_j = e.vapor_absolute_thermochemical_enthalpy_to_gas_j +
+      e.parcel_thermochemical_enthalpy_delta_j;
+  e.parcel_kinetic_energy_delta_j = kinetic_delta(state, next);
+  auto dragged = state;
+  dragged.velocity_m_per_s = next.velocity_m_per_s;
+  e.drag_work_to_parcel_j = kinetic_delta(state, dragged);
+  for (unsigned d = 0; d < 3; ++d) {
+    e.parcel_momentum_delta_kg_m_per_s[d] = specific_inventory_delta(
+        state, next, state.velocity_m_per_s[d], next.velocity_m_per_s[d]);
+    e.gas_momentum_delta_kg_m_per_s[d] = -e.parcel_momentum_delta_kg_m_per_s[d];
+    e.drag_momentum_to_parcel_kg_m_per_s[d] = specific_inventory_delta(
+        state, dragged, state.velocity_m_per_s[d], next.velocity_m_per_s[d]);
+    e.vapor_momentum_to_gas_kg_m_per_s[d] =
+        e.vapor_mass_to_gas_kg * next.velocity_m_per_s[d];
+  }
+  out.available = true;
+  if (!valid_interval(out, dt, revision)) return {};
   return out;
 }
 ParcelTabIntervalReport

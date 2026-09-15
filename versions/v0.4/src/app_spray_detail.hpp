@@ -10,7 +10,9 @@ inline bool valid_spray_spec(const SpraySpec &s) {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
   };
   const auto positive = [](double x) { return std::isfinite(x) && x > 0; };
-  if (s.liquid_file.empty() || s.liquid_file.has_parent_path() ||
+  if ((s.evaporation != spray::EvaporationModel::abramzon_sirignano &&
+       s.evaporation != spray::EvaporationModel::thick_exchange) ||
+      s.liquid_file.empty() || s.liquid_file.has_parent_path() ||
       s.liquid_file.extension() != ".asset" ||
       s.liquid_file.native().size() > 255 ||
       s.liquid_file.native().find('\0') != std::string::npos ||
@@ -95,6 +97,11 @@ template <class Reader> bool read_spray(Reader &r, SpraySpec &s) {
 }
 
 template <class Hash> void hash_spray(Hash &h, const SpraySpec &s) {
+  // Preserve the established identity of A-S inputs and native Restarts.
+  if (s.evaporation != spray::EvaporationModel::abramzon_sirignano) {
+    h.text("spray-evaporation-v1");
+    h.integer(static_cast<std::uint8_t>(s.evaporation));
+  }
   h.text("spray-case-v1");
   h.text(s.liquid_file.generic_string());
   h.integer(s.liquid_fingerprint);

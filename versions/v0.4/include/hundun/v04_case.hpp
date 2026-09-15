@@ -4,6 +4,7 @@
 #pragma once
 
 #include "hundun/v04_status.hpp"
+#include "hundun/v04_spray.hpp"
 
 #include <mpi.h>
 
@@ -188,6 +189,7 @@ struct SpraySpec {
   double relative_tolerance{1e-6};
   bool tab_breakup{};
   std::vector<SprayInjectionSpec> injectors;
+  spray::EvaporationModel evaporation{spray::EvaporationModel::abramzon_sirignano};
 };
 
 struct CaseSpec {

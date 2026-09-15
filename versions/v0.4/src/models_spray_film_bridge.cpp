@@ -4,10 +4,21 @@
 namespace hundun::v04::spray::detail {
 FilmEnvironmentBridge::FilmEnvironmentBridge(
     const LiquidAsset &asset, portable::GasQueryProvider &gas,
-    const ParcelGasStateProvider &sampler, portable::Revision revision)
+    const ParcelGasStateProvider &sampler, portable::Revision revision,
+    EvaporationModel evaporation, const FilmTransportProvider *transport)
     : asset_(asset), gas_(gas), sampler_(sampler), revision_(revision),
       liquid_(&asset.pack, 1), film_(asset.gas_identity.species_names.size()),
+      thick_film_(asset.gas_identity.species_names.size()),
+      evaporation_(evaporation), transport_(transport),
       y_(asset.gas_identity.species_names.size()) {}
+bool FilmEnvironmentBridge::compatible() const noexcept {
+  if (evaporation_ == EvaporationModel::abramzon_sirignano) return true;
+  return evaporation_ == EvaporationModel::thick_exchange && transport_ &&
+      asset_.pack.density_kg_per_m3.kind == TemperatureCorrelationKind::kerosene_density_v1 &&
+      asset_.pack.cp_j_per_kg_k.kind == TemperatureCorrelationKind::kerosene_cp_v1 &&
+      asset_.pack.latent_heat_j_per_kg.kind == TemperatureCorrelationKind::kerosene_latent_v1 &&
+      asset_.pack.saturation_pressure.kind == SaturationPressureCorrelationKind::kerosene_v1;
+}
 FilmEnvironmentReport
 FilmEnvironmentBridge::query(const SprayParcelState &parcel, double elapsed,
                              ParcelPass pass,
@@ -17,7 +28,7 @@ FilmEnvironmentBridge::query(const SprayParcelState &parcel, double elapsed,
     out.status = portable::Status::stale_revision;
     return out;
   }
-  if (!std::isfinite(elapsed) || elapsed < 0 ||
+  if (!compatible() || !std::isfinite(elapsed) || elapsed < 0 ||
       parcel.liquid_material_fingerprint != asset_.pack.material_fingerprint ||
       (pass != ParcelPass::predictor && pass != ParcelPass::corrector))
     return out;
@@ -47,6 +58,39 @@ FilmEnvironmentBridge::query(const SprayParcelState &parcel, double elapsed,
                      0,
                      y_.data(),
                      y_.size()};
+  if (evaporation_ == EvaporationModel::thick_exchange) {
+    KeroseneFilmInput input;
+    input.far_gas = request.far_gas;
+    input.expected_revision = input.transport_revision = revision;
+    input.surface_temperature_k = parcel.temperature_k;
+    input.transport = transport_;
+    const auto f = thick_film_.query(asset_, gas_, input);
+    const auto h = evaluate_liquid_enthalpy(asset_, parcel.temperature_k);
+    if (!f.available || !h.available) {
+      out.status = !f.available ? f.status : h.status;
+      return out;
+    }
+    for (double u : far.velocity_m_per_s)
+      if (!std::isfinite(u)) return out;
+    auto &e = out.environment;
+    e.revision = revision;
+    e.gas.gas_velocity_m_per_s = far.velocity_m_per_s;
+    e.gas.gas_temperature_k = f.far_temperature_k;
+    e.gas.gas_vapor_mass_fraction = y_[asset_.vapor_species_index];
+    e.gas.thermodynamic_pressure_pa = far.pressure_pa;
+    e.gas.film_dynamic_viscosity_pa_s = f.gas_dynamic_viscosity_pa_s;
+    e.gas.film_cp_j_per_kg_k = f.gas_cp_j_per_kg_k;
+    e.gas.vapor_absolute_thermochemical_enthalpy_j_per_kg = f.vapor_absolute_enthalpy_j_per_kg;
+    e.liquid = &liquid_;
+    e.liquid_absolute_enthalpy_j_per_kg = h.liquid_enthalpy_j_per_kg;
+    e.far_gas_density_kg_per_m3 = f.far_density_kg_per_m3;
+    e.far_gas_dynamic_viscosity_pa_s = f.far_dynamic_viscosity_pa_s;
+    e.boiling_temperature_k = f.liquid.boiling_temperature_k;
+    e.vapor_prandtl_number = f.vapor_prandtl_number;
+    e.available = true;
+    out.status = portable::Status::success;
+    return out;
+  }
   const auto sampled = film_.query(asset_, gas_, request);
   if (!sampled.available) {
     out.status = sampled.status;

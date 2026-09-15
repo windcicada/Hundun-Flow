@@ -11,6 +11,22 @@ using namespace hundun::v04;
 using namespace spray::detail;
 namespace {
 constexpr double gas_r=8314.46261815324;
+class Transport final : public FilmTransportProvider {
+ public:
+  bool stale{}, fail{};
+  mutable unsigned calls{};
+  mutable double temperature{};
+  FilmTransportReport query(const portable::GasQuery& q) const noexcept override {
+    ++calls; temperature=q.temperature_k;
+    FilmTransportReport out;
+    if (fail || q.coordinates!=portable::GasStateCoordinates::pressure_temperature ||
+        q.composition_fingerprint!=42 || q.species_count!=3) return out;
+    out.status=portable::Status::success;out.revision=q.revision;
+    if(stale) ++out.revision.input_revision;
+    out.dynamic_viscosity_pa_s=2e-5;
+    return out;
+  }
+};
 class Gas final : public portable::GasQueryProvider {
  public:
   portable::GasIdentity id;
@@ -103,6 +119,19 @@ int main(int argc,char** argv) {
   y[2]=.02;passed &= !workspace.query(asset,gas,input).available;y[2]=.01;
   gas.calls=0;r=workspace.query(asset,gas,input);
   passed &= r.available && r.gas_dynamic_viscosity_pa_s==reference.gas_dynamic_viscosity_pa_s && gas.calls==4;
+  Transport transport;
+  input.transport=&transport;input.far_dynamic_viscosity_pa_s=0.;gas.calls=0;
+  r=workspace.query(asset,gas,input);
+  passed &= r.available && gas.calls==4 && transport.calls==1 &&
+      std::abs(transport.temperature-900.)<1e-12 &&
+      r.gas_dynamic_viscosity_pa_s==reference.gas_dynamic_viscosity_pa_s &&
+      r.far_dynamic_viscosity_pa_s==2e-5 && r.far_density_kg_per_m3==1.;
+  transport.stale=true;
+  passed &= workspace.query(asset,gas,input).status==portable::Status::stale_revision;
+  transport.stale=false;transport.fail=true;
+  passed &= !workspace.query(asset,gas,input).available;
+  transport.fail=false;input.far_dynamic_viscosity_pa_s=2e-5;
+  passed &= !workspace.query(asset,gas,input).available;
   std::cout<<"thick_gas_queries_identity_and_failure passed="<<passed<<'\n';
   return passed ? 0 : 1;
 }

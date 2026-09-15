@@ -496,11 +496,13 @@ KeroseneFilmReport KeroseneFilmWorkspace::query(const LiquidAsset& asset,
       asset.vapor_molecular_weight_kg_per_kmol != gas.molecular_weights_kg_per_kmol[vapor])
     return failure(portable::Status::identity_mismatch);
   if (n != pure_y_.size()) return failure(portable::Status::capacity_exceeded);
-  const double t = input.surface_temperature_k, mu = input.far_dynamic_viscosity_pa_s;
+  const double t = input.surface_temperature_k;
+  double mu = input.far_dynamic_viscosity_pa_s;
   if (far.coordinates != portable::GasStateCoordinates::pressure_enthalpy ||
       far.species_count != n || !far.mass_fractions ||
       !std::isfinite(far.pressure_pa) || far.pressure_pa <= 0. ||
-      !std::isfinite(far.enthalpy_j_per_kg) || !std::isfinite(mu) || mu <= 0. ||
+      !std::isfinite(far.enthalpy_j_per_kg) ||
+      (input.transport ? mu != 0. : (!std::isfinite(mu) || mu <= 0.)) ||
       !std::isfinite(asset.pack.minimum_temperature_k) ||
       !std::isfinite(asset.pack.maximum_temperature_k) ||
       asset.pack.minimum_temperature_k <= 0. ||
@@ -542,6 +544,22 @@ KeroseneFilmReport KeroseneFilmWorkspace::query(const LiquidAsset& asset,
   auto status = call(far);
   if (status != portable::Status::success) return failure(status);
   const double far_t = response.sample.temperature_k;
+  const double far_rho = response.sample.density_kg_per_m3;
+  if (!std::isfinite(far_rho) || far_rho <= 0.)
+    return failure(portable::Status::provider_failure);
+  if (input.transport) {
+    auto pt = far;
+    pt.coordinates = portable::GasStateCoordinates::pressure_temperature;
+    pt.temperature_k = far_t;
+    const auto transport = input.transport->query(pt);
+    if (transport.status != portable::Status::success)
+      return failure(transport.status);
+    if (transport.revision != input.expected_revision)
+      return failure(portable::Status::stale_revision);
+    mu = transport.dynamic_viscosity_pa_s;
+    if (!std::isfinite(mu) || mu <= 0.)
+      return failure(portable::Status::provider_failure);
+  }
   const double film_t = t + (far_t-t)/3.;
   std::fill(pure_y_.begin(),pure_y_.end(),0.); pure_y_[vapor] = 1.;
   auto query = far;
@@ -584,6 +602,7 @@ KeroseneFilmReport KeroseneFilmWorkspace::query(const LiquidAsset& asset,
   out.gas_dynamic_viscosity_pa_s = film_mu; out.vapor_cp_j_per_kg_k = vapor_cp;
   out.vapor_prandtl_number = prandtl; out.vapor_absolute_enthalpy_j_per_kg = vapor_h;
   out.surface_vapor_mass_fraction = ys; out.available = true;
+  out.far_density_kg_per_m3 = far_rho; out.far_dynamic_viscosity_pa_s = mu;
   return out;
 }
 

@@ -61,6 +61,7 @@ constexpr std::uint8_t kSprayWireFlag = 64U;
 constexpr std::uint8_t kPatchInletsWireVersion = 19U;
 constexpr std::uint8_t kCflBandWireVersion = 20U;
 constexpr std::uint8_t kSmagorinskyWireVersion = 21U;
+constexpr std::uint8_t kSprayEvaporationWireVersion = 22U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -927,8 +928,20 @@ bool parse_spray(yyjson_val *value, SpraySpec &s) {
           value,
           {"liquid_file", "liquid_fingerprint", "seed", "maximum_local_parcels",
            "maximum_local_segments", "maximum_substep_s", "minimum_substep_s",
-           "relative_tolerance", "tab_breakup", "injectors"}))
+           "relative_tolerance", "tab_breakup", "injectors"}) &&
+      !object_has_exact_keys(value,
+          {"liquid_file", "liquid_fingerprint", "seed", "maximum_local_parcels",
+           "maximum_local_segments", "maximum_substep_s", "minimum_substep_s",
+           "relative_tolerance", "tab_breakup", "injectors", "evaporation"}))
     return false;
+  if (yyjson_obj_get(value, "evaporation")) {
+    const auto name = string_value(value, "evaporation");
+    if (!name) return false;
+    if (*name == "thick_exchange") s.evaporation = spray::EvaporationModel::thick_exchange;
+    else if (*name == "abramzon_sirignano")
+      s.evaporation = spray::EvaporationModel::abramzon_sirignano;
+    else return false;
+  }
   const auto file = string_value(value, "liquid_file");
   auto *identity = yyjson_obj_get(value, "liquid_fingerprint");
   auto *seed = yyjson_obj_get(value, "seed");
@@ -2387,6 +2400,10 @@ Status serialize_model(const ValidatedModel& model,
         model.solver.pressure.mg_correction_scaling !=
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
+    if (model.spray && model.spray->evaporation != spray::EvaporationModel::abramzon_sirignano) {
+      writer.byte(kSprayEvaporationWireVersion);
+      writer.byte(static_cast<std::uint8_t>(model.spray->evaporation));
+    }
     if (model.turbulence == TurbulenceKind::smagorinsky) {
       if (!std::isfinite(model.smagorinsky_coefficient) || model.smagorinsky_coefficient < 0.0)
         return invalid_case(detail_wire);
@@ -2556,6 +2573,12 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
     if (!reader.byte(version)) return invalid_case(detail_wire);
+    const bool evaporation_wire = version == kSprayEvaporationWireVersion;
+    std::uint8_t evaporation = 0;
+    if (evaporation_wire &&
+        (!reader.byte(evaporation) ||
+         evaporation != static_cast<std::uint8_t>(spray::EvaporationModel::thick_exchange) ||
+         !reader.byte(version))) return invalid_case(detail_wire);
     const bool smagorinsky_wire = version == kSmagorinskyWireVersion;
     double smagorinsky_coefficient = 0.17;
     if (smagorinsky_wire &&
@@ -2568,6 +2591,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     if (patch_wire && !reader.byte(version)) return invalid_case(detail_wire);
     const bool has_reaction = (version & kReactionWireFlag) != 0U;
     const bool has_spray = (version & kSprayWireFlag) != 0U;
+    if (evaporation_wire && !has_spray) return invalid_case(detail_wire);
     version &= ~(kReactionWireFlag | kSprayWireFlag);
     if ((version != kLegacyWireVersion &&
          version != kLegacyPressureAlgorithmWireVersion &&
@@ -2784,6 +2808,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       model.spray.emplace();
       if (!detail::read_spray(reader, *model.spray))
         return invalid_case(detail_wire);
+      model.spray->evaporation = static_cast<spray::EvaporationModel>(evaporation);
     }
     if (patch_wire) {
       std::uint8_t marker_geometry = 0U;

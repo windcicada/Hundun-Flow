@@ -244,6 +244,7 @@ int main(int argc, char* argv[]) {
                     : report.summary.turbulence == hundun::v04::TurbulenceKind::vreman_wall_function
                         ? "vreman_wall_function" : "none")
                 << " smagorinsky_coefficient=" << report.summary.smagorinsky_coefficient
+                << " evaporation=" << report.summary.evaporation_model
                 << " chemistry="
                 << (report.summary.reaction_mode == hundun::v04::ReactionMode::none ? "none"
                     : report.summary.interval_chemistry ? "transport_then_interval"

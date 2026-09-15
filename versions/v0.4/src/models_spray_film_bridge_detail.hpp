@@ -31,7 +31,11 @@ struct FilmEnvironmentReport {
 class FilmEnvironmentBridge final : public ParcelTransferEnvironmentProvider {
 public:
   FilmEnvironmentBridge(const LiquidAsset &, portable::GasQueryProvider &,
-                        const ParcelGasStateProvider &, portable::Revision);
+                        const ParcelGasStateProvider &, portable::Revision,
+                        EvaporationModel = EvaporationModel::abramzon_sirignano,
+                        const FilmTransportProvider * = nullptr);
+  EvaporationModel evaporation() const noexcept { return evaporation_; }
+  bool compatible() const noexcept;
   FilmEnvironmentBridge(const FilmEnvironmentBridge &) = delete;
   FilmEnvironmentBridge &operator=(const FilmEnvironmentBridge &) = delete;
   // Reuse the cold-reserved exclusive lane for the next native attempt.
@@ -55,6 +59,9 @@ private:
   portable::Revision revision_;
   LiquidPropertyService liquid_;
   mutable FilmQueryWorkspace film_;
+  mutable KeroseneFilmWorkspace thick_film_;
+  EvaporationModel evaporation_;
+  const FilmTransportProvider *transport_{};
   mutable std::vector<double> y_;
 };
 } // namespace hundun::v04::spray::detail

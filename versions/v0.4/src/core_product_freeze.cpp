@@ -3937,7 +3937,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           model, case_root, candidate->reaction, candidate->geometry,
           candidate->patch, rank, candidate->esf.tcr_history.snapshot(),
           candidate->surface ? &*candidate->surface : nullptr,
-          candidate->topology ? &*candidate->topology : nullptr);
+          candidate->topology ? &*candidate->topology : nullptr,
+          &candidate->transport);
     });
   if (!status)
     return status;
@@ -5725,6 +5726,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->summary.coupling = schedule;
   candidate->summary.time_scheme = model.time.scheme;
   candidate->summary.reaction_mode = model.reaction.mode;
+  candidate->summary.evaporation_model = !model.spray ? "none" :
+      model.spray->evaporation == spray::EvaporationModel::thick_exchange
+          ? "thick_exchange" : "abramzon_sirignano";
     candidate->summary.interval_chemistry = candidate->reaction.interval_enabled();
     candidate->summary.reaction_model = candidate->reaction.reaction_model();
   candidate->summary.reaction_workspace_bytes = candidate->reaction.interval_workspace_bytes();
@@ -9428,6 +9432,7 @@ Status ProductDriver::Impl::execute_attempt(
   Span<const EquationContributionView> momentum_contributions,
       enthalpy_contributions;
   double attempt_closed_mass_target = closed_mass_target;
+  detail::ProductPhaseSources phase_sources;
   if (status && product.spray.enabled()) {
     std::array<FieldView, UINT8_MAX> inputs{};
     FieldView pressure, enthalpy, velocity;
@@ -9494,6 +9499,10 @@ Status ProductDriver::Impl::execute_attempt(
                                                   .data[s]] *
                 scale;
           mass_delta += row.gas.gas_mass_delta_kg;
+          phase_sources.mass_kg_s += static_cast<long double>(row.gas.gas_mass_delta_kg) / step.dt;
+          phase_sources.energy_w +=
+              (static_cast<long double>(row.gas.gas_thermochemical_enthalpy_delta_j) +
+               row.gas.gas_kinetic_energy_delta_j) / step.dt;
         }
     status = product.reductions.consensus(status);
     if (status) {
@@ -15088,7 +15097,7 @@ Status ProductDriver::Impl::execute_attempt(
                 pressure_energy_e_p, time.accepted_step(), balance_history,
                 product.reductions, conservation, pending_balance,
                 product.ibm_equations ? &*product.ibm_equations : nullptr,
-                &mixture_faces,false,dual_esf ? &statistical_balance : nullptr);
+                &mixture_faces,false,dual_esf ? &statistical_balance : nullptr, phase_sources);
           status = product.reductions.consensus(status);
           if (!status)
             return status;
@@ -21406,7 +21415,8 @@ Status ProductDriver::Impl::execute_attempt(
         momentum_low_order_rhs_delta, pressure_energy_e_p,
         time.accepted_step(), balance_history, product.reductions,
         conservation, pending_balance,
-        product.ibm_equations ? &*product.ibm_equations : nullptr);
+        product.ibm_equations ? &*product.ibm_equations : nullptr,
+        nullptr, false, nullptr, phase_sources);
   final_audit_timer.stop();
   if (status) {
     begin_timed_stage(70U);

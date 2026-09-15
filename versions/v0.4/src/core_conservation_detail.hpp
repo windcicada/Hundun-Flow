@@ -18,6 +18,9 @@ struct ProductBoundaryBalanceHistory {
   std::uint64_t epoch_start_step{};
   long double mass{}, previous_mass{}, energy{}, previous_energy{};
 };
+struct ProductPhaseSources {
+  long double mass_kg_s{}, energy_w{}; // rank-local extensive rates
+};
 
 // All fields are already certified by the final equation assembly. Only
 // rank-local scalar accumulators are owned here; no field or state is changed.
@@ -66,7 +69,8 @@ inline Status collect_terminal_equations(
         const double continuity = temporal +
             flux.x.unchecked({x + 1, y, z}) - flux.x.unchecked(cell) +
             flux.y.unchecked({x, y + 1, z}) - flux.y.unchecked(cell) +
-            flux.z.unchecked({x, y, z + 1}) - flux.z.unchecked(cell);
+            flux.z.unchecked({x, y, z + 1}) - flux.z.unchecked(cell) -
+            (state.mass_source.identity ? volume * state.mass_source.rate.unchecked(cell, 0U) : 0.);
         const double energy = energy_residual.unchecked(cell, 0U);
         double kinetic = 0.0;
         double momentum_work = 0.0;
@@ -174,7 +178,8 @@ inline Status collect_boundary_balance(
     const IbmEquationInterfacePlan* immersed_interface = nullptr,
     const MixtureTransportFaces* mixture = nullptr,
     bool provisional_flux = false,
-    const StatisticalEnergyBalanceView* statistical = nullptr) noexcept {
+    const StatisticalEnergyBalanceView* statistical = nullptr,
+    ProductPhaseSources phase = {}) noexcept {
   out = {};
   pending = {};
   const bool direct_h = enthalpy_plan.unity_lewis_total_enthalpy();
@@ -208,7 +213,11 @@ inline Status collect_boundary_balance(
         }
         kinetic.unchecked(cell, 0U) = value;
       }
-  std::array<long double, 12U> sum{};
+  std::array<long double, 14U> sum{};
+  sum[12U] = phase.mass_kg_s;
+  sum[13U] = phase.energy_w;
+  if (!std::isfinite(sum[12U]) || !std::isfinite(sum[13U]))
+    local = {StatusCode::numerical_failure, 10212U};
   const KernelBox box{{0, 0, 0}, cells};
   const auto convection = [&](ConstFieldView field, ConvectionScheme scheme,
                               IbmInterfaceInletFieldKind inlet_field) {
@@ -348,14 +357,14 @@ inline Status collect_boundary_balance(
           }
     }
   }
-  std::array<double, 12U> values{}, global{};
+  std::array<double, 14U> values{}, global{};
   for (std::size_t i = 0U; i < sum.size(); ++i)
     values[i] = static_cast<double>(sum[i]);
   Status status = reductions.checked_sum(
       {values.data(), 8U}, {global.data(), 8U}, local);
   if (status)
     status = reductions.checked_sum(
-        {values.data() + 8U, 4U}, {global.data() + 8U, 4U}, {});
+        {values.data() + 8U, 6U}, {global.data() + 8U, 6U}, {});
   if (!status) return status;
   double statistical_global[2]{};
   if(statistical) {
@@ -385,13 +394,13 @@ inline Status collect_boundary_balance(
   const long double previous_energy = history.valid ? history.previous_energy : global[5U];
   const long double energy_out = static_cast<long double>(global[7U]) +
                                 global[8U] - global[9U] - global[10U] - global[11U] +
-                                statistical_global[0] - statistical_global[1];
+                                statistical_global[0] - statistical_global[1] - global[13U];
   ProductBoundaryBalanceHistory next;
   next.valid = true;
   next.epoch_start_step = history.valid ? history.epoch_start_step : accepted_step;
   next.previous_mass = mass;
   next.previous_energy = energy;
-  next.mass = (-bdf.a1 * mass - bdf.a2 * previous_mass - global[6U]) / bdf.a0;
+  next.mass = (-bdf.a1 * mass - bdf.a2 * previous_mass - global[6U] + global[12U]) / bdf.a0;
   next.energy = (-bdf.a1 * energy - bdf.a2 * previous_energy - energy_out) / bdf.a0;
   DriverConservationReport report;
   report.epoch_start_step = next.epoch_start_step;
@@ -403,6 +412,8 @@ inline Status collect_boundary_balance(
   report.viscous_work_input = global[10U];
   report.statistical_enthalpy_outflow=statistical_global[0];
   report.statistical_enthalpy_source=statistical_global[1];
+  report.phase_mass_input = global[12U];
+  report.phase_energy_input = global[13U];
   report.mass_bdf_rate = static_cast<double>(
       static_cast<long double>(bdf.a0) * global[0U] +
       static_cast<long double>(bdf.a1) * global[1U] +
@@ -411,7 +422,7 @@ inline Status collect_boundary_balance(
       static_cast<long double>(bdf.a0) * global[3U] +
       static_cast<long double>(bdf.a1) * global[4U] +
       static_cast<long double>(bdf.a2) * global[5U]);
-  report.mass_balance_defect = report.mass_bdf_rate + global[6U];
+  report.mass_balance_defect = report.mass_bdf_rate + global[6U] - global[12U];
   report.total_energy_balance_defect =
       report.total_energy_bdf_rate + static_cast<double>(energy_out);
   report.cumulative_mass_defect = static_cast<double>(global[0U] - next.mass);

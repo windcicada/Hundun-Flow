@@ -14,7 +14,8 @@ public:
                          const CartesianGeometryPlan &, MeshPatch, int rank,
                          RestartCellRecordsView tcr,
                          const ImmersedSurfacePlan *surface = nullptr,
-                         const EBTopology *topology = nullptr);
+                         const EBTopology *topology = nullptr,
+                         const TransportPlan *transport = nullptr);
   Status configure_collective(MPI_Comm, Span<const RemoteDonorFieldSpec>);
   Status configure_source_transport(Span<const RemoteDonorFieldSpec>);
   Status exchange_source_transport(Span<FieldView>, RevisionToken boundary,
@@ -71,6 +72,7 @@ private:
   spray::detail::LiquidAsset asset_;
   ProductParcelGas gas_;
   ProductParcelGeometry events_;
+  std::unique_ptr<ProductSprayTransport> transport_;
   std::unique_ptr<spray::detail::FilmEnvironmentBridge> film_;
   std::vector<std::unique_ptr<ProductSprayHistory::Injector>> injectors_;
   std::vector<ProductSprayHistory::Injector *> injector_views_;

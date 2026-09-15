@@ -11,6 +11,11 @@ namespace hundun::v04::spray {
 
 using Vector3 = std::array<double, 3U>;
 
+enum class EvaporationModel : std::uint8_t {
+  abramzon_sirignano,
+  thick_exchange
+};
+
 struct ParcelId {
   std::uint64_t high{};
   std::uint64_t low{};

@@ -526,6 +526,8 @@ struct DriverConservationReport {
   double viscous_work_input{};           // W, including prescribed IBM inlets
   double statistical_enthalpy_outflow{}; // W, realized statistical face correction
   double statistical_enthalpy_source{};  // W, realized noise and implicit mixing
+  double phase_mass_input{};            // kg/s, accepted-candidate interphase exchange
+  double phase_energy_input{};          // W, thermochemical plus kinetic exchange
   double mass_bdf_rate{};                // kg/s
   double total_energy_bdf_rate{};        // W
   double mass_balance_defect{};          // kg/s

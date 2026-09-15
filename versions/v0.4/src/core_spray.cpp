@@ -22,7 +22,8 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                                      MeshPatch patch, int rank,
                                      RestartCellRecordsView tcr,
                                      const ImmersedSurfacePlan *surface,
-                                     const EBTopology *topology) {
+                                     const EBTopology *topology,
+                                     const TransportPlan *transport) {
   if (!model.spray)
     return {};
   if (enabled() || !reaction.gas_query() ||
@@ -71,7 +72,7 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
            std::uint64_t(spec_.maximum_local_parcels) *
                (sizeof(spray::SprayParcelState) + sizeof(spray::ParcelId))) +
       ns * (sizeof(std::size_t) + 2 * sizeof(ConstFieldView) +
-            8 * sizeof(double));
+            13 * sizeof(double));
   if (local_bytes_ > maximum_bytes_)
     return {StatusCode::allocation_failure, 10342};
   auto loaded = spray::detail::load_liquid_asset(root / spec_.liquid_file,
@@ -150,8 +151,18 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
   if (!status)
     return status;
   local_bytes_ += history.owned_bytes();
+  if (spec_.evaporation == spray::EvaporationModel::thick_exchange) {
+    // The enclosing product freeze fills this stable plan object in its
+    // thermophysical phase before publishing any runnable state.
+    if (!transport) return invalid();
+    transport_ = std::make_unique<ProductSprayTransport>(
+        *transport, reaction.gas_identity().composition_fingerprint,
+        reaction.species_indices());
+  }
   film_ = std::make_unique<spray::detail::FilmEnvironmentBridge>(
-      asset_, *reaction.gas_query(), gas_, portable::Revision{0, 1, 1});
+      asset_, *reaction.gas_query(), gas_, portable::Revision{0, 1, 1},
+      spec_.evaporation, transport_.get());
+  if (!film_->compatible()) return invalid();
   advance_ =
       std::make_unique<ProductParcelAdvance>(gas_, events_, asset_, *film_);
   halo_views_.resize(ns + 2);
