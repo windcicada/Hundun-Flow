@@ -18,7 +18,11 @@ enum class TemperatureCorrelationKind : std::uint8_t {
   constant,
   polynomial_cubic,
   // Fixed Rachner saturated-liquid coefficients; density only. c[] stays zero.
-  kerosene_density_v1
+  kerosene_density_v1,
+  // Fixed phase correlations, used only for cp and latent heat respectively.
+  // Their four user coefficients stay zero.
+  kerosene_cp_v1,
+  kerosene_latent_v1
 };
 
 struct TemperatureCorrelation {
@@ -29,7 +33,8 @@ struct TemperatureCorrelation {
 
 enum class SaturationPressureCorrelationKind : std::uint8_t {
   antoine_kelvin,
-  clausius_clapeyron
+  clausius_clapeyron,
+  kerosene_v1
 };
 
 struct SaturationPressureCorrelation {

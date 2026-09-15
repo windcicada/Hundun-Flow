@@ -16,6 +16,38 @@ namespace hundun::v04::spray::detail {
 namespace {
 
 constexpr double kUniversalGasConstantJPerKmolK = 8314.46261815324;
+constexpr double kKeroseneCritical = 684.26, kKeroseneShift = 43.0;
+constexpr double kKeroseneJunction = 477.95;
+constexpr double kKeroseneLowA = 20.4274903, kKeroseneLowB = 3877.38996;
+constexpr double kKeroseneHighA = 21.3176792, kKeroseneHighB = 4264.57762;
+constexpr double kKeroseneCpA = 1.7664045e2, kKeroseneCpB = 7.4680836;
+constexpr double kKeroseneCpC = -4.2123987e-3, kKeroseneCpD = 1.4948931e4;
+enum class LiquidPropertyRole { generic, density, heat_capacity, latent_heat };
+bool kerosene_temperature(double t) noexcept {
+  return std::isfinite(t) && t > kKeroseneShift && t < kKeroseneCritical;
+}
+double kerosene_cp(double t) noexcept {
+  return kKeroseneCpA + kKeroseneCpB*t + kKeroseneCpC*t*t +
+         kKeroseneCpD/(kKeroseneCritical-t);
+}
+double kerosene_latent(double t) noexcept {
+  return 2.50183e5*std::pow((kKeroseneCritical-t)/(kKeroseneCritical-483.15),.38);
+}
+double kerosene_saturation(double t) noexcept {
+  const bool high = t >= kKeroseneJunction;
+  return std::exp((high ? kKeroseneHighA : kKeroseneLowA) -
+                  (high ? kKeroseneHighB : kKeroseneLowB)/(t-kKeroseneShift));
+}
+double kerosene_enthalpy_increment(double t, double reference) noexcept {
+  const double lower = std::min(t,reference), upper = std::max(t,reference);
+  const double span = upper-lower;
+  // Canonical positive integration retains adjacent-temperature increments
+  // and the reverse integral close to the critical-temperature singularity.
+  const double magnitude = span*(kKeroseneCpA + .5*kKeroseneCpB*(lower+upper) +
+      kKeroseneCpC/3.0*(lower*lower+lower*upper+upper*upper)) +
+      kKeroseneCpD*std::log1p(span/(kKeroseneCritical-upper));
+  return t < reference ? -magnitude : magnitude;
+}
 bool finite_vector(const Vector3 &value) noexcept {
   return std::isfinite(value[0U]) && std::isfinite(value[1U]) &&
          std::isfinite(value[2U]);
@@ -29,7 +61,8 @@ LiquidPropertyReport liquid_failure(LiquidPropertyStatus status) noexcept {
 bool evaluate_temperature_correlation(const TemperatureCorrelation &law,
                                       double temperature_k,
                                       double &value,
-                                      bool density = false) noexcept {
+                                      LiquidPropertyRole role =
+                                          LiquidPropertyRole::generic) noexcept {
   value = 0.0;
   if (!std::isfinite(temperature_k) || !(temperature_k > 0.0))
     return false;
@@ -54,12 +87,23 @@ bool evaluate_temperature_correlation(const TemperatureCorrelation &law,
     return true;
   }
   case TemperatureCorrelationKind::kerosene_density_v1:
-    if (!density || temperature_k >= 684.26 ||
+    if (role != LiquidPropertyRole::density || temperature_k >= kKeroseneCritical ||
         !std::isfinite(law.reference_temperature_k) || law.reference_temperature_k <= 0 ||
         std::any_of(law.c.begin(), law.c.end(), [](double c) { return c != 0; }))
       return false;
     value = hundun::v04::detail::kerosene_liquid_density(temperature_k);
     return std::isfinite(value) && value > 0;
+  case TemperatureCorrelationKind::kerosene_cp_v1:
+  case TemperatureCorrelationKind::kerosene_latent_v1: {
+    const bool cp = law.kind == TemperatureCorrelationKind::kerosene_cp_v1;
+    if (role != (cp ? LiquidPropertyRole::heat_capacity : LiquidPropertyRole::latent_heat) ||
+        !kerosene_temperature(temperature_k) ||
+        !kerosene_temperature(law.reference_temperature_k) ||
+        std::any_of(law.c.begin(),law.c.end(),[](double c){return c != 0;}))
+      return false;
+    value = cp ? kerosene_cp(temperature_k) : kerosene_latent(temperature_k);
+    return std::isfinite(value) && value > 0;
+  }
   }
   return false;
 }
@@ -71,6 +115,17 @@ bool evaluate_saturation_pressure(const SaturationPressureCorrelation &law,
   if (!std::isfinite(temperature_k) || !(temperature_k > 0.0))
     return false;
   switch (law.kind) {
+  case SaturationPressureCorrelationKind::kerosene_v1: {
+    const double unused[]{law.antoine_a,law.antoine_b_k,law.antoine_c_k,
+                          law.pressure_scale_pa,law.reference_pressure_pa,
+                          law.reference_temperature_k,law.latent_heat_j_per_kg,
+                          law.molecular_weight_kg_per_kmol};
+    if (!kerosene_temperature(temperature_k) ||
+        std::any_of(std::begin(unused),std::end(unused),[](double c){return c != 0;}))
+      return false;
+    pressure_pa = kerosene_saturation(temperature_k);
+    return std::isfinite(pressure_pa) && pressure_pa > 0;
+  }
   case SaturationPressureCorrelationKind::antoine_kelvin: {
     if (!std::isfinite(law.antoine_a) || !std::isfinite(law.antoine_b_k) ||
         !std::isfinite(law.antoine_c_k) ||
@@ -234,6 +289,10 @@ LiquidAssetReport load_liquid_asset(const std::filesystem::path &path,
         law.kind = TemperatureCorrelationKind::polynomial_cubic;
       else if (token == "kerosene_density_v1" && std::string_view(name) == "density")
         law.kind = TemperatureCorrelationKind::kerosene_density_v1;
+      else if (token == "kerosene_cp_v1" && std::string_view(name) == "cp")
+        law.kind = TemperatureCorrelationKind::kerosene_cp_v1;
+      else if (token == "kerosene_latent_v1" && std::string_view(name) == "latent")
+        law.kind = TemperatureCorrelationKind::kerosene_latent_v1;
       else
         throw std::invalid_argument("unknown liquid correlation");
       input >> law.reference_temperature_k;
@@ -247,9 +306,11 @@ LiquidAssetReport load_liquid_asset(const std::filesystem::path &path,
       if (law.kind == TemperatureCorrelationKind::constant &&
           (law.c[1] != 0 || law.c[2] != 0 || law.c[3] != 0))
         throw std::invalid_argument("unused nonzero constant coefficient");
-      if (law.kind == TemperatureCorrelationKind::kerosene_density_v1 &&
+      if ((law.kind == TemperatureCorrelationKind::kerosene_density_v1 ||
+           law.kind == TemperatureCorrelationKind::kerosene_cp_v1 ||
+           law.kind == TemperatureCorrelationKind::kerosene_latent_v1) &&
           std::any_of(law.c.begin(), law.c.end(), [](double c) { return c != 0; }))
-        throw std::invalid_argument("fixed kerosene density coefficients");
+        throw std::invalid_argument("fixed kerosene phase coefficients");
     };
     correlation("density", pack.density_kg_per_m3);
     correlation("cp", pack.cp_j_per_kg_k);
@@ -273,6 +334,8 @@ LiquidAssetReport load_liquid_asset(const std::filesystem::path &path,
       if (sat.molecular_weight_kg_per_kmol !=
           candidate.vapor_molecular_weight_kg_per_kmol)
         return out;
+    } else if (token == "kerosene_v1") {
+      sat.kind = SaturationPressureCorrelationKind::kerosene_v1;
     } else
       return out;
     key("end");
@@ -347,11 +410,17 @@ LiquidEnthalpyReport evaluate_liquid_enthalpy(const LiquidAsset &asset,
       !std::isfinite(asset.reference_liquid_enthalpy_j_per_kg))
     return out;
   double cp;
-  if (!evaluate_temperature_correlation(law, t, cp) || cp <= 0)
+  if (!evaluate_temperature_correlation(law, t, cp,
+                                         LiquidPropertyRole::heat_capacity) || cp <= 0)
     return out;
   double integral = 0;
   if (law.kind == TemperatureCorrelationKind::constant)
     integral = law.c[0] * (t - asset.reference_temperature_k);
+  else if (law.kind == TemperatureCorrelationKind::kerosene_cp_v1) {
+    if (!kerosene_temperature(asset.reference_temperature_k))
+      return out;
+    integral = kerosene_enthalpy_increment(t,asset.reference_temperature_k);
+  }
   else {
     const double a = t - law.reference_temperature_k,
                  b = asset.reference_temperature_k -
@@ -373,35 +442,21 @@ LiquidEnthalpyReport evaluate_liquid_enthalpy(const LiquidAsset &asset,
 KerosenePhaseReport evaluate_kerosene_phase(double t, double p,
                                            double reference) noexcept {
   KerosenePhaseReport out;
-  constexpr double critical = 684.26, shift = 43.0, junction = 477.95;
-  constexpr double low_a = 20.4274903, low_b = 3877.38996;
-  constexpr double high_a = 21.3176792, high_b = 4264.57762;
-  constexpr double cp_a = 1.7664045e2, cp_b = 7.4680836;
-  constexpr double cp_c = -4.2123987e-3, cp_d = 1.4948931e4;
-  if (!std::isfinite(t) || !std::isfinite(p) || !std::isfinite(reference) ||
-      t <= shift || t >= critical || reference <= shift ||
-      reference >= critical || p <= 0.0)
+  if (!kerosene_temperature(t) || !kerosene_temperature(reference) ||
+      !std::isfinite(p) || p <= 0.0)
     return out;
   // Preserve the reference branch tests, including their rounded junction.
-  const bool high_temperature = t >= junction;
-  const double ps = std::exp((high_temperature ? high_a : low_a) -
-                            (high_temperature ? high_b : low_b) / (t - shift));
-  const bool high_pressure = p > std::exp(low_a - low_b / (junction - shift));
-  const double denominator = (high_pressure ? high_a : low_a) - std::log(p);
+  const double ps = kerosene_saturation(t);
+  const bool high_pressure = p > std::exp(kKeroseneLowA -
+      kKeroseneLowB / (kKeroseneJunction-kKeroseneShift));
+  const double denominator = (high_pressure ? kKeroseneHighA : kKeroseneLowA) - std::log(p);
   if (!std::isfinite(denominator) || denominator <= 0.0) return out;
-  const double boiling = shift + (high_pressure ? high_b : low_b) / denominator;
-  if (!std::isfinite(boiling) || boiling <= shift || boiling >= critical)
+  const double boiling = kKeroseneShift +
+      (high_pressure ? kKeroseneHighB : kKeroseneLowB) / denominator;
+  if (!kerosene_temperature(boiling))
     return out;
-  const double cp = cp_a + cp_b * t + cp_c * t * t + cp_d / (critical - t);
-  const double latent = 2.50183e5 * std::pow((critical - t) / (critical - 483.15), .38);
-  const double lower = std::min(t, reference), upper = std::max(t, reference);
-  const double span = upper - lower;
-  // Integrate in a canonical positive direction. This retains small dT
-  // precision and avoids cancellation of 1 + negative_ratio near critical T.
-  const double magnitude = span * (cp_a + .5 * cp_b * (lower + upper) +
-      cp_c / 3.0 * (lower * lower + lower * upper + upper * upper)) +
-      cp_d * std::log1p(span / (critical - upper));
-  const double increment = t < reference ? -magnitude : magnitude;
+  const double cp = kerosene_cp(t), latent = kerosene_latent(t);
+  const double increment = kerosene_enthalpy_increment(t,reference);
   if (!std::isfinite(ps) || !std::isfinite(cp) || cp <= 0.0 ||
       !std::isfinite(latent) || latent <= 0.0 || !std::isfinite(increment))
     return out;
@@ -636,10 +691,12 @@ FilmQueryWorkspace::query(const LiquidAsset &asset,
   const auto &latent = asset.pack.latent_heat_j_per_kg;
   const double theta =
       input.surface_temperature_k - latent.reference_temperature_k;
-  const double dlatent = latent.kind == TemperatureCorrelationKind::constant
-                             ? 0
-                             : latent.c[1] + 2 * latent.c[2] * theta +
-                                   3 * latent.c[3] * theta * theta;
+  double dlatent = 0;
+  if (latent.kind == TemperatureCorrelationKind::polynomial_cubic)
+    dlatent = latent.c[1] + 2*latent.c[2]*theta + 3*latent.c[3]*theta*theta;
+  else if (latent.kind == TemperatureCorrelationKind::kerosene_latent_v1)
+    dlatent = -.38*liquid.properties.latent_heat_j_per_kg /
+               (kKeroseneCritical-input.surface_temperature_k);
   if (!std::isfinite(residual) ||
       std::abs(residual) >
           1e-6 + 1e-9 * std::max(std::abs(vapor_h),
@@ -722,12 +779,13 @@ LiquidPropertyReport LiquidPropertyService::evaluate(
   LiquidProperties properties;
   bool evaluated = evaluate_temperature_correlation(
       selected->density_kg_per_m3, query.temperature_k,
-      properties.density_kg_per_m3, true);
+      properties.density_kg_per_m3, LiquidPropertyRole::density);
   evaluated &= evaluate_temperature_correlation(
-      selected->cp_j_per_kg_k, query.temperature_k, properties.cp_j_per_kg_k);
+      selected->cp_j_per_kg_k, query.temperature_k, properties.cp_j_per_kg_k,
+      LiquidPropertyRole::heat_capacity);
   evaluated &= evaluate_temperature_correlation(
       selected->latent_heat_j_per_kg, query.temperature_k,
-      properties.latent_heat_j_per_kg);
+      properties.latent_heat_j_per_kg, LiquidPropertyRole::latent_heat);
   evaluated &= evaluate_temperature_correlation(
       selected->surface_tension_n_per_m, query.temperature_k,
       properties.surface_tension_n_per_m);

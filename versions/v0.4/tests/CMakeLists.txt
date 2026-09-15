@@ -2523,6 +2523,13 @@ add_test(NAME v04_models_spray_density COMMAND v04_models_spray_density_test
   "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset")
 set_tests_properties(v04_models_spray_density PROPERTIES TIMEOUT 15)
 
+add_executable(v04_models_spray_caloric_test unit/models_spray_caloric_test.cpp)
+target_include_directories(v04_models_spray_caloric_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_caloric_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_caloric COMMAND v04_models_spray_caloric_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/synthetic-liquid-alpha.asset")
+set_tests_properties(v04_models_spray_caloric PROPERTIES TIMEOUT 15)
+
 add_executable(v04_models_spray_film_thick_test unit/models_spray_film_thick_test.cpp)
 target_include_directories(v04_models_spray_film_thick_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(v04_models_spray_film_thick_test PRIVATE hundun_v04_core)
