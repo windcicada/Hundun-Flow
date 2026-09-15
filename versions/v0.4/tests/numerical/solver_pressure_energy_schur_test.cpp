@@ -823,6 +823,110 @@ bool test_coupled_density_face_response() {
   return passed;
 }
 
+bool test_coupled_density_inverse_accuracy() {
+  EnthalpySpatialFixture fixture;
+  if (!make_enthalpy_spatial_fixture(fixture, MPI_COMM_SELF, true, false,
+                                     ConvectionScheme::central2, 8))
+    return false;
+  const auto n = fixture.patch.cells;
+  auto rp = shaped_field(0U, 1U, 9301U, n, 0.2);
+  auto rh = shaped_field(1U, 1U, 9302U, n, -0.4);
+  auto velocity = ghosted_components_field(2U, 1U, 9303U, n, 1U, 3U, 0.0);
+  auto coefficient = face_bundle(n, 9304U, 9305U, 1.0);
+  auto enthalpy = face_bundle(n, 9306U, 9307U, 3.0);
+  auto rhs = shaped_field(0U, 1U, 9308U, n, 0.0);
+  constexpr double speed = 0.6;
+  constexpr double mean = 1.2;
+  const double angle = 2.0 * std::acos(-1.0) / n.x;
+  const double frequency = speed * std::sin(angle);
+  for (int z = -1; z <= n.z; ++z)
+    for (int y = -1; y <= n.y; ++y)
+      for (int x = -1; x <= n.x; ++x)
+        velocity.view.unchecked({x, y, z}, 0U) = speed;
+  LinearOperatorCertificate certificate;
+  certificate.local_shape = n;
+  certificate.collective_fingerprint = 9310U;
+  certificate.identity = {9311U, 9312U, 9313U, 9314U, 9315U};
+  IdentityCertificateOperator identity(certificate);
+  detail::PressureEnergyCoupledSchur schur;
+  if (!expect(bool(schur.allocate(fixture.geometry, fixture.patch,
+              fixture.boundary, 0U, 5U, 2U, 6U, 0U, 1)) &&
+              bool(schur.bind_halo(MPI_COMM_SELF, fixture.patch, fixture.boundary)),
+              "periodic density inverse reserves its production halo"))
+    return false;
+  schur.cp = schur.ep = schur.eh = &identity;
+  schur.kernels = &fixture.kernels;
+  schur.rp = as_const(rp.view);
+  schur.rh = as_const(rh.view);
+  schur.velocity = as_const(velocity.view);
+  schur.coeff = {as_const(coefficient.x), as_const(coefficient.y), as_const(coefficient.z)};
+  schur.hface = {as_const(enthalpy.x), as_const(enthalpy.y), as_const(enthalpy.z)};
+  schur.cells([&](Int3 c, std::size_t) {
+    rhs.view.unchecked(c, 0U) = mean + std::cos(angle * c.x);
+  });
+  const auto bytes = schur.owned_payload_bytes();
+  std::array<double, 3U> errors{}, defects{};
+  bool passed = true;
+  for (std::size_t level = 0U; level < errors.size(); ++level) {
+    schur.a0 = std::ldexp(4.0, static_cast<int>(level));
+    schur.cert = certificate;
+    Status prepared, applied, closed;
+    {
+      allocation_observer::Guard guard;
+      prepared = schur.prepare();
+      if (prepared) applied = schur.inverse_ch(as_const(rhs.view));
+      closed = schur.close();
+    }
+    passed &= expect(bool(prepared) && bool(applied) && bool(closed) &&
+        allocation_observer::count.load() == 0U && schur.owned_payload_bytes() == bytes,
+        "density inverse retains its reserved capacity during time refinement");
+    if (!prepared || !applied || !closed) return false;
+    double error2 = 0.0, defect2 = 0.0, reference2 = 0.0, source2 = 0.0;
+    double mass = 0.0, recovery_error = 0.0;
+    schur.cells([&](Int3 c, std::size_t) {
+      const double cosine = std::cos(angle * c.x);
+      const double sine = std::sin(angle * c.x);
+      // Exact Fourier solution of a0*rho + u*central_gradient(rho) = rhs.
+      const double exact_wave = (schur.a0 * cosine + frequency * sine) /
+          (schur.a0 * schur.a0 + frequency * frequency);
+      const double density = schur.fields[0].unchecked(c, 0U);
+      const double error = density - mean / schur.a0 - exact_wave;
+      auto lo = c, hi = c;
+      lo.x = (c.x + n.x - 1) % n.x;
+      hi.x = (c.x + 1) % n.x;
+      // Rebuild the original row directly from periodic neighboring values.
+      const double residual = schur.a0 * density + 0.5 * speed *
+          (schur.fields[0].unchecked(hi, 0U) - schur.fields[0].unchecked(lo, 0U)) -
+          rhs.view.unchecked(c, 0U);
+      error2 += error * error;
+      defect2 += residual * residual;
+      reference2 += exact_wave * exact_wave;
+      source2 += cosine * cosine;
+      mass += density;
+      recovery_error = std::max(recovery_error, std::abs(
+          rh.view.unchecked(c, 0U) * schur.fields[5].unchecked(c, 0U) - density));
+    });
+    errors[level] = std::sqrt(error2 / reference2);
+    defects[level] = std::sqrt(defect2 / source2);
+    const double cells = static_cast<double>(n.x) * n.y * n.z;
+    passed &= expect(std::abs(schur.a0 * mass / cells - mean) < 2e-14 &&
+        recovery_error < 2e-15 && std::isfinite(errors[level]) &&
+        std::isfinite(defects[level]),
+        "density elimination preserves the periodic mean and EOS recovery");
+    if (level != 0U) {
+      const double error_order = std::log2(errors[level - 1U] / errors[level]);
+      const double defect_order = std::log2(defects[level - 1U] / defects[level]);
+      passed &= expect(std::abs(error_order - 3.0) < 1e-8 &&
+          std::abs(defect_order - 3.0) < 1e-8,
+          "fixed density inverse has third-order direction and original-row defects");
+    }
+  }
+  std::cout << "density-inverse Fourier relative-error=" << errors[0U] << '/'
+            << errors[1U] << '/' << errors[2U] << " original-row-defect="
+            << defects[0U] << '/' << defects[1U] << '/' << defects[2U] << '\n';
+  return passed;
+}
+
 bool test_exact_schur_and_recovery() {
   const Matrix continuity_pressure{{
       2.0, -1.0, 0.0,
@@ -5305,6 +5409,7 @@ int main(int argc, char** argv) {
   passed &= test_temporal_schur_preconditioner();
   passed &= test_pressure_direction_history();
   passed &= test_coupled_density_face_response();
+  passed &= test_coupled_density_inverse_accuracy();
   passed &= test_mixture_binding_replaces_faces();
   passed &= test_mass_flow_three_cell_pressure_flux_red();
   passed &= test_boundary_constant_h_and_directional_derivative();

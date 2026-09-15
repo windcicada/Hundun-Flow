@@ -345,6 +345,10 @@ public:
     return {};
   }
   // Fixed polynomial inverse, hence a linear operator at every Krylov call.
+  // With M=a0*V and A=M^-1*D, B=(I-A+A^2)*M^-1 approximates (M+D)^-1.
+  // Its unreduced continuity defect is M*A^3*M^-1*rhs, even when the
+  // reduced Schur solve reaches its Krylov tolerance. Candidate replay and
+  // the original nonlinear conservation gates decide step acceptance.
   Status inverse_ch(ConstFieldView rhs) const {
     cells([&](Int3 c, std::size_t i) {
       fields[7].unchecked(c, 0) = fluid(i) ? rhs.unchecked(c, 0) : 0;

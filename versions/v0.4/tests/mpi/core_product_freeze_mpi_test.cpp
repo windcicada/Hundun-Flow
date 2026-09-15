@@ -1204,7 +1204,9 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
   // minimum.
   // Total energy changes the original static-h trajectory: dt=.006 reaches
   // the 200 K edge already in C1; dt=.003 exercises accepted backtracking
-  // replays before the C2 refinement cap. Neither may publish a time step.
+  // replays before the C2 thermal guard. Neither may publish a time step.
+  // C2 uses a fixed approximate density inverse; its raw joint continuity
+  // defect can exceed the reduced Krylov residual in this forced-flux stress.
   const double target_dt = replay_before_rejection ? 0.003 : 0.006;
   model.time.initial_dt = target_dt;
   model.time.minimum_dt = target_dt;
@@ -1310,24 +1312,10 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
   const std::size_t reported_sample_count = std::min<std::size_t>(
       diagnostic.sample_count,
       detail::kPressureEnergyCandidateGlobalizationSampleCapacity);
-  bool smaller_admissible = false;
-  bool admissible_strict_merit_decrease = false;
   bool alpha_sequence = reported_sample_count == diagnostic.sample_count;
-  const double baseline_merit =
-      std::hypot(diagnostic.baseline_normalized_continuity,
-                 diagnostic.baseline_normalized_energy);
   for (std::size_t index = 0U; index < reported_sample_count; ++index) {
     alpha_sequence &= diagnostic.samples[index].alpha ==
                       std::ldexp(1.0, -static_cast<int>(index));
-    if (index != 0U) {
-      smaller_admissible |= diagnostic.samples[index].admissible;
-      if (diagnostic.samples[index].admissible) {
-        const double merit = std::hypot(
-            diagnostic.samples[index].normalized_continuity,
-            diagnostic.samples[index].normalized_energy);
-        admissible_strict_merit_decrease |= merit < baseline_merit;
-      }
-    }
   }
   const auto wire_double = [](double value) {
     std::uint64_t wire = 0U;
@@ -1492,12 +1480,6 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
       diagnostic.samples[0U];
   const bool first_admissible_valid =
       diagnostic.first_admissible_sample < reported_sample_count;
-  bool first_admissible_is_first = first_admissible_valid;
-  for (std::size_t index = 0U;
-       index < diagnostic.first_admissible_sample &&
-       index < reported_sample_count;
-       ++index)
-    first_admissible_is_first &= !diagnostic.samples[index].admissible;
   bool all_thermally_inadmissible = reported_sample_count ==
       detail::kPressureEnergyCandidateGlobalizationSampleCapacity;
   for (std::size_t index = 0U; index < reported_sample_count; ++index)
@@ -1506,16 +1488,101 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
         !diagnostic.samples[index].state_and_flux_finite &&
         diagnostic.samples[index].first_failure_reason ==
             detail::PressureEnergyCandidateFailureReason::thermodynamic_evaluation;
+  const auto& globalization = step.pressure_energy_globalization;
+  const auto trajectory_count = globalization.trajectory_count;
+  const auto refinement_calls = step.piso.pressure_energy_refinement_solve_calls;
+  bool accepted_replays = replay_before_rejection
+      ? globalization.valid && trajectory_count >= 2U &&
+        trajectory_count < globalization.trajectory.size() &&
+        refinement_calls == trajectory_count - 1U &&
+        step.piso.pressure_energy_refinement_termination ==
+            PressureEnergyRefinementTermination::rejected_candidate
+      : trajectory_count == 0U;
+  std::uint64_t trajectory_hash = mix(UINT64_C(1469598103934665603),
+                                      trajectory_count);
+  // The diagnostic above describes the last rejected ladder. The public
+  // trajectory preserves every earlier successful candidate and its replay.
+  for (std::size_t index = 0U;
+       index < std::min<std::size_t>(trajectory_count,
+                                    globalization.trajectory.size()); ++index) {
+    const auto& iteration = globalization.trajectory[index];
+    const auto& baseline = iteration.baseline;
+    const auto& selected = iteration.selected;
+    const std::uint8_t corrector = index == 0U ? 1U : 2U;
+    const std::uint8_t refinement = index < 2U ? 0U :
+        static_cast<std::uint8_t>(index - 1U);
+    const double baseline_merit = std::hypot(
+        baseline.global_normalized_continuity, baseline.global_normalized_energy);
+    const double selected_merit = std::hypot(
+        selected.global_normalized_continuity, selected.global_normalized_energy);
+    accepted_replays &= iteration.valid && iteration.corrector == corrector &&
+        iteration.refinement_iteration == refinement &&
+        baseline.corrector == corrector && selected.corrector == corrector &&
+        baseline.alpha == 0.0 && selected.alpha > 0.0 && selected.alpha < 1.0 &&
+        baseline.thermodynamically_admissible && baseline.state_and_flux_finite &&
+        selected.thermodynamically_admissible && selected.state_and_flux_finite &&
+        std::isfinite(baseline_merit) && std::isfinite(selected_merit) &&
+        selected_merit < baseline_merit && baseline.target_time != 0U &&
+        selected.target_time == baseline.target_time &&
+        baseline.target_time == globalization.trajectory[0U].baseline.target_time &&
+        baseline.correction_direction != 0U &&
+        selected.correction_direction == baseline.correction_direction &&
+        baseline.state_provenance != 0U && baseline.mass_flux_provenance != 0U &&
+        selected.state_provenance != 0U && selected.mass_flux_provenance != 0U &&
+        selected.state_provenance != baseline.state_provenance &&
+        selected.mass_flux_provenance != baseline.mass_flux_provenance;
+    if (index >= 2U) {
+      const auto& prior = globalization.trajectory[index - 1U];
+      accepted_replays &=
+          baseline.correction_direction != prior.baseline.correction_direction &&
+          wire_double(baseline.global_normalized_continuity) ==
+              wire_double(prior.selected.global_normalized_continuity) &&
+          wire_double(baseline.global_normalized_energy) ==
+              wire_double(prior.selected.global_normalized_energy);
+    }
+    trajectory_hash = mix(trajectory_hash, iteration.corrector);
+    trajectory_hash = mix(trajectory_hash, iteration.refinement_iteration);
+    for (const auto& sample : {baseline, selected}) {
+      trajectory_hash = mix(trajectory_hash, wire_double(sample.alpha));
+      trajectory_hash = mix(trajectory_hash, wire_double(sample.global_normalized_continuity));
+      trajectory_hash = mix(trajectory_hash, wire_double(sample.global_normalized_energy));
+      trajectory_hash = mix(trajectory_hash, sample.target_time);
+      trajectory_hash = mix(trajectory_hash, sample.correction_direction);
+      trajectory_hash = mix(trajectory_hash, sample.state_provenance);
+      trajectory_hash = mix(trajectory_hash, sample.mass_flux_provenance);
+    }
+  }
+  for (std::size_t index = trajectory_count;
+       index < globalization.trajectory.size(); ++index)
+    accepted_replays &= !globalization.trajectory[index].valid;
+  if (replay_before_rejection && trajectory_count > 0U &&
+      trajectory_count <= globalization.trajectory.size()) {
+    const auto& last = globalization.trajectory[trajectory_count - 1U].selected;
+    accepted_replays &= wire_double(diagnostic.baseline_normalized_continuity) ==
+        wire_double(last.global_normalized_continuity) &&
+        wire_double(diagnostic.baseline_normalized_energy) ==
+        wire_double(last.global_normalized_energy);
+  }
+  accepted_replays &= same_u64(trajectory_hash, MPI_COMM_WORLD);
+  bool c2_thermal_guard = reported_sample_count ==
+      detail::kPressureEnergyCandidateGlobalizationSampleCapacity;
+  for (std::size_t index = 0U; index < reported_sample_count; ++index) {
+    const auto& evaluation = globalization.candidate_evaluation_status[index];
+    c2_thermal_guard &= !diagnostic.samples[index].admissible &&
+        !diagnostic.samples[index].state_and_flux_finite &&
+        diagnostic.samples[index].first_failure_reason ==
+            detail::PressureEnergyCandidateFailureReason::production_candidate_evaluation &&
+        evaluation.code == StatusCode::rejected_step && evaluation.detail == 10415U;
+  }
   const bool stage_contract = replay_before_rejection
-      ? status.detail == 10210U && step.failed_stage == 54U &&
-        diagnostic.corrector == 2U && diagnostic.selection_valid &&
-        diagnostic.replay_valid && smaller_admissible &&
-        first_admissible_valid && first_admissible_is_first &&
-        diagnostic.first_admissible_sample > 0U &&
-        admissible_strict_merit_decrease &&
-        diagnostic.selected_alpha > 0.0 && diagnostic.selected_alpha < 1.0 &&
-        diagnostic.selected_state_provenance != 0U &&
-        diagnostic.selected_mass_flux_provenance != 0U &&
+      ? status.detail == 5792U && step.failed_stage == 53U &&
+        diagnostic.corrector == 2U && !diagnostic.selection_valid &&
+        !diagnostic.replay_valid && c2_thermal_guard && !first_admissible_valid &&
+        diagnostic.selected_alpha == 0.0 &&
+        diagnostic.selected_normalized_continuity == 0.0 &&
+        diagnostic.selected_normalized_energy == 0.0 &&
+        diagnostic.selected_state_provenance == 0U &&
+        diagnostic.selected_mass_flux_provenance == 0U &&
         full.first_failing_global_cell == std::numeric_limits<std::uint64_t>::max() &&
         full.first_failure_reason ==
             detail::PressureEnergyCandidateFailureReason::production_candidate_evaluation &&
@@ -1525,7 +1592,8 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
                    diagnostic.corrector_one_selected_normalized_energy) <
             std::hypot(diagnostic.corrector_one_baseline_normalized_continuity,
                        diagnostic.corrector_one_baseline_normalized_energy) &&
-        diagnostic.corrector_two_linear_predicted_normalized_continuity < 1.0e-8 &&
+        std::isfinite(diagnostic.corrector_two_linear_predicted_normalized_continuity) &&
+        diagnostic.corrector_two_linear_predicted_normalized_continuity >= 0.0 &&
         diagnostic.corrector_two_linear_predicted_normalized_energy < 1.0e-7
       : status.detail == 5792U && step.failed_stage == 44U &&
         diagnostic.corrector == 1U && !diagnostic.selection_valid &&
@@ -1536,7 +1604,7 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
         diagnostic.selected_normalized_energy == 0.0 &&
         diagnostic.selected_state_provenance == 0U &&
         diagnostic.selected_mass_flux_provenance == 0U;
-  const bool passed = stage_contract &&
+  const bool passed = stage_contract && accepted_replays &&
       !status && status.code == StatusCode::rejected_step && !step.accepted &&
       step.attempts == 1U && observed && diagnostic.valid &&
       diagnostic.production_candidate_loop && !diagnostic.committed &&
@@ -1621,7 +1689,9 @@ bool run_pressure_energy_candidate_globalization_red(int rank,
               << static_cast<unsigned>(full.first_failure_reason)
               << " min-p/T/rho=" << full.minimum_absolute_pressure << '/'
               << full.minimum_temperature << '/' << full.minimum_density
-              << " first-admissible=" << first_alpha << '\n';
+              << " first-admissible=" << first_alpha
+              << " accepted-replays=" << static_cast<unsigned>(trajectory_count)
+              << " replay-contract=" << accepted_replays << '\n';
   }
   if (!passed) {
     std::cerr << "rank " << rank << " candidate-globalization="
