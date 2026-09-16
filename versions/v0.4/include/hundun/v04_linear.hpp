@@ -606,7 +606,7 @@ struct FgmresRecoveryObservation {
   std::uint64_t cycle_residual_applies{};
 };
 
-inline constexpr std::size_t kReductionMaximumLocationPayload = 5U;
+inline constexpr std::size_t kReductionMaximumLocationPayload = 7U;
 
 // Deterministic max-location reduction.  Equal values select the smallest
 // global location and then the smallest rank, so the result is independent

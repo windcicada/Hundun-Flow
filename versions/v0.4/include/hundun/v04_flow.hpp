@@ -301,6 +301,8 @@ struct ConvectiveCflFailureWitness {
   // Raw sum of |mass flux| over the six control-volume faces.  Co_abs uses
   // one half of this sum.
   double absolute_mass_flow{};
+  double directional{};
+  double maximum_face_mass_flow{};
 
   bool formula_valid(double dt) const noexcept {
     const auto same = [](double left, double right) noexcept {
@@ -315,6 +317,11 @@ struct ConvectiveCflFailureWitness {
            density_volume > 0.0 && std::isfinite(outgoing_mass_flow) &&
            outgoing_mass_flow >= 0.0 &&
            std::isfinite(absolute_mass_flow) && absolute_mass_flow >= 0.0 &&
+           std::isfinite(directional) && directional >= 0.0 &&
+           std::isfinite(maximum_face_mass_flow) && maximum_face_mass_flow >= 0.0 &&
+           maximum_face_mass_flow <= absolute_mass_flow *
+               (1.0 + 64.0 * std::numeric_limits<double>::epsilon()) &&
+           same(directional, (dt / density_volume) * maximum_face_mass_flow) &&
            same(out, (dt / density_volume) * outgoing_mass_flow) &&
            same(absolute,
                 (dt / density_volume) * (0.5 * absolute_mass_flow));
@@ -400,8 +407,14 @@ struct MomentumAdvectiveCflCertificate {
   double limit{};
   ConvectiveCflFailureWitness failure_witness{};
 
+  ConvectiveCflDefinition definition{ConvectiveCflDefinition::outgoing_sum};
+  double directional_max{};
+  double admitted_max() const noexcept { return selected_cfl(definition,out_max,directional_max); }
+
   bool valid() const noexcept {
-    return plan != 0U && time != 0U && density != 0U && face_flux != 0U &&
+    return valid_cfl_definition(definition) &&
+           std::isfinite(directional_max) && directional_max >= 0.0 &&
+           plan != 0U && time != 0U && density != 0U && face_flux != 0U &&
            density_storage != 0U && density_revision_domain != 0U &&
            face_flux_storage != 0U && face_flux_revision_domain != 0U &&
            density_view_identity.valid() &&
@@ -449,7 +462,13 @@ struct CommittedConvectiveCflCertificate {
   double limit{};
   ConvectiveCflFailureWitness out_winner{};
   ConvectiveCflFailureWitness absolute_winner{};
+  // Outgoing-sum exceedance diagnostic; admission uses admitted_max().
   CommittedConvectiveCflFailureWitness failure_witness{};
+
+  ConvectiveCflDefinition definition{ConvectiveCflDefinition::outgoing_sum};
+  double directional_max{};
+  double admitted_max() const noexcept { return selected_cfl(definition,out_max,directional_max); }
+  ConvectiveCflFailureWitness directional_winner{};
 
   bool valid() const noexcept {
     constexpr double slack =
@@ -467,9 +486,15 @@ struct CommittedConvectiveCflCertificate {
              left.absolute == right.absolute &&
              left.density_volume == right.density_volume &&
              left.outgoing_mass_flow == right.outgoing_mass_flow &&
-             left.absolute_mass_flow == right.absolute_mass_flow;
+             left.absolute_mass_flow == right.absolute_mass_flow &&
+             left.directional == right.directional &&
+             left.maximum_face_mass_flow == right.maximum_face_mass_flow;
     };
-    return plan != 0U && correction_state != 0U && density != 0U &&
+    return valid_cfl_definition(definition) &&
+           std::isfinite(directional_max) && directional_max >= 0.0 &&
+           (definition != ConvectiveCflDefinition::directional_max ||
+            (directional_winner.formula_valid(dt) && directional_winner.directional == directional_max)) &&
+           plan != 0U && correction_state != 0U && density != 0U &&
            final_flux != 0U && density_storage != 0U &&
            density_revision_domain != 0U && face_flux_storage != 0U &&
            face_flux_revision_domain != 0U &&
@@ -1104,7 +1129,7 @@ class MomentumEquationPlan {
       const EquationAssemblyCertificate&, ConstFieldView, ConstFieldView,
       double, double, ConstFaceFluxView, MgDomainActivityView, EquationSystemView,
       MomentumPredictorLimiterWorkspace, HaloEngine&, ReductionEngine&,
-      MomentumPredictorLimiterReport&) noexcept;
+      MomentumPredictorLimiterReport&, ConvectiveCflDefinition) noexcept;
   friend Status solve_momentum_predictor(
       MPI_Comm, const MomentumEquationPlan&, const BoundaryPlan&, MeshPatch,
       const EquationAssemblyCertificate&, ConstFaceFluxView,
@@ -3036,6 +3061,7 @@ struct PisoTerminalAuditInput {
   Span<const std::uint8_t> active{};
   BoundaryThermophysicalGhostUse thermophysical_boundary{};
   ConservativeMassSourceView mass_source{};
+  ConvectiveCflDefinition convective_cfl_definition{ConvectiveCflDefinition::outgoing_sum};
 };
 
 struct PisoTerminalCertificate {
@@ -4642,7 +4668,8 @@ Status limit_momentum_predictor_correction(
     EquationSystemView system, MomentumPredictorLimiterWorkspace workspace,
     HaloEngine& limiter_halo,
     ReductionEngine& reductions,
-    MomentumPredictorLimiterReport& report) noexcept;
+    MomentumPredictorLimiterReport& report,
+    ConvectiveCflDefinition definition = ConvectiveCflDefinition::outgoing_sum) noexcept;
 
 // require_composition_accuracy also serves the product's conservative
 // total-energy coupling, whose h solution depends on K(U).

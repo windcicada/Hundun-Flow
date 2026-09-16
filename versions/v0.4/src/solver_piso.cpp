@@ -8693,7 +8693,7 @@ Status PressureVelocityCoupler::audit_pending_final(
       same_bdf_coefficients(input.bdf, impl.frozen_candidate_bdf) &&
       detail::bdf_matches_time_step(input.bdf, input.step_dt) &&
       std::isfinite(input.convective_cfl_limit) &&
-      input.convective_cfl_limit > 0.0 &&
+      input.convective_cfl_limit > 0.0 && valid_cfl_definition(input.convective_cfl_definition) &&
       valid_active &&
       valid_thermophysical_boundary &&
       valid_terminal_composition &&
@@ -8708,7 +8708,7 @@ Status PressureVelocityCoupler::audit_pending_final(
   };
   double local_max[7]{};
   double local_sum[5]{};
-  std::array<ReductionMaximumLocation, 2U> local_cfl_winners{};
+  std::array<ReductionMaximumLocation, 3U> local_cfl_winners{};
   Int3 local_continuity_cell{};
   bool local_continuity_location_valid = false;
   local_max[3U] = input.boundary_closure_residual;
@@ -8877,9 +8877,10 @@ Status PressureVelocityCoupler::audit_pending_final(
                   (static_cast<std::uint64_t>(global_cell.y) +
                    static_cast<std::uint64_t>(global_cells.y) *
                        static_cast<std::uint64_t>(global_cell.z));
-          const std::array<double, 5U> payload{{
+          const std::array<double, 7U> payload{{
               cell_cfl.out, cell_cfl.absolute, cell_cfl.density_volume,
-              cell_cfl.outgoing_mass_flow, cell_cfl.absolute_mass_flow}};
+              cell_cfl.outgoing_mass_flow, cell_cfl.absolute_mass_flow,
+              cell_cfl.directional_max, cell_cfl.maximum_face_mass_flow}};
           const auto select_winner = [&](std::size_t index,
                                          double value) noexcept {
             ReductionMaximumLocation& winner = local_cfl_winners[index];
@@ -8895,6 +8896,7 @@ Status PressureVelocityCoupler::audit_pending_final(
           };
           select_winner(0U, cell_cfl.out);
           select_winner(1U, cell_cfl.absolute);
+          select_winner(2U, cell_cfl.directional_max);
           local_sum[0U] += mass_contribution;
           local_sum[1U] += volume_contribution;
           local_sum[2U] += compressibility_moment;
@@ -8909,7 +8911,7 @@ Status PressureVelocityCoupler::audit_pending_final(
   if (!status) {
     return status;
   }
-  std::array<ReductionMaximumLocation, 2U> global_cfl_winners{};
+  std::array<ReductionMaximumLocation, 3U> global_cfl_winners{};
   status = reductions.checked_max_locations(
       {local_cfl_winners.data(), local_cfl_winners.size()},
       {global_cfl_winners.data(), global_cfl_winners.size()});
@@ -9044,6 +9046,8 @@ Status PressureVelocityCoupler::audit_pending_final(
     witness.density_volume = winner.payload[2U];
     witness.outgoing_mass_flow = winner.payload[3U];
     witness.absolute_mass_flow = winner.payload[4U];
+    witness.directional = winner.payload[5U];
+    witness.maximum_face_mass_flow = winner.payload[6U];
     return witness;
   };
   CommittedConvectiveCflCertificate committed_cfl;
@@ -9063,6 +9067,9 @@ Status PressureVelocityCoupler::audit_pending_final(
   committed_cfl.out_max = global_max[5U];
   committed_cfl.absolute_max = global_max[6U];
   committed_cfl.limit = input.convective_cfl_limit;
+  committed_cfl.definition = input.convective_cfl_definition;
+  committed_cfl.directional_max = global_cfl_winners[2U].value;
+  committed_cfl.directional_winner = cfl_witness(global_cfl_winners[2U]);
   committed_cfl.out_winner = cfl_witness(global_cfl_winners[0U]);
   committed_cfl.absolute_winner = cfl_witness(global_cfl_winners[1U]);
   constexpr double kCommittedCflRoundoffSlack =
@@ -9115,6 +9122,11 @@ Status PressureVelocityCoupler::audit_pending_final(
   audit = hash_mix(audit, double_bits(global_max[5U]));
   audit = hash_mix(audit, double_bits(global_max[6U]));
   audit = hash_mix(audit, double_bits(input.convective_cfl_limit));
+  if (input.convective_cfl_definition != ConvectiveCflDefinition::outgoing_sum) {
+    audit = hash_mix(audit, UINT64_C(0x43464c4445463031));
+    audit = hash_mix(audit, static_cast<std::uint8_t>(input.convective_cfl_definition));
+    audit = hash_mix(audit, double_bits(committed_cfl.directional_max));
+  }
   audit = hash_mix(audit, committed_cfl.density);
   audit = hash_mix(audit, committed_cfl.final_flux);
   audit = hash_mix(audit, committed_cfl.density_storage);

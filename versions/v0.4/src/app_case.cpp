@@ -62,6 +62,7 @@ constexpr std::uint8_t kPatchInletsWireVersion = 19U;
 constexpr std::uint8_t kCflBandWireVersion = 20U;
 constexpr std::uint8_t kSmagorinskyWireVersion = 21U;
 constexpr std::uint8_t kSprayEvaporationWireVersion = 22U;
+constexpr std::uint8_t kCflDefinitionWireVersion = 23U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -835,26 +836,30 @@ bool parse_schemes_object(yyjson_val* value, SchemeSpec& out) noexcept {
 }
 
 bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
-  const bool base_keys = object_has_exact_keys(
-          value, {"control", "scheme", "initial_dt", "minimum_dt",
-                  "maximum_dt", "convective_cfl", "viscous_cfl",
-                  "thermal_cfl", "species_cfl", "acoustic_cfl",
-                  "maximum_growth", "retry_factor", "maximum_retries",
-                  "minimum_bdf_ratio", "maximum_bdf_ratio"});
-  if (!base_keys && !object_has_exact_keys(
-          value, {"control", "scheme", "initial_dt", "minimum_dt",
-                  "maximum_dt", "convective_cfl", "viscous_cfl",
-                  "thermal_cfl", "species_cfl", "acoustic_cfl",
-                  "maximum_growth", "retry_factor", "maximum_retries",
-                  "minimum_bdf_ratio", "maximum_bdf_ratio",
-                  "convective_cfl_margin"})) {
-    return false;
+  if (!yyjson_is_obj(value)) return false;
+  const std::set<std::string_view> required{
+      "control", "scheme", "initial_dt", "minimum_dt", "maximum_dt",
+      "convective_cfl", "viscous_cfl", "thermal_cfl", "species_cfl", "acoustic_cfl",
+      "maximum_growth", "retry_factor", "maximum_retries", "minimum_bdf_ratio", "maximum_bdf_ratio"};
+  std::set<std::string_view> seen;
+  std::size_t index, count; yyjson_val *key, *entry;
+  yyjson_obj_foreach(value,index,count,key,entry) {
+    const std::string_view name{yyjson_get_str(key),yyjson_get_len(key)};
+    if (!seen.insert(name).second ||
+        (!required.count(name) && name != "convective_cfl_margin" &&
+         name != "convective_cfl_definition")) return false;
   }
-  // Existing explicit targets retain exact-target stepping when the band
-  // field is absent. New generated cases write both target and band.
+  for (auto name : required) if (!seen.count(name)) return false;
   out.convective_cfl_margin = 0.0;
-  if (!base_keys && !finite_real(yyjson_obj_get(value, "convective_cfl_margin"),
-                                out.convective_cfl_margin)) return false;
+  if (auto* band = yyjson_obj_get(value,"convective_cfl_margin"))
+    if (!finite_real(band,out.convective_cfl_margin)) return false;
+  out.convective_cfl_definition = ConvectiveCflDefinition::outgoing_sum;
+  if (yyjson_obj_get(value,"convective_cfl_definition")) {
+    const auto definition=string_value(value,"convective_cfl_definition");
+    if (definition == "directional_max")
+      out.convective_cfl_definition=ConvectiveCflDefinition::directional_max;
+    else if (definition != "outgoing_sum") return false;
+  }
   const auto control = string_value(value, "control");
   const auto scheme = string_value(value, "scheme");
   return control && scheme && parse_time_control(*control, out.control) &&
@@ -1486,7 +1491,7 @@ bool valid_time(const TimeControlSpec& time) noexcept {
       std::isfinite(time.retry_factor) &&
       std::isfinite(time.minimum_bdf_ratio) &&
       std::isfinite(time.maximum_bdf_ratio);
-  return finite_values && time.initial_dt > 0.0 && time.minimum_dt > 0.0 &&
+  return valid_cfl_definition(time.convective_cfl_definition) && finite_values && time.initial_dt > 0.0 && time.minimum_dt > 0.0 &&
          time.maximum_dt >= time.minimum_dt &&
          time.initial_dt >= time.minimum_dt &&
          time.initial_dt <= time.maximum_dt && time.convective_cfl > 0.0 &&
@@ -1559,6 +1564,10 @@ void hash_solver(Hash64& hash, const SolverSpec& value) noexcept {
 }
 
 void hash_time(Hash64& hash, const TimeControlSpec& value) noexcept {
+  if (value.convective_cfl_definition != ConvectiveCflDefinition::outgoing_sum) {
+    hash.integer(UINT64_C(0x43464c4445463031));
+    hash.integer(static_cast<std::uint8_t>(value.convective_cfl_definition));
+  }
   hash.integer(static_cast<std::uint8_t>(value.control));
   hash.integer(static_cast<std::uint8_t>(value.scheme));
   hash.real(value.initial_dt);
@@ -2422,6 +2431,10 @@ Status serialize_model(const ValidatedModel& model,
         model.solver.pressure.mg_correction_scaling !=
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
+    if (model.time.convective_cfl_definition != ConvectiveCflDefinition::outgoing_sum) {
+      writer.byte(kCflDefinitionWireVersion);
+      writer.byte(static_cast<std::uint8_t>(model.time.convective_cfl_definition));
+    }
     if (model.spray && model.spray->evaporation != spray::EvaporationModel::abramzon_sirignano) {
       writer.byte(kSprayEvaporationWireVersion);
       writer.byte(static_cast<std::uint8_t>(model.spray->evaporation));
@@ -2600,6 +2613,10 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
     if (!reader.byte(version)) return invalid_case(detail_wire);
+    std::uint8_t cfl_definition=0;
+    if (version==kCflDefinitionWireVersion &&
+        (!reader.byte(cfl_definition) || cfl_definition!=1 || !reader.byte(version)))
+      return invalid_case(detail_wire);
     const bool evaporation_wire = version == kSprayEvaporationWireVersion;
     std::uint8_t evaporation = 0;
     if (evaporation_wire &&
@@ -2646,6 +2663,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     }
 
     ValidatedModel model;
+    model.time.convective_cfl_definition=static_cast<ConvectiveCflDefinition>(cfl_definition);
     model.solver.coupling = simple_wire(version) ? CouplingKind::simple
                                                   : CouplingKind::piso;
     model.mesh.kind = static_cast<GeometryKind>(geometry);

@@ -123,6 +123,9 @@ bool valid_runtime_cfl_winner(const RuntimeConvectiveCflWinner& winner,
          winner.outgoing_mass_flow >= 0.0 &&
          std::isfinite(winner.absolute_mass_flow) &&
          winner.absolute_mass_flow >= 0.0 &&
+         std::isfinite(winner.directional) && winner.directional >= 0.0 &&
+         std::isfinite(winner.maximum_face_mass_flow) && winner.maximum_face_mass_flow >= 0.0 &&
+         same(winner.directional,(dt/winner.density_volume)*winner.maximum_face_mass_flow) &&
          same(winner.out,
               (dt / winner.density_volume) *
                   winner.outgoing_mass_flow) &&
@@ -358,7 +361,12 @@ Status validate_record(const IoServicePlan& services,
       std::isfinite(committed.out_max) && committed.out_max >= 0.0 &&
       std::isfinite(committed.abs_max) && committed.abs_max >= 0.0 &&
       std::isfinite(committed.limit) && committed.limit > 0.0 &&
-      committed.out_max <=
+      valid_cfl_definition(committed.definition) &&
+      std::isfinite(committed.directional_max) && committed.directional_max >= 0 &&
+      (committed.definition != ConvectiveCflDefinition::directional_max ||
+       (valid_runtime_cfl_winner(committed.directional_winner,committed.dt) &&
+        committed.directional_winner.directional == committed.directional_max)) &&
+      selected_cfl(committed.definition,committed.out_max,committed.directional_max) <=
           committed.limit * kConvectiveCflComparisonSlack &&
       valid_runtime_cfl_winner(committed.out_winner, committed.dt) &&
       valid_runtime_cfl_winner(committed.abs_winner, committed.dt) &&
@@ -379,7 +387,9 @@ Status validate_record(const IoServicePlan& services,
       std::isfinite(advective.abs_max) && advective.abs_max >= 0.0 &&
       std::isfinite(advective.limit) && advective.limit > 0.0 &&
       advective.limit == committed.limit && advective.dt == committed.dt &&
-      advective.out_max <=
+      advective.definition == committed.definition &&
+      std::isfinite(advective.directional_max) && advective.directional_max >= 0 &&
+      selected_cfl(advective.definition,advective.out_max,advective.directional_max) <=
           advective.limit * kConvectiveCflComparisonSlack;
   const bool valid_terminal_physical_audit =
       terminal.present && terminal.final_flux_revision != 0U &&
@@ -918,6 +928,8 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << ",\"dt\":" << record.committed_convective_cfl.dt
        << ",\"out_max\":" << record.committed_convective_cfl.out_max
        << ",\"abs_max\":" << record.committed_convective_cfl.abs_max
+       << ",\"definition\":\"" << cfl_definition_name(record.committed_convective_cfl.definition) << '"'
+       << ",\"directional_max\":" << record.committed_convective_cfl.directional_max
        << ",\"limit\":" << record.committed_convective_cfl.limit;
   const auto encode_cfl_winner = [&](std::string_view name,
                                      const RuntimeConvectiveCflWinner& winner) {
@@ -930,12 +942,15 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"density_volume\":" << winner.density_volume
          << ",\"outgoing_mass_flow\":" << winner.outgoing_mass_flow
          << ",\"absolute_mass_flow\":" << winner.absolute_mass_flow
+         << ",\"directional\":" << winner.directional
+         << ",\"maximum_face_mass_flow\":" << winner.maximum_face_mass_flow
          << '}';
   };
   encode_cfl_winner("out_winner",
                     record.committed_convective_cfl.out_winner);
   encode_cfl_winner("abs_winner",
                     record.committed_convective_cfl.abs_winner);
+  encode_cfl_winner("directional_winner",record.committed_convective_cfl.directional_winner);
   json << "}}"
        << ",\"momentum_predictor_solve_calls\":"
        << static_cast<unsigned>(record.momentum_predictor_solve_calls)
@@ -980,6 +995,8 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
        << ",\"dt\":" << record.momentum_advective_cfl.dt
        << ",\"out_max\":" << record.momentum_advective_cfl.out_max
        << ",\"abs_max\":" << record.momentum_advective_cfl.abs_max
+       << ",\"definition\":\"" << cfl_definition_name(record.momentum_advective_cfl.definition) << '"'
+       << ",\"directional_max\":" << record.momentum_advective_cfl.directional_max
        << ",\"limit\":" << record.momentum_advective_cfl.limit
        << "}}"
        << ",\"thermophysical_predictor\":{\"limited\":"

@@ -21,7 +21,7 @@ RuntimeConvectiveCflWinner runtime_cfl_winner(
           witness.absolute,
           witness.density_volume,
           witness.outgoing_mass_flow,
-          witness.absolute_mass_flow};
+          witness.absolute_mass_flow, witness.directional, witness.maximum_face_mass_flow};
 }
 
 void fingerprint_word(std::uint64_t word, std::uint64_t& hash) noexcept {
@@ -112,6 +112,9 @@ Status runtime_committed_cfl(
   runtime.out_max = certificate.out_max;
   runtime.abs_max = certificate.absolute_max;
   runtime.limit = certificate.limit;
+  runtime.definition = certificate.definition;
+  runtime.directional_max = certificate.directional_max;
+  runtime.directional_winner = runtime_cfl_winner(certificate.directional_winner);
   runtime.out_winner = runtime_cfl_winner(certificate.out_winner);
   runtime.abs_winner = runtime_cfl_winner(certificate.absolute_winner);
   return {};
@@ -150,7 +153,7 @@ Status runtime_advective_cfl(
              certificate.dt,
              certificate.out_max,
              certificate.absolute_max,
-             certificate.limit};
+             certificate.limit, certificate.definition, certificate.directional_max};
   return {};
 }
 

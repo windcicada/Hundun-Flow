@@ -1,11 +1,11 @@
 # 气相专项执行台账
 
-入口为 [gas.md](gas.md)。当前基线为 main 8235e59 加本专项本地改动。
+入口为 [gas.md](gas.md)。当前实施承接 main eba8a1b 的参考冻结与运行接口节点。
 
 | 项目 | 本次实现与证据 | 接续工作 |
 |---|---|---|
 | G0 | gas-ref.json：131 文件哈希、关键调用表；gas-cfl.json：完整 courant 例程的 259 输入对照 | 实际参考构建、算例后端与端到端计时窗口 |
-| G1 | 三种 CFL 局部指标共同计算，默认运行参数分离为 run.json | 方向指标准入／重试／Restart、逐方程时间和固定外迭代模式 |
+| G1 | CFL 定义贯通配置、准入、自适应 dt、运行证据与 Restart 方法身份；定向检查见 gas-cfl-policy.log | 逐方程时间和固定外迭代模式，非均匀场重试 |
 | G2 | Vreman 无散度反例定向回归 | ICCG、矩阵／通量、壁函数、精度及同场性能 |
 | G3 | 继承 S28–S29 动态 TCR 与恢复证据 | 原始 dyn711 八步统计与分支／重新混合对齐，8/16 场动态模型组合（TCR off 复用 S24） |
 | G4 | 继承 JL4 原时间步组合检查 | 化学筛选／任务均衡、热源／边界及实场轨迹 |
@@ -37,3 +37,8 @@ python3 tools/gas_cfl.py --float check/gc/f4/probe --double check/gc/f8/probe \
 （CN/BE 监看）、`check/gas-fault.log`（输出路径与 MPI 故障收敛 2/2）。
 `check/gas-vtk.log` 与独立 VTK 读取覆盖新版索引顺序保护；日志与
 测试目录为本地生成资产，复现入口随源码保存。
+
+G1 CFL：`check/gas-cfl-final.log` 通过原生定向检查；
+`check/gas-cfl-check.log` 的输入、MPI 广播、时间控制与 PISO 四项回归
+通过。外部证据校验器 self-test 返回成功。原版完整 courant 例程的
+259 输入比较沿用 gas-cfl.json；新增接线保持局部公式与 FP64 运算顺序。

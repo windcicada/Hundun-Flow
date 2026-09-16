@@ -1043,6 +1043,28 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
     }
 
 
+def admitted_cfl(cfl, prefix, committed=False):
+    definition = cfl.get("definition", "outgoing_sum")
+    if definition not in ("outgoing_sum", "directional_max"):
+        raise EvidenceError(f"{prefix}.CFL definition is invalid")
+    outgoing = require_nonnegative_finite_number(cfl["out_max"], prefix)
+    if definition == "outgoing_sum":
+        return outgoing
+    directional = require_nonnegative_finite_number(cfl.get("directional_max"), prefix)
+    if committed:
+        winner = require_object_fields(cfl.get("directional_winner"),
+            V6_CFL_WINNER_FIELDS + ("directional", "maximum_face_mass_flow"), prefix)
+        # Check all original mass-flux terms at the directional winner too.
+        validate_v6_cfl_winner(winner, cfl["dt"], winner["out"], "out", prefix)
+        value = require_nonnegative_finite_number(winner["directional"], prefix)
+        flux = require_nonnegative_finite_number(winner["maximum_face_mass_flow"], prefix)
+        if (value != directional or
+                not _v6_close(value, cfl["dt"] / winner["density_volume"] * flux) or
+                flux > winner["absolute_mass_flow"] * (1 + 64 * float.fromhex("0x1p-52"))):
+            raise EvidenceError(f"{prefix}.directional CFL witness drifted")
+    return directional
+
+
 def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
     if record.get("pressure_solve_contract") == "coast_cn_be":
         record["pressure_solve_contract"] = "cn_be"
@@ -1238,7 +1260,8 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
         cfl["limit"], f"{prefix}.committed CFL.limit")
     if dt == 0.0 or limit == 0.0:
         raise EvidenceError(f"{prefix}.committed CFL dt/limit must be positive")
-    if out_max > limit * (1.0 + 64.0 * float.fromhex("0x1.0p-52")):
+    admitted = admitted_cfl(cfl, prefix, committed=True)
+    if admitted > limit * (1.0 + 64.0 * float.fromhex("0x1.0p-52")):
         raise EvidenceError(f"{prefix}.committed CFL exceeds its limit")
     validate_v6_cfl_winner(cfl["out_winner"], dt, out_max, "out",
                            f"{prefix}.committed CFL.out_winner")
@@ -1333,7 +1356,7 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
     provisional_limit = require_nonnegative_finite_number(
         advective["limit"], f"{prefix}.advective CFL.limit")
     if (provisional_dt == 0.0 or provisional_limit == 0.0 or
-            provisional_out > provisional_limit *
+            admitted_cfl(advective, prefix) > provisional_limit *
             (1.0 + 64.0 * float.fromhex("0x1.0p-52"))):
         raise EvidenceError(f"{prefix}.advective CFL failed")
 
@@ -1346,7 +1369,7 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
     projection.pop("run_start")
     projection.pop("previous_committed_time")
     projection["terminal_physical_audit"]["committed_convective_cfl"] = {
-        "out_max": out_max, "abs_max": abs_max, "limit": limit,
+        "out_max": admitted, "abs_max": abs_max, "limit": limit,
     }
     legacy_advective = {
         "present": advective["present"],
@@ -1356,7 +1379,7 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
         "face_flux_revision": advective["face_flux_view_collective"],
         "activity_collective": advective["activity_collective"],
         "dt": advective["dt"],
-        "out_max": advective["out_max"],
+        "out_max": admitted_cfl(advective, prefix),
         "abs_max": advective["abs_max"],
         "limit": advective["limit"],
     }
@@ -1369,7 +1392,8 @@ def validate_v6_v8_runtime_record(record: Dict[str, Any], line_number: int,
     }
     contract = validate_v5_runtime_record(projection, line_number)
     validate_v4_refinement(projection, line_number, refinement_capacity)
-    if (not _v6_close(advective["dt"], dt) or
+    if (advective.get("definition", "outgoing_sum") != cfl.get("definition", "outgoing_sum") or
+            not _v6_close(advective["dt"], dt) or
             not _v6_close(advective["limit"], limit) or
             advective["activity_collective"] != activity):
         raise EvidenceError(f"{prefix}.provisional/committed CFL drifted")

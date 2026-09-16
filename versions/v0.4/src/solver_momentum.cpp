@@ -1194,7 +1194,8 @@ Status limit_momentum_predictor_correction(
     EquationSystemView system, MomentumPredictorLimiterWorkspace workspace,
     HaloEngine& limiter_halo,
     ReductionEngine& reductions,
-    MomentumPredictorLimiterReport& report) noexcept {
+    MomentumPredictorLimiterReport& report,
+    ConvectiveCflDefinition definition) noexcept {
   report = {};
   FieldView cell_workspace = workspace.cell_ratios;
   const std::array<FaceFluxView, 3U> face_workspace =
@@ -1256,7 +1257,7 @@ Status limit_momentum_predictor_correction(
     }
   }
   Status preflight = reductions.validate_communicator(communicator);
-  if (preflight && (communicator == MPI_COMM_NULL || cell_count == 0U ||
+  if (preflight && (!valid_cfl_definition(definition) || communicator == MPI_COMM_NULL || cell_count == 0U ||
       plan.kernels_ == nullptr || plan.kernels_->fingerprint() == 0U ||
       plan.cells().x != cells.x || plan.cells().y != cells.y ||
       plan.cells().z != cells.z || boundary.local_cells().x != cells.x ||
@@ -1427,7 +1428,7 @@ Status limit_momentum_predictor_correction(
     return sum;
   };
 
-  double local_cfl_max[2U]{};
+  double local_cfl_max[3U]{};
   Int3 local_cfl_cell{};
   double local_cfl_rho_volume = 0.0;
   double local_cfl_outgoing = 0.0;
@@ -1498,12 +1499,13 @@ Status limit_momentum_predictor_correction(
         local_cfl_max[0U] = std::max(local_cfl_max[0U], cell_cfl.out);
         local_cfl_max[1U] =
             std::max(local_cfl_max[1U], cell_cfl.absolute);
+        local_cfl_max[2U] = std::max(local_cfl_max[2U],cell_cfl.directional_max);
       }
     }
   }
-  double global_cfl_max[2U]{};
-  status = reductions.checked_max({local_cfl_max, 2U},
-                                  {global_cfl_max, 2U}, cfl_status);
+  double global_cfl_max[3U]{};
+  status = reductions.checked_max({local_cfl_max, 3U},
+                                  {global_cfl_max, 3U}, cfl_status);
   if (!status) return status;
   MomentumAdvectiveCflCertificate advective_cfl;
   advective_cfl.plan = plan.fingerprint();
@@ -1521,6 +1523,8 @@ Status limit_momentum_predictor_correction(
   advective_cfl.out_max = global_cfl_max[0U];
   advective_cfl.absolute_max = global_cfl_max[1U];
   advective_cfl.limit = convective_cfl_limit;
+  advective_cfl.definition = definition;
+  advective_cfl.directional_max = global_cfl_max[2U];
   constexpr double kCflRoundoffSlack =
       64.0 * std::numeric_limits<double>::epsilon();
   if (global_cfl_max[0U] >

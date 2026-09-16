@@ -3677,7 +3677,7 @@ Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
     to.transport_source_histories[i] = detail::product_method_history_signature(
         from.time.spec().scheme, !from.fields.scalars.empty(), from.reaction.enabled(),
         from.esf.enabled(), from.esf.tcr_history.enabled(), from.spray.enabled(),
-        !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy, revisions[i]);
+        !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy, revisions[i], from.time.spec().convective_cfl_definition);
   out = std::move(candidate);
   return {};
 } catch (const std::bad_alloc&) {
@@ -5760,6 +5760,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       ? model.smagorinsky_coefficient : 0.0;
   candidate->summary.coupling = schedule;
   candidate->summary.time_scheme = model.time.scheme;
+  candidate->summary.convective_cfl_definition = model.time.convective_cfl_definition;
   candidate->summary.fixed_thermodynamic_pressure = model.thermophysics.fixed_pressure_pa;
   candidate->summary.reaction_mode = model.reaction.mode;
   if(model.reaction.esf) {
@@ -7103,7 +7104,8 @@ Status ProductDriver::restart_expected(
       product.reaction.enabled(),
       product.esf.enabled(), product.esf.tcr_history.enabled(),
       product.spray.enabled(), !product.patch_inlets.patches.empty(),
-      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy);
+      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition);
   if (history_policy == RestartHistoryPolicy::rebuild_method_history) {
     out.compatible_method_schema = product.transport_source_schema;
     out.compatible_method_plan = product.transport_source_plan != 0U
@@ -7976,7 +7978,8 @@ Status ProductDriver::initialize_restart(
           product.reaction.enabled(),
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
-      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy));
+      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool chemistry_refinement = history_policy == RestartHistoryPolicy::refine_chemistry;
@@ -11754,7 +11757,7 @@ Status ProductDriver::Impl::execute_attempt(
                momentum_limiter_alpha,
                product.ibm_equations.has_value() ? &*product.ibm_equations : nullptr},
               product.momentum_limiter_halo, product.reductions,
-              momentum_predictor_limiter);
+              momentum_predictor_limiter, product.time.spec().convective_cfl_definition);
         if (prerequisite) {
           const MomentumAdvectiveCflCertificate& cfl =
               momentum_predictor_limiter.advective_cfl;
@@ -11773,12 +11776,13 @@ Status ProductDriver::Impl::execute_attempt(
                   momentum_activity.collective_fingerprint ||
               cfl.dt != momentum_certificate.dt ||
               momentum_certificate.dt != step.dt ||
-              cfl.limit != product.time.spec().convective_cfl_limit()) {
+              cfl.limit != product.time.spec().convective_cfl_limit() ||
+              cfl.definition != product.time.spec().convective_cfl_definition) {
             prerequisite = {StatusCode::invalid_plan,
                             kProductConvectiveCfl};
           } else {
             prerequisite = convective_cfl_acceptance_status(
-                product.time.spec().control, cfl.out_max, cfl.limit);
+                product.time.spec().control, cfl.admitted_max(), cfl.limit);
           }
         }
         // The certificate carries rank-local storage and revision-domain
@@ -15067,7 +15071,7 @@ Status ProductDriver::Impl::execute_attempt(
           // Certify the exact published pending flux, with both global CFL
           // winners carrying the terms used in the cell formula.
           const Int3 global_cells = product.geometry.global_cells();
-          std::array<ReductionMaximumLocation, 2U> local_cfl{}, global_cfl{};
+          std::array<ReductionMaximumLocation, 3U> local_cfl{}, global_cfl{};
           const std::array<std::uint8_t, 6U> active_faces{1, 1, 1, 1, 1, 1};
           double local_continuity = 0.0;
           for (int z = 0; z < cells.z && status; ++z)
@@ -15103,7 +15107,7 @@ Status ProductDriver::Impl::execute_attempt(
                     global.x;
                 for (std::size_t index = 0U; index < local_cfl.size();
                      ++index) {
-                  const double value = index == 0U ? cfl.out : cfl.absolute;
+                  const double value = index == 0U ? cfl.out : index == 1U ? cfl.absolute : cfl.directional_max;
                   auto &winner = local_cfl[index];
                   if (!winner.valid || value > winner.value ||
                       (value == winner.value && gid < winner.global_location))
@@ -15112,7 +15116,8 @@ Status ProductDriver::Impl::execute_attempt(
                               gid,
                               outer_rank,
                               {cfl.out, cfl.absolute, cfl.density_volume,
-                               cfl.outgoing_mass_flow, cfl.absolute_mass_flow}};
+                               cfl.outgoing_mass_flow, cfl.absolute_mass_flow,
+                               cfl.directional_max, cfl.maximum_face_mass_flow}};
                 }
                 const double continuity =
                     (rho - equation_state.density.accepted.unchecked(c, 0U)) *
@@ -15150,6 +15155,8 @@ Status ProductDriver::Impl::execute_attempt(
             witness.density_volume = winner.payload[2U];
             witness.outgoing_mass_flow = winner.payload[3U];
             witness.absolute_mass_flow = winner.payload[4U];
+            witness.directional = winner.payload[5U];
+            witness.maximum_face_mass_flow = winner.payload[6U];
             return witness;
           };
           auto &cfl_certificate = report.committed_convective_cfl;
@@ -15174,6 +15181,9 @@ Status ProductDriver::Impl::execute_attempt(
           cfl_certificate.out_max = global_cfl[0U].value;
           cfl_certificate.absolute_max = global_cfl[1U].value;
           cfl_certificate.limit = product.time.spec().convective_cfl_limit();
+          cfl_certificate.definition = product.time.spec().convective_cfl_definition;
+          cfl_certificate.directional_max = global_cfl[2U].value;
+          cfl_certificate.directional_winner = cfl_witness(global_cfl[2U]);
           cfl_certificate.out_winner = cfl_witness(global_cfl[0U]);
           cfl_certificate.absolute_winner = cfl_witness(global_cfl[1U]);
           if (cfl_certificate.out_max >
@@ -15193,7 +15203,7 @@ Status ProductDriver::Impl::execute_attempt(
           report.committed_convective_cfl_limit = cfl_certificate.limit;
           report.final_flux_revision = cold_final_flux.revision;
           status = convective_cfl_acceptance_status(product.time.spec().control,
-                                                    cfl_certificate.out_max,
+                                                    cfl_certificate.admitted_max(),
                                                     cfl_certificate.limit);
           if (!status)
             return status;
@@ -21031,6 +21041,7 @@ Status ProductDriver::Impl::execute_attempt(
   audit.bdf = effective_bdf;
   audit.step_dt = step.dt;
   audit.convective_cfl_limit = product.time.spec().convective_cfl_limit();
+  audit.convective_cfl_definition = product.time.spec().convective_cfl_definition;
   audit.mass_source = coupled_mass_source;
   audit.closed_mass_target = attempt_closed_mass_target;
   audit.boundary_closure_residual = local_boundary_closure_residual;
@@ -21058,7 +21069,7 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) {
     status = convective_cfl_acceptance_status(
         product.time.spec().control,
-        report.committed_convective_cfl_out_max,
+        report.committed_convective_cfl.admitted_max(),
         report.committed_convective_cfl_limit);
   }
   const RevisionSourceId pressure_reference_revision_source =
@@ -21638,7 +21649,8 @@ Status ProductDriver::constrain_convective_time_limit(
             local = {StatusCode::numerical_failure, kProductConvectiveCfl};
             break;
           }
-          maximum_rate = std::max(maximum_rate, cfl.out);
+          maximum_rate = std::max(maximum_rate, selected_cfl(
+              product.time.spec().convective_cfl_definition,cfl.out,cfl.directional_max));
         }
     local = product.reductions.consensus(local);
     if (!local) return local;
@@ -22358,7 +22370,8 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
           product.reaction.enabled(),
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
-      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy)};
+      product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition)};
   out.cell_records = product.spray.enabled()
                          ? product.spray.history.snapshot()
                          : product.esf.tcr_history.snapshot();

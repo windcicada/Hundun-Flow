@@ -202,7 +202,8 @@ Status TimeSchemePlan::compile(const TimeControlSpec& spec,
   const bool valid_scheme =
       static_cast<std::uint8_t>(spec.scheme) <=
       static_cast<std::uint8_t>(TimeScheme::cn_be);
-  if (!valid_control || !valid_scheme || !finite_positive(spec.initial_dt) ||
+  if (!valid_cfl_definition(spec.convective_cfl_definition) ||
+      !valid_control || !valid_scheme || !finite_positive(spec.initial_dt) ||
       !finite_positive(spec.minimum_dt) ||
       !finite_positive(spec.maximum_dt) ||
       spec.minimum_dt > spec.initial_dt ||
@@ -246,6 +247,10 @@ Status TimeSchemePlan::compile(const TimeControlSpec& spec,
   if (spec.convective_cfl_margin > 0.0) {
     hash = hash_mix(hash, UINT64_C(0x43464c42414e4431));
     hash = hash_mix(hash, double_bits(spec.convective_cfl_margin));
+  }
+  if (spec.convective_cfl_definition != ConvectiveCflDefinition::outgoing_sum) {
+    hash = hash_mix(hash, UINT64_C(0x43464c4445463031));
+    hash = hash_mix(hash, static_cast<std::uint8_t>(spec.convective_cfl_definition));
   }
   candidate.fingerprint_ = hash == 0U ? 1U : hash;
   out = candidate;

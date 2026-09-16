@@ -37,6 +37,7 @@ struct PlanSummary {
   double smagorinsky_coefficient{};
   CouplingKind coupling{CouplingKind::piso};
   TimeScheme time_scheme{TimeScheme::backward_euler};
+  ConvectiveCflDefinition convective_cfl_definition{ConvectiveCflDefinition::outgoing_sum};
   double fixed_thermodynamic_pressure{};
   Int3 global_cells{};
   Int3 local_cells{};

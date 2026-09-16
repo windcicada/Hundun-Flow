@@ -32,7 +32,9 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
                                  bool inlet_patches = false,
                                  bool cold_unity_lewis = false,
                                  ColdHistoryRevision cold_revision =
-                                     ColdHistoryRevision::pressure_coupled) noexcept {
+                                     ColdHistoryRevision::pressure_coupled,
+                                 ConvectiveCflDefinition cfl_definition =
+                                     ConvectiveCflDefinition::outgoing_sum) noexcept {
   std::uint64_t hash = UINT64_C(1469598103934665603);
   const std::string_view method = scheme == TimeScheme::cn_be
       ? "hundun-cold-history-v1;CN-midpoint-momentum-BE-mass-energy-species-v1;"
@@ -120,6 +122,11 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
     }
   if (inlet_patches)
     for (char byte : std::string_view(";labelled-mass-inlets-v2;ibm-prescribed-state-convection-v2")) {
+      hash ^= static_cast<unsigned char>(byte);
+      hash *= UINT64_C(1099511628211);
+    }
+  if (cfl_definition == ConvectiveCflDefinition::directional_max)
+    for (char byte : std::string_view(";directional-max-cfl-admission-v1")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }

@@ -262,6 +262,8 @@ int main(int argc, char* argv[]) {
                 << " time_scheme="
                 << (report.summary.time_scheme == hundun::v04::TimeScheme::cn_be
                         ? "cn_be" : "backward_euler")
+                << " cfl_definition="
+                << hundun::v04::cfl_definition_name(report.summary.convective_cfl_definition)
                 << " coupling="
                 << (report.summary.coupling == hundun::v04::CouplingKind::outer_corrected
                         ? "outer_corrected"
@@ -539,6 +541,16 @@ int main(int argc, char* argv[]) {
         }
         const hundun::v04::CommittedConvectiveCflCertificate& committed_cfl =
             report.piso.committed_convective_cfl;
+        if (committed_cfl.valid()) {
+          std::cerr << " cfl_definition=" << hundun::v04::cfl_definition_name(committed_cfl.definition)
+                    << " committed_cfl_directional=" << committed_cfl.directional_max;
+          const auto& winner = committed_cfl.directional_winner;
+          if (winner.valid)
+            std::cerr << " committed_cfl_directional_winner="
+                      << winner.global_cell.x << ',' << winner.global_cell.y << ','
+                      << winner.global_cell.z << '/' << winner.rank << '/'
+                      << winner.directional << '/' << winner.maximum_face_mass_flow;
+        }
         if (committed_cfl.failure_witness.valid) {
           const auto emit_committed_winner = [&](
               const char* label,
@@ -562,6 +574,8 @@ int main(int argc, char* argv[]) {
               report.momentum_predictor_limiter.advective_cfl;
           std::cerr << " advective_cfl_out=" << cfl.out_max
                     << " advective_cfl_abs=" << cfl.absolute_max
+                    << " advective_cfl_directional=" << cfl.directional_max
+                    << " advective_cfl_definition=" << hundun::v04::cfl_definition_name(cfl.definition)
                     << " advective_cfl_limit=" << cfl.limit
                     << " advective_cfl_flux_revision=" << cfl.face_flux;
           if (cfl.failure_witness.valid)

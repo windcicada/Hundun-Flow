@@ -35,6 +35,7 @@ struct CellConvectiveCflResult {
   double out{};
   double absolute{};
   double directional_max{};
+  double maximum_face_mass_flow{};
 };
 
 CellConvectiveCflStatus evaluate_cell_convective_cfl(

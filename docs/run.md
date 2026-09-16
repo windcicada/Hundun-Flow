@@ -55,3 +55,15 @@ CFL 数值及定义、方程残差、迭代次数和最大进程推进壁钟时�
 网格、方法／模型历史身份和文件校验结果。默认逐文件流式核对校验和，
 工作缓冲区为 64 KiB；`--metadata-only` 读取并核对清单。
 具体算例的模型兼容性由原生恢复入口结合 case.json 检查。
+
+气相时间配置支持 `time.convective_cfl_definition`：`outgoing_sum` 为
+单元向外面质量通量之和，`directional_max` 为六个面质量通量绝对值
+的最大值；两者均乘以 `dt/(rho*V)`。原版气相对齐输入显式选用
+`directional_max`，既有输入延续 `outgoing_sum`。目标及浮动范围由
+`convective_cfl`、`convective_cfl_margin` 控制，推荐 0.30 和 0.05。
+
+`hundun check`、接受步摘要和运行证据报告实际定义。监看同时记录
+向外通量和、绝对通量和及方向最大值；准入和自适应 dt 使用所选指标。
+固定 dt 超过所选上限时返回定位信息；自适应尝试超过上限时沿统一
+回退／重试流程处理。Restart 的方法历史签名携带 CFL 定义，原生
+连续恢复沿用来源定义。

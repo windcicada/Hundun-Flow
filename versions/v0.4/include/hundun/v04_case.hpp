@@ -347,6 +347,20 @@ struct SolverSpec {
   std::optional<ColdStoppingSpec> cold_stopping;
 };
 
+enum class ConvectiveCflDefinition : std::uint8_t { outgoing_sum, directional_max };
+inline bool valid_cfl_definition(ConvectiveCflDefinition definition) noexcept {
+  return definition == ConvectiveCflDefinition::outgoing_sum ||
+         definition == ConvectiveCflDefinition::directional_max;
+}
+inline const char* cfl_definition_name(ConvectiveCflDefinition definition) noexcept {
+  return definition == ConvectiveCflDefinition::directional_max
+      ? "directional_max" : "outgoing_sum";
+}
+inline double selected_cfl(ConvectiveCflDefinition definition, double outgoing,
+                           double directional) noexcept {
+  return definition == ConvectiveCflDefinition::directional_max ? directional : outgoing;
+}
+
 struct TimeControlSpec {
   TimeControlKind control{TimeControlKind::adaptive_flow};
   TimeScheme scheme{TimeScheme::cn_be};
@@ -366,6 +380,7 @@ struct TimeControlSpec {
   // Optional symmetric deadband around the convective target. Zero retains
   // exact-target stepping; positive values keep dt while CFL is in the band.
   double convective_cfl_margin{0.05};
+  ConvectiveCflDefinition convective_cfl_definition{ConvectiveCflDefinition::outgoing_sum};
 
   double convective_cfl_limit() const noexcept {
     return convective_cfl + convective_cfl_margin;

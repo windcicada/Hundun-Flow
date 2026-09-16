@@ -889,6 +889,8 @@ static Status run_application(MPI_Comm communicator,
                 << step.momentum_predictor_limiter.advective_cfl.absolute_max
                 << " advective_cfl_limit="
                 << step.momentum_predictor_limiter.advective_cfl.limit
+                << " cfl_definition=" << cfl_definition_name(model.time.convective_cfl_definition)
+                << " committed_cfl_directional=" << step.piso.committed_convective_cfl.directional_max
                 << " committed_cfl_out="
                 << step.piso.committed_convective_cfl_out_max
                 << " committed_cfl_abs="
@@ -927,7 +929,12 @@ static Status run_application(MPI_Comm communicator,
         payload << std::setprecision(17)
             << "{\"dt\":" << step.proposal.dt
             << ",\"seconds\":" << maximum_nanoseconds*1e-9
-            << ",\"timing_scope\":\"max_rank_advance\",\"cfl_definition\":\"outgoing_sum\""
+            << ",\"timing_scope\":\"max_rank_advance\",\"cfl_definition\":\""
+            << cfl_definition_name(model.time.convective_cfl_definition) << '"'
+            << ",\"advective_convective_cfl_directional\":"
+            << step.momentum_predictor_limiter.advective_cfl.directional_max
+            << ",\"committed_convective_cfl_directional\":"
+            << step.piso.committed_convective_cfl.directional_max
             << ",\"outer_iterations\":" << step.piso.cold.outer_iterations
             << ",\"momentum_iterations\":" << step.piso.cold.momentum_iterations
             << ",\"pressure_iterations\":" << step.piso.cold.pressure_iterations

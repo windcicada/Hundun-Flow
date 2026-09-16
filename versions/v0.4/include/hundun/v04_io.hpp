@@ -433,6 +433,8 @@ struct RuntimeConvectiveCflWinner {
   double density_volume{};
   double outgoing_mass_flow{};
   double absolute_mass_flow{};
+  double directional{};
+  double maximum_face_mass_flow{};
 };
 
 struct RuntimeCommittedConvectiveCflAudit {
@@ -453,6 +455,9 @@ struct RuntimeCommittedConvectiveCflAudit {
   double limit{};
   RuntimeConvectiveCflWinner out_winner{};
   RuntimeConvectiveCflWinner abs_winner{};
+  ConvectiveCflDefinition definition{ConvectiveCflDefinition::outgoing_sum};
+  double directional_max{};
+  RuntimeConvectiveCflWinner directional_winner{};
 };
 
 struct RuntimeAdvectiveCflAudit {
@@ -466,6 +471,8 @@ struct RuntimeAdvectiveCflAudit {
   double out_max{};
   double abs_max{};
   double limit{};
+  ConvectiveCflDefinition definition{ConvectiveCflDefinition::outgoing_sum};
+  double directional_max{};
 };
 
 // Runtime candidate identity contains only immutable content digests.  Paths,

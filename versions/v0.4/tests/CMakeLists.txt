@@ -2709,3 +2709,9 @@ if(HUNDUN_V04_PYTHON_EXECUTABLE)
 endif()
 add_executable(v04_gas_cfl_probe integration/gas_cfl_probe.cpp)
 target_link_libraries(v04_gas_cfl_probe PRIVATE hundun_v04_core)
+
+add_test(NAME v04_gas_cfl_policy_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_cfl_policy_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
+set_tests_properties(v04_gas_cfl_policy_cli PROPERTIES PROCESSORS 4 TIMEOUT 180 RUN_SERIAL TRUE)

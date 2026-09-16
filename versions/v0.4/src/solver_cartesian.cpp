@@ -167,6 +167,7 @@ CellConvectiveCflStatus evaluate_cell_convective_cfl(
   double maximum_face=0.0;
   for(double flux:face_flux)maximum_face=std::max(maximum_face,std::abs(flux));
   candidate.directional_max=scale*maximum_face;
+  candidate.maximum_face_mass_flow=maximum_face;
   if (!std::isfinite(candidate.density_volume) ||
       !(candidate.density_volume > 0.0) ||
       !std::isfinite(candidate.outgoing_mass_flow) ||
@@ -174,7 +175,8 @@ CellConvectiveCflStatus evaluate_cell_convective_cfl(
       !std::isfinite(candidate.absolute_mass_flow) ||
       candidate.absolute_mass_flow < 0.0 || !std::isfinite(candidate.out) ||
       candidate.out < 0.0 || !std::isfinite(candidate.absolute) ||
-      candidate.absolute < 0.0) {
+      candidate.absolute < 0.0 || !std::isfinite(candidate.directional_max) ||
+      candidate.directional_max < 0.0) {
     return CellConvectiveCflStatus::nonphysical_state;
   }
   result = candidate;
