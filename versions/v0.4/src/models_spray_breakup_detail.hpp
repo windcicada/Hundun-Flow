@@ -67,8 +67,8 @@ struct BreakupConservationReport {
   double maximum_child_temperature_k{};
 
   // Multiplicity is physical droplet count represented by computational
-  // parcels.  It increases as d_parent^3/d_child^3; equality with the parent
-  // multiplicity is neither expected nor claimed.
+  // parcels. Uniform splits scale as d_parent^3/d_child^3; complementary
+  // binary splits carry twice the parent multiplicity in total.
   double parent_multiplicity{};
   double expected_children_total_multiplicity{};
   double children_total_multiplicity{};
@@ -113,6 +113,22 @@ struct BreakupChildReport {
 
 [[nodiscard]] BreakupChildReport generate_supplied_diameter_children(
     const BreakupChildInput& input) noexcept;
+
+// Two complementary daughter volumes, each with the parent's multiplicity.
+// Parcel age remains time since injection; model exposure clocks are separate
+// SgsBreakupHistory state initialized by the event owner at joint commit.
+struct SgsChildInput {
+  SprayParcelState parent{};
+  SgsBreakupReport trigger{};
+  std::uint64_t accepted_step{};
+  std::uint64_t breakup_ordinal{};
+  double liquid_density_kg_per_m3{};
+  double surface_tension_n_per_m{};
+  double liquid_absolute_thermochemical_enthalpy_j_per_kg{};
+};
+
+[[nodiscard]] BreakupChildReport generate_sgs_children(
+    const SgsChildInput& input) noexcept;
 
 // O'Rourke/Amsden (1987), LA-UR-87-2105-Rev, equations 14, 19--22.
 // K=10/3, Cb=1/2, Ck=8, y=1. Equal-size representatives replace the

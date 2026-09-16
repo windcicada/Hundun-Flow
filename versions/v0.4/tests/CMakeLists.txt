@@ -558,6 +558,7 @@ foreach(spray_slice IN ITEMS breakup mechanics source transfer events thick)
 endforeach()
 
 add_executable(v04_models_spray_sgs_test unit/models_spray_sgs_test.cpp)
+target_include_directories(v04_models_spray_sgs_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(v04_models_spray_sgs_test PRIVATE hundun_v04_core)
 add_test(NAME v04_models_spray_sgs COMMAND v04_models_spray_sgs_test
   "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sgs-breakup.dat")

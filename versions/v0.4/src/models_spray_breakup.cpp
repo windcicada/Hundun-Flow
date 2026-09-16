@@ -51,13 +51,14 @@ bool parent_geometry_consistent(const SprayParcelState& parent,
                           kAbsoluteMassToleranceKg);
 }
 
-ParcelId child_id(const BreakupChildInput& input,
+ParcelId child_id(const SprayParcelState& parent, std::uint64_t accepted_step,
+                  std::uint64_t breakup_ordinal,
                   std::uint32_t child_index) noexcept {
   ParcelRandomAddress address;
-  address.seed = input.parent.id.high;
-  address.accepted_step = input.accepted_step;
-  address.stream_identity = input.parent.id.low;
-  address.ordinal = input.breakup_ordinal;
+  address.seed = parent.id.high;
+  address.accepted_step = accepted_step;
+  address.stream_identity = parent.id.low;
+  address.ordinal = breakup_ordinal;
   address.purpose = ParcelRandomPurpose::breakup_child;
   const std::uint64_t first_lane =
       static_cast<std::uint64_t>(child_index) * 2U;
@@ -111,6 +112,167 @@ bool finite_conservation(const BreakupConservationReport& budget) noexcept {
   return finite_vector(budget.parent_total_momentum_kg_m_per_s) &&
          finite_vector(budget.children_total_momentum_kg_m_per_s) &&
          finite_vector(budget.momentum_residual_kg_m_per_s);
+}
+
+// Shared audit for equal and unequal children. Surface energy is an explicit
+// ledger alongside the preserved bulk kinetic energy and absolute enthalpy.
+BreakupChildReport audit_children(
+    const SprayParcelState& parent, double surface_tension_n_per_m,
+    double liquid_enthalpy_j_per_kg, double deformation_energy_per_droplet_j,
+    double expected_children_multiplicity, BreakupChildReport report) noexcept {
+  const double parent_total_mass = parent.droplet_mass_kg * parent.multiplicity;
+  BreakupConservationReport& budget = report.conservation;
+  budget.parent_total_mass_kg = parent_total_mass;
+  budget.parent_multiplicity = parent.multiplicity;
+  budget.expected_children_total_multiplicity =
+      expected_children_multiplicity;
+  budget.parent_temperature_k = parent.temperature_k;
+  budget.minimum_child_temperature_k =
+      std::numeric_limits<double>::infinity();
+  budget.maximum_child_temperature_k = 0.0;
+
+  long double children_mass = 0.0L;
+  std::array<long double, 3U> children_momentum{};
+  long double children_kinetic = 0.0L;
+  long double children_enthalpy = 0.0L;
+  long double children_multiplicity = 0.0L;
+  long double children_surface = 0.0L;
+  for (std::uint32_t index = 0U; index < report.candidate.child_count;
+       ++index) {
+    const SprayParcelState& child = report.candidate.children[index];
+    const long double represented_mass =
+        static_cast<long double>(child.droplet_mass_kg) *
+        static_cast<long double>(child.multiplicity);
+    children_mass += represented_mass;
+    const double speed_squared =
+        dot(child.velocity_m_per_s, child.velocity_m_per_s);
+    children_kinetic += 0.5L * represented_mass *
+                        static_cast<long double>(speed_squared);
+    children_enthalpy +=
+        represented_mass *
+        static_cast<long double>(
+            liquid_enthalpy_j_per_kg);
+    children_multiplicity +=
+        static_cast<long double>(child.multiplicity);
+    children_surface +=
+        static_cast<long double>(child.multiplicity) *
+        static_cast<long double>(surface_tension_n_per_m) *
+        static_cast<long double>(kPi) *
+        static_cast<long double>(child.droplet_diameter_m) *
+        static_cast<long double>(child.droplet_diameter_m);
+    for (std::size_t component = 0U; component < 3U; ++component) {
+      children_momentum[component] +=
+          represented_mass *
+          static_cast<long double>(child.velocity_m_per_s[component]);
+    }
+    budget.minimum_child_temperature_k =
+        std::min(budget.minimum_child_temperature_k, child.temperature_k);
+    budget.maximum_child_temperature_k =
+        std::max(budget.maximum_child_temperature_k, child.temperature_k);
+  }
+
+  budget.children_total_mass_kg = static_cast<double>(children_mass);
+  budget.mass_residual_kg =
+      budget.children_total_mass_kg - budget.parent_total_mass_kg;
+  const double parent_speed_squared =
+      dot(parent.velocity_m_per_s, parent.velocity_m_per_s);
+  budget.parent_bulk_kinetic_energy_j =
+      0.5 * parent_total_mass * parent_speed_squared;
+  budget.children_bulk_kinetic_energy_j =
+      static_cast<double>(children_kinetic);
+  budget.bulk_kinetic_energy_residual_j =
+      budget.children_bulk_kinetic_energy_j -
+      budget.parent_bulk_kinetic_energy_j;
+  budget.parent_thermochemical_enthalpy_j =
+      parent_total_mass *
+      liquid_enthalpy_j_per_kg;
+  budget.children_thermochemical_enthalpy_j =
+      static_cast<double>(children_enthalpy);
+  budget.thermochemical_enthalpy_residual_j =
+      budget.children_thermochemical_enthalpy_j -
+      budget.parent_thermochemical_enthalpy_j;
+  budget.children_total_multiplicity =
+      static_cast<double>(children_multiplicity);
+  budget.multiplicity_residual =
+      budget.children_total_multiplicity -
+      budget.expected_children_total_multiplicity;
+  for (std::size_t component = 0U; component < 3U; ++component) {
+    budget.parent_total_momentum_kg_m_per_s[component] =
+        parent_total_mass * parent.velocity_m_per_s[component];
+    budget.children_total_momentum_kg_m_per_s[component] =
+        static_cast<double>(children_momentum[component]);
+    budget.momentum_residual_kg_m_per_s[component] =
+        budget.children_total_momentum_kg_m_per_s[component] -
+        budget.parent_total_momentum_kg_m_per_s[component];
+  }
+
+  budget.parent_spherical_surface_energy_j =
+      parent.multiplicity * surface_tension_n_per_m * kPi *
+      parent.droplet_diameter_m * parent.droplet_diameter_m;
+  budget.children_spherical_surface_energy_j =
+      static_cast<double>(children_surface);
+  budget.surface_energy_increase_j =
+      budget.children_spherical_surface_energy_j -
+      budget.parent_spherical_surface_energy_j;
+  budget.supplied_deformation_energy_j =
+      deformation_energy_per_droplet_j *
+      parent.multiplicity;
+  budget.unassigned_deformation_energy_j =
+      budget.supplied_deformation_energy_j -
+      budget.surface_energy_increase_j;
+  const double energy_tolerance =
+      kAbsoluteEnergyToleranceJ +
+      kRelativeTolerance *
+          (std::abs(budget.supplied_deformation_energy_j) +
+           std::abs(budget.surface_energy_increase_j));
+  if (std::abs(budget.unassigned_deformation_energy_j) <=
+      energy_tolerance) {
+    budget.energy_disposition = BreakupEnergyDisposition::balanced;
+  } else if (budget.unassigned_deformation_energy_j < 0.0) {
+    budget.energy_disposition =
+        BreakupEnergyDisposition::supplied_deformation_energy_deficit;
+  } else {
+    budget.energy_disposition =
+        BreakupEnergyDisposition::supplied_deformation_energy_surplus;
+  }
+
+  if (!finite_conservation(budget)) {
+    return failure(BreakupChildStatus::non_finite_output);
+  }
+  bool conservative = within_tolerance(
+      budget.mass_residual_kg, budget.children_total_mass_kg,
+      budget.parent_total_mass_kg, kAbsoluteMassToleranceKg);
+  conservative &= within_tolerance(
+      budget.bulk_kinetic_energy_residual_j,
+      budget.children_bulk_kinetic_energy_j,
+      budget.parent_bulk_kinetic_energy_j, kAbsoluteEnergyToleranceJ);
+  conservative &= within_tolerance(
+      budget.thermochemical_enthalpy_residual_j,
+      budget.children_thermochemical_enthalpy_j,
+      budget.parent_thermochemical_enthalpy_j,
+      kAbsoluteEnergyToleranceJ);
+  conservative &= within_tolerance(
+      budget.multiplicity_residual,
+      budget.children_total_multiplicity,
+      budget.expected_children_total_multiplicity,
+      std::numeric_limits<double>::epsilon());
+  conservative &=
+      budget.minimum_child_temperature_k == parent.temperature_k &&
+      budget.maximum_child_temperature_k == parent.temperature_k;
+  for (std::size_t component = 0U; component < 3U; ++component) {
+    conservative &= within_tolerance(
+        budget.momentum_residual_kg_m_per_s[component],
+        budget.children_total_momentum_kg_m_per_s[component],
+        budget.parent_total_momentum_kg_m_per_s[component],
+        kAbsoluteMomentumToleranceKgMPerS);
+  }
+  if (!conservative) {
+    return failure(BreakupChildStatus::conservation_failure);
+  }
+
+  report.candidate.available = true;
+  report.status = BreakupChildStatus::success;
+  return report;
 }
 
 }  // namespace
@@ -178,7 +340,8 @@ BreakupChildReport generate_supplied_diameter_children(
   for (std::uint32_t index = 0U; index < parameters.child_parcel_count;
        ++index) {
     SprayParcelState child = input.parent;
-    child.id = child_id(input, index);
+    child.id = child_id(input.parent, input.accepted_step,
+                        input.breakup_ordinal, index);
     if ((child.id.high == 0U && child.id.low == 0U) ||
         child.id == input.parent.id) {
       return failure(BreakupChildStatus::child_id_collision);
@@ -197,157 +360,97 @@ BreakupChildReport generate_supplied_diameter_children(
     report.candidate.children[index] = child;
   }
 
-  BreakupConservationReport& budget = report.conservation;
-  budget.parent_total_mass_kg = parent_total_mass;
-  budget.parent_multiplicity = input.parent.multiplicity;
-  budget.expected_children_total_multiplicity =
-      expected_children_multiplicity;
-  budget.parent_temperature_k = input.parent.temperature_k;
-  budget.minimum_child_temperature_k =
-      std::numeric_limits<double>::infinity();
-  budget.maximum_child_temperature_k = 0.0;
+  return audit_children(input.parent, parameters.surface_tension_n_per_m,
+      parameters.liquid_absolute_thermochemical_enthalpy_j_per_kg,
+      parameters.supplied_deformation_energy_per_parent_droplet_j,
+      expected_children_multiplicity, report);
+}
 
-  long double children_mass = 0.0L;
-  std::array<long double, 3U> children_momentum{};
-  long double children_kinetic = 0.0L;
-  long double children_enthalpy = 0.0L;
-  long double children_multiplicity = 0.0L;
-  long double children_surface = 0.0L;
-  for (std::uint32_t index = 0U; index < parameters.child_parcel_count;
-       ++index) {
-    const SprayParcelState& child = report.candidate.children[index];
-    const long double represented_mass =
-        static_cast<long double>(child.droplet_mass_kg) *
-        static_cast<long double>(child.multiplicity);
-    children_mass += represented_mass;
-    const double speed_squared =
-        dot(child.velocity_m_per_s, child.velocity_m_per_s);
-    children_kinetic += 0.5L * represented_mass *
-                        static_cast<long double>(speed_squared);
-    children_enthalpy +=
-        represented_mass *
-        static_cast<long double>(
-            parameters.liquid_absolute_thermochemical_enthalpy_j_per_kg);
-    children_multiplicity +=
-        static_cast<long double>(child.multiplicity);
-    children_surface +=
-        static_cast<long double>(child.multiplicity) *
-        static_cast<long double>(parameters.surface_tension_n_per_m) *
-        static_cast<long double>(kPi) *
-        static_cast<long double>(child.droplet_diameter_m) *
-        static_cast<long double>(child.droplet_diameter_m);
-    for (std::size_t component = 0U; component < 3U; ++component) {
-      children_momentum[component] +=
-          represented_mass *
-          static_cast<long double>(child.velocity_m_per_s[component]);
+BreakupChildReport generate_sgs_children(const SgsChildInput& input) noexcept {
+  const auto fail = [](BreakupChildStatus status) {
+    auto report = failure(status);
+    report.model_id = "conservative_sgs_binary_split_v1";
+    return report;
+  };
+  const auto& trigger = input.trigger;
+  const auto& history = trigger.candidate;
+  const double positive[]{input.liquid_density_kg_per_m3,
+                          input.surface_tension_n_per_m};
+  for (double value : positive) {
+    if (!std::isfinite(value) || !(value > 0.0))
+      return fail(BreakupChildStatus::invalid_input);
+  }
+  const double diagnostics[]{history.mean_dissipation_m2_per_s3,
+      history.dissipation_age_s, history.mean_rate_per_s, history.rate_age_s,
+      trigger.weber_number, trigger.critical_diameter_m,
+      trigger.kolmogorov_length_m, trigger.deterministic_rate_per_s,
+      trigger.stochastic_rate_per_s, trigger.minimum_diameter_ratio,
+      trigger.maximum_diameter_ratio, trigger.distribution_lambda};
+  for (double value : diagnostics) {
+    if (!std::isfinite(value) || value < 0.0)
+      return fail(BreakupChildStatus::invalid_input);
+  }
+  if (validate_parcel_state(input.parent) != ParcelStateStatus::success ||
+      !std::isfinite(input.liquid_absolute_thermochemical_enthalpy_j_per_kg) ||
+      !trigger.succeeded() ||
+      trigger.model_id != "deterministic_sgs_martinez_bazan_20_v1" ||
+      history.poisson_multiplier > 7U) {
+    return fail(BreakupChildStatus::invalid_input);
+  }
+  if (!trigger.breakup_requested)
+    return fail(BreakupChildStatus::breakup_not_requested);
+  if (!trigger.rate_active || history.poisson_multiplier == 0U ||
+      !(history.mean_rate_per_s > 0.0) ||
+      !(history.rate_age_s >= 1.0 /
+          (history.poisson_multiplier * history.mean_rate_per_s))) {
+    return fail(BreakupChildStatus::invalid_input);
+  }
+  const auto ratios = trigger.daughter_diameter_ratios;
+  for (double ratio : ratios) {
+    if (!std::isfinite(ratio) || !(ratio > 0.0) || ratio > 1.0)
+      return fail(BreakupChildStatus::invalid_input);
+  }
+  const double volume_sum = ratios[0] * ratios[0] * ratios[0] +
+                            ratios[1] * ratios[1] * ratios[1];
+  if (std::abs(volume_sum - 1.0) >
+      64.0 * std::numeric_limits<double>::epsilon()) {
+    return fail(BreakupChildStatus::invalid_input);
+  }
+  if (!parent_geometry_consistent(input.parent, input.liquid_density_kg_per_m3))
+    return fail(BreakupChildStatus::inconsistent_parent_geometry);
+
+  // Form the smaller mass first. At a CDF endpoint the larger diameter can
+  // round to the parent diameter while the smaller daughter is representable.
+  const std::size_t small = ratios[0] <= ratios[1] ? 0U : 1U;
+  std::array<double, 2U> masses{};
+  masses[small] = input.parent.droplet_mass_kg * ratios[small] *
+                  ratios[small] * ratios[small];
+  masses[1U - small] = input.parent.droplet_mass_kg - masses[small];
+  BreakupChildReport report;
+  report.model_id = "conservative_sgs_binary_split_v1";
+  report.trigger_model_id = trigger.model_id;
+  report.rng_model_id = "parcel_counter_splitmix64_v1:breakup_child";
+  report.parent_id = input.parent.id;
+  report.accepted_step = input.accepted_step;
+  report.breakup_ordinal = input.breakup_ordinal;
+  report.candidate.child_count = 2U;
+  for (std::uint32_t index = 0U; index < 2U; ++index) {
+    auto child = input.parent;
+    child.id = child_id(input.parent, input.accepted_step, input.breakup_ordinal, index);
+    if ((child.id.high == 0U && child.id.low == 0U) || child.id == input.parent.id ||
+        (index == 1U && child.id == report.candidate.children[0].id)) {
+      return fail(BreakupChildStatus::child_id_collision);
     }
-    budget.minimum_child_temperature_k =
-        std::min(budget.minimum_child_temperature_k, child.temperature_k);
-    budget.maximum_child_temperature_k =
-        std::max(budget.maximum_child_temperature_k, child.temperature_k);
+    child.droplet_diameter_m = input.parent.droplet_diameter_m * ratios[index];
+    child.droplet_mass_kg = masses[index];
+    if (validate_parcel_state(child) != ParcelStateStatus::success)
+      return fail(BreakupChildStatus::non_finite_output);
+    report.candidate.children[index] = child;
   }
-
-  budget.children_total_mass_kg = static_cast<double>(children_mass);
-  budget.mass_residual_kg =
-      budget.children_total_mass_kg - budget.parent_total_mass_kg;
-  const double parent_speed_squared =
-      dot(input.parent.velocity_m_per_s, input.parent.velocity_m_per_s);
-  budget.parent_bulk_kinetic_energy_j =
-      0.5 * parent_total_mass * parent_speed_squared;
-  budget.children_bulk_kinetic_energy_j =
-      static_cast<double>(children_kinetic);
-  budget.bulk_kinetic_energy_residual_j =
-      budget.children_bulk_kinetic_energy_j -
-      budget.parent_bulk_kinetic_energy_j;
-  budget.parent_thermochemical_enthalpy_j =
-      parent_total_mass *
-      parameters.liquid_absolute_thermochemical_enthalpy_j_per_kg;
-  budget.children_thermochemical_enthalpy_j =
-      static_cast<double>(children_enthalpy);
-  budget.thermochemical_enthalpy_residual_j =
-      budget.children_thermochemical_enthalpy_j -
-      budget.parent_thermochemical_enthalpy_j;
-  budget.children_total_multiplicity =
-      static_cast<double>(children_multiplicity);
-  budget.multiplicity_residual =
-      budget.children_total_multiplicity -
-      budget.expected_children_total_multiplicity;
-  for (std::size_t component = 0U; component < 3U; ++component) {
-    budget.parent_total_momentum_kg_m_per_s[component] =
-        parent_total_mass * input.parent.velocity_m_per_s[component];
-    budget.children_total_momentum_kg_m_per_s[component] =
-        static_cast<double>(children_momentum[component]);
-    budget.momentum_residual_kg_m_per_s[component] =
-        budget.children_total_momentum_kg_m_per_s[component] -
-        budget.parent_total_momentum_kg_m_per_s[component];
-  }
-
-  budget.parent_spherical_surface_energy_j =
-      input.parent.multiplicity * parameters.surface_tension_n_per_m * kPi *
-      input.parent.droplet_diameter_m * input.parent.droplet_diameter_m;
-  budget.children_spherical_surface_energy_j =
-      static_cast<double>(children_surface);
-  budget.surface_energy_increase_j =
-      budget.children_spherical_surface_energy_j -
-      budget.parent_spherical_surface_energy_j;
-  budget.supplied_deformation_energy_j =
-      parameters.supplied_deformation_energy_per_parent_droplet_j *
-      input.parent.multiplicity;
-  budget.unassigned_deformation_energy_j =
-      budget.supplied_deformation_energy_j -
-      budget.surface_energy_increase_j;
-  const double energy_tolerance =
-      kAbsoluteEnergyToleranceJ +
-      kRelativeTolerance *
-          (std::abs(budget.supplied_deformation_energy_j) +
-           std::abs(budget.surface_energy_increase_j));
-  if (std::abs(budget.unassigned_deformation_energy_j) <=
-      energy_tolerance) {
-    budget.energy_disposition = BreakupEnergyDisposition::balanced;
-  } else if (budget.unassigned_deformation_energy_j < 0.0) {
-    budget.energy_disposition =
-        BreakupEnergyDisposition::supplied_deformation_energy_deficit;
-  } else {
-    budget.energy_disposition =
-        BreakupEnergyDisposition::supplied_deformation_energy_surplus;
-  }
-
-  if (!finite_conservation(budget)) {
-    return failure(BreakupChildStatus::non_finite_output);
-  }
-  bool conservative = within_tolerance(
-      budget.mass_residual_kg, budget.children_total_mass_kg,
-      budget.parent_total_mass_kg, kAbsoluteMassToleranceKg);
-  conservative &= within_tolerance(
-      budget.bulk_kinetic_energy_residual_j,
-      budget.children_bulk_kinetic_energy_j,
-      budget.parent_bulk_kinetic_energy_j, kAbsoluteEnergyToleranceJ);
-  conservative &= within_tolerance(
-      budget.thermochemical_enthalpy_residual_j,
-      budget.children_thermochemical_enthalpy_j,
-      budget.parent_thermochemical_enthalpy_j,
-      kAbsoluteEnergyToleranceJ);
-  conservative &= within_tolerance(
-      budget.multiplicity_residual,
-      budget.children_total_multiplicity,
-      budget.expected_children_total_multiplicity,
-      std::numeric_limits<double>::epsilon());
-  conservative &=
-      budget.minimum_child_temperature_k == input.parent.temperature_k &&
-      budget.maximum_child_temperature_k == input.parent.temperature_k;
-  for (std::size_t component = 0U; component < 3U; ++component) {
-    conservative &= within_tolerance(
-        budget.momentum_residual_kg_m_per_s[component],
-        budget.children_total_momentum_kg_m_per_s[component],
-        budget.parent_total_momentum_kg_m_per_s[component],
-        kAbsoluteMomentumToleranceKgMPerS);
-  }
-  if (!conservative) {
-    return failure(BreakupChildStatus::conservation_failure);
-  }
-
-  report.candidate.available = true;
-  report.status = BreakupChildStatus::success;
+  report = audit_children(input.parent, input.surface_tension_n_per_m,
+      input.liquid_absolute_thermochemical_enthalpy_j_per_kg, 0.0,
+      2.0 * input.parent.multiplicity, report);
+  if (!report.succeeded()) return fail(report.status);
   return report;
 }
 
