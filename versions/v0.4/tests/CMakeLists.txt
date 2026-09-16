@@ -207,6 +207,11 @@ add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_evidence_validate.py"
           self-test)
+add_test(NAME v04_coast_spray_inventory
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/integration/coast_spray_test.py"
+          "${hundun_repository_root}/tools/v04_spray_inventory.py")
+set_tests_properties(v04_coast_spray_inventory PROPERTIES TIMEOUT 30)
 add_test(NAME v04_evidence_v4_product_validator
   COMMAND "${CMAKE_COMMAND}"
           "-DPRODUCT=$<TARGET_FILE:hundun>"
