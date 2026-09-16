@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
   MPI_Bcast(text.data(), static_cast<int>(text.size()), MPI_CHAR, 0, MPI_COMM_WORLD);
   const fs::path root{text.data()};
   bool passed = ranks >= 2;
-  for (int mode = 0; mode < 9; ++mode) {
+  for (int mode = 0; mode < 12; ++mode) {
     ApplicationRunOptions options;
     options.case_root = root / "case";
     options.source_root = HUNDUN_V04_SOURCE_ROOT;
@@ -45,6 +45,9 @@ int main(int argc, char** argv) {
       if (mode == 6) options.initial_state = DriverInitialState{};
       if (mode == 7) options.diagnostics_interval = 1U;
       if (mode == 8) options.observe_mg_cost = true;
+      if (mode == 9) options.monitor_interval = 0U;
+      if (mode == 10) options.end_time = 1.0;
+      if (mode == 11) options.visit_format = VisitFormat::xml;
     }
     ApplicationRunReport report;
     const Status status = ApplicationService::run(MPI_COMM_WORLD, options, report);

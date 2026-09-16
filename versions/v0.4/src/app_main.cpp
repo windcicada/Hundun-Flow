@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -92,18 +93,22 @@ Status broadcast_root_status(Status status, int rank) {
 void usage(int rank) {
   if (rank == 0) {
     std::cerr << "usage:\n"
+              << "  hundun                         # case.json + run.json\n"
+              << "  hundun run <case-dir> --config <run.json> [overrides]\n"
               << "  hundun --version\n"
+              << "  hundun status <run-dir>\n"
+              << "  hundun restart-info <restart-dir> [--metadata-only]\n"
               << "  hundun validate <case-dir> [--dry-plan]\n"
               << "  hundun check <case-dir> [--dry-plan]\n"
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
                  " [--restart <restart-dir>] [--output-interval <N>]"
                  " [--restart-interval <N>]"
-                 " [--diagnostics-interval <N>] [--max-dt <seconds>] [--observe-mg-cost]"
+                 " [--visit-format legacy|xml] [--until <time>] [--monitor-interval <N>] [--diagnostics-interval <N>] [--max-dt <seconds>] [--observe-mg-cost]"
                  " [--initial-state p,T,Ux,Uy,Uz[,q...]]"
                  " [--restart-method-recovery] [--restart-source-case <case-dir>]"
                  " [--restart-refine-chemistry <source-case-dir>]"
                  " [--restart-storage-compatibility mg-bundle-ghost-v1]\n"
-              << "    interval 0 disables Visit/screen/monitor or Restart;"
+              << "    each interval controls its own output; 0 disables it;"
                  " evidence remains enabled outside the timed step\n"
               << "    initial-state is a uniform fresh state (Pa, K, m/s);"
                  " q values follow the scalar catalog; incompatible with restart\n"
@@ -215,10 +220,35 @@ int main(int argc, char* argv[]) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  std::vector<std::string> arguments;
+  const auto argument_status=hundun::v04::expand_run_arguments(MPI_COMM_WORLD,argc,argv,arguments);
+  if(!argument_status) {
+    const int code=finish(argument_status,rank);
+    MPI_Finalize();return code;
+  }
+  std::vector<char*> argument_pointers;
+  for(auto& argument:arguments)argument_pointers.push_back(argument.data());
+  argument_pointers.push_back(nullptr);
+  argc=static_cast<int>(arguments.size());argv=argument_pointers.data();
   int result = 2;
   if (argc == 2 && std::string_view{argv[1]} == "--version") {
     if (rank == 0) std::cout << "HUNDUN-FLOW 1.0.0 source=v0.4\n";
     result = 0;
+  } else if ((argc==3 || argc==4) && std::string_view{argv[1]}=="restart-info" &&
+             (argc==3 || std::string_view{argv[3]}=="--metadata-only")) {
+    std::string json;
+    const auto status=hundun::v04::RestartReader::inspect(MPI_COMM_WORLD,argv[2],json,argc==3);
+    if(status && rank==0)std::cout<<json<<'\n';
+    result=finish(status,rank);
+  } else if (argc == 3 && std::string_view{argv[1]} == "status") {
+    Status status;
+    if (rank==0) {
+      std::ifstream input(std::filesystem::path(argv[2])/"status.json");
+      std::string text;
+      if (!input || !std::getline(input,text)) status={StatusCode::io_failure,10509U};
+      else std::cout << text << '\n';
+    }
+    result=finish(broadcast_root_status(status,rank),rank);
   } else if ((argc == 3 || argc == 4) &&
              (std::string_view{argv[1]} == "validate" ||
               std::string_view{argv[1]} == "check") &&
@@ -336,10 +366,17 @@ int main(int argc, char* argv[]) {
       } else if (flag == "--steps" && !saw_steps) {
         parsed = positive_integer(value, options.steps);
         saw_steps = true;
+      } else if (flag == "--visit-format") {
+        parsed=value=="legacy" || value=="xml";
+        options.visit_format=value=="xml" ? hundun::v04::VisitFormat::xml : hundun::v04::VisitFormat::legacy_binary;
+      } else if (flag == "--until" && options.end_time == 0.0) {
+        parsed = positive_real(argv[index - 1], options.end_time);
       } else if (flag == "--output-interval") {
         parsed = nonnegative_integer(value, options.output_interval);
       } else if (flag == "--restart-interval") {
         parsed = nonnegative_integer(value, options.restart_interval);
+      } else if (flag == "--monitor-interval") {
+        parsed = nonnegative_integer(value, options.monitor_interval);
       } else if (flag == "--diagnostics-interval") {
         parsed = nonnegative_integer(value, options.diagnostics_interval);
       } else if (flag == "--max-dt" && options.time_limits.maximum_dt == 0.0) {

@@ -268,6 +268,7 @@ set(hundun_v04_core_sources
   src/common_terminal_audit.c
   src/app_case.cpp
   src/app_driver.cpp
+  src/app_run.cpp
   src/app_failure_report.cpp
   src/app_evidence_detail.cpp
   src/app_identity.cpp
@@ -336,6 +337,7 @@ set(hundun_v04_core_sources
   src/io_service_plan.cpp
   src/io_restart.cpp
   src/io_visit.cpp
+  src/io_legacy.cpp
   src/io_screen.cpp
   src/io_monitor.cpp
   src/io_evidence.cpp

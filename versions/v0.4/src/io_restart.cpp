@@ -29,6 +29,8 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <sstream>
+#include <iomanip>
 #include <utility>
 #include <vector>
 
@@ -1328,7 +1330,7 @@ Status broadcast_bytes(MPI_Comm communicator, int rank,
 }
 
 Status broadcast_string(MPI_Comm communicator, int rank,
-                        std::string& value) noexcept {
+                        std::string& value, std::size_t maximum_bytes=kCurrentMaximumBytes) noexcept {
   std::vector<std::uint8_t> bytes;
   Status status;
   try {
@@ -1338,7 +1340,7 @@ Status broadcast_string(MPI_Comm communicator, int rank,
   }
   status = collective_status(communicator, status);
   if (!status) return status;
-  status = broadcast_bytes(communicator, rank, bytes, kCurrentMaximumBytes);
+  status = broadcast_bytes(communicator, rank, bytes, maximum_bytes);
   if (status && rank != 0) {
     try {
       value.assign(bytes.begin(), bytes.end());
@@ -2348,6 +2350,67 @@ Status RestartReader::load(MPI_Comm communicator,
   return {StatusCode::allocation_failure, kRestartInput};
 } catch (...) {
   return {StatusCode::io_failure, kRestartInput};
+}
+
+Status RestartReader::inspect(MPI_Comm communicator,
+    const fs::path& directory,std::string& json,bool verify) noexcept {
+  int rank{};
+  if(communicator==MPI_COMM_NULL || MPI_Comm_rank(communicator,&rank)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,kRestartInput};
+  std::string candidate;
+  Status status=restart_local_stage(communicator,[&]() -> Status {
+    if(rank!=0)return {};
+    std::string generation;
+    auto local=read_current_name(directory,generation,nullptr);
+    if(!local)return local;
+    std::vector<std::uint8_t> bytes;
+    if(!read_file(directory/generation/"manifest.bin",bytes,8U*1024U*1024U,0U))
+      return {StatusCode::io_failure,kRestartManifest};
+    Manifest manifest;
+    local=parse_manifest(bytes,manifest,65536U);
+    if(!local)return local;
+    std::uint64_t total{};
+    for(std::size_t r=0;r<manifest.ranks.size();++r) {
+      const auto& record=manifest.ranks[r];
+      if(record.bytes>UINT64_MAX-total)return {StatusCode::invalid_plan,kRestartReadBudget};
+      total+=record.bytes;
+      if(!verify)continue;
+      const auto path=directory/generation/rank_name(static_cast<std::uint32_t>(r));
+      int fd;
+      do{fd=::open(path.c_str(),O_RDONLY|O_CLOEXEC|O_NONBLOCK);}while(fd<0 && errno==EINTR);
+      if(fd<0)return {StatusCode::io_failure,kRestartRankFile};
+      struct stat info{};
+      bool valid=::fstat(fd,&info)==0 && S_ISREG(info.st_mode) &&
+          info.st_size>=0 && static_cast<std::uint64_t>(info.st_size)==record.bytes;
+      std::array<std::uint8_t,65536> buffer{};
+      std::uint64_t hash=kFnvOffset,seen{};
+      while(valid && seen<record.bytes) {
+        ssize_t n;
+        do{n=::read(fd,buffer.data(),std::min<std::uint64_t>(buffer.size(),record.bytes-seen));}while(n<0 && errno==EINTR);
+        if(n<=0){valid=false;break;}
+        for(ssize_t b=0;b<n;++b){hash^=buffer[b];hash*=kFnvPrime;}
+        seen+=static_cast<std::uint64_t>(n);
+      }
+      if(::close(fd)!=0)valid=false;
+      if(!valid || (hash==0U ? 1U : hash)!=record.hash)return {StatusCode::io_failure,kRestartIntegrity};
+    }
+    std::ostringstream out;out<<std::setprecision(17);
+    out<<"{\"generation\":\""<<generation<<"\",\"version\":"<<manifest.format_version
+       <<",\"step\":"<<manifest.step<<",\"time\":"<<manifest.time<<",\"dt\":"<<manifest.dt
+       <<",\"source_ranks\":"<<manifest.rank_count<<",\"global_cells\":["<<manifest.global_cells.x
+       <<','<<manifest.global_cells.y<<','<<manifest.global_cells.z<<"],\"plan\":"<<manifest.plan
+       <<",\"schema\":"<<manifest.schema<<",\"method_history_signature\":"<<manifest.method_history_signature
+       <<",\"model_record_identity\":"<<manifest.cell_record_identity
+       <<",\"pressure_reference_pa\":"<<manifest.pressure_reference<<",\"rank_file_bytes\":"<<total
+       <<",\"field_count\":"<<manifest.fields.size()
+       <<",\"integrity\":\""<<(verify ? "manifest_and_rank_checksums" : "manifest_checksum")
+       <<"\",\"restore_compatibility\":\"checked_against_case_on_load\"}";
+    candidate=out.str();return {};
+  });
+  if(!status)return status;
+  status=broadcast_string(communicator,rank,candidate,65536U);
+  if(status)json=std::move(candidate);
+  return status;
 }
 
 }  // namespace hundun::v04

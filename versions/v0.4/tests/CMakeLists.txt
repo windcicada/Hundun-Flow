@@ -2689,3 +2689,23 @@ set_tests_properties(v04_case_pack_files PROPERTIES TIMEOUT 15)
 add_test(NAME v04_vtk_mask_cli COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/vtk_mask_test.py")
 set_tests_properties(v04_vtk_mask_cli PROPERTIES TIMEOUT 30)
+
+if(HUNDUN_V04_PYTHON_EXECUTABLE)
+  foreach(hundun_app_interface IN ITEMS control run)
+    add_test(NAME v04_app_${hundun_app_interface}_cli COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/app_${hundun_app_interface}_test.py"
+      "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
+    set_tests_properties(v04_app_${hundun_app_interface}_cli PROPERTIES PROCESSORS 4 TIMEOUT 120)
+  endforeach()
+endif()
+
+add_executable(v04_legacy_vtk_test integration/legacy_vtk_test.cpp)
+target_link_libraries(v04_legacy_vtk_test PRIVATE hundun_v04_core MPI::MPI_C)
+if(HUNDUN_V04_PYTHON_EXECUTABLE)
+  add_test(NAME v04_restart_info_cli COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/restart_info_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
+  set_tests_properties(v04_restart_info_cli PROPERTIES PROCESSORS 2 TIMEOUT 90)
+endif()
+add_executable(v04_gas_cfl_probe integration/gas_cfl_probe.cpp)
+target_link_libraries(v04_gas_cfl_probe PRIVATE hundun_v04_core)

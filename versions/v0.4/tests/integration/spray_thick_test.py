@@ -274,7 +274,7 @@ end
         if output.exists():
             shutil.rmtree(str(output))
         args = [mpi, "--oversubscribe", "--bind-to", "none", "-n", str(ranks),
-                binary, "run", work, "--output", output, "--steps", str(count),
+                binary, "run", work, "--visit-format", "xml", "--output", output, "--steps", str(count),
                 "--max-dt", str(dt), "--output-interval", "1" if sgs else "0",
                 "--restart-interval", "1", "--diagnostics-interval", "1"]
         if restart:

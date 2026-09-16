@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <iomanip>
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include "app_driver_detail.hpp"
+#include "app_control_detail.hpp"
 #include "app_evidence_detail.hpp"
 #include "app_identity_detail.hpp"
 #include "hundun/v04_app.hpp"
@@ -415,6 +417,9 @@ Status ApplicationService::initialize_case_directory(
   if (!fs::create_directories(output_directory, error) || error)
     return {StatusCode::io_failure, kApplicationTemplate};
   if (!write_exclusive(output_directory / "case.json", kCaseJson) ||
+      !write_exclusive(output_directory / "run.json",
+          "{\"mode\":\"new\",\"steps\":10,\"output\":\"../out\","
+          "\"monitor_interval\":1,\"output_interval\":10,\"restart_interval\":10}\n") ||
       !write_exclusive(output_directory / "thermophysics.d",
                        kThermophysics) ||
       !sync_directory(output_directory)) {
@@ -461,6 +466,8 @@ static Status run_application(MPI_Comm communicator,
       communicator,
       options.case_root.empty() || options.run_directory.empty() ||
               options.source_root.empty() || options.steps == 0U ||
+              !std::isfinite(options.end_time) || options.end_time < 0 ||
+              options.visit_format > VisitFormat::xml ||
               (!options.restart_source_case.empty() &&
                (options.restart_directory.empty() ||
                 (options.restart_history_policy != RestartHistoryPolicy::rebuild_method_history &&
@@ -484,14 +491,16 @@ static Status run_application(MPI_Comm communicator,
   if (!status) return status;
   // These controls determine collective order, not local storage identity.
   // Check once before filesystem/product work; do not add hot halo checks.
-  const std::array<std::uint64_t, 10U> control{{
+  std::uint64_t end_time_bits{};
+  std::memcpy(&end_time_bits,&options.end_time,sizeof(end_time_bits));
+  const std::array<std::uint64_t, 13U> control{{
       options.steps, options.output_interval, options.restart_interval,
       options.restart_directory.empty() ? 0U : 1U,
       static_cast<std::uint64_t>(options.restart_storage_compatibility),
       static_cast<std::uint64_t>(options.restart_history_policy),
       options.initial_state.has_value() ? 1U : 0U,
       options.diagnostics_interval, options.restart_source_case.empty() ? 0U : 1U,
-      options.observe_mg_cost ? 1U : 0U}};
+      options.observe_mg_cost ? 1U : 0U, options.monitor_interval, end_time_bits, static_cast<std::uint64_t>(options.visit_format)}};
   auto minimum = control, maximum = control;
   const int min_status = MPI_Allreduce(MPI_IN_PLACE, minimum.data(),
       static_cast<int>(minimum.size()), MPI_UINT64_T, MPI_MIN, communicator);
@@ -645,6 +654,21 @@ static Status run_application(MPI_Comm communicator,
   if (options.steps > UINT64_MAX - starting_step)
     return {StatusCode::invalid_case, kApplicationInput};
   const std::uint64_t target_step = starting_step + options.steps;
+  if (rank==0) {
+    int ranks{}; MPI_Comm_size(communicator,&ranks);
+    std::fprintf(stdout,"RUN ranks=%d case=%llu product=%llu mode=%s steps=%llu until=%.17g "
+        "monitor_interval=%llu output_interval=%llu restart_interval=%llu\n",
+        ranks,(unsigned long long)model.fingerprint,(unsigned long long)product_fingerprint,
+        options.restart_directory.empty() ? "new" : "restart",(unsigned long long)options.steps,
+        options.end_time,(unsigned long long)options.monitor_interval,
+        (unsigned long long)options.output_interval,(unsigned long long)options.restart_interval);
+    std::fprintf(stdout,"RUN_PATH case=%s output=%s restart=%s\n",options.case_root.c_str(),
+        options.run_directory.c_str(),options.restart_directory.c_str());
+  }
+  status=detail::application_status(communicator,rank,options.run_directory,
+      options.end_time>0 && report.final_time>=options.end_time ? "completed" : "ready",
+      starting_step,run_start.previous_time);
+  if(!status)return status;
 
   report.case_model = model.fingerprint;
   report.product = product_fingerprint;
@@ -659,13 +683,17 @@ static Status run_application(MPI_Comm communicator,
           ? Status{}
           : Status{StatusCode::mpi_failure, kApplicationInput});
   for (std::uint64_t step_index = 0U;
-       step_index < options.steps && status; ++step_index) {
+       step_index < options.steps && status &&
+       (options.end_time == 0 || report.final_time < options.end_time); ++step_index) {
     report.failure_phase = ApplicationFailurePhase::time_control;
     timing.phase(1U);
     if (options.observe_mg_cost) {
       status = driver.set_pressure_mg_profiling(true);
       if (!status) return status;
     }
+    status = detail::application_status(communicator, rank, options.run_directory,
+        "solving", report.accepted_steps, report.final_time);
+    if (!status) break;
     const auto begin = std::chrono::steady_clock::now();
     DriverStepReport step;
     LocalTimeLimits time_limits = options.time_limits;
@@ -795,21 +823,33 @@ static Status run_application(MPI_Comm communicator,
     report.predictor_low_order_halo_exchanges +=
         step.thermophysical_predictor.low_order_halo_exchanges;
 
-    const bool output =
-        options.output_interval != 0U &&
+    std::array<int,2> requests{};
+    status = detail::application_requests(communicator,rank,options.run_directory,requests);
+    if (!status) break;
+    const bool stopping=requests[0]!=0;
+    const bool last=step.accepted_step == target_step ||
+        (options.end_time > 0 && step.accepted_time >= options.end_time);
+    const bool output = requests[1] || (options.output_interval != 0U &&
         (step.accepted_step % options.output_interval == 0U ||
-         step.accepted_step == target_step);
-    const bool restart =
-        options.restart_interval != 0U &&
+         last || stopping));
+    const bool restart = stopping || (options.restart_interval != 0U &&
         (step.accepted_step % options.restart_interval == 0U ||
-         step.accepted_step == target_step);
+         last));
+    const bool monitor = options.monitor_interval != 0U &&
+        (step.accepted_step % options.monitor_interval == 0U ||
+         last || stopping);
     const bool diagnostics =
         options.diagnostics_interval != 0U &&
         (step.accepted_step % options.diagnostics_interval == 0U ||
-         step.accepted_step == target_step);
+         last);
+    if (output || restart) {
+      status = detail::application_status(communicator,rank,options.run_directory,
+          "writing",step.accepted_step,step.accepted_time);
+      if (!status) break;
+    }
     CommittedOutputSnapshot snapshot;
     fs::path output_path;
-    if (output || diagnostics) {
+    if (output || diagnostics || monitor) {
       report.failure_phase = output ? ApplicationFailurePhase::visit
                                     : ApplicationFailurePhase::monitor;
       timing.phase(output ? 4U : 5U);
@@ -825,9 +865,10 @@ static Status run_application(MPI_Comm communicator,
         status = driver.committed_sgs_output_snapshot(snapshot);
     }
     if (status && output)
-      status = VisitWriter::write(communicator, output_path, services, snapshot,
-                                  &report.io_failure);
-    if (status && output) {
+      status = options.visit_format == VisitFormat::legacy_binary
+          ? VisitWriter::write_legacy(communicator,output_path,services,snapshot,&report.io_failure)
+          : VisitWriter::write(communicator,output_path,services,snapshot,&report.io_failure);
+    if (status && monitor) {
       report.failure_phase = ApplicationFailurePhase::screen;
       timing.phase(5U);
       std::string screen_text;
@@ -835,7 +876,11 @@ static Status run_application(MPI_Comm communicator,
         local_allocation_checkpoint(report.failure_phase, rank);
         output_path = options.run_directory / "screen.log";
         std::ostringstream summary;
-        summary << "attempts=" << step.attempts
+        summary << std::setprecision(10) << "dt=" << step.proposal.dt
+                << " seconds=" << maximum_nanoseconds*1e-9
+                << " outer=" << step.piso.cold.outer_iterations
+                << " pressure_iterations=" << step.piso.cold.pressure_iterations
+                << " cfl_definition=outgoing_sum attempts=" << step.attempts
                 << " continuity=" << step.piso.continuity_residual
                 << " energy=" << step.piso.energy_residual
                 << " eos=" << step.piso.eos_residual << " advective_cfl_out="
@@ -854,6 +899,9 @@ static Status run_application(MPI_Comm communicator,
                 << (step.thermophysical_predictor.limited ? 1 : 0)
                 << " predictor_theta=" << step.thermophysical_predictor.theta;
         screen_text = summary.str();
+        if (rank == 0) std::fprintf(stdout,"step=%llu time=%.17g %s\n",
+            (unsigned long long)step.accepted_step,step.accepted_time,screen_text.c_str());
+        if(rank==0)std::fflush(stdout);
         return Status{};
       });
       if (status)
@@ -861,16 +909,31 @@ static Status run_application(MPI_Comm communicator,
             ScreenWriter::append(communicator, output_path, services, snapshot,
                                  screen_text, &report.io_failure);
     }
-    if (status && output) {
+    if (status && monitor) {
       report.failure_phase = ApplicationFailurePhase::monitor;
       timing.phase(5U);
+      std::array<std::uint64_t, kCnPhaseNames.size()> maximum_phases{};
+      if (MPI_Allreduce(step.cn_phase_nanoseconds.data(), maximum_phases.data(),
+                        static_cast<int>(maximum_phases.size()), MPI_UINT64_T,
+                        MPI_MAX, communicator) != MPI_SUCCESS) {
+        status = {StatusCode::mpi_failure, kApplicationInput};
+        break;
+      }
       std::string monitor_text;
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
         output_path = options.run_directory / "monitor.jsonl";
         std::ostringstream payload;
-        payload
-            << "{\"attempts\":" << step.attempts
+        payload << std::setprecision(17)
+            << "{\"dt\":" << step.proposal.dt
+            << ",\"seconds\":" << maximum_nanoseconds*1e-9
+            << ",\"timing_scope\":\"max_rank_advance\",\"cfl_definition\":\"outgoing_sum\""
+            << ",\"outer_iterations\":" << step.piso.cold.outer_iterations
+            << ",\"momentum_iterations\":" << step.piso.cold.momentum_iterations
+            << ",\"pressure_iterations\":" << step.piso.cold.pressure_iterations
+            << ",\"enthalpy_iterations\":" << step.piso.cold.enthalpy_iterations
+            << ",\"species_iterations\":" << step.piso.cold.species_iterations
+            << ",\"attempts\":" << step.attempts
             << ",\"candidate_baseline_evaluations\":"
             << step.pressure_energy_globalization.work.baseline_evaluations
             << ",\"candidate_extrapolation_evaluations\":"
@@ -898,7 +961,19 @@ static Status run_application(MPI_Comm communicator,
             << (step.thermophysical_predictor.limited ? "true" : "false")
             << ",\"predictor_theta\":" << step.thermophysical_predictor.theta
             << '}';
-        monitor_text = payload.str();
+        // Phase maxima can belong to different ranks; advance remains the
+        // authoritative wall time. Every candidate and retry is included.
+        auto text = payload.str();
+        text.pop_back();
+        std::ostringstream phases;
+        phases.imbue(std::locale::classic());
+        phases << std::setprecision(17) << ",\"cn_phases\":{\"scope\":\"max_rank_all_attempts_inclusive_mpi\",\"seconds\":{";
+        for (std::size_t i = 0; i < maximum_phases.size(); ++i) {
+          if (i) phases << ',';
+          phases << '\"' << kCnPhaseNames[i] << "\":" << maximum_phases[i] * 1e-9;
+        }
+        phases << "}}}";
+        monitor_text = text + phases.str();
         return Status{};
       });
       if (status)
@@ -1253,7 +1328,15 @@ static Status run_application(MPI_Comm communicator,
         status = EvidenceWriter::append(communicator, output_path, services,
                                         evidence, &report.io_failure);
     }
+    if (status && (requests[0] || requests[1]))
+      status = detail::application_acknowledge(communicator,rank,options.run_directory,
+          requests,step.accepted_step,step.accepted_time);
+    if (status)
+      status = detail::application_status(communicator,rank,options.run_directory,
+          stopping ? "stopped" : last ? "completed" : "ready",
+          step.accepted_step,step.accepted_time);
     timing.phase(3U);
+    if (stopping) break;
   }
   const Status shared_close_status =
       detail::output_collective_status(communicator, shared_resources.close());
@@ -1262,6 +1345,8 @@ static Status run_application(MPI_Comm communicator,
     status = shared_close_status;
   }
   if (!status) {
+    (void)detail::application_status(communicator,rank,options.run_directory,
+        "failed",report.accepted_steps,report.final_time);
     report.failure = status;
     return status;
   }

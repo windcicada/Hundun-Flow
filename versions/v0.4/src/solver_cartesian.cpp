@@ -164,6 +164,9 @@ CellConvectiveCflStatus evaluate_cell_convective_cfl(
   const double scale = dt / candidate.density_volume;
   candidate.out = scale * candidate.outgoing_mass_flow;
   candidate.absolute = scale * (0.5 * candidate.absolute_mass_flow);
+  double maximum_face=0.0;
+  for(double flux:face_flux)maximum_face=std::max(maximum_face,std::abs(flux));
+  candidate.directional_max=scale*maximum_face;
   if (!std::isfinite(candidate.density_volume) ||
       !(candidate.density_volume > 0.0) ||
       !std::isfinite(candidate.outgoing_mass_flow) ||

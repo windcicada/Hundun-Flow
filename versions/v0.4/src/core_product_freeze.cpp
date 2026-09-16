@@ -3248,6 +3248,7 @@ struct ProductDriver::Impl {
   PressureEnergyGlobalizationAttemptReport pressure_energy_globalization{};
   std::uint64_t temporal_preconditioner_applications{};
   std::array<DriverStageTiming, kDriverTimedStageCapacity> attempt_timings{};
+  std::array<std::uint64_t, kCnPhaseNames.size()> cn_phase_nanoseconds{};
   std::size_t attempt_timing_count{};
   StageId timed_stage{};
   std::chrono::steady_clock::time_point timed_stage_begin{};
@@ -3361,6 +3362,7 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
 
 void ProductDriver::Impl::reset_stage_timings(StageId stage) noexcept {
   attempt_timings = {};
+  cn_phase_nanoseconds = {};
   attempt_timing_count = 0U;
   timed_stage = stage;
   timed_stage_begin = std::chrono::steady_clock::now();
@@ -3388,6 +3390,11 @@ void ProductDriver::Impl::finish_stage_timings() noexcept {
 
 void ProductDriver::Impl::accumulate_stage_timings(
     DriverStepReport& report) const noexcept {
+  for (std::size_t i = 0; i < cn_phase_nanoseconds.size(); ++i) {
+    auto& total = report.cn_phase_nanoseconds[i];
+    const auto value = cn_phase_nanoseconds[i];
+    total = value > UINT64_MAX - total ? UINT64_MAX : total + value;
+  }
   for (std::size_t source = 0U; source < attempt_timing_count; ++source) {
     const DriverStageTiming timing = attempt_timings[source];
     std::size_t target = 0U;
@@ -4242,7 +4249,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                       candidate->esf.halo_stats(), candidate->graph);
     std::vector<SnapshotFieldSpec> snapshots{{candidate->fields.velocity, 3U},
                                              {candidate->fields.pressure, 1U},
-                                             {candidate->fields.enthalpy, 1U}};
+                                             {candidate->fields.enthalpy, 1U},
+                                             {candidate->fields.rho, 1U},
+                                             {candidate->fields.temperature, 1U}};
     for (FieldId scalar : candidate->fields.scalars)
       snapshots.push_back({scalar, 1U});
     if (model.turbulence != TurbulenceKind::none) {
@@ -4261,7 +4270,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     std::size_t coordinate_bytes = 0U;
     std::size_t staging_bytes = 0U;
     if (!detail::product_checked_add(
-            model.turbulence == TurbulenceKind::none ? 5U : 9U,
+            model.turbulence == TurbulenceKind::none ? 7U : 11U,
             candidate->fields.scalars.size(), snapshot_components) ||
         !detail::product_field_bytes(local_cells, snapshot_components,
                                      snapshot_bytes) ||
@@ -4282,12 +4291,24 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         !detail::product_checked_add(staging_bytes, 65536U, staging_bytes)) {
       return {StatusCode::invalid_plan, kProductAnalysis};
     }
+    // Legacy point output carries one positive neighbour centre and full
+    // coordinate triples. The cold ceiling includes field/face/file buffers.
+    std::size_t visit_points=1U,visit_components=0U,visit_staging=0U;
+    for(auto extent:maximum_patch)
+      if(!detail::product_checked_multiply(visit_points,static_cast<std::size_t>(extent)+1U,visit_points))
+        return {StatusCode::invalid_plan,kProductAnalysis};
+    if(!detail::product_checked_add(snapshot_components,6U,visit_components) ||
+       !detail::product_checked_multiply(visit_components,5U*sizeof(double),visit_components) ||
+       !detail::product_checked_multiply(visit_points,visit_components,visit_staging) ||
+       !detail::product_checked_add(visit_staging,65536U,visit_staging))
+      return {StatusCode::invalid_plan,kProductAnalysis};
     std::array<RuntimeServiceCapacity, 5U> services{};
     for (std::size_t index = 0U; index < services.size(); ++index) {
       services[index] = {static_cast<RuntimeServiceKind>(index),
                          static_cast<StageId>(200U + index), snapshot_bytes,
                          staging_bytes, 8U};
     }
+    services[static_cast<std::size_t>(RuntimeServiceKind::visit)].maximum_staging_bytes_per_rank=visit_staging;
     // V2: two primitive states (5+s), two rates (1+s), two face
     // histories. The (+1)^3 envelope bounds all owned faces on every rank;
     // root also holds gathered records, manifest and one verification buffer.
@@ -12419,6 +12440,7 @@ Status ProductDriver::Impl::execute_attempt(
     auto equation_solve = product.piso.pressure_solve();
     equation_solve.restart = equation_workspace.requirements().maximum_restart;
     const auto cold_attempt = [&]() -> Status {
+      detail::LocalPhaseTimer<kCnPhaseNames.size()> phase_timer(cn_phase_nanoseconds);
       report.cold.active = true;
       report.cold.independent_species_count =
           static_cast<std::uint32_t>(species_trial.size());
@@ -13467,9 +13489,11 @@ Status ProductDriver::Impl::execute_attempt(
       for (unsigned cold_outer = 0; cold_outer < ColdCouplingReport::maximum_outer_iterations; ++cold_outer) {
         report.cold.outer_iterations = cold_outer + 1U;
         const double outer_begin = MPI_Wtime();
+        phase_timer.phase(1);
         status=solve_cold_scalars(cold_outer);
         if (!status) return status;
         if (status) {
+          phase_timer.phase(2);
           const double reference_begin = MPI_Wtime();
           cold_freeze_sgs = false;
           std::vector<double> endpoint_velocity;
@@ -13508,6 +13532,7 @@ Status ProductDriver::Impl::execute_attempt(
           material.effective_viscosity = as_const(effective_viscosity);
           assembly.mass_flux = as_const(provisional_flux);
           assembly.face_flux = provisional_flux.revision;
+          phase_timer.phase(3);
           const double source_kernel_begin = MPI_Wtime();
           if (probe_status)
             probe_status = assemble_momentum_predictor(
@@ -13546,6 +13571,7 @@ Status ProductDriver::Impl::execute_attempt(
                            unsigned(probe_status.code), probe_status.detail);
             return probe_status;
           }
+          phase_timer.phase(4);
           double total_solve{}, max_delta{}, max_velocity{};
           for (unsigned component = 0; component < 3; ++component) {
             LinearIdentity identity{product.piso.fingerprint(),
@@ -13631,6 +13657,7 @@ Status ProductDriver::Impl::execute_attempt(
                 (unsigned long long)global_counts[0],
                 (unsigned long long)global_counts[1],
                 (unsigned long long)global_counts[2], step.dt, global[5], global[6]);
+          phase_timer.phase(2);
           status = refresh_coupled_state(
               kCoupledStateC1Stage,
               BoundaryThermophysicalGhostPhase::corrector_one, probe_status);
@@ -13638,6 +13665,7 @@ Status ProductDriver::Impl::execute_attempt(
             return status;
         }
         if (status) {
+          phase_timer.phase(5);
           std::vector<detail::ColdPressureRow> rows;
           std::vector<std::array<detail::ColdPressureFace, 6>> faces;
           detail::ColdGridReport observed;
@@ -13688,6 +13716,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (probe_status) probe_status = product.reductions.checked_max(
               {&local_ratio, 1U}, {&global_ratio, 1U});
           const bool use_mg = global_ratio > 0.5;
+          phase_timer.phase(6);
           const double setup_begin = MPI_Wtime();
           if (probe_status && use_mg) {
             probe_status = make_pressure_face_views(product.pressure_face_storage,
@@ -13803,6 +13832,7 @@ Status ProductDriver::Impl::execute_attempt(
                 pressure_rhs.unchecked({x, y, z}, 0) = rows[ordinal].rhs;
                 pressure_correction.unchecked({x, y, z}, 0) = 0;
               }
+          phase_timer.phase(7);
           const double solve_begin = MPI_Wtime();
           detail::ColdPressureContinuityAudit continuity_audit(
               as_const(trial_density),as_const(trial_pressure),attempt_pressure_reference,step.dt,
@@ -13815,6 +13845,7 @@ Status ProductDriver::Impl::execute_attempt(
               ? solve_fgmres(op, pc, pressure_call, product.krylov_workspace, product.reductions)
               : solve_bicgstab(op, pc, pressure_call, product.krylov_workspace, product.reductions);
           const double solve_time = MPI_Wtime() - solve_begin;
+          phase_timer.phase(8);
           ++report.cold.pressure_solve_calls;
           report.cold.pressure_iterations += solved.iterations;
           report.cold.final_pressure = solved;
@@ -14204,6 +14235,7 @@ Status ProductDriver::Impl::execute_attempt(
                   product.cold_stopping->reference_time;
           nascent_species_reference.clear();
         }
+        phase_timer.phase(9);
         const double outer_elapsed = MPI_Wtime() - outer_begin;
         double maximum_outer_elapsed{};
         MPI_Allreduce(&outer_elapsed, &maximum_outer_elapsed, 1, MPI_DOUBLE,
@@ -22002,7 +22034,8 @@ Status ProductDriver::committed_output_snapshot(
          {runtime.output_fields.data(), product.io.primary_field_count()},
          true,
          product.topology.has_value() ? product.topology->region()
-                                      : Span<const std::uint8_t>{}};
+                                      : Span<const std::uint8_t>{},
+         runtime.pressure_reference};
   return {};
 }
 

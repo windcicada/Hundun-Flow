@@ -330,6 +330,11 @@ class RestartWriter {
 
 class RestartReader {
  public:
+  // Root-owned bounded metadata read and optional streamed rank checksums.
+  // Compatibility with a selected case remains the load() contract.
+  static Status inspect(MPI_Comm communicator,
+                        const std::filesystem::path& restart_directory,
+                        std::string& json, bool verify_rank_files = true) noexcept;
   static Status load(MPI_Comm communicator,
                      const std::filesystem::path& restart_directory,
                      const RestartExpected& expected,
@@ -358,6 +363,7 @@ struct CommittedOutputSnapshot {
   // Same borrowed lifetime as fields. Empty means all fluid; otherwise x-fast
   // owned cells, 0 = solid placeholder, 1 = fluid (the frozen EBTopology mask).
   Span<const std::uint8_t> cell_activity{};
+  double pressure_reference{};
 };
 
 struct StageTimingRecord {
@@ -590,8 +596,15 @@ struct RuntimeEvidenceRecord {
   bool statistics_eligible{};
 };
 
+enum class VisitFormat : std::uint8_t { legacy_binary, xml };
+
 class VisitWriter {
  public:
+  static Status write_legacy(MPI_Comm communicator,
+                      const std::filesystem::path& visit_directory,
+                      const IoServicePlan& services,
+                      const CommittedOutputSnapshot& snapshot,
+                      IoFailureContext* failure = nullptr) noexcept;
   static Status write(MPI_Comm communicator,
                       const std::filesystem::path& visit_directory,
                       const IoServicePlan& services,

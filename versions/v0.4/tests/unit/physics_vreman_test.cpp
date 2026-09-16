@@ -84,6 +84,11 @@ bool test_vreman_invariants() {
                                               viscosity) &&
                        std::abs(viscosity - expected) < 1.0e-15,
                    "Vreman anisotropic invariant matches independent oracle");
+  VelocityGradient original_counterexample;
+  original_counterexample.value={1,2,0,0,1,0,0,0,-2};
+  passed &= expect(vreman_kinematic_viscosity(original_counterexample,{1,1,1},.07,viscosity) &&
+      std::abs(viscosity-.07*std::sqrt(25./10.))<1e-15,
+      "gas reference divergence-free counterexample preserves the standard beta invariant");
   return passed;
 }
 

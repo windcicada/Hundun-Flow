@@ -37,6 +37,10 @@ struct DriverInitialState {
 // option (and the zero-independent-species default).
 std::vector<double> initial_scalar_values(const ValidatedModel& model);
 
+// Root-owned run.json input, expanded and broadcast before CLI parsing.
+Status expand_run_arguments(MPI_Comm communicator, int argc, char** argv,
+                            std::vector<std::string>& arguments) noexcept;
+
 struct ApplicationRunOptions {
   // Paths must refer to the same logical shared inputs/run/checkpoint across
   // ranks; local mount spellings are not compared as raw bytes. At the cold
@@ -50,6 +54,8 @@ struct ApplicationRunOptions {
   // Source case is revalidated and bound before any source checkpoint is read.
   std::filesystem::path restart_source_case;
   std::uint64_t steps{};
+  // Stop at the first accepted time at or above this positive bound.
+  double end_time{};
   std::uint64_t output_interval{1U};
   std::uint64_t restart_interval{1U};
   // Caller-supplied operator time scales. The application tightens convection
@@ -73,6 +79,9 @@ struct ApplicationRunOptions {
   // Optional small committed-state ledger, independent of Visit output.
   // Zero preserves the historical application output behavior.
   std::uint64_t diagnostics_interval{};
+  // Accepted-state summaries are independent of volumetric field output.
+  std::uint64_t monitor_interval{1U};
+  VisitFormat visit_format{VisitFormat::legacy_binary};
   // Optional MG phase observation, reported after the timed advance.
   bool observe_mg_cost{};
 };
@@ -578,6 +587,12 @@ struct DriverCellTrace {
   std::size_t dropped{};
 };
 
+// Disjoint elapsed intervals inside the CN/BE outer-correction attempt.
+// Each rank accumulates every candidate and retry; communication is included.
+inline constexpr std::array<const char*, 10> kCnPhaseNames{
+    "preparation", "scalars", "state", "momentum_assembly", "momentum_solve",
+    "pressure_assembly", "pressure_setup", "pressure_solve", "correction", "audit"};
+
 struct DriverStepReport {
   StepCompletionReport completion{};
   TimeProposalDiagnostic initial_time_proposal{};
@@ -600,6 +615,7 @@ struct DriverStepReport {
   DriverResourceReport resources{};
   std::array<DriverStageTiming, kDriverTimedStageCapacity> stage_timings{};
   std::size_t stage_timing_count{};
+  std::array<std::uint64_t, kCnPhaseNames.size()> cn_phase_nanoseconds{};
   bool accepted{};
   PressureEnergyPerformanceTotals pressure_energy_performance{};
   DriverTerminalEquationReport terminal_equations{};
