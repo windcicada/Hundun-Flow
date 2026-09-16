@@ -114,6 +114,9 @@ LES 云图同时提供 `nu_sgs`（m²/s）、`k_sgs`（m²/s²）、`eps_sgs_vol
 
 ## 构建
 
+首次在其他主机部署，请先阅读[环境要求、依赖获取与运行验证](docs/user-guide/environment.md)。
+真实化学需要单独取得锁定 Cantera C++ SDK；Python Cantera 包不能替代它。
+
 Release 组合采用 CMake 3.21 及以上版本、Clang 15、libstdc++ ABI1、
 Ninja、MPI 3 及以上实现和固定 Cantera 3.2 程序包。配套 Linux 环境
 使用 glibc 2.35；构建保留 FP64，采用 ThinLTO 与 lld。
