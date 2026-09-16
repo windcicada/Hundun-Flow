@@ -35,7 +35,9 @@ struct ParcelId {
 enum class ParcelRandomPurpose : std::uint64_t {
   stable_id = 0U,
   injection_direction = 1U,
-  breakup_child = 2U
+  breakup_child = 2U,
+  breakup_lifetime = 3U,
+  breakup_quantile = 4U
 };
 
 struct ParcelRandomAddress {

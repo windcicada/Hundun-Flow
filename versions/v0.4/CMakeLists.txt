@@ -282,6 +282,7 @@ set(hundun_v04_core_sources
   src/models_spray.cpp
   src/models_spray_breakup.cpp
   src/models_spray_sgs.cpp
+  src/models_spray_sgs_step.cpp
   src/models_spray_mechanics.cpp
   src/models_spray_migration.cpp
   src/models_spray_parcel.cpp
