@@ -3715,7 +3715,6 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       ((model.reaction.mode != ReactionMode::none &&
         model.reaction.mode != ReactionMode::finite_rate_mean &&
         model.reaction.mode != ReactionMode::pasr_algebraic_v1 && !implicit_esf) ||
-       (model.spray && implicit_esf) ||
        model.pressure_reference != PressureReferenceKind::boundary_absolute ||
        schedule != CouplingKind::outer_corrected ||
        (model.solver.pressure.algorithm != LinearAlgorithm::fgmres &&
@@ -9435,12 +9434,20 @@ Status ProductDriver::Impl::execute_attempt(
   ConservativeMassSourceView coupled_mass_source;
   FieldView spray_mass, spray_enthalpy, spray_momentum;
   std::array<FieldView, UINT8_MAX> spray_sources{}, combined_sources{};
-  std::array<EquationContributionView, 1> momentum_sources{},
-      enthalpy_sources{};
+  std::array<EquationContributionView, 1> momentum_sources{};
+  std::array<EquationContributionView, 2> enthalpy_sources{};
   std::array<EquationContributionView,UINT8_MAX> parcel_species_sources{};
   std::array<EquationContributionView,2*UINT8_MAX> coupled_species_sources{};
   Span<const EquationContributionView> momentum_contributions,
       enthalpy_contributions;
+  const std::size_t statistical_heat_slot=product.spray.enabled() ? 1U : 0U;
+  const auto select_enthalpy_sources=[&](EquationAssemblyContext& context) {
+    if(product.spray.enabled())context.contribution_stage=2;
+    if(dual_esf) {
+      context.contribution_stage=detail::ProductEsf::transport_source_stage;
+      if(product.spray.enabled())context.additional_contribution_stage=2;
+    }
+  };
   double attempt_closed_mass_target = closed_mass_target;
   detail::ProductPhaseSources phase_sources;
   if (status && product.spray.enabled()) {
@@ -10058,7 +10065,9 @@ Status ProductDriver::Impl::execute_attempt(
           if(heat) {local_heat[0]+=volume*static_cast<double>(noise);local_heat[1]+=volume*static_cast<double>(exchange);}
         }
         if(heat && s) {
-          auto& contribution=enthalpy_sources[0];
+          // Statistical transport and parcel exchange retain separate
+          // source identities and balance terms in the common energy row.
+          auto& contribution=enthalpy_sources[statistical_heat_slot];
           contribution={};contribution.conserved_quantity=fields.enthalpy;
           contribution.explicit_source_density=as_const(source);
           contribution.implicit_sink_density=as_const(sink);contribution.has_implicit_sink=true;
@@ -10067,7 +10076,7 @@ Status ProductDriver::Impl::execute_attempt(
           contribution.stage=detail::ProductEsf::transport_source_stage;
           contribution.capability=ContributionCapability::reacting;
           contribution.source_identity=product.reaction.fingerprint();
-          enthalpy_contributions={enthalpy_sources.data(),1};
+          enthalpy_contributions={enthalpy_sources.data(),statistical_heat_slot+1};
         }
       }
       s=product.reductions.consensus(s);if(!s)return s;
@@ -12819,9 +12828,7 @@ Status ProductDriver::Impl::execute_attempt(
               }
               EquationAssemblyCertificate energy_certificate;
               auto enthalpy_assembly = cold_energy_context;
-              if (product.spray.enabled())
-                enthalpy_assembly.contribution_stage = 2;
-              if(dual_esf)enthalpy_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
+              select_enthalpy_sources(enthalpy_assembly);
               if (assembled)
                 assembled = assemble_enthalpy(
                     product.equations.enthalpy(), equation_state, material,
@@ -14485,9 +14492,7 @@ Status ProductDriver::Impl::execute_attempt(
                   }
                   EquationAssemblyCertificate energy_certificate;
                   auto enthalpy_assembly = cold_energy_context;
-                  if (product.spray.enabled())
-                    enthalpy_assembly.contribution_stage = 2;
-                  if(dual_esf)enthalpy_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
+                  select_enthalpy_sources(enthalpy_assembly);
                   if (assembled)
                     assembled = assemble_enthalpy(
                         product.equations.enthalpy(), equation_state, material,
@@ -14855,7 +14860,7 @@ Status ProductDriver::Impl::execute_attempt(
             if (status) status = runtime_write_view(product.fields.pressure_energy_e_p,
                                                     pressure_energy_e_p);
             status = product.reductions.consensus(status);
-            const auto statistical_balance=esf_energy_ledger.balance(enthalpy_sources[0].explicit_source_density);
+            const auto statistical_balance=esf_energy_ledger.balance(enthalpy_sources[statistical_heat_slot].explicit_source_density);
             if (status) status = detail::collect_boundary_balance(
                 product.equations.enthalpy(), product.equations.kernels(),
                 product.schemes, product.boundary, equation_state, material,
@@ -15134,7 +15139,7 @@ Status ProductDriver::Impl::execute_attempt(
             status = runtime_write_view(product.fields.pressure_energy_e_p,
                                         pressure_energy_e_p);
           status = product.reductions.consensus(status);
-          const auto statistical_balance=esf_energy_ledger.balance(enthalpy_sources[0].explicit_source_density);
+          const auto statistical_balance=esf_energy_ledger.balance(enthalpy_sources[statistical_heat_slot].explicit_source_density);
           if (status)
             status = detail::collect_boundary_balance(
                 product.equations.enthalpy(), product.equations.kernels(),
@@ -15893,9 +15898,7 @@ Status ProductDriver::Impl::execute_attempt(
         }
         EquationAssemblyCertificate energy_certificate;
         auto enthalpy_assembly = assembly;
-        if (product.spray.enabled())
-          enthalpy_assembly.contribution_stage = 2;
-        if(dual_esf)enthalpy_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
+        select_enthalpy_sources(enthalpy_assembly);
         if (assembled && scope == EquationAssemblyScope::target_coupled &&
             enthalpy_contributions.size == 0U) {
           // Schur consumes A_h's diagonal; its spatial operator prepares its
@@ -18147,9 +18150,7 @@ Status ProductDriver::Impl::execute_attempt(
             product.ibm_equations.has_value() ? &*product.ibm_equations
                                               : nullptr;
         candidate_assembly.wall_treatment = product.ibm_equations ? &product.turbulence : nullptr;
-        if (product.spray.enabled())
-          candidate_assembly.contribution_stage = 2;
-        if(dual_esf)candidate_assembly.contribution_stage=detail::ProductEsf::transport_source_stage;
+        select_enthalpy_sources(candidate_assembly);
         const auto assemble_candidate_energy = [&]() noexcept {
           const TargetCoupledEnthalpyResidualWorkspace residual_workspace{
               pressure_energy_e_h, pressure_energy_r_c,

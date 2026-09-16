@@ -18,7 +18,10 @@ int main(int argc,char** argv) {
   RestartImage a,b;if(s)s=RestartReader::load(MPI_COMM_WORLD,argv[2],expected,a);
   if(s)s=RestartReader::load(MPI_COMM_WORLD,argv[3],expected,b);
   if(!all(bool(s))) {if(!rank)std::cout<<"load "<<unsigned(s.code)<<'/'<<s.detail<<std::endl;return 3;}
-  const bool metadata=a.step==b.step && a.time==b.time && a.dt==b.dt && a.method_history_signature==b.method_history_signature && a.plan==b.plan && a.schema==b.schema && a.geometry==b.geometry && a.source_format_version==b.source_format_version && !a.backward_euler_recovery && !b.backward_euler_recovery && a.controller_state==b.controller_state && a.pressure_reference==b.pressure_reference && a.previous_pressure_reference==b.previous_pressure_reference && a.closed_mass_target==b.closed_mass_target && a.cell_records==b.cell_records;
+  const bool metadata=a.step==b.step && a.time==b.time && a.dt==b.dt && a.method_history_signature==b.method_history_signature && a.plan==b.plan && a.schema==b.schema && a.geometry==b.geometry && a.source_format_version==b.source_format_version && !a.backward_euler_recovery && !b.backward_euler_recovery && a.controller_state==b.controller_state && a.pressure_reference==b.pressure_reference && a.previous_pressure_reference==b.previous_pressure_reference && a.closed_mass_target==b.closed_mass_target && a.cell_records==b.cell_records &&
+      a.cell_record_lengths==b.cell_record_lengths &&
+      a.cell_record_identity==b.cell_record_identity && a.cell_record_bytes==b.cell_record_bytes &&
+      (!model.spray || (!a.cell_records.empty() && a.cell_record_identity!=0));
   if(!all(metadata))return 4;
   bool passed=true;double worst{};
   const auto role_count=[&](RestartFieldRole role) {

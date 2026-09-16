@@ -2336,6 +2336,14 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/thick-cn"
       "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be)
   set_tests_properties(v04_spray_thick_cn_cli PROPERTIES TIMEOUT 180 PROCESSORS 4 RUN_SERIAL TRUE)
+  add_test(NAME v04_spray_thick_esf_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_thick_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/thick-esf"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be_esf
+      "$<TARGET_FILE:v04_kerosene_esf_test>")
+  set_tests_properties(v04_spray_thick_esf_cli PROPERTIES TIMEOUT 180 PROCESSORS 4 RUN_SERIAL TRUE)
   add_test(NAME v04_composition_balance_cli
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/composition_balance_cli_test.py"
