@@ -48,3 +48,28 @@ G1 固定外迭代：`check/gas-outer-final.log` 原生入口检查通过。覆�
 进程恢复、配置身份漂移、输入范围及外部证据篡改。`gas-outer-check.log`
 的输入与 MPI 广播两项回归通过；证据校验器 self-test 返回成功。
 正式构建完成后执行上述检查；原生残差停止模式与旧输入身份保持原行为。
+
+G0/G1 时间算子基准：`gas-time.json` 登记完整 `cmod.F90`／`step.F90`
+的 257 组输入、三条路径及源码／程序哈希。CN 与 Hundun 现用
+`time_centre_cold_row` 逐系数、RHS 比较；BE 与压力行分别与解析式比较。
+FP64 三条路径本组差异均为 0，原版默认 REAL 最大归一化差异为
+1.65e-7。RHS 按输入项幅度归一化，避免抵消后的近零分母放大舍入。
+此证据覆盖冻结行算子，普通焓完整接线及时间阶由 G1/G2 继续验收。
+
+已定位的普通焓接线范围：原版 `boffin` 的普通焓调用
+`condif → source → bndry2 → cmod → step(rhobar)`，其中 `source` 的
+`dpdt` 保持全量；PDF 焓调用 `source_pdf → step(rho)`，两次 `jstep`
+共享 `fold`。当前 Hundun 高效能量组装与末次审计均显式使用 BE。
+后续修改需同时覆盖空间矩阵／RHS、密度时间层、压力功、IBM、边界
+消元、总能量收支及 Restart 身份。既有 CN 动量行算子已具备原版对照。
+
+```sh
+mkdir -p check/gt/f4 check/gt/f8
+cp /home/wyf/code_dev/src.TCR.dyn711/cmod.F90 check/gt/cmod.F90
+cp /home/wyf/code_dev/src.TCR.dyn711/step.F90 check/gt/step.F90
+gfortran -O2 -Jcheck/gt/f4 tools/gas_time.f90 check/gt/cmod.F90 check/gt/step.F90 -o check/gt/f4/probe
+gfortran -O2 -fdefault-real-8 -Jcheck/gt/f8 tools/gas_time.f90 check/gt/cmod.F90 check/gt/step.F90 -o check/gt/f8/probe
+python3 tools/gas_time.py --float check/gt/f4/probe --double check/gt/f8/probe \
+  --hundun b3/versions/v0.4/tests/v04_gas_time_probe --runner 'bash check/jam.sh' \
+  --cmod check/gt/cmod.F90 --step check/gt/step.F90 --output docs/gas-time.json
+```

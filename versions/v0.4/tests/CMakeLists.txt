@@ -2721,3 +2721,6 @@ add_test(NAME v04_gas_outer_cli
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_outer_test.py"
     "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
 set_tests_properties(v04_gas_outer_cli PROPERTIES PROCESSORS 4 TIMEOUT 180 RUN_SERIAL TRUE)
+
+add_executable(v04_gas_time_probe integration/gas_time_probe.cpp)
+target_link_libraries(v04_gas_time_probe PRIVATE hundun_v04_core)
