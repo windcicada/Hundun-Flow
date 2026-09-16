@@ -17,7 +17,8 @@ class ProductSprayHistory {
 public:
   using Parcel = spray::detail::ParcelMigrationValue;
   using Injector = spray::detail::DeterministicInjector;
-  static constexpr std::size_t header_bytes = 24, parcel_bytes = 144,
+  static constexpr std::size_t header_bytes = 24, legacy_parcel_bytes = 144,
+                               parcel_bytes = legacy_parcel_bytes + 8 * spray::detail::kSgsHistoryLanes,
                                injector_bytes = 24;
   Status configure(PlanFingerprint identity, MeshPatch patch, Int3 global,
                    std::size_t capacity, std::uint64_t material,
@@ -185,16 +186,17 @@ public:
         return invalid();
       const auto np = get(p, 4), ni = get(p, 4), nt = get(p, 4),
                  version = get(p, 4);
-      if (version != 1 || nt != tcr_width_ || np > capacity_ - trial_.size() ||
+      const auto width = version == 1 ? legacy_parcel_bytes : parcel_bytes;
+      if ((version != 1 && version != 2) || nt != tcr_width_ || np > capacity_ - trial_.size() ||
           ni > injectors_.size() ||
-          header_bytes + nt + np * parcel_bytes + ni * injector_bytes != length)
+          header_bytes + nt + np * width + ni * injector_bytes != length)
         return invalid();
       if (nt) {
         std::memcpy(trial_tcr_.data() + cell * tcr_width_, p, nt);
         p += nt;
       }
       for (std::uint64_t i = 0; i < np; ++i) {
-        const auto value = decode_parcel(p);
+        const auto value = decode_parcel(p, version);
         std::size_t local{};
         if (!local_cell(value.parcel.owner_global_cell, local) || local != cell)
           return invalid();
@@ -284,6 +286,7 @@ private:
           v.parcel.liquid_material_fingerprint != material_ ||
           !std::isfinite(v.tab_deformation) ||
           !std::isfinite(v.tab_deformation_rate_per_s) ||
+          !spray::detail::valid_sgs_state(v.sgs) ||
           !local_cell(v.parcel.owner_global_cell, cell))
         return false;
     }
@@ -310,6 +313,10 @@ private:
         tcr.values.size != count_ * tcr_width_ ||
         (tcr.values.size && !tcr.values.data) || tcr.variable_cell_bytes.size)
       return false;
+    const bool has_sgs = std::any_of(parcels.begin(), parcels.end(),
+        [](const Parcel& p) { return p.sgs.version != 0U; });
+    const unsigned version = has_sgs ? 2U : 1U;
+    const auto width = has_sgs ? parcel_bytes : legacy_parcel_bytes;
     std::fill(lengths.begin(), lengths.end(),
               tcr_width_ ? header_bytes + tcr_width_ : 0);
     const auto add = [&](std::uint64_t global, std::size_t amount) {
@@ -325,7 +332,7 @@ private:
       return true;
     };
     for (const auto &p : parcels)
-      if (!add(p.parcel.owner_global_cell, parcel_bytes))
+      if (!add(p.parcel.owner_global_cell, width))
         return false;
     for (auto *i : injectors_)
       if (!add(i->configured_spec().owner_global_cell, injector_bytes))
@@ -346,7 +353,7 @@ private:
       put(p, 0, 4);
       put(p, 0, 4);
       put(p, tcr_width_, 4);
-      put(p, 1, 4);
+      put(p, version, 4);
       if (tcr_width_) {
         const auto *source = tcr.values.data + cell * tcr_width_;
         const auto *cursor = source;
@@ -362,8 +369,8 @@ private:
       if (!local_cell(v.parcel.owner_global_cell, cell))
         return false;
       auto *p = bytes.data() + offsets_[cell];
-      encode_parcel(v, p);
-      offsets_[cell] += parcel_bytes;
+      encode_parcel(v, p, version);
+      offsets_[cell] += width;
     }
     for (auto *i : injectors_) {
       spray::detail::InjectorCommittedState state = i->committed_state();
@@ -429,7 +436,7 @@ private:
     std::memcpy(&value, &bits, 8);
     return value;
   }
-  static void encode_parcel(const Parcel &v, std::uint8_t *&p) noexcept {
+  static void encode_parcel(const Parcel &v, std::uint8_t *&p, unsigned version) noexcept {
     const auto &q = v.parcel;
     put(p, q.id.high);
     put(p, q.id.low);
@@ -447,8 +454,13 @@ private:
     real(p, v.tab_deformation);
     real(p, v.tab_deformation_rate_per_s);
     put(p, v.breakup_ordinal);
+    if (version == 2U) {
+      std::uint64_t wire[spray::detail::kSgsHistoryLanes]{};
+      spray::detail::encode_sgs_state(v.sgs, wire);
+      for (auto value : wire) put(p, value);
+    }
   }
-  static Parcel decode_parcel(const std::uint8_t *&p) noexcept {
+  static Parcel decode_parcel(const std::uint8_t *&p, unsigned version) noexcept {
     Parcel v;
     auto &q = v.parcel;
     q.id = {get(p), get(p)};
@@ -466,6 +478,11 @@ private:
     v.tab_deformation = real(p);
     v.tab_deformation_rate_per_s = real(p);
     v.breakup_ordinal = get(p);
+    if (version == 2U) {
+      std::uint64_t wire[spray::detail::kSgsHistoryLanes]{};
+      for (auto& value : wire) value = get(p);
+      v.sgs = spray::detail::decode_sgs_state(wire);
+    }
     return v;
   }
   PlanFingerprint identity_{}, tcr_identity_{};

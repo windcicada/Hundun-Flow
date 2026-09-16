@@ -2,6 +2,7 @@
 #pragma once
 #include "hundun/v04_portable.hpp"
 #include "models_spray_breakup_detail.hpp"
+#include "models_spray_sgs_detail.hpp"
 #include "models_spray_transfer_detail.hpp"
 #include <array>
 
@@ -13,6 +14,7 @@ struct ParcelAuxiliaryState {
   double tab_deformation{};
   double tab_deformation_rate_per_s{};
   std::uint64_t breakup_ordinal{};
+  PersistentSgsBreakupState sgs{};
 };
 struct ParcelTabIntervalReport {
   portable::Revision revision{};

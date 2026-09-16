@@ -268,7 +268,7 @@ ProductSpray::configure_collective(MPI_Comm comm,
     return {StatusCode::mpi_failure, 10341};
   const std::uint64_t restore =
       std::uint64_t(ranks) * 5 * sizeof(int) +
-      std::uint64_t(np) * (sizeof(int) + 36 * sizeof(std::uint64_t) +
+      std::uint64_t(np) * (sizeof(int) + 2 * spray::detail::kParcelMigrationWireLanes * sizeof(std::uint64_t) +
                            sizeof(ProductSprayHistory::Parcel)) +
       std::uint64_t(ns) *
           (2 * sizeof(std::uint64_t) + sizeof(spray::ParcelId)) +

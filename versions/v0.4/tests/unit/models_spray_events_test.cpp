@@ -234,6 +234,20 @@ int main() {
       r.available && r.parcel.position_m[0] == 1 && r.predictor_passes == 1 &&
           r.corrector_passes == 1 && r.advanced_duration_s == .5,
       "ballistic endpoint and one predictor/corrector macro contract");
+  in.accepted_auxiliary.sgs = {1U,{1234.5,.125,678.25,.0625,7U}};
+  const auto carried = integrate_parcel_events(in);
+  ok &= check(carried.available && carried.auxiliary.sgs.version == 1U &&
+      carried.auxiliary.sgs.history.mean_dissipation_m2_per_s3 == 1234.5 &&
+      carried.auxiliary.sgs.history.dissipation_age_s == .125 &&
+      carried.auxiliary.sgs.history.mean_rate_per_s == 678.25 &&
+      carried.auxiliary.sgs.history.rate_age_s == .0625 &&
+      carried.auxiliary.sgs.history.poisson_multiplier == 7U,
+      "explicitly inactive SGS evolution preserves accepted model history");
+  in.accepted_auxiliary.sgs.history.poisson_multiplier = 8U;
+  const auto invalid_sgs = integrate_parcel_events(in);
+  ok &= check(!invalid_sgs.available && invalid_sgs.status == ParcelEventsStatus::invalid_input,
+              "invalid SGS history rejects before event integration");
+  in.accepted_auxiliary.sgs = {};
   Geometry events;
   events.wall = true;
   physics.acceleration = 1;

@@ -14,7 +14,7 @@
 
 namespace hundun::v04::spray::detail {
 namespace {
-constexpr int kLanes = 18;
+constexpr int kLanes = static_cast<int>(kParcelMigrationWireLanes);
 static_assert(sizeof(double) == sizeof(std::uint64_t) &&
                   std::numeric_limits<double>::is_iec559,
               "parcel wire requires IEEE binary64");
@@ -71,6 +71,7 @@ void encode(const ParcelMigrationValue &value, std::uint64_t *wire) noexcept {
   wire[15] = bits(value.tab_deformation);
   wire[16] = bits(value.tab_deformation_rate_per_s);
   wire[17] = value.breakup_ordinal;
+  encode_sgs_state(value.sgs, wire + 18);
 }
 ParcelMigrationValue decode(const std::uint64_t *wire) noexcept {
   ParcelMigrationValue value;
@@ -90,12 +91,13 @@ ParcelMigrationValue decode(const std::uint64_t *wire) noexcept {
   value.tab_deformation = real(wire[15]);
   value.tab_deformation_rate_per_s = real(wire[16]);
   value.breakup_ordinal = wire[17];
+  value.sgs = decode_sgs_state(wire + 18);
   return value;
 }
 bool valid(const ParcelMigrationValue &value) noexcept {
   return validate_parcel_state(value.parcel) == ParcelStateStatus::success &&
          std::isfinite(value.tab_deformation) &&
-         std::isfinite(value.tab_deformation_rate_per_s);
+         std::isfinite(value.tab_deformation_rate_per_s) && valid_sgs_state(value.sgs);
 }
 int owner_coordinate(int index, int cells, int partitions) noexcept {
   const int ordinary = cells / partitions;

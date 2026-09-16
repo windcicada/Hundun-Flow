@@ -68,6 +68,8 @@ ParcelMigrationValue value(int origin, int ordinal, int ranks, Int3 cells) {
   result.parcel.age_s = 0.5;
   result.tab_deformation = -0.25 - ordinal;
   result.tab_deformation_rate_per_s = 4.0 + origin;
+  result.sgs = {1U, {10000.25+origin, .004+ordinal, 1250.5+ordinal,
+                    .001+origin, static_cast<std::uint8_t>(ordinal == 0 ? 0 : 7)}};
   return result;
 }
 bool same(const ParcelMigrationValue &a, const ParcelMigrationValue &b) {
@@ -85,7 +87,12 @@ bool same(const ParcelMigrationValue &a, const ParcelMigrationValue &b) {
          a.parcel.age_s == b.parcel.age_s &&
          a.tab_deformation == b.tab_deformation &&
          a.tab_deformation_rate_per_s == b.tab_deformation_rate_per_s &&
-         a.breakup_ordinal == b.breakup_ordinal;
+         a.breakup_ordinal == b.breakup_ordinal && a.sgs.version == b.sgs.version &&
+         a.sgs.history.mean_dissipation_m2_per_s3 == b.sgs.history.mean_dissipation_m2_per_s3 &&
+         a.sgs.history.dissipation_age_s == b.sgs.history.dissipation_age_s &&
+         a.sgs.history.mean_rate_per_s == b.sgs.history.mean_rate_per_s &&
+         a.sgs.history.rate_age_s == b.sgs.history.rate_age_s &&
+         a.sgs.history.poisson_multiplier == b.sgs.history.poisson_multiplier;
 }
 bool owner_exchange(int rank, int ranks) {
   namespace p = hundun::v04::portable;
@@ -447,7 +454,7 @@ int main(int argc, char **argv) {
         value(static_cast<int>(actual.parcel.id.high - 1),
               static_cast<int>(actual.parcel.id.low - 1), ranks, cells);
     expect(same(actual, expected),
-           "all values including TAB and signed zero survive");
+           "all values including SGS clocks, Poisson, TAB and signed zero survive");
     expect((static_cast<int>(actual.parcel.id.high + actual.parcel.id.low - 1) %
             ranks) == rank,
            "one authoritative destination owner");
@@ -472,6 +479,22 @@ int main(int argc, char **argv) {
              migration.prepare({input.data(), input.size()}, report)),
          "retry recomputes migration after failure");
   migration.discard();
+
+  for (unsigned defect=0;defect<5U;++defect) {
+    input = original;
+    if (rank == ranks-1) {
+      auto& state=input[0].sgs;
+      if (defect == 0U) state.version=2U;
+      if (defect == 1U) state.history.mean_dissipation_m2_per_s3=-1.;
+      if (defect == 2U) state.history.rate_age_s=std::numeric_limits<double>::quiet_NaN();
+      if (defect == 3U) state.history.poisson_multiplier=8U;
+      if (defect == 4U) state.version=0U;
+    }
+    expect(!migration.prepare({input.data(),input.size()},report) &&
+        !report.available && migration.candidates().size == 0U,
+        "one-rank SGS history failure collectively withdraws candidates");
+  }
+  input=original;
 
   // Duplicate identities may be sent to different owners; audit must be global.
   input[0].parcel.id = {71U, 89U};

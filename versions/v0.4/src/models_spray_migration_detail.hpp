@@ -7,6 +7,7 @@
 #include "hundun/v04_mesh.hpp"
 #include "hundun/v04_portable.hpp"
 #include "hundun/v04_spray.hpp"
+#include "models_spray_sgs_detail.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,11 +16,14 @@
 
 namespace hundun::v04::spray::detail {
 
+inline constexpr std::size_t kParcelMigrationWireLanes = 18U + kSgsHistoryLanes;
+
 struct ParcelMigrationValue {
   SprayParcelState parcel{};
   double tab_deformation{};
   double tab_deformation_rate_per_s{};
   std::uint64_t breakup_ordinal{};
+  PersistentSgsBreakupState sgs{};
 };
 
 enum class MigrationDetail : std::uint32_t {
@@ -70,9 +74,9 @@ private:
 };
 
 struct ParcelMigrationReport {
-  std::string_view model_id{"parcel_candidate_migration_values_v2"};
+  std::string_view model_id{"parcel_candidate_migration_values_v3"};
   std::uint32_t value_wire_version{
-      2U}; // 18 plain-value lanes; not a product checkpoint format
+      3U}; // 24 plain-value lanes; product records carry their own version
   Status status{StatusCode::invalid_plan,
                 static_cast<std::uint32_t>(MigrationDetail::invalid_plan)};
   bool available{};

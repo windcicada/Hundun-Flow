@@ -312,7 +312,7 @@ bool same_report(const InjectionReport& left, const InjectionReport& right) {
          left.residual_mass_after_kg == right.residual_mass_after_kg;
 }
 
-bool test_native_spray_history(bool coupled_tcr) {
+bool test_native_spray_history(bool coupled_tcr, bool sgs = false) {
   using namespace hundun::v04;
   hundun::v04::detail::ProductSprayHistory history;
   hundun::v04::detail::ProductTcrHistory tcr;
@@ -377,6 +377,8 @@ bool test_native_spray_history(bool coupled_tcr) {
   parcels[0].tab_deformation_rate_per_s = 12;
   parcels[0].breakup_ordinal = UINT64_C(9007199254740997);
   parcels[1].breakup_ordinal = UINT64_MAX - 1;
+  if (sgs) parcels[0].sgs = {1U, {12345.5, .03125, 7654.25, .015625, 7U}};
+  const auto parcel_width = sgs ? 192U : 144U;
   if (!stage_tcr())
     return false;
   hot_allocation_count = 0;
@@ -412,9 +414,9 @@ bool test_native_spray_history(bool coupled_tcr) {
   passed &= expect(history.accepted_parcels().size == 2 &&
                        emitted.next_ordinal == original.next_ordinal + 2 &&
                        image.cell_record_lengths[0] ==
-                           24 + 144 + (coupled_tcr ? 120 : 0) &&
+                           24 + parcel_width + (coupled_tcr ? 120 : 0) &&
                        image.cell_record_lengths[7] ==
-                           24 + 144 + 24 + (coupled_tcr ? 120 : 0),
+                           24 + parcel_width + 24 + (coupled_tcr ? 120 : 0),
                    "one publication advances parcels and exact counters into "
                    "cell-partitioned V5 records");
   if (!expect(bool(history.stage_restore(initial)),
@@ -456,9 +458,70 @@ bool test_native_spray_history(bool coupled_tcr) {
           restored.data[0].tab_deformation_rate_per_s == 12 &&
           restored.data[0].breakup_ordinal == UINT64_C(9007199254740997) &&
           restored.data[1].breakup_ordinal == UINT64_MAX - 1 &&
+          restored.data[0].sgs.version == (sgs ? 1U : 0U) &&
+          restored.data[0].sgs.history.mean_dissipation_m2_per_s3 == (sgs ? 12345.5 : 0.) &&
+          restored.data[0].sgs.history.dissipation_age_s == (sgs ? .03125 : 0.) &&
+          restored.data[0].sgs.history.mean_rate_per_s == (sgs ? 7654.25 : 0.) &&
+          restored.data[0].sgs.history.rate_age_s == (sgs ? .015625 : 0.) &&
+          restored.data[0].sgs.history.poisson_multiplier == (sgs ? 7U : 0U) &&
+          restored.data[1].sgs.version == 0U &&
+          image.cell_records[20] == (sgs ? 2U : 1U) &&
           injector.committed_state() == emitted,
       "V5 restore preserves full parcel IDs, TAB and uint64 breakup/injection "
       "lineage");
+  if (sgs && !coupled_tcr) {
+    // Repartition the same native variable-cell payload from one patch into
+    // two x patches. The outer V5 reader uses this global-cell slicing contract.
+    std::array<std::size_t,8> offsets{};
+    for (unsigned cell=1;cell<8U;++cell)
+      offsets[cell]=offsets[cell-1]+image.cell_record_lengths[cell-1];
+    for (unsigned rank=0;rank<2U;++rank) {
+      hundun::v04::detail::ProductSprayHistory target;
+      DeterministicInjector target_injector;
+      DeterministicInjector* target_injections[]{&target_injector};
+      if (rank && (!target_injector.reserve(4) || !target_injector.configure(spec,original))) return false;
+      const MeshPatch target_patch{{static_cast<int>(rank),0,0},{1,2,2},{2,1,1},{static_cast<int>(rank),0,0}};
+      if (!target.configure(8001,target_patch,global,4,spec.liquid_material_fingerprint,
+                            {target_injections,rank ? 1U : 0U},{},1U<<20)) return false;
+      auto sliced=image;
+      sliced.cell_record_lengths.clear();
+      sliced.cell_records.clear();
+      for (unsigned z=0;z<2U;++z) for (unsigned y=0;y<2U;++y) {
+        const auto cell=rank+2U*(y+2U*z);
+        const auto length=image.cell_record_lengths[cell];
+        sliced.cell_record_lengths.push_back(length);
+        sliced.cell_records.insert(sliced.cell_records.end(),image.cell_records.begin()+offsets[cell],
+                                    image.cell_records.begin()+offsets[cell]+length);
+      }
+      if (!target.stage_restore(sliced) || !target.preflight_commit()) return false;
+      target.commit();
+      const auto owned=target.accepted_parcels();
+      passed &= expect(owned.size == 1 && same_parcel(owned.data[0].parcel,parcels[rank].parcel) &&
+          owned.data[0].sgs.version == parcels[rank].sgs.version &&
+          owned.data[0].sgs.history.mean_dissipation_m2_per_s3 == parcels[rank].sgs.history.mean_dissipation_m2_per_s3 &&
+          owned.data[0].sgs.history.poisson_multiplier == parcels[rank].sgs.history.poisson_multiplier,
+          "SGS native cell records restore under a different patch decomposition");
+    }
+  }
+  if (sgs) {
+    const auto extension = 24U + (coupled_tcr ? 120U : 0U) + 144U;
+    for (unsigned defect=0;defect<6U;++defect) {
+      auto damaged = image;
+      if (defect == 0U) damaged.cell_records[extension] = 2U; // unknown SI model version
+      if (defect == 1U) damaged.cell_records[extension+41U] = 1U; // Poisson 263, prior to narrowing
+      if (defect == 2U) damaged.cell_records[extension] = 0U; // hidden history with inactive version
+      if (defect == 3U) damaged.cell_records[20] = 3U; // unknown record version
+      if (defect == 4U) damaged.cell_records[20] = 1U; // legacy header with extended body
+      if (defect == 5U) damaged.cell_records[extension+15U] |= 0x80U; // negative dissipation
+      const auto status = history.stage_restore(damaged);
+      history.discard();
+      const auto unchanged = history.snapshot();
+      passed &= expect(!status && !history.preflight_commit() && !injector.trial_active() &&
+          injector.committed_state() == emitted && unchanged.values.size == image.cell_records.size() &&
+          std::equal(image.cell_records.begin(),image.cell_records.end(),unchanged.values.data),
+          "malformed SGS history rejects before parcel and injector publication");
+    }
+  }
   if (coupled_tcr) {
     auto damaged = image;
     damaged.cell_records[24 + 64] ^=
@@ -789,6 +852,8 @@ int main() {
   passed &= test_staged_injector_restore();
   passed &= test_native_spray_history(false);
   passed &= test_native_spray_history(true);
+  passed &= test_native_spray_history(false, true);
+  passed &= test_native_spray_history(true, true);
   passed &= test_micro_mass_residual_scale();
   passed &= test_cone_zero_flow_and_capacity_failure();
   return passed ? 0 : 1;

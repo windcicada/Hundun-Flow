@@ -692,6 +692,7 @@ integrate_parcel_events(const ParcelEventsInput &in) noexcept {
       validate_parcel_state(in.accepted_parcel) != ParcelStateStatus::success ||
       !std::isfinite(in.accepted_auxiliary.tab_deformation) ||
       !std::isfinite(in.accepted_auxiliary.tab_deformation_rate_per_s) ||
+      !valid_sgs_state(in.accepted_auxiliary.sgs) ||
       !std::isfinite(in.elapsed_offset_s) || in.elapsed_offset_s < 0 ||
       !std::isfinite(in.elapsed_offset_s + in.duration_s) ||
       (in.duration_s > 0 &&

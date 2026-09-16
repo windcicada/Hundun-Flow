@@ -87,7 +87,7 @@ Status ProductParcelAdvance::configure(MPI_Comm comm,
       np * (2 * sizeof(Parcel) + sizeof(Job)) +
       ns * (2 * sizeof(portable::ExchangeSegment) + sizeof(std::size_t)) +
       std::uint64_t(ranks) * 5 * sizeof(int) +
-      np * (sizeof(int) + 36 * sizeof(std::uint64_t) + sizeof(Parcel)) +
+      np * (sizeof(int) + 2 * spray::detail::kParcelMigrationWireLanes * sizeof(std::uint64_t) + sizeof(Parcel)) +
       ns * (2 * sizeof(std::uint64_t) + sizeof(spray::ParcelId)) + 24;
   if (fixed > maximum_bytes || nc > (maximum_bytes - fixed) / per_cell)
     local = capacity();
@@ -233,7 +233,7 @@ Status ProductParcelAdvance::wave(portable::Revision revision, double start,
     in.revision = revision;
     in.accepted_auxiliary = {job.value.tab_deformation,
                              job.value.tab_deformation_rate_per_s,
-                             job.value.breakup_ordinal};
+                             job.value.breakup_ordinal, job.value.sgs};
     in.interval = evaporation_ == spray::EvaporationModel::thick_exchange
         ? static_cast<const spray::detail::ParcelIntervalProvider *>(&thick_interval_)
         : &interval_;
@@ -343,7 +343,7 @@ Status ProductParcelAdvance::wave(portable::Revision revision, double start,
         return capacity();
       next_.push_back({result.parcel, result.auxiliary.tab_deformation,
                        result.auxiliary.tab_deformation_rate_per_s,
-                       result.auxiliary.breakup_ordinal});
+                       result.auxiliary.breakup_ordinal, result.auxiliary.sgs});
     }
   }
   return {};
