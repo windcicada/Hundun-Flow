@@ -1496,8 +1496,10 @@ int main(int argc, char **argv) {
             (model.mesh.upper.y - model.mesh.lower.y) / image.global_cells.y;
         const double dz =
             (model.mesh.upper.z - model.mesh.lower.z) / image.global_cells.z;
+        std::array<std::array<double,3>,4> increments{};
         const auto wiener=esf::detail::balanced_wiener(4,image.dt,
-            {model.reaction.esf->seed,image.step,1,0,0,1});
+            {model.reaction.esf->seed,image.step,1,0,0,1},increments.data(),increments.size());
+        if (wiener!=portable::Status::success) return 1;
         const double maximum_perturbation=amplitude*std::cos(pi/image.global_cells.x);
         const double rho = initial.pressure_reference *
                            model.thermophysics.species[0].molecular_weight /
@@ -1535,7 +1537,7 @@ int main(int argc, char **argv) {
             const double gradient=sign*amplitude*std::sin(2*pi/nx)/dx*
                 std::cos(2*pi*(x+.5)/nx);
             const double raw_noise=std::sqrt(2*(cache[2]/.7+cache[3]/.5)/rho)*
-                gradient*wiener.increments[f][0];
+                gradient*increments[f][0];
             const double noise=std::max(-maximum_perturbation-sign*perturbation,
                 std::min(maximum_perturbation-sign*perturbation,raw_noise));
             rhs[x]=base[f]+sign*perturbation+noise+mix*mean;

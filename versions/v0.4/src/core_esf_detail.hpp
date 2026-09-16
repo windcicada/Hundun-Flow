@@ -46,7 +46,7 @@ public:
     enthalpy_scheme_ = model.schemes.enthalpy;
     common_transport_ = species_scheme_ == ConvectionScheme::tvd2 ||
                         species_scheme_ == ConvectionScheme::limited_central2;
-    if (!gas.gas_advance() || !gas.gas_query() || ns_ < 2 || ns_ >= UINT8_MAX ||
+    if (!esf::valid_field_count(spec_.fields) || !gas.gas_advance() || !gas.gas_query() || ns_ < 2 || ns_ >= UINT8_MAX ||
         (model.time.scheme != TimeScheme::backward_euler &&
          !(model.time.scheme == TimeScheme::cn_be &&
            (spec_.tcr.mode == TcrMode::off || spec_.tcr.mode == TcrMode::shadow))) ||
@@ -92,7 +92,7 @@ public:
         std::size_t(cells.y + 1) * cells.x * cells.z +
         std::size_t(cells.z + 1) * cells.x * cells.y : 0;
     const auto extra_bytes = (thermal_count + face_count +
-        2*spec_.fields*stride_ + 1 + stride_) * sizeof(double) +
+        2*spec_.fields*stride_ + 6*spec_.fields + 1 + stride_) * sizeof(double) +
         (common_transport_ ? (ns_ - 1) * sizeof(ConstFieldView) : 0);
     const auto maximum_bytes = model.mesh.limits.max_memory_bytes_per_rank;
     if (count_ > SIZE_MAX / per_cell || extra_bytes > maximum_bytes ||
@@ -107,7 +107,7 @@ public:
     if (tcr)
       tcr_history.configure(gas.fingerprint(), count_,
                             spec_.tcr.initialization_sign);
-    workspace_ = std::make_unique<esf::detail::Workspace>(ns_);
+    workspace_ = std::make_unique<esf::detail::Workspace>(ns_, spec_.fields);
     if (implicit_transport()) {
       transport_rows_.resize(count_);
       transport_pc_=std::make_unique<ColdPressureDilu>(transport_rows_,cells_,LinearIdentity{});
@@ -121,6 +121,10 @@ public:
     tuple_.resize(spec_.fields * stride_);
     noise_bounds_.resize(2*tuple_.size()+1);
     noise_.resize(stride_);
+    wiener_.resize(spec_.fields);
+    field_rates_.resize(spec_.fields);
+    field_pressures_.resize(spec_.fields);
+    field_densities_.resize(spec_.fields);
     means_.resize(stride_);
     independent_.resize(ns_ - 1);
     diffusion_.resize(ns_);
@@ -252,9 +256,10 @@ public:
     for (const auto *v :
          {&rates_, &gradients_, &scratch_, &mass_divergence_, &tuple_, &means_,
           &noise_bounds_, &noise_, &reactor_density_, &transport_carrier_density_,
-          &independent_, &diffusion_, &enthalpies_, &query_rates_, &thermal_coordinate_})
+          &independent_, &diffusion_, &enthalpies_, &query_rates_, &thermal_coordinate_,
+          &field_rates_, &field_pressures_, &field_densities_})
       bytes += v->capacity() * sizeof(double);
-    return bytes;
+    return bytes + wiener_.capacity()*sizeof(std::array<double,3>);
   }
   bool enabled() const noexcept { return bool(workspace_); }
   bool implicit_transport() const noexcept { return enabled() && spec_.tcr.mode!=TcrMode::experimental; }
@@ -655,8 +660,8 @@ public:
       noise_bounds_[size+j]=-noise_bounds_[size+j];
     }
     const auto wiener=esf::detail::balanced_wiener(spec_.fields,dt,
-        {spec_.seed,step,1,0,0,1});
-    if(wiener.status!=portable::Status::success) return invalid();
+        {spec_.seed,step,1,0,0,1},wiener_.data(),wiener_.size());
+    if(wiener!=portable::Status::success) return invalid();
     auto scratch = scratch_view(rho, 1);
     KernelInvocation call{{}, {&scratch, 1}, {{0, 0, 0}, cells_}, 0, 0,
                           1,  flux.revision};
@@ -788,7 +793,7 @@ public:
               const esf::detail::StochasticSourceRequest noise_request{
                   density,cache.unchecked(cell,2),cache.unchecked(cell,3),.7,
                   spec_.tcr.mode==TcrMode::experimental ? .7 : .5,dt,
-                  wiener.increments[f],tuple_.data()+f*stride_,
+                  wiener_[f],tuple_.data()+f*stride_,
                   gradients_.data()+3*slot(i,f,0),
                   noise_bounds_.data()+f*stride_,noise_bounds_.data()+size+f*stride_,stride_,
                   implicit_transport()};
@@ -826,7 +831,7 @@ public:
             means_[gas.dependent_index()] = 1 - sum;
             means_[ns_] = mean_h.unchecked(cell, 0);
             const double pressure = pressure_reference + pi.unchecked(cell, 0);
-            std::array<double, 4> rates{};
+            auto& rates = field_rates_;
             double psr_rate{};
             status = progress_rate(gas, thermo, means_.data(), pressure,
                                    revision, psr_rate);
@@ -981,7 +986,7 @@ public:
               sources.data[s].unchecked(cell, 0) = 0;
             continue;
           }
-          std::array<double, 4> pressures{};
+          auto& pressures = field_pressures_;
           for (std::size_t f = 0; f < spec_.fields; ++f) {
             pressures[f] = pressure_reference + pi.unchecked(cell, 0);
             for (std::size_t c = 0; c < stride_; ++c)
@@ -1097,7 +1102,7 @@ public:
     for (std::size_t f=0;f<fields.size;++f)
       if (field_view_overlaps_storage(fields.data[f],physical_mean.data,stride_)) return invalid();
     std::array<double,UINT8_MAX> raw_auxiliary{};
-    std::array<double,4> densities{};
+    auto& densities = field_densities_;
     for (std::size_t c=0;c<stride_;++c)
       raw_auxiliary[c]=auxiliary.unchecked(cell,c)+(c==ns_ ? delta_h : 0.);
     esf::detail::AuxiliaryPressureState pressure_state;
@@ -1382,6 +1387,8 @@ private:
   FaceFluxStorage mixture_storage_;
   std::vector<ConstFieldView> mixture_species_;
   std::vector<double> thermal_coordinate_;
+  std::vector<std::array<double, 3>> wiener_;
+  std::vector<double> field_rates_, field_pressures_, field_densities_;
   std::unique_ptr<esf::detail::Workspace> workspace_;
   std::vector<ColdPressureRow> transport_rows_;
   std::unique_ptr<ColdPressureDilu> transport_pc_;

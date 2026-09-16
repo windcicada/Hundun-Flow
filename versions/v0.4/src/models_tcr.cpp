@@ -4,6 +4,7 @@
 // governance 8ffdf2b comb_tcr_algebra; independent value history, no inherited
 // oracle authorization or checkpoint.
 #include "models_tcr_detail.hpp"
+#include "esf_count_detail.hpp"
 #include <cmath>
 #include <limits>
 namespace hundun::v04::tcr::detail {
@@ -72,7 +73,7 @@ Statistics statistics(const double *scalar, const double *rates,
                       std::size_t n) noexcept {
   Statistics r;
   r.count = n;
-  if (!scalar || !rates || (n != 2 && n != 4))
+  if (!scalar || !rates || !esf::valid_field_count(n))
     return r;
   for (std::size_t i = 0; i < n; ++i) {
     if (!std::isfinite(scalar[i]) || !std::isfinite(rates[i]))
@@ -98,7 +99,7 @@ MappingReport map_statistics(const Statistics &s,
   if (s.status != Status::success || !std::isfinite(s.scalar_mean) ||
       !std::isfinite(s.scalar_variance) || s.scalar_variance < 0 ||
       !std::isfinite(s.rate_mean) || !std::isfinite(s.scalar_rate_covariance) ||
-      (s.count != 2 && s.count != 4))
+      !esf::valid_field_count(s.count))
     return {Status::statistics_unavailable};
   auto r = p.map(s);
   if (r.status != Status::success)
@@ -120,7 +121,7 @@ ideal_gas_reactant_mole_fraction_v1(const ReactantMappingInput &q) noexcept {
       !q.mean_mass_fractions || !q.molecular_weights_kg_per_kmol ||
       !q.reactant_indices || !q.field_progress_rates || q.species_count == 0 ||
       q.reactant_count == 0 || q.reactant_count > q.species_count ||
-      (q.field_count != 2 && q.field_count != 4) ||
+      !esf::valid_field_count(q.field_count) ||
       !std::isfinite(q.psr_progress_rate) ||
       !std::isfinite(q.weak_rate_absolute_threshold) ||
       q.weak_rate_absolute_threshold <= 0)

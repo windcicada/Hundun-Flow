@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
 #include "hundun/v04_combustion.hpp"
+#include "esf_count_detail.hpp"
 
 #include <new>
 
@@ -655,7 +656,7 @@ EsfCommonSourceReport apply_esf_common_source(
     return report;
   };
   if (!valid_identity(identity) || !valid_state(mean, identity) ||
-      (fields.size() != 2U && fields.size() != 4U) ||
+      !esf::valid_field_count(fields.size()) ||
       !std::isfinite(source.density_delta_kg_per_m3) ||
       !std::isfinite(source.thermochemical_enthalpy_density_delta_j_per_m3) ||
       source.species_density_delta_kg_per_m3.size() != identity.species.size())

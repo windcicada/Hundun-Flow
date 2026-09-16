@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn
 // Current-state PDF bridge. Missing temporal histories are explicitly rebuilt.
 #include "hundun/v04_app.hpp"
+#include "esf_count_detail.hpp"
 #include "hundun/v04_io.hpp"
 #include "hundun/v04_mesh.hpp"
 #include "hundun/v04_physics.hpp"
@@ -117,7 +118,7 @@ Status read_header(const std::filesystem::path &root, Header &h) {
       h.time >> h.dt >> h.pressure >> h.nf >> h.ns;
   std::size_t count = 0;
   if (!in || magic != "HUNDUN_PDF_TRANSFER" || version != 1 ||
-      !checked_product(h.cells, count) || (h.nf != 2 && h.nf != 4) ||
+      !checked_product(h.cells, count) || !esf::valid_field_count(h.nf) ||
       h.ns < 2 || h.ns > 64 || h.step == 0 || !std::isfinite(h.time) ||
       h.time < 0 || !std::isfinite(h.dt) || h.dt <= 0 ||
       !std::isfinite(h.pressure) || h.pressure <= 0)

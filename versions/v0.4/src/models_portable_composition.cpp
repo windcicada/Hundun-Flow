@@ -426,8 +426,7 @@ CompositionWorkspace::prepare_cells(const CompositionInput &q,
     } else {
       reacted.status = Status::success;
       reacted.candidate.values = field;
-      std::copy(densities, densities + n,
-                reacted.final_densities_kg_per_m3.begin());
+      reacted.final_densities_kg_per_m3 = densities;
     }
     if (reacted.status != Status::success)
       return fail(reacted.status, 6, c);
@@ -438,7 +437,8 @@ CompositionWorkspace::prepare_cells(const CompositionInput &q,
     candidate.inventory = {in.inventory.global_cell, in.inventory.volume_m3,
                            mnew, e.gas.gas_momentum_candidate_kg_m_per_s};
     candidate.fields = field;
-    candidate.eos_densities_kg_per_m3 = reacted.final_densities_kg_per_m3;
+    std::copy_n(reacted.final_densities_kg_per_m3, n,
+                candidate.eos_densities_kg_per_m3.begin());
     candidate.tcr = mixed.tcr;
     candidate.heat_release_report_j_per_m3 =
         reacted.ensemble_heat_release_j_per_m3;

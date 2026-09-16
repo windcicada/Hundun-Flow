@@ -3,6 +3,7 @@
 // windcicada | Year.M: 2026.09
 #pragma once
 #include "hundun/v04_combustion.hpp"
+#include "esf_count_detail.hpp"
 #include "hundun/v04_portable.hpp"
 #include <array>
 #include <vector>
@@ -19,12 +20,10 @@ std::array<std::uint32_t, 4>
                  std::array<std::uint32_t, 2>) noexcept;
 std::array<std::uint32_t, 4> philox(const CounterAddress &,
                                     std::uint32_t lane) noexcept;
-struct WienerReport {
-  portable::Status status{portable::Status::invalid_input};
-  std::array<std::array<double, 3>, 4> increments{};
-};
-WienerReport balanced_wiener(std::size_t fields, double dt,
-                             const CounterAddress &) noexcept;
+// Caller-prepared increments; invalid requests preserve the output.
+portable::Status balanced_wiener(std::size_t fields, double dt,
+    const CounterAddress &, std::array<double, 3>* increments,
+    std::size_t capacity) noexcept;
 // Full species; fluxes are kg/(m2 s), correction J_i-Y_i sum(J).
 portable::Status correct_species_flux(const double *y, const double *raw,
                                       std::size_t species,
@@ -149,7 +148,8 @@ struct Report {
   const double *variances{};
   std::uint64_t model_identity{0x4553465048490001ULL};
   std::uint32_t chemistry_call_count{};
-  std::array<double, 4> final_densities_kg_per_m3{};
+  // Borrowed under candidate generation; null on failure.
+  const double* final_densities_kg_per_m3{};
   double ensemble_heat_release_j_per_m3{};
   // Equal-weight sum of validated chemical intervals, Ns entries.
   // Borrowed under candidate generation; null on a failed reaction.
@@ -171,13 +171,13 @@ struct ReactionRequest {
 };
 class Workspace {
 public:
-  explicit Workspace(std::size_t species_capacity);
+  explicit Workspace(std::size_t species_capacity, std::size_t field_capacity = 4);
   std::uint64_t owned_bytes() const noexcept {
     std::uint64_t bytes = sizeof(*this);
     for (const auto *v : {&candidate_, &transported_, &means_, &variances_,
-                          &next_y_, &species_delta_, &mean_species_delta_, &mean_fraction_delta_})
+                          &next_y_, &species_delta_, &mean_species_delta_, &mean_fraction_delta_, &final_densities_})
       bytes += v->capacity() * sizeof(double);
-    return bytes;
+    return bytes + wiener_.capacity() * sizeof(std::array<double, 3>);
   }
   Report advance(const Request &) noexcept;
   // Translate to a prescribed physical mean, then apply the largest common
@@ -196,7 +196,9 @@ public:
 
 private:
   std::uint64_t generation_{};
-  std::size_t capacity_{};
+  std::size_t capacity_{}, field_capacity_{};
+  std::vector<std::array<double, 3>> wiener_;
+  std::vector<double> final_densities_;
   std::vector<double> candidate_, transported_, means_, variances_;
   std::vector<double> next_y_, species_delta_, mean_species_delta_, mean_fraction_delta_;
 };

@@ -3,6 +3,7 @@
 // windcicada | Year.M: 2026.09
 #include "models_chemistry_adapter_detail.hpp"
 #include "models_esf_detail.hpp"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 using namespace hundun::v04;
@@ -17,12 +18,13 @@ int main() {
     chemistry::detail::AnalyticIsomerBackend backend(2, reversed);
     const auto &gas = backend.gas_identity();
     const auto &id = backend.closure_identity();
-    double values[12]{};
-    for (std::size_t f = 0; f < 4; ++f) {
+    double values[48]{};
+    for (std::size_t f = 0; f < 16; ++f) {
       values[f * 3 + (reversed ? 1 : 0)] = 1;
       values[f * 3 + 2] = 101850;
     }
-    double p[]{101325, 101325, 101325, 101325}, rho[4];
+    double p[16], rho[16];
+    std::fill_n(p, 16, 101325);
     double d[2], h[2], w[2];
     portable::GasQuery query{{0, 1, 1},
                              gas.composition_fingerprint,
@@ -37,8 +39,8 @@ int main() {
       return 1;
     for (auto &r : rho)
       r = sample.sample.density_kg_per_m3;
-    esf::detail::Workspace workspace(2);
-    for (std::size_t fields : {2U, 4U}) {
+    esf::detail::Workspace workspace(2, 16);
+    for (std::size_t fields : {2U, 4U, 6U, 8U, 16U}) {
       esf::detail::ReactionRequest q{
           {query.revision, id.fingerprint, fields, 2, values},
           query.revision,
@@ -63,6 +65,12 @@ int main() {
                   << result.candidate.values[reversed ? 1 : 0] << ' '
                   << result.candidate.values[2] << '\n';
         return 3;
+      }
+      for (std::size_t f=0;f<fields;++f) {
+        if (!near(result.candidate.values[3*f+(reversed?1:0)],std::exp(-1.)) ||
+            result.candidate.values[3*f+2]!=101850 ||
+            !near(result.final_densities_kg_per_m3[f]/rho[f],
+                  .825963772790506964766474928233575)) return 5;
       }
       // Final T = 300 + 100(1-exp(-1)); constant pressure gives inverse-T
       // density.

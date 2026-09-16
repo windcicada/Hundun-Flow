@@ -416,6 +416,7 @@ target_link_libraries(v04_coast_restart_import PRIVATE hundun_v04_core)
 # Full stochastic current-state migration with explicit method recovery.
 add_executable(v04_pdf_import "${hundun_repository_root}/tools/v04_pdf_import.cpp")
 target_link_libraries(v04_pdf_import PRIVATE hundun_v04_core)
+target_include_directories(v04_pdf_import PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""624CF gas assets with two ESF fields, Vreman and native rank-change history."""
+"""624CF gas assets, configured ESF fields and native rank-change history."""
 from pathlib import Path
 import json,shutil,subprocess,sys,tempfile
-program,checker,launcher,validator=sys.argv[1:]
+program,checker,launcher,validator=sys.argv[1:5]
+fields=int(sys.argv[5]) if len(sys.argv)>5 else 2
 fixture=Path(__file__).resolve().parents[1]/'fixtures'/'ker-flow'
 def call(args):
  result=subprocess.run(list(map(str,args)),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
@@ -17,10 +18,24 @@ with tempfile.TemporaryDirectory(prefix='ke-') as folder:
  root=Path(folder);case=root/'case';shutil.copytree(fixture,case)
  model=json.loads((case/'case.json').read_text())
  model['reaction'].update(model='esf_tpdf',
-   ensemble=dict(fields=2,seed=1234,
-     initial_species_offsets=[1e-4,0,0,0,0,0,-1e-4,0,0,0,0,0],tcr=dict(mode='off')),
+   ensemble=dict(fields=fields,seed=1234,
+     initial_species_offsets=[1e-4,0,0,0,0,0,-1e-4,0,0,0,0,0]*(fields//2),tcr=dict(mode='off')),
    mixing=dict(c_z=.001,turbulent_schmidt=.7))
  model['turbulence']=dict(model='vreman')
+ if fields==16:
+  admitted_budget=model['mesh']['limits']['max_memory_bytes_per_rank']
+  model['mesh']['limits']['max_memory_bytes_per_rank']=16*1024*1024
+  model['reaction']['ensemble']['fields']=2
+  model['reaction']['ensemble']['initial_species_offsets']=model['reaction']['ensemble']['initial_species_offsets'][:12]
+  (case/'case.json').write_text(json.dumps(model))
+  call([program,'check',case])
+  model['reaction']['ensemble']['fields']=16
+  model['reaction']['ensemble']['initial_species_offsets']*=8
+  (case/'case.json').write_text(json.dumps(model))
+  denied=subprocess.run([program,'check',str(case)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                        universal_newlines=True,timeout=60)
+  assert denied.returncode!=0 and 'allocation failure' in denied.stdout,denied.stdout
+  model['mesh']['limits']['max_memory_bytes_per_rank']=admitted_budget
  (case/'case.json').write_text(json.dumps(model))
  seed=root/'seed'
  run(1,case,seed,1,'--initial-state','100000,1200,0,0,0,.001,.05,.005,.01,.2,.02')
@@ -41,4 +56,4 @@ with tempfile.TemporaryDirectory(prefix='ke-') as folder:
    summary=[x for x in comparison.splitlines() if x.startswith('kerosene_esf_compare ')]
    assert len(summary)==1 and 'passed=1' in summary[0]
    print(summary[0])
- print('two-field kerosene ESF: full-state 1/2/4 continuation and physical/element budgets passed')
+ print(str(fields)+'-field kerosene ESF: full-state 1/2/4 continuation and physical/element budgets passed')

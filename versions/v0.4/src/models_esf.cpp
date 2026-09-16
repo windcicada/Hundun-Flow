@@ -10,8 +10,9 @@
 #include <stdexcept>
 namespace hundun::v04::esf::detail {
 namespace {
-std::size_t checked_capacity(std::size_t species) {
-  if (species == 0 || species > std::numeric_limits<std::size_t>::max() / 4 - 1)
+std::size_t checked_capacity(std::size_t species, std::size_t fields) {
+  if (species == 0 || !valid_field_count(fields) ||
+      species > std::numeric_limits<std::size_t>::max() / fields / sizeof(double) - 1)
     throw std::invalid_argument("invalid ESF prepared species capacity");
   return species;
 }
@@ -121,8 +122,8 @@ DualStateReport dual_state_moments(const DualStateRequest& q,
     report.status=portable::Status::identity_mismatch;return report;
   }
   const auto ns=a.species,n=a.fields;
-  if (!ns || ns>std::numeric_limits<std::size_t>::max()/(4*sizeof(double))-1 ||
-      (n!=2 && n!=4) || b.fields!=1 || b.species!=ns ||
+  if (!ns || ns>std::numeric_limits<std::size_t>::max()/(maximum_fields*sizeof(double))-1 ||
+      !valid_field_count(n) || b.fields!=1 || b.species!=ns ||
       !a.values || !b.values || !q.stochastic_densities_kg_per_m3 ||
       !out.physical_mean || !out.physical_variance ||
       !std::isfinite(q.auxiliary_density_kg_per_m3) ||
@@ -206,11 +207,12 @@ std::array<std::uint32_t, 4> philox(const CounterAddress &a,
                       {std::uint32_t(a.seed) ^ rot(a.purpose, 5),
                        std::uint32_t(a.seed >> 32) ^ rot(1, 23)});
 }
-WienerReport balanced_wiener(std::size_t n, double dt,
-                             const CounterAddress &a) noexcept {
-  WienerReport r;
-  if ((n != 2 && n != 4) || !std::isfinite(dt) || dt < 0)
-    return r;
+portable::Status balanced_wiener(std::size_t n, double dt,
+    const CounterAddress &a, std::array<double, 3>* increments,
+    std::size_t capacity) noexcept {
+  if (!valid_field_count(n) || !increments || !std::isfinite(dt) || dt < 0)
+    return portable::Status::invalid_input;
+  if (capacity < n) return portable::Status::capacity_exceeded;
   for (std::size_t p = 0; p < n / 2; ++p)
     for (unsigned d = 0; d < 3; ++d) {
       auto x = a;
@@ -220,11 +222,10 @@ WienerReport balanced_wiener(std::size_t n, double dt,
                            ? 0
                            : ((philox(x, 0x57494e31U)[0] & 1) ? -std::sqrt(dt)
                                                               : std::sqrt(dt));
-      r.increments[2 * p][d] = w;
-      r.increments[2 * p + 1][d] = -w;
+      increments[2 * p][d] = w;
+      increments[2 * p + 1][d] = -w;
     }
-  r.status = portable::Status::success;
-  return r;
+  return portable::Status::success;
 }
 portable::Status iem_factor(double dt, double tau, double control,
                             double &f) noexcept {
@@ -349,9 +350,10 @@ StochasticSourceReport stochastic_source(const StochasticSourceRequest& q,
   report.status=portable::Status::success;
   return report;
 }
-Workspace::Workspace(std::size_t ns)
-    : capacity_(checked_capacity(ns)), candidate_(4 * (ns + 1)),
-      transported_(4 * (ns + 1)), means_(ns + 1), variances_(ns + 1),
+Workspace::Workspace(std::size_t ns, std::size_t fields)
+    : capacity_(checked_capacity(ns, fields)), field_capacity_(fields),
+      wiener_(fields), final_densities_(fields), candidate_(fields * (ns + 1)),
+      transported_(fields * (ns + 1)), means_(ns + 1), variances_(ns + 1),
       next_y_(ns), species_delta_(ns), mean_species_delta_(ns), mean_fraction_delta_(ns) {}
 Report Workspace::advance(const Request &q) noexcept {
   Report r;
@@ -368,11 +370,11 @@ Report Workspace::advance(const Request &q) noexcept {
     r.status = portable::Status::stale_revision;
     return r;
   }
-  if (ns > capacity_) {
+  if (ns > capacity_ || n > field_capacity_) {
     r.status = portable::Status::capacity_exceeded;
     return r;
   }
-  if (ns == 0 || (n != 2 && n != 4) || !a.values || !q.identity ||
+  if (ns == 0 || !valid_field_count(n) || !a.values || !q.identity ||
       q.identity->species.size() != ns ||
       a.composition_fingerprint != q.identity->fingerprint ||
       !std::isfinite(q.turbulent_diffusivity_m2_s) ||
@@ -385,8 +387,8 @@ Report Workspace::advance(const Request &q) noexcept {
         s.molecular_weight_kg_per_kmol <= 0 ||
         s.element_counts.size() != q.identity->element_count)
       return r;
-  const auto w = balanced_wiener(n, q.dt_s, q.random);
-  if (w.status != portable::Status::success)
+  const auto w = balanced_wiener(n, q.dt_s, q.random, wiener_.data(), wiener_.size());
+  if (w != portable::Status::success)
     return r;
   const double amplitude = std::sqrt(2 * q.turbulent_diffusivity_m2_s);
   for (std::size_t f = 0; f < n; ++f) {
@@ -407,7 +409,7 @@ Report Workspace::advance(const Request &q) noexcept {
           const double g = q.gradients[3 * k + d];
           if (!std::isfinite(g))
             return r;
-          value += amplitude * g * w.increments[f][d];
+          value += amplitude * g * wiener_[f][d];
         }
       if (!std::isfinite(value))
         return r;
@@ -488,8 +490,8 @@ Report Workspace::recenter(const View& input,const double* target) noexcept {
     report.status=portable::Status::stale_revision;return report;
   }
   const auto ns=input.species,n=input.fields,stride=ns+1;
-  if(ns>capacity_) {report.status=portable::Status::capacity_exceeded;return report;}
-  if(!ns || (n!=2 && n!=4) || !input.values || !target ||
+  if(ns>capacity_ || n>field_capacity_) {report.status=portable::Status::capacity_exceeded;return report;}
+  if(!ns || !valid_field_count(n) || !input.values || !target ||
       !fraction_tuple(target,ns) || !std::isfinite(target[ns])) return report;
   for(std::size_t f=0;f<n;++f)
     if(!fraction_tuple(input.values+f*stride,ns) ||
@@ -553,11 +555,11 @@ Report Workspace::react(const ReactionRequest &q,
     r.status = portable::Status::stale_revision;
     return r;
   }
-  if (ns > capacity_) {
+  if (ns > capacity_ || n > field_capacity_) {
     r.status = portable::Status::capacity_exceeded;
     return r;
   }
-  if (ns == 0 || (n != 2 && n != 4) || !a.values || !q.chemistry_identity ||
+  if (ns == 0 || !valid_field_count(n) || !a.values || !q.chemistry_identity ||
       !q.gas_identity || !q.pressures_pa || !q.initial_densities_kg_per_m3 ||
       !std::isfinite(q.start_time_s) || q.start_time_s < 0 ||
       !std::isfinite(q.duration_s) || q.duration_s <= 0 ||
@@ -694,7 +696,7 @@ Report Workspace::react(const ReactionRequest &q,
       density = sample.density_kg_per_m3;
       r.ensemble_heat_release_j_per_m3 += heat / double(n);
     }
-    r.final_densities_kg_per_m3[f] = density;
+    final_densities_[f] = density;
   }
   for (std::size_t j = 0; j < c; ++j) {
     double mean = 0, var = 0;
@@ -726,6 +728,7 @@ Report Workspace::react(const ReactionRequest &q,
   }
   r.mean_integrated_species_density_delta_kg_per_m3 = mean_species_delta_.data();
   r.mean_integrated_mass_fraction_delta = mean_fraction_delta_.data();
+  r.final_densities_kg_per_m3 = final_densities_.data();
   return r;
 }
 } // namespace hundun::v04::esf::detail

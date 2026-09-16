@@ -120,6 +120,7 @@ def validate_sgs_output(work, case):
 def main():
     binary, fixture, mpi, work, validator = map(Path, sys.argv[1:6])
     mode = sys.argv[6] if len(sys.argv) > 6 else "backward_euler"
+    fields = int(sys.argv[8]) if len(sys.argv) > 8 else 2
     assert mode in ("backward_euler", "cn_be", "cn_be_esf", "cn_be_esf_ibm", "cn_be_esf_ibm_sgs")
     sgs = mode == "cn_be_esf_ibm_sgs"
     ibm = mode in ("cn_be_esf_ibm", "cn_be_esf_ibm_sgs")
@@ -188,11 +189,12 @@ end
             represented_mass_per_parcel_kg=1e-4)
     if esf:
         independent = len(species) - 1
-        offsets = [0.] * (2 * independent)
-        offsets[0], offsets[independent] = .0001, -.0001
+        offsets = [0.] * (fields * independent)
+        for pair in range(fields // 2):
+            offsets[2*pair*independent], offsets[(2*pair+1)*independent] = .0001, -.0001
         case["reaction"]["model"] = "esf_tpdf"
         case["reaction"]["ensemble"] = dict(
-            fields=2, seed=1234, initial_species_offsets=offsets, tcr=dict(mode="off"))
+            fields=fields, seed=1234, initial_species_offsets=offsets, tcr=dict(mode="off"))
         case["reaction"]["mixing"] = dict(c_z=.25, turbulent_schmidt=.7)
     if ibm:
         wall_case = fixture.with_name("reacting-spray-esf-ibm")
@@ -276,7 +278,7 @@ end
     if esf:
         validate_esf_records(records)
         if len(sys.argv) > 7:
-            command([mpi, "--oversubscribe", "--bind-to", "none", "-n", "1", sys.argv[7],
+            command([mpi, "--oversubscribe", "--bind-to", "none", "-n", "2", sys.argv[7],
                      work, work.with_name(work.name + "r") / "Restart", two / "Restart"]
                     + (["--wall"] if ibm else []), work / "compare.log")
     report = dict(scope=method + " THICK_EX spray with native kerosene four-step chemistry",

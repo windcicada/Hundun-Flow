@@ -31,6 +31,27 @@ int main() {
   namespace esf=esf::detail;
   using portable::Status;
   const portable::Revision revision{32000,7,1};
+  {
+    std::array<double,192> tuple{};
+    std::array<double,64> density{};
+    for (unsigned f=0;f<64;++f) {
+      tuple[3*f]=f%2 ? .8 : .2; tuple[3*f+1]=1-tuple[3*f];
+      tuple[3*f+2]=f%2 ? 300 : 100; density[f]=f%2 ? 4 : 1;
+    }
+    const std::array<double,3> auxiliary{{.1,.9,175}};
+    std::array<double,3> mean{}, variance{};
+    for (auto n : {6U,8U,16U,64U}) {
+      esf::DualStateRequest q{{revision,42,n,2,tuple.data()},
+          {revision,42,1,2,auxiliary.data()},revision,density.data(),2.5};
+      const auto before=allocations;
+      const auto result=esf::dual_state_moments(q,{mean.data(),variance.data(),3});
+      if (!successful(result) || allocations!=before || !near(mean[0],.5) ||
+          !near(mean[1],.5) || !near(mean[2],200) || !near(variance[0],.09) ||
+          !near(variance[1],.09) || !near(variance[2],10000) ||
+          !near(result.statistical_density_kg_per_m3,1.6) ||
+          result.pressure_density_kg_per_m3!=2.5) return 50;
+    }
+  }
   std::array<double,12> fields{{.2,.8,100,.8,.2,300,.2,.8,100,.8,.2,300}};
   const auto saved=fields;
   std::array<double,3> auxiliary{{.1,.9,175}},mean{},variance{};

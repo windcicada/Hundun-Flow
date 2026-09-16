@@ -274,7 +274,7 @@ int main(int argc, char **argv) {
   // Both the physical simplex boundary and its positive interior are covered.
   const bool zero = argc == 2 && std::string(argv[1]) == "--zero";
   bool passed = run(2, zero);
-  passed = run(4, zero) && passed;
+  for (auto fields : {4U, 8U, 16U}) passed = run(fields, zero) && passed;
   MPI_Finalize();
   return passed ? 0 : 1;
 }

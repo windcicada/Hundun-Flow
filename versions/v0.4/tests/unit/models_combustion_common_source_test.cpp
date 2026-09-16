@@ -25,7 +25,7 @@ int main() {
   source.density_delta_kg_per_m3 = 0.25;
   source.species_density_delta_kg_per_m3 = {0.25, 0.0};
   source.thermochemical_enthalpy_density_delta_j_per_m3 = 50.0;
-  for (const std::size_t count : {2U, 4U}) {
+  for (const std::size_t count : {2U, 4U, 6U, 8U, 16U}) {
     std::vector<ThermochemicalState> fields;
     for (std::size_t i = 0; i < count; ++i) fields.push_back(i % 2U ? rich : lean);
     const auto result = apply_esf_common_source(mean, fields, identity, source);

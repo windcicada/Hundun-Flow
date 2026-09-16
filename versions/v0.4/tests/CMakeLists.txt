@@ -1335,6 +1335,13 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
     "$<TARGET_FILE:hundun>" "$<TARGET_FILE:v04_kerosene_esf_test>" "${MPIEXEC_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py")
   set_tests_properties(v04_kerosene_esf PROPERTIES PROCESSORS 4 TIMEOUT 120)
+  foreach(esf_fields IN ITEMS 8 16)
+    add_test(NAME v04_kerosene_esf_${esf_fields} COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/kerosene_esf_test.py"
+      "$<TARGET_FILE:hundun>" "$<TARGET_FILE:v04_kerosene_esf_test>" "${MPIEXEC_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/v04_evidence_validate.py" "${esf_fields}")
+    set_tests_properties(v04_kerosene_esf_${esf_fields} PROPERTIES PROCESSORS 4 TIMEOUT 240)
+  endforeach()
 endif()
 
 add_executable(v04_app_driver_test
@@ -2378,6 +2385,14 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be_esf_ibm_sgs
       "$<TARGET_FILE:v04_kerosene_esf_test>")
   set_tests_properties(v04_spray_thick_sgs_cli PROPERTIES TIMEOUT 240 PROCESSORS 4 RUN_SERIAL TRUE)
+  add_test(NAME v04_spray_thick_esf16_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_thick_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/thick16"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be_esf_ibm_sgs
+      "$<TARGET_FILE:v04_kerosene_esf_test>" 16)
+  set_tests_properties(v04_spray_thick_esf16_cli PROPERTIES TIMEOUT 600 PROCESSORS 4 RUN_SERIAL TRUE)
   add_test(NAME v04_composition_balance_cli
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/composition_balance_cli_test.py"

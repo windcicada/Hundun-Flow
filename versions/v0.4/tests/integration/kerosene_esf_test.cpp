@@ -21,11 +21,32 @@ int main(int argc,char** argv) {
   RestartImage a,b;if(s)s=RestartReader::load(MPI_COMM_WORLD,argv[2],expected,a);
   if(s)s=RestartReader::load(MPI_COMM_WORLD,argv[3],expected,b);
   if(!all(bool(s))) {if(!rank)std::cout<<"load "<<unsigned(s.code)<<'/'<<s.detail<<std::endl;return 3;}
+  // Parcel ownership can leave a valid reader rank with an empty payload.
+  int global_records = !a.cell_records.empty();
+  MPI_Allreduce(MPI_IN_PLACE,&global_records,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
   const bool metadata=a.step==b.step && a.time==b.time && a.dt==b.dt && a.method_history_signature==b.method_history_signature && a.plan==b.plan && a.schema==b.schema && a.geometry==b.geometry && a.source_format_version==b.source_format_version && !a.backward_euler_recovery && !b.backward_euler_recovery && a.controller_state==b.controller_state && a.pressure_reference==b.pressure_reference && a.previous_pressure_reference==b.previous_pressure_reference && a.closed_mass_target==b.closed_mass_target && a.cell_records==b.cell_records &&
       a.cell_record_lengths==b.cell_record_lengths &&
       a.cell_record_identity==b.cell_record_identity && a.cell_record_bytes==b.cell_record_bytes &&
-      (!model.spray || (!a.cell_records.empty() && a.cell_record_identity!=0));
-  if(!all(metadata))return 4;
+      (!model.spray || (global_records && a.cell_record_identity!=0));
+  if(!all(metadata)) {
+    if(!metadata)std::cout << "metadata mismatch rank=" << rank << " step=" << (a.step==b.step)
+      << " time=" << (a.time==b.time) << " dt=" << (a.dt==b.dt)
+      << " method=" << (a.method_history_signature==b.method_history_signature)
+      << " plan=" << (a.plan==b.plan) << " schema=" << (a.schema==b.schema)
+      << " geometry=" << (a.geometry==b.geometry)
+      << " source=" << (a.source_format_version==b.source_format_version)
+      << " recovery=" << (!a.backward_euler_recovery && !b.backward_euler_recovery)
+      << " controller=" << (a.controller_state==b.controller_state)
+      << " pressure=" << (a.pressure_reference==b.pressure_reference && a.previous_pressure_reference==b.previous_pressure_reference)
+      << " mass=" << (a.closed_mass_target==b.closed_mass_target)
+      << " records=" << (a.cell_records==b.cell_records)
+      << " lengths=" << (a.cell_record_lengths==b.cell_record_lengths)
+      << " record_identity=" << (a.cell_record_identity==b.cell_record_identity)
+      << " record_bytes=" << (a.cell_record_bytes==b.cell_record_bytes)
+      << " spray=" << bool(model.spray) << " stored_bytes=" << a.cell_records.size()
+      << " identity=" << a.cell_record_identity << std::endl;
+    return 4;
+  }
   if(wall) {
     // Native V5 variable cell records: header, TCR, parcels, injectors.
     // Check the actual trajectory after the specified cube-wall encounter.
@@ -61,7 +82,7 @@ int main(int argc,char** argv) {
   const auto role_count=[&](RestartFieldRole role) {
     return std::count_if(a.fields.begin(),a.fields.end(),[&](const auto& f){return f.role==role;});
   };
-  if(!all(role_count(RestartFieldRole::stochastic_field)==2 &&
+  if(!all(role_count(RestartFieldRole::stochastic_field)==model.reaction.esf->fields &&
           role_count(RestartFieldRole::stochastic_auxiliary)==1))return 8;
   double maximum_flux_difference{};unsigned long long total{};
   const auto fields=[&](const char* level,const std::vector<RestartImageField>& x,const std::vector<RestartImageField>& y) {

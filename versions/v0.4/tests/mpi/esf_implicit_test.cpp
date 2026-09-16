@@ -104,8 +104,10 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
     out.integrated_heat_release_j_per_m3=0;return portable::Status::success;
   }
   bool reference(std::uint64_t seed,std::uint64_t step) {
-    const auto w=esf::detail::balanced_wiener(fields,dt,{seed,step,1,0,0,1});
-    if(w.status!=portable::Status::success)return false;
+    std::vector<std::array<double,3>> increments(fields);
+    const auto w=esf::detail::balanced_wiener(fields,dt,{seed,step,1,0,0,1},
+        increments.data(),increments.size());
+    if(w!=portable::Status::success)return false;
     const double beta=mu/std::pow(volume,2./3.),mix=dt*beta/rho;
     Row old_mean{};for(int i=0;i<nx;++i)old_mean[i]=reacting ? .3 : mean_a(i);
     const Row transported_mean=solve(matrix(0),old_mean);
@@ -116,7 +118,7 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
       const double lo=*std::min_element(old.begin(),old.end()),hi=*std::max_element(old.begin(),old.end());
       for(int i=0;i<nx;++i) {
         const double gradient=(old[(i+1)%nx]-old[(i+nx-1)%nx])/(2*dx);
-        double delta=std::sqrt(2*gamma/rho)*w.increments[f][0]*gradient;
+        double delta=std::sqrt(2*gamma/rho)*increments[f][0]*gradient;
         // A and B have opposite gradients and complementary bounds; C and
         // h are constant. Their common tuple limiter reduces to this bound.
         if(delta>0)delta=std::min(delta,hi-old[i]);
@@ -181,7 +183,7 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
       const double lo=*std::min_element(old.begin(),old.end()),hi=*std::max_element(old.begin(),old.end());
       for(unsigned f=0;f<fields;++f) {
         for(int x=0;x<nx;++x) {
-          double noise=std::sqrt(2*gamma/rho)*w.increments[f][0]*
+          double noise=std::sqrt(2*gamma/rho)*increments[f][0]*
               (old[(x+1)%nx]-old[(x+nx-1)%nx])/(2*dx);
           noise=std::max(lo-old[x],std::min(hi-old[x],noise));
           rhs[x]=old[x]+noise+mix*mean_h[x]+work[x];

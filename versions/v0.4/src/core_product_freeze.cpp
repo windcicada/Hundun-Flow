@@ -5942,7 +5942,11 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
       // required by the same-target pressure-energy correction. The coupled
       // halo is bound separately; this vector is the allocation-free hot-path
       // staging capacity shared by both routes.
-      candidate->halo_views.resize(16U + product.fields.scalars.size());
+      // The accepted/previous ESF exchange carries h, T, the transport
+      // cache, every scalar and every stochastic field.
+      const auto halo_count = product.fields.scalars.size() +
+          std::max<std::size_t>(16U, 3U + product.fields.esf_fields.size());
+      candidate->halo_views.resize(halo_count);
       candidate->final_dependencies.resize(6U + species);
       if (!product.fields.scalars.empty()) {
         candidate->scalar_remap.emplace();
@@ -6153,7 +6157,7 @@ Status ProductDriver::Impl::initialize_common_fields(
       if (status) fill_field(field, 0.0);
     }
     if (status && product.esf.enabled()) {
-      std::array<FieldView, 4> ensemble{};
+      std::array<FieldView, esf::maximum_fields> ensemble{};
       std::vector<ConstFieldView> mean_species;
       for (std::size_t s = 0; s < product.fields.scalars.size() && status;
            ++s) {
@@ -9148,8 +9152,8 @@ Status ProductDriver::Impl::execute_attempt(
                                  product.fields.scalars[index], value);
     if (status) halo_views[halo_count++] = value;
   }
-  std::array<FieldView, 4> esf_trial{};
-  std::array<ConstFieldView, 4> esf_accepted{};
+  std::array<FieldView, esf::maximum_fields> esf_trial{};
+  std::array<ConstFieldView, esf::maximum_fields> esf_accepted{};
   ConstFieldView esf_transport;
   if (product.esf.enabled()) {
     for (std::size_t f = 0; f < product.fields.esf_fields.size() && status;
@@ -9592,8 +9596,8 @@ Status ProductDriver::Impl::execute_attempt(
       post_passive_read{};
   std::array<ThermophysicalGhostAuthority, UINT8_MAX> post_species_ghosts{},
       post_passive_ghosts{};
-  std::array<FieldView, 4> post_esf{};
-  std::array<ConstFieldView, 4> post_esf_read{};
+  std::array<FieldView, esf::maximum_fields> post_esf{};
+  std::array<ConstFieldView, esf::maximum_fields> post_esf_read{};
   ThermophysicalGhostAuthority post_h_ghost;
   if (status && product.spray.enabled() && product.esf.enabled()) {
     status = runtime_write_view(product.fields.post_enthalpy, post_h);

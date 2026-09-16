@@ -117,18 +117,29 @@ int main() {
       work.valid(old))
     return 4;
   q.accepted.revision = q.expected_revision;
-  for (std::size_t n : {2U, 4U}) {
-    auto noise = esf::detail::balanced_wiener(n, 0.25, {71, 0, 2, 0, 0, 1});
-    auto retry = esf::detail::balanced_wiener(n, 0.25, {71, 0, 2, 0, 0, 1});
-    if (noise.status != portable::Status::success ||
-        noise.increments != retry.increments)
+  for (std::size_t n : {2U, 4U, 6U, 8U, 16U}) {
+    std::vector<std::array<double,3>> noise(n), retry(n);
+    auto a = esf::detail::balanced_wiener(n, 0.25, {71,0,2,0,0,1},noise.data(),n);
+    auto b = esf::detail::balanced_wiener(n, 0.25, {71,0,2,0,0,1},retry.data(),n);
+    if (a != portable::Status::success || b != a || noise != retry)
       return 5;
     for (std::size_t p = 0; p < n / 2; ++p)
       for (unsigned d = 0; d < 3; ++d)
-        if (noise.increments[2 * p][d] + noise.increments[2 * p + 1][d] != 0 ||
-            std::abs(noise.increments[2 * p][d]) != 0.5)
+        if (noise[2 * p][d] + noise[2 * p + 1][d] != 0 ||
+            std::abs(noise[2 * p][d]) != 0.5)
           return 6;
   }
+  std::array<std::array<double,3>,16> buffer{};
+  for (auto& row : buffer) row.fill(71);
+  const auto original=buffer;
+  for (std::size_t n : {0U,1U,3U,65U}) {
+    if (esf::detail::balanced_wiener(n,.25,{},buffer.data(),buffer.size())!=
+          portable::Status::invalid_input || buffer!=original) return 28;
+  }
+  if (esf::detail::balanced_wiener(16,.25,{},buffer.data(),8)!=
+        portable::Status::capacity_exceeded || buffer!=original) return 29;
+  if (esf::detail::balanced_wiener(16,NAN,{},buffer.data(),16)!=
+        portable::Status::invalid_input || buffer!=original) return 30;
   double raw[]{2, -1}, y[]{0.25, 0.75}, corrected[]{99, 99};
   if (esf::detail::correct_species_flux(y, raw, 2, corrected) !=
           portable::Status::success ||

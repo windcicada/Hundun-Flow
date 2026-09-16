@@ -2,12 +2,13 @@
 #pragma once
 
 #include "hundun/v04_case.hpp"
+#include "esf_count_detail.hpp"
 #include <cmath>
 #include <limits>
 
 namespace hundun::v04::detail {
 inline bool valid_esf_spec(const EsfSpec& e) {
-  if ((e.fields != 2 && e.fields != 4) || e.initial_species_offsets.size() > 1024)
+  if (!esf::valid_field_count(e.fields) || e.initial_species_offsets.size() > 1024)
     return false;
   for (double value : e.initial_species_offsets)
     if (!std::isfinite(value) || value < -1 || value > 1) return false;
