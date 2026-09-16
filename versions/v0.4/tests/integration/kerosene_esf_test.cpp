@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Small native 624CF gas fixture: full histories and absolute face-flux audit.
 #include "hundun/v04_app.hpp"
+#include "../../src/models_tcr_dynamic_detail.hpp"
 #include <mpi.h>
 #include <algorithm>
 #include <cmath>
@@ -12,8 +13,9 @@ using namespace hundun::v04;
 int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);struct End{~End(){MPI_Finalize();}} end;int rank{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);
   const auto all=[&](bool value){int ok=value;MPI_Allreduce(MPI_IN_PLACE,&ok,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);return bool(ok);};
-  if(argc!=4 && (argc!=5 || std::string_view(argv[4])!="--wall"))return 2;
+  if(argc!=4 && (argc!=5 || (std::string_view(argv[4])!="--wall" && std::string_view(argv[4])!="--evaporated")))return 2;
   const bool wall=argc==5;
+  const bool evaporated=wall && std::string_view(argv[4])=="--evaporated";
   ValidatedModel model;auto s=CaseCompiler::load_and_compile(MPI_COMM_WORLD,argv[1],model);
   CompiledCasePlan plan;if(s)s=ProductCompiler::compile(MPI_COMM_WORLD,model,argv[1],plan);
   ProductDriver driver;if(s)s=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),driver);
@@ -25,7 +27,7 @@ int main(int argc,char** argv) {
   int global_records = !a.cell_records.empty();
   MPI_Allreduce(MPI_IN_PLACE,&global_records,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
   bool records_equal=a.cell_records==b.cell_records;
-  double history_error{};
+  double history_error{}, kappa_roundoff_bound{};
   if(model.reaction.esf && model.reaction.esf->tcr.model==TcrModel::cdphyso_dynamic_v1 &&
       a.cell_record_bytes==b.cell_record_bytes && a.cell_records.size()==b.cell_records.size() &&
       a.cell_record_lengths==b.cell_record_lengths) {
@@ -51,7 +53,35 @@ int main(int argc,char** argv) {
         else {
           const double x=real(av),y=real(bv);
           const double gap=std::abs(x-y)/std::max({1.,std::abs(x),std::abs(y)});
-          records_equal &= std::isfinite(x) && std::isfinite(y) && gap<1e-11;
+          double tolerance=1e-11;
+          if(j<5*ns && (j%5==2 || j%5==3)) {
+            const auto species=j/5;
+            const auto base=prefix+24+8*(5*species);
+            const double pdf=real(ap+base), psr=real(ap+base+8);
+            const auto select=[&](double f,double s) {
+              const auto c=tcr::detail::cdphyso_species_control(.3,f,s,
+                  model.reaction.esf->tcr.weak_rate_threshold);
+              return j%5==2 ? c.selected : c.effective;
+            };
+            // Rates subtract two FP64 mass fractions before division by dt*W.
+            // Bound their cancellation uncertainty before the nonlinear root;
+            // raw rates, Cd, fields and every discrete state retain 1e-11/exact checks.
+            const double ulp_rate=4*std::numeric_limits<double>::epsilon()/
+                (a.dt*model.thermophysics.species[species].molecular_weight);
+            const auto own=tcr::detail::cdphyso_species_control(.3,pdf,psr,
+                model.reaction.esf->tcr.weak_rate_threshold);
+            if(own.state==tcr::detail::SpeciesControlState::direct ||
+               own.state==tcr::detail::SpeciesControlState::projected) {
+              const double center=select(pdf,psr);
+              records_equal &= std::abs(x-center)<=1e-11;
+              for(int df:{-1,0,1})for(int ds:{-1,0,1})
+                tolerance=std::max(tolerance,std::abs(select(pdf+df*ulp_rate,psr+ds*ulp_rate)-center)+1e-11);
+              const double other=select(real(bp+base),real(bp+base+8));
+              records_equal &= std::abs(y-other)<=1e-11;
+              kappa_roundoff_bound=std::max(kappa_roundoff_bound,tolerance);
+            }
+          }
+          records_equal &= std::isfinite(x) && std::isfinite(y) && gap<tolerance;
           history_error=std::max(history_error,gap);
         }
       }
@@ -60,8 +90,9 @@ int main(int argc,char** argv) {
     records_equal &= offset==a.cell_records.size();
   }
   MPI_Allreduce(MPI_IN_PLACE,&history_error,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE,&kappa_roundoff_bound,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
   if(!rank && model.reaction.esf && model.reaction.esf->tcr.model==TcrModel::cdphyso_dynamic_v1)
-    std::printf("dynamic_tcr_compare discrete=exact parcels=exact history_relative=%.17g limit=1e-11\n",history_error);
+    std::printf("dynamic_tcr_compare discrete=exact parcels=exact history_relative=%.17g rate_cd_limit=1e-11 kappa_roundoff_bound=%.17g\n",history_error,kappa_roundoff_bound);
   const bool metadata=a.step==b.step && a.time==b.time && a.dt==b.dt && a.method_history_signature==b.method_history_signature && a.plan==b.plan && a.schema==b.schema && a.geometry==b.geometry && a.source_format_version==b.source_format_version && !a.backward_euler_recovery && !b.backward_euler_recovery && a.controller_state==b.controller_state && a.pressure_reference==b.pressure_reference && a.previous_pressure_reference==b.previous_pressure_reference && a.closed_mass_target==b.closed_mass_target && records_equal &&
       a.cell_record_lengths==b.cell_record_lengths &&
       a.cell_record_identity==b.cell_record_identity && a.cell_record_bytes==b.cell_record_bytes &&
@@ -83,7 +114,7 @@ int main(int argc,char** argv) {
       << " record_bytes=" << (a.cell_record_bytes==b.cell_record_bytes)
       << " spray=" << bool(model.spray) << " stored_bytes=" << a.cell_records.size()
       << " identity=" << a.cell_record_identity << std::endl;
-    return 4;
+    // Continue with field diagnostics; metadata still participates in the final result.
   }
   if(model.reaction.esf->tcr.model==TcrModel::cdphyso_dynamic_v1) {
     const auto integer=[](const std::uint8_t* p,unsigned width) {
@@ -139,7 +170,12 @@ int main(int argc,char** argv) {
       const auto* p=record+24+tcr;
       for(std::uint64_t i=0;i<count;++i,p+=width) {
         const double x=real(p+16),u=real(p+40);
-        valid &= x<.375 && x>.3748 && std::isfinite(u) && u<0;
+        const double length=model.mesh.upper.x-model.mesh.lower.x;
+        const double wall_x=model.mesh.lower.x+.375*length;
+        const double travel=200.*a.dt*a.step+1e-6*length;
+        if(!(x<wall_x && x>wall_x-travel && std::isfinite(u) && u<0))
+          std::printf("wall_probe rank=%d x=%.17g u=%.17g wall=%.17g travel=%.17g\n",rank,x,u,wall_x,travel);
+        valid &= x<wall_x && x>wall_x-travel && std::isfinite(u) && u<0;
         if(model.spray->breakup==SprayBreakupModel::stochastic_sgs) {
           // Exact cross-partition record comparison above includes the full
           // lineage; require live exposure history in this native run too.
@@ -152,10 +188,10 @@ int main(int argc,char** argv) {
     }
     valid &= offset==a.cell_records.size();
     MPI_Allreduce(MPI_IN_PLACE,&parcels,1,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
-    if(!all(valid && parcels==a.step))return 9;
-    if(!rank)std::printf("ibm_parcel_wall reflected=%llu position=fluid_side velocity=outward records=exact\n",parcels);
+    if(!all(valid && parcels==(evaporated ? 0 : a.step)))return 9;
+    if(!rank)std::printf("ibm_parcel_wall retained=%llu complete_evaporation=%d records=exact\n",parcels,int(evaporated));
   }
-  bool passed=true;double worst{};
+  bool passed=metadata;double worst{};
   const auto role_count=[&](RestartFieldRole role) {
     return std::count_if(a.fields.begin(),a.fields.end(),[&](const auto& f){return f.role==role;});
   };

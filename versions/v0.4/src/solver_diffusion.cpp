@@ -2769,9 +2769,10 @@ Status prepare_cartesian_mixture_transport(
           if (immersed) {
             const int first=mass_rate>0.0 ? -2 : -1;
             for (int offset=first; offset<=first+2; ++offset) {
-              Int3 global{face.x+plan.metric(0).global_begin,
-                          face.y+plan.metric(1).global_begin,
-                          face.z+plan.metric(2).global_begin};
+              // Metric packets use an offset into their local sliced arrays.
+              // IBM topology instead consumes true global cell coordinates.
+              const auto begin = plan.patch_begin();
+              Int3 global{face.x + begin.x, face.y + begin.y, face.z + begin.z};
               (a==0 ? global.x : a==1 ? global.y : global.z)+=offset;
               if (!immersed->topology_->is_fluid_stencil(global))
                 fluid_upstream=false;

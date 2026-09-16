@@ -80,6 +80,7 @@ private:
   std::vector<double> fluid_mask_storage_;
   FieldView fluid_mask_{};
   SpraySpec spec_;
+  double fixed_pressure_{};
   spray::detail::LiquidAsset asset_;
   ProductParcelGas gas_;
   ProductParcelGeometry events_;

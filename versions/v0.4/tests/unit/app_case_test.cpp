@@ -2043,6 +2043,12 @@ bool test_reaction_wire() {
       recovered.reaction.esf->tcr.progress_weights == model.reaction.esf->tcr.progress_weights &&
       recovered.reaction.esf->tcr.initialization_sign == 1,
       "ESF fields, integer RNG seed, and TCR mapping survive broadcast");
+  model.thermophysics.fixed_pressure_pa = 790216.58;
+  passed &= expect(bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+      bool(hundun::v04::detail::deserialize_model_for_test(bytes, recovered)) &&
+      recovered.thermophysics.fixed_pressure_pa == 790216.58,
+      "fixed thermodynamic pressure survives broadcast independently of pressure reference");
+  model.thermophysics.fixed_pressure_pa = 0.;
   const auto root_tcr = model.reaction.esf->tcr;
   auto& dynamic_tcr = model.reaction.esf->tcr;
   dynamic_tcr = {};

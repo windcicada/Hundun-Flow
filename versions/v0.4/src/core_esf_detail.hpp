@@ -333,10 +333,11 @@ public:
   // mass-divergence workspace after prepare_transport has frozen all noise.
   Status prepare_pressure_work(const CartesianKernelPlan& kernels,
       PrimitiveHistory pressure, ConstFieldView velocity, double reference,
-      double previous_reference, double previous_dt) noexcept {
+      double previous_reference, double previous_dt, bool fixed_pressure=false) noexcept {
     if (!implicit_transport() || !transport_pending_ || !std::isfinite(previous_dt) ||
         previous_dt<0 || !std::isfinite(reference) || !std::isfinite(previous_reference))
       return invalid();
+    if(fixed_pressure) {std::fill(mass_divergence_.begin(),mass_divergence_.end(),0.);return {};}
     auto gradient=scratch_view(pressure.accepted,3);
     const auto p=pressure.accepted;
     auto status=cartesian_gradient(kernels,{{&p,1},{&gradient,1},
@@ -1050,7 +1051,7 @@ public:
           }
           auto& pressures = field_pressures_;
           for (std::size_t f = 0; f < spec_.fields; ++f) {
-            pressures[f] = pressure_reference + pi.unchecked(cell, 0);
+            pressures[f] = thermo.eos_pressure(pressure_reference + pi.unchecked(cell, 0));
             for (std::size_t c = 0; c < stride_; ++c)
               tuple_[f * stride_ + c] = trial.data[f].unchecked(cell, c);
           }
@@ -1168,6 +1169,8 @@ public:
   Status auxiliary_pressure(Span<const double> row, double pressure,
       const ProductReactionSources& gas, const ThermodynamicsPlan& thermo,
       portable::Revision revision, esf::detail::AuxiliaryPressureState& out) noexcept {
+    if (!std::isfinite(pressure)) return invalid();
+    pressure=thermo.eos_pressure(pressure);
     if (!implicit_transport() || gas.fingerprint()!=gas_fingerprint_ ||
         !row.data || row.size!=stride_ || revision.algorithm_version!=1 ||
         revision.input_revision==0 || !(pressure>0) || !std::isfinite(pressure))
@@ -1195,6 +1198,8 @@ public:
       ConstFieldView auxiliary, double pressure, double delta_h, Real3 velocity,
       const ProductReactionSources& gas, const ThermodynamicsPlan& thermo,
       portable::Revision revision, Span<double> physical_mean, DualState& out) noexcept {
+    if (!std::isfinite(pressure)) return invalid();
+    pressure=thermo.eos_pressure(pressure);
     if (!implicit_transport() || gas.fingerprint()!=gas_fingerprint_ ||
         revision.algorithm_version!=1 || revision.input_revision==0 ||
         fields.size!=spec_.fields || !fields.data || physical_mean.size!=stride_ ||
@@ -1388,6 +1393,7 @@ private:
                const ThermodynamicsPlan &thermo, const double *row,
                double pressure, portable::Revision revision,
                portable::GasSample &sample) noexcept {
+    pressure=thermo.eos_pressure(pressure);
     double sum = 0;
     for (std::size_t s = 0; s < ns_; ++s) {
       if (!std::isfinite(row[s]) || row[s] < 0 || row[s] > 1)

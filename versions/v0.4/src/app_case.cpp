@@ -2355,7 +2355,9 @@ Status serialize_model(const ValidatedModel& model,
                model.immersed_boundary->marker_fingerprint != 0U) {
       return invalid_case(detail_wire);
     }
-    if (!detail::valid_reaction_spec(model.reaction) ||
+    if ((model.thermophysics.fixed_pressure_pa > 0 &&
+         model.pressure_reference != PressureReferenceKind::boundary_absolute) ||
+        !detail::valid_reaction_spec(model.reaction) ||
         (model.spray && !detail::valid_spray_spec(*model.spray)) ||
         !valid_canonical_mesh(model.mesh) ||
         static_cast<std::uint8_t>(model.pressure_reference) >
@@ -2452,7 +2454,9 @@ Status serialize_model(const ValidatedModel& model,
                                           : kWireVersion))));
     writer.byte(static_cast<std::uint8_t>(model.mesh.kind));
     writer.byte(static_cast<std::uint8_t>(model.turbulence));
-    writer.byte(static_cast<std::uint8_t>(model.pressure_reference));
+    writer.byte(static_cast<std::uint8_t>(model.pressure_reference) |
+        (model.thermophysics.fixed_pressure_pa > 0 ? 0x10 : 0));
+    if (model.thermophysics.fixed_pressure_pa > 0) writer.real(model.thermophysics.fixed_pressure_pa);
     writer.real3(model.mesh.lower);
     writer.real3(model.mesh.upper);
     writer.byte(model.mesh.has_exact_cells ? 1U : 0U);
@@ -2636,7 +2640,7 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         turbulence >
             static_cast<std::uint8_t>(TurbulenceKind::smagorinsky) ||
         !reader.byte(pressure_reference) ||
-        pressure_reference >
+        (pressure_reference & ~0x10) >
             static_cast<std::uint8_t>(PressureReferenceKind::closed_mass)) {
       return invalid_case(detail_wire);
     }
@@ -2650,7 +2654,11 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
       return invalid_case(detail_wire);
     model.smagorinsky_coefficient = smagorinsky_coefficient;
     model.pressure_reference =
-        static_cast<PressureReferenceKind>(pressure_reference);
+        static_cast<PressureReferenceKind>(pressure_reference & ~0x10);
+    if ((pressure_reference & 0x10) &&
+        (!reader.real(model.thermophysics.fixed_pressure_pa) ||
+         !std::isfinite(model.thermophysics.fixed_pressure_pa) ||
+         model.thermophysics.fixed_pressure_pa <= 0)) return invalid_case(detail_wire);
     if (!reader.real3(model.mesh.lower) || !reader.real3(model.mesh.upper) ||
         !ordered_domain(model.mesh.lower, model.mesh.upper) ||
         !reader.byte(has_exact_cells) || has_exact_cells > 1U) {
@@ -2986,8 +2994,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
                    "minimum_spacing", "max_growth_ratio", "focus_regions",
                    "limits", "data_files", "immersed_boundary"});
     if (!mesh_schema ||
-        !object_has_exact_keys(flow,
-                               {"model", "pressure_reference", "reacting"}) ||
+        !(object_has_exact_keys(flow,{"model", "pressure_reference", "reacting"}) ||
+          object_has_exact_keys(flow,{"model", "pressure_reference", "reacting", "thermodynamic_pressure_pa"})) ||
         !(object_has_exact_keys(solver,
                                 {"coupling", "pressure_correctors"}) ||
           object_has_exact_keys(
@@ -3037,6 +3045,11 @@ Status compile_on_root(const fs::path& case_root, int rank,
                 "single_phase_low_mach_compressible")) {
       return invalid_case(detail_json_value);
     }
+    double fixed_pressure_pa{};
+    if (yyjson_obj_get(flow,"thermodynamic_pressure_pa") &&
+        (!finite_real(yyjson_obj_get(flow,"thermodynamic_pressure_pa"),fixed_pressure_pa) ||
+         fixed_pressure_pa <= 0 || model.pressure_reference != PressureReferenceKind::boundary_absolute))
+      return invalid_case(detail_json_value);
     if (turbulence && yyjson_obj_get(turbulence, "coefficient")) {
       if (model.turbulence != TurbulenceKind::smagorinsky ||
           !finite_real(yyjson_obj_get(turbulence, "coefficient"), model.smagorinsky_coefficient) ||
@@ -3394,6 +3407,7 @@ Status compile_on_root(const fs::path& case_root, int rank,
         return invalid_case(detail_json_value);
       }
       thermophysics.data_file = std::move(relative);
+      thermophysics.fixed_pressure_pa = fixed_pressure_pa;
       if (!detail::valid_thermophysical_spec(thermophysics)) {
         return invalid_case(detail_json_value);
       }

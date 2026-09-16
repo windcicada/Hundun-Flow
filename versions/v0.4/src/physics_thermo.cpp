@@ -320,6 +320,7 @@ Status ThermodynamicsPlan::compile(
     }
     candidate.dependent_species_ = dependent_species;
     candidate.minimum_temperature_ = canonical_spec.minimum_temperature;
+    candidate.fixed_pressure_pa_ = canonical_spec.fixed_pressure_pa;
     candidate.maximum_temperature_ = canonical_spec.maximum_temperature;
     candidate.relative_tolerance_ =
         canonical_spec.temperature_relative_tolerance;
@@ -1014,6 +1015,8 @@ Status ThermodynamicsPlan::evaluate_pressure_impl(
     double p_abs, const ThermalState& thermal,
     ThermalRevisionTuple revisions, bool require_certificate,
     PressureThermoState& out) const noexcept {
+  if (!finite(p_abs)) return {StatusCode::numerical_failure,kThermoInput};
+  p_abs=eos_pressure(p_abs);
   if (!finite(p_abs) || p_abs <= 0.0 ||
       !thermal.certified_ || thermal.thermodynamics_ != fingerprint_ ||
       (require_certificate &&
@@ -1050,6 +1053,8 @@ Status ThermodynamicsPlan::complete_state_impl(
     double p_abs, const ThermalState& thermal,
     ThermalRevisionTuple revisions, bool require_certificate, Real3 velocity,
     ThermoState& out) const noexcept {
+  if (!finite(p_abs)) return {StatusCode::numerical_failure,kThermoInput};
+  p_abs=eos_pressure(p_abs);
   if (!finite(p_abs) || p_abs <= 0.0 || !finite(velocity) ||
       !thermal.certified_ || thermal.thermodynamics_ != fingerprint_ ||
       (require_certificate &&
@@ -1102,7 +1107,7 @@ Status ThermodynamicsPlan::evaluate_from_reference_pressure(
     ThermoState& out, double temperature_hint,
     ThermoInversionDiagnostic* diagnostic) const noexcept {
   if (diagnostic != nullptr) *diagnostic = {};
-  const double absolute_pressure = p_ref + pi;
+  const double absolute_pressure = eos_pressure(p_ref + pi);
   if (!finite(p_ref) || !finite(pi) || !finite(absolute_pressure) ||
       absolute_pressure <= 0.0) {
     return {StatusCode::numerical_failure, kThermoInput};
@@ -1116,6 +1121,7 @@ Status ThermodynamicsPlan::evaluate_from_density(
     Span<const double> independent_mass_fractions, Real3 velocity,
     double& pressure_absolute, ThermoState& out,
     double temperature_hint, ThermoInversionDiagnostic* diagnostic) const noexcept {
+  if (fixed_pressure_pa_ > 0) return {StatusCode::invalid_plan,kThermoInput};
   if (diagnostic != nullptr) *diagnostic = {};
   if (!finite(density) || density <= 0.0) {
     return {StatusCode::numerical_failure, kThermoInput};

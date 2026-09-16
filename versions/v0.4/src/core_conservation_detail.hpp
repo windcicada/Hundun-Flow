@@ -3,6 +3,7 @@
 
 #pragma once
 #include "core_esf_energy_detail.hpp"
+#include "solver_conservative_energy_detail.hpp"
 
 #include "hundun/v04_app.hpp"
 #include "solver_equation_detail.hpp"
@@ -58,8 +59,8 @@ inline Status collect_terminal_equations(
             (static_cast<std::uint64_t>(patch.begin.z + z) * global_cells.y +
              patch.begin.y + y) * global_cells.x + patch.begin.x + x;
         const double h = state.enthalpy.trial.unchecked(cell, 0U);
-        const double p = state.pressure_reference +
-                         state.pressure_perturbation.trial.unchecked(cell, 0U);
+        const double p = state.eos_pressure(state.pressure_reference,
+                         state.pressure_perturbation.trial.unchecked(cell, 0U));
         const double temporal =
             volume * (bdf.a0 * rho +
                       bdf.a1 * state.density.accepted.unchecked(cell, 0U) +
@@ -213,7 +214,7 @@ inline Status collect_boundary_balance(
         }
         kinetic.unchecked(cell, 0U) = value;
       }
-  std::array<long double, 14U> sum{};
+  std::array<long double, 15U> sum{};
   sum[12U] = phase.mass_kg_s;
   sum[13U] = phase.energy_w;
   if (!std::isfinite(sum[12U]) || !std::isfinite(sum[13U]))
@@ -282,16 +283,32 @@ inline Status collect_boundary_balance(
             sum[layer] += volume * rho;
             sum[layer + 3U] += volume *
                 (rho * (enthalpy[i].unchecked(cell, 0U) + k) -
-                 (reference[i] + pressure[i].unchecked(cell, 0U)));
+                 state.eos_pressure(reference[i], pressure[i].unchecked(cell, 0U)));
           }
           sum[6U] += flux.x.unchecked({x + 1, y, z}) - flux.x.unchecked(cell) +
                      flux.y.unchecked({x, y + 1, z}) - flux.y.unchecked(cell) +
                      flux.z.unchecked({x, y, z + 1}) - flux.z.unchecked(cell);
           sum[8U] += volume * scratch.unchecked(cell, 0U);
+          if(state.fixed_thermodynamic_pressure>0) {
+          const ConstFaceFieldView f[]{flux.x,flux.y,flux.z};
+          for(unsigned d=0;d<3;++d) {
+            Int3 upper=cell;(d==0 ? upper.x : d==1 ? upper.y : upper.z)++;
+            const auto axis=static_cast<CartesianAxis>(d);
+            sum[14]+=mechanical_pressure_face_work(kernels,state,axis,upper,f[d].unchecked(upper))-
+                     mechanical_pressure_face_work(kernels,state,axis,cell,f[d].unchecked(cell));
+          }
+          }
         }
   if (local && immersed_interface != nullptr) {
+    if(state.fixed_thermodynamic_pressure>0) {
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+        kinetic.unchecked({x,y,z},0)=0;
+      local=immersed_interface->add_source_mechanical_pressure_work_correction(state,kinetic);
+      if(local)for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+        if(fluid({x,y,z}))sum[14]+=cell_volume(kernels,{x,y,z})*kinetic.unchecked({x,y,z},0);
+    }
     double inlet_work = 0.0;
-    local = immersed_interface->inlet_viscous_work_input(
+    if(local)local = immersed_interface->inlet_viscous_work_input(
         state.velocity.trial, material.effective_viscosity, inlet_work);
     if (local) sum[10U] += inlet_work;
   }
@@ -357,14 +374,14 @@ inline Status collect_boundary_balance(
           }
     }
   }
-  std::array<double, 14U> values{}, global{};
+  std::array<double, 15U> values{}, global{};
   for (std::size_t i = 0U; i < sum.size(); ++i)
     values[i] = static_cast<double>(sum[i]);
   Status status = reductions.checked_sum(
       {values.data(), 8U}, {global.data(), 8U}, local);
   if (status)
     status = reductions.checked_sum(
-        {values.data() + 8U, 6U}, {global.data() + 8U, 6U}, {});
+        {values.data() + 8U, 7U}, {global.data() + 8U, 7U}, {});
   if (!status) return status;
   double statistical_global[2]{};
   if(statistical) {
@@ -393,7 +410,7 @@ inline Status collect_boundary_balance(
   const long double energy = history.valid ? history.energy : global[4U];
   const long double previous_energy = history.valid ? history.previous_energy : global[5U];
   const long double energy_out = static_cast<long double>(global[7U]) +
-                                global[8U] - global[9U] - global[10U] - global[11U] +
+                                global[8U] + global[14U] - global[9U] - global[10U] - global[11U] +
                                 statistical_global[0] - statistical_global[1] - global[13U];
   ProductBoundaryBalanceHistory next;
   next.valid = true;
@@ -407,6 +424,7 @@ inline Status collect_boundary_balance(
   report.mass_outflow = global[6U];
   report.enthalpy_outflow = global[7U];
   report.kinetic_energy_outflow = global[8U];
+  report.mechanical_pressure_work_outflow = global[14U];
   report.conductive_heat_input = global[9U];
   report.species_enthalpy_diffusion_input = global[11U];
   report.viscous_work_input = global[10U];

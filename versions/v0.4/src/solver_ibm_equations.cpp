@@ -2259,6 +2259,45 @@ Status IbmEquationInterfacePlan::add_source_kinetic_convection_correction(
       scale, output, box, true);
 }
 
+Status IbmEquationInterfacePlan::add_source_mechanical_pressure_work_correction(
+    const EquationStateView& state, FieldView output, KernelBox box) const noexcept {
+  auto status=validate_bound(*this,kernels_,topology_,boundary_,metric_);
+  if(!status)return status;
+  const auto cells=kernels_->cells();
+  if(box.cells.x==0 && box.cells.y==0 && box.cells.z==0)box={{0,0,0},cells};
+  if(!detail::valid_kernel_box(box,cells) ||
+      !std::isfinite(state.fixed_thermodynamic_pressure) || state.fixed_thermodynamic_pressure<=0 ||
+      !detail::valid_cell_view(state.pressure_perturbation.trial,cells,0,1,1) ||
+      !detail::valid_cell_view(state.density.trial,cells,0,1,1) ||
+      !detail::valid_cell_view(output,cells,0,1) ||
+      detail::field_views_overlap(state.pressure_perturbation.trial,as_const(output)) ||
+      detail::field_views_overlap(state.density.trial,as_const(output)))
+    return {StatusCode::invalid_plan,kIbmEquationApply};
+  const auto links=topology_->links();
+  for(const auto& source:prescribed_interface_fluxes_) {
+    if(!source.has_inlet_state || source.topology_link>=links.size)
+      return {StatusCode::invalid_plan,kIbmEquationApply};
+    const auto& link=links.data[source.topology_link];
+    const auto c=link.fluid_local_index;
+    if(c.x<box.begin.x || c.x>=box.begin.x+box.cells.x ||
+       c.y<box.begin.y || c.y>=box.begin.y+box.cells.y ||
+       c.z<box.begin.z || c.z>=box.begin.z+box.cells.z)continue;
+    const auto face=interface_face(link);
+    const double u=face.axis==CartesianAxis::x ? source.velocity.x :
+                   face.axis==CartesianAxis::y ? source.velocity.y : source.velocity.z;
+    const double pi=state.pressure_reference-state.fixed_thermodynamic_pressure+
+        state.pressure_perturbation.trial.unchecked(c,0);
+    const double desired=pi*u*detail::face_area(*kernels_,face.axis,face.index);
+    const double ordinary=detail::mechanical_pressure_face_work(*kernels_,state,
+        face.axis,face.index,source.face_mass_flux);
+    const double value=output.unchecked(c,0)+(positive_face(link.direction) ? 1. : -1.)*
+        (desired-ordinary)/detail::cell_volume(*kernels_,c);
+    if(!std::isfinite(value))return {StatusCode::numerical_failure,kIbmEquationNumerical};
+    output.unchecked(c,0)=value;
+  }
+  return {};
+}
+
 Status IbmEquationInterfacePlan::correct_viscous_heating(
     ConstFieldView velocity, ConstFieldView velocity_gradient,
     ConstFieldView density, ConstFieldView molecular_viscosity,

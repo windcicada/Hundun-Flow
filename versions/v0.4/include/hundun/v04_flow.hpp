@@ -104,6 +104,11 @@ struct EquationStateView {
   double accepted_pressure_reference{};
   double previous_pressure_reference{};
   ConservativeMassSourceView mass_source{};
+  double fixed_thermodynamic_pressure{};
+  double eos_pressure(double reference, double perturbation) const noexcept {
+    return fixed_thermodynamic_pressure > 0 ? fixed_thermodynamic_pressure
+                                          : reference + perturbation;
+  }
 };
 
 struct EquationMaterialView {

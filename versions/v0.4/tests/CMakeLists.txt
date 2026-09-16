@@ -2405,6 +2405,14 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be_esf_ibm_tcr
       "$<TARGET_FILE:v04_kerosene_esf_test>")
   set_tests_properties(v04_spray_thick_tcr_cli PROPERTIES TIMEOUT 240 PROCESSORS 4 RUN_SERIAL TRUE)
+  add_test(NAME v04_spray_fixed_tcr_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_thick_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/fixed-tcr"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py" fixed_tcr
+      "$<TARGET_FILE:v04_kerosene_esf_test>")
+  set_tests_properties(v04_spray_fixed_tcr_cli PROPERTIES TIMEOUT 240 PROCESSORS 4 RUN_SERIAL TRUE)
   add_test(NAME v04_jl4_tcr_cli
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/tcr_gas_test.py"

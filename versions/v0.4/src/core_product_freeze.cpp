@@ -3688,6 +3688,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     return {StatusCode::invalid_plan, kProductInput};
   }
   const bool cold_model = model.time.scheme == TimeScheme::cn_be;
+  const bool fixed_pressure = model.thermophysics.fixed_pressure_pa > 0;
   const auto schedule = effective_coupling(model.time.scheme, model.solver.coupling);
   const bool cold_perry = cold_model && !model.thermophysics.species.empty() &&
       coast_mixture_transport(model.thermophysics.species.front().transport_law);
@@ -3731,6 +3732,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                         model.time.scheme == TimeScheme::variable_bdf2 ||
                         (!cold_model && schedule == CouplingKind::outer_corrected) ||
                         unsupported_cold || incompatible_lewis ||
+                        (fixed_pressure && (!cold_model ||
+                         model.pressure_reference != PressureReferenceKind::boundary_absolute)) ||
                         (model.solver.cold_stopping &&
                          (!cold_model || !model.solver.cold_stopping->valid()))
                         ? Status{StatusCode::invalid_plan, kProductInput}
@@ -5736,6 +5739,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       ? model.smagorinsky_coefficient : 0.0;
   candidate->summary.coupling = schedule;
   candidate->summary.time_scheme = model.time.scheme;
+  candidate->summary.fixed_thermodynamic_pressure = model.thermophysics.fixed_pressure_pa;
   candidate->summary.reaction_mode = model.reaction.mode;
   if(model.reaction.esf) {
     const auto &tcr=model.reaction.esf->tcr;
@@ -6793,7 +6797,7 @@ Status ProductDriver::Impl::rebuild_cold_velocity_dependents(
                ? Status{}
                : Status{StatusCode::invalid_plan, kProductBinding};
   };
-  EquationStateView equation_state;
+  EquationStateView equation_state; equation_state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();
   if (status) status = history(product.fields.rho, equation_state.density);
   if (status)
     status = history(product.fields.velocity, equation_state.velocity);
@@ -8756,6 +8760,7 @@ Status ProductDriver::Impl::execute_attempt(
   CompiledCasePlan::Impl& product = *plan.implementation_;
   const bool cold_method = product.summary.coupling == CouplingKind::outer_corrected;
   const bool dual_esf = cold_method && product.esf.implicit_transport();
+  const bool fixed_eos = product.thermodynamics.fixed_pressure_pa()>0;
   product.esf_energy_ledger.discard_attempt();
   effective_bdf = step.bdf;
   thermophysical_predictor_calls = 0U;
@@ -9421,7 +9426,7 @@ Status ProductDriver::Impl::execute_attempt(
     std::array<PrimitiveHistory, UINT8_MAX> accepted_species{};
     for (std::size_t species = 0; species < species_history.size(); ++species)
       accepted_species[species] = accepted_history(species_history[species]);
-    EquationStateView accepted_state;
+    EquationStateView accepted_state; accepted_state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();
     accepted_state.density = accepted_history(rho_history);
     accepted_state.velocity = accepted_history(velocity_history);
     accepted_state.pressure_perturbation = accepted_history(pressure_history);
@@ -9959,7 +9964,7 @@ Status ProductDriver::Impl::execute_attempt(
             diffusivities[a]=gamma;
           }
           const auto old_h=read_alias(accepted,ns+1,fields.enthalpy);
-          EquationStateView state;state.density={density,density,density};
+          EquationStateView state; state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();state.density={density,density,density};
           state.velocity={velocity_history.accepted,velocity_history.accepted,velocity_history.accepted};
           state.independent_species={histories.data(),ns};state.enthalpy={as_const(alias(current,ns+1,fields.enthalpy)),old_h,old_h};
           auto& scalar=heat ? state.enthalpy : histories[c];
@@ -10170,7 +10175,7 @@ Status ProductDriver::Impl::execute_attempt(
       status=product.reductions.consensus(status);
       if(status)status=product.esf.prepare_pressure_work(product.equations.kernels(),
           pressure_history,velocity_history.accepted,pressure_reference,previous_pressure_reference,
-          time.last_accepted_dt());
+          time.last_accepted_dt(),fixed_eos);
       status=product.reductions.consensus(status);
     }
     if(status && !product.esf.implicit_transport())
@@ -10397,7 +10402,7 @@ Status ProductDriver::Impl::execute_attempt(
     if(status) status=runtime_write_view(product.fields.pressure_energy_c_h_row_scale,seed_rhs);
     if(status) status=runtime_write_view(product.fields.pressure_energy_e_p,seed_residual);
     if(status) status=runtime_write_view(product.fields.scalar_diffusivity,seed_coefficient);
-    EquationStateView seed_state;
+    EquationStateView seed_state; seed_state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();
     seed_state.density=rho_history;
     seed_state.density.trial=as_const(trial_density);
     seed_state.independent_species={species_history.data(),species_history.size()};
@@ -10629,7 +10634,7 @@ Status ProductDriver::Impl::execute_attempt(
             : std::numeric_limits<double>::quiet_NaN();
     context.cp_before = heat_capacity.unchecked(cell, 0U);
     context.pressure_absolute =
-        p_ref + trial_pressure.unchecked(cell, 0U);
+        product.thermodynamics.eos_pressure(p_ref + trial_pressure.unchecked(cell, 0U));
     context.enthalpy_accepted_revision = enthalpy_history.accepted.revision;
     context.enthalpy_previous_revision =
         effective_bdf.order == 2U ? enthalpy_history.previous.revision : 0U;
@@ -11076,7 +11081,7 @@ Status ProductDriver::Impl::execute_attempt(
       detail::ProductEsf::DualState selected;
       evaluated=product.esf.evaluate_dual_state_cell(c,
           {esf_trial.data(),product.fields.esf_fields.size()},as_const(esf_auxiliary),
-          reference+pi,h-esf_mean_anchor.unchecked(c,product.fields.esf_components-1),velocity,
+          product.thermodynamics.eos_pressure(reference+pi),h-esf_mean_anchor.unchecked(c,product.fields.esf_components-1),velocity,
           product.reaction,product.thermodynamics,{step.accepted_step,step.generation,1},
           {mean.data(),product.fields.esf_components},selected);
       if(evaluated) {
@@ -11097,6 +11102,10 @@ Status ProductDriver::Impl::execute_attempt(
   };
   const auto evaluate_selected_density=[&](Int3 c,double rho,double h,
       Span<const double> y,Real3 velocity,double& p,CoupledThermoState& out,double hint) {
+    if(fixed_eos) {
+      p=pressure_reference+trial_pressure.unchecked(c,0);
+      return evaluate_selected_reference(c,pressure_reference,trial_pressure.unchecked(c,0),h,y,velocity,out,hint);
+    }
     if(!dual_esf) {
       const auto evaluated=product.thermodynamics.evaluate_from_density(rho,h,y,velocity,p,out,hint);
       if(evaluated)out.pressure={out.rho,out.drho_dp_hY,out.drho_dh_pY};
@@ -11204,19 +11213,19 @@ Status ProductDriver::Impl::execute_attempt(
           previous = {
               rho_history.previous.unchecked(cell, 0U),
               enthalpy_history.previous.unchecked(cell, 0U),
-              previous_pressure_reference +
-                  pressure_history.previous.unchecked(cell, 0U)};
+              product.thermodynamics.eos_pressure(previous_pressure_reference +
+                  pressure_history.previous.unchecked(cell, 0U))};
         }
         return detail::product_pressure_energy_temporal_operand_scale(
             effective_bdf, volume,
             {target_density.unchecked(cell, 0U),
              target_enthalpy.unchecked(cell, 0U),
-             target_pressure_reference +
-                 target_pressure.unchecked(cell, 0U)},
+             product.thermodynamics.eos_pressure(target_pressure_reference +
+                 target_pressure.unchecked(cell, 0U))},
             {rho_history.accepted.unchecked(cell, 0U),
              enthalpy_history.accepted.unchecked(cell, 0U),
-             pressure_reference +
-                 pressure_history.accepted.unchecked(cell, 0U)},
+             product.thermodynamics.eos_pressure(pressure_reference +
+                 pressure_history.accepted.unchecked(cell, 0U))},
             previous, scale);
       };
   if (status) {
@@ -11583,7 +11592,7 @@ Status ProductDriver::Impl::execute_attempt(
   FaceFieldView x_coefficient;
   FaceFieldView y_coefficient;
   FaceFieldView z_coefficient;
-  EquationStateView equation_state;
+  EquationStateView equation_state; equation_state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();
   equation_state.mass_source = coupled_mass_source;
   EquationMaterialView material;
   EquationAssemblyContext assembly;
@@ -12503,8 +12512,8 @@ Status ProductDriver::Impl::execute_attempt(
             for (int x = 0; x < cells.x; ++x) {
               const Int3 c{x, y, z};
               const double rho = equation_state.density.accepted.unchecked(c, 0);
-              const double p = pressure_reference +
-                  equation_state.pressure_perturbation.accepted.unchecked(c, 0);
+              const double p = product.thermodynamics.eos_pressure(pressure_reference +
+                  equation_state.pressure_perturbation.accepted.unchecked(c, 0));
               const double speed = std::hypot(
                   equation_state.velocity.accepted.unchecked(c, 0),
                   equation_state.velocity.accepted.unchecked(c, 1),
@@ -12756,11 +12765,12 @@ Status ProductDriver::Impl::execute_attempt(
                 // Keep an EOS-compatible pressure only while resolving a
                 // full energy request. Ordinary h/Y guesses refresh pressure
                 // directly so roundoff retention adds no thermodynamic lag.
-                if (conservative_energy_requested)
+                if (conservative_energy_requested && !fixed_eos)
                   absolute_pressure=detail::cold_density_pressure_candidate(
                     trial_density.unchecked(c,0),therm.pressure.drho_dp_hY,
                     attempt_pressure_reference+trial_pressure.unchecked(c,0),absolute_pressure);
-                trial_pressure.unchecked(c, 0) =
+                if(fixed_eos) trial_density.unchecked(c,0)=therm.pressure.rho;
+                else trial_pressure.unchecked(c, 0) =
                     absolute_pressure - attempt_pressure_reference;
                 trial_temperature.unchecked(c, 0) = therm.temperature;
                 heat_capacity.unchecked(c, 0) = therm.cp;
@@ -13218,15 +13228,15 @@ Status ProductDriver::Impl::execute_attempt(
                 }
                 const double psi = compressibility.unchecked(c, 0),
                              chi = enthalpy_compressibility.unchecked(c, 0);
-                const double dpdh = -chi / psi;
-                if (!std::isfinite(dpdh) || dpdh <= 0) {
+                const double dpdh = fixed_eos ? 0. : -chi / psi;
+                if (!std::isfinite(dpdh) || (!fixed_eos && dpdh <= 0)) {
                   status = {StatusCode::numerical_failure, 17817};
                   break;
                 }
                 pressure_energy_e_h.unchecked(c, 0) -=
                     detail::cell_volume(product.equations.kernels(), c) *
                     dpdh / step.dt;
-                if (!sampled) {
+                if (!sampled && !fixed_eos) {
                   sampled = true;
                   for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
                     species_values[isp] = species_trial[isp].unchecked(c, 0);
@@ -13341,7 +13351,7 @@ Status ProductDriver::Impl::execute_attempt(
                 // Keep an EOS-compatible pressure only while resolving a
                 // full energy request. Ordinary h/Y guesses refresh pressure
                 // directly so roundoff retention adds no thermodynamic lag.
-                if (conservative_energy_requested)
+                if (conservative_energy_requested && !fixed_eos)
                   absolute_pressure=detail::cold_density_pressure_candidate(
                     trial_density.unchecked(c,0),thermo.pressure.drho_dp_hY,
                     attempt_pressure_reference+trial_pressure.unchecked(c,0),absolute_pressure,
@@ -13352,10 +13362,11 @@ Status ProductDriver::Impl::execute_attempt(
                     product.reaction.interval_enabled() && reference_stopping
                         ? 0.0
                         : std::numeric_limits<double>::infinity());
-                trial_pressure.unchecked(c, 0) =
+                if(fixed_eos) trial_density.unchecked(c,0)=thermo.pressure.rho;
+                else trial_pressure.unchecked(c, 0) =
                     absolute_pressure - attempt_pressure_reference;
                 hstats[1] = std::max(
-                    hstats[1], std::abs((attempt_pressure_reference +
+                    hstats[1], std::abs(product.thermodynamics.eos_pressure(attempt_pressure_reference +
                                          trial_pressure.unchecked(c, 0)) *
                                             thermo.pressure.drho_dp_hY -
                                         trial_density.unchecked(c, 0)) /
@@ -13424,8 +13435,8 @@ Status ProductDriver::Impl::execute_attempt(
               thermal_final[3] = std::max(
                   thermal_final[3],
                   double(!std::isfinite(trial_pressure.unchecked(c, 0)) ||
-                         attempt_pressure_reference +
-                                 trial_pressure.unchecked(c, 0) <=
+                         product.thermodynamics.eos_pressure(attempt_pressure_reference +
+                                 trial_pressure.unchecked(c, 0)) <=
                              0 ||
                          !std::isfinite(trial_temperature.unchecked(c, 0)) ||
                          trial_temperature.unchecked(c, 0) <= 0));
@@ -13444,7 +13455,9 @@ Status ProductDriver::Impl::execute_attempt(
               thermal_global[0], thermal_global[1], thermal_global[2],
               thermal_global[3]);
         if (thermal_global[3] != 0 ||
-            (cold_outer > 0 && thermal_global[1] >
+            // At fixed p0, h/Y changes density; the following pressure
+            // projection restores continuity before the terminal audit.
+            (!fixed_eos && cold_outer > 0 && thermal_global[1] >
              128 * std::numeric_limits<double>::epsilon()))
           return {StatusCode::invalid_plan, 17819};
 
@@ -13643,7 +13656,7 @@ Status ProductDriver::Impl::execute_attempt(
                   velocity_history.accepted, as_const(trial_pressure),
                   attempt_pressure_reference, step.dt,
                   as_const(provisional_flux), rows, observed, &faces,
-                  coupled_mass_source,step.generation))
+                  coupled_mass_source,step.generation,fixed_eos))
             probe_status = {StatusCode::invalid_plan, 17778};
           PressureCorrectionBoundaryPlan cold_boundary;
           if (probe_status)
@@ -13687,8 +13700,8 @@ Status ProductDriver::Impl::execute_attempt(
                   const double volume = detail::cell_volume(product.equations.kernels(),c);
                   const bool fluid = momentum_activity.cells.size == 0U ||
                       momentum_activity.cells.data[index] != 0U;
-                  double diagonal = fluid ? volume*trial_density.unchecked(c,0)/
-                      ((attempt_pressure_reference+trial_pressure.unchecked(c,0))*step.dt) : 1.0;
+                  double diagonal = fluid ? (fixed_eos ? 0. : volume*trial_density.unchecked(c,0)/
+                      ((attempt_pressure_reference+trial_pressure.unchecked(c,0))*step.dt)) : 1.0;
                   for(unsigned f=0; f<6; ++f) {
                     auto at = c;
                     if(f%2) (f/2 == 0 ? at.x : f/2 == 1 ? at.y : at.z)++;
@@ -13794,7 +13807,7 @@ Status ProductDriver::Impl::execute_attempt(
           detail::ColdPressureContinuityAudit continuity_audit(
               as_const(trial_density),as_const(trial_pressure),attempt_pressure_reference,step.dt,
               product.topology ? product.topology->region() : Span<const std::uint8_t>{},
-              detail::product_mix(product.piso.fingerprint(),UINT64_C(0x434f4c4441554431)));
+              detail::product_mix(product.piso.fingerprint(),UINT64_C(0x434f4c4441554431)),fixed_eos);
           const LinearSolveInvocation pressure_call{
               as_const(pressure_rhs), pressure_correction, identity,
               product.piso.pressure_solve(),&continuity_audit};
@@ -13845,7 +13858,7 @@ Status ProductDriver::Impl::execute_attempt(
                                      {x, y, z - 1}, {x, y, z + 1}};
                   const double center = dp.unchecked(c, 0),
                                rho = trial_density.unchecked(c, 0);
-                  const double derivative =
+                  const double derivative = fixed_eos ? 0. :
                       rho / (attempt_pressure_reference +
                              trial_pressure.unchecked(c, 0));
                   const double volume =
@@ -13893,12 +13906,12 @@ Status ProductDriver::Impl::execute_attempt(
                       derivative * center / step.dt;
                   update_audit[0] = std::max(
                       update_audit[0],
-                      std::abs(new_rho - rho * new_p / absolute_p) / rho);
+                      std::abs(new_rho - (fixed_eos ? rho : rho * new_p / absolute_p)) / rho);
                   update_audit[1] =
                       std::max(update_audit[1], std::abs(physical_continuity));
                   update_audit[2] =
                       std::max(update_audit[2],
-                               double(!std::isfinite(new_p) || new_p <= 0 ||
+                               double(!std::isfinite(new_p) || (!fixed_eos && new_p <= 0) ||
                                       !std::isfinite(new_rho) || new_rho <= 0));
                   update_audit[3] += physical_continuity * volume;
                   audit[0] = std::max(audit[0], std::abs(residual));
@@ -14028,7 +14041,7 @@ Status ProductDriver::Impl::execute_attempt(
                     trial_velocity.unchecked(c, a) = value;
                   }
                   trial_pressure.unchecked(c, 0) += correction;
-                  trial_density.unchecked(c, 0) +=
+                  if(!fixed_eos) trial_density.unchecked(c, 0) +=
                       rho / absolute_p * correction;
                   for (unsigned f = 0; f < 6; ++f) {
                     const auto &face = faces[ordinal][f];
@@ -14613,9 +14626,9 @@ Status ProductDriver::Impl::execute_attempt(
                   const double rho = trial_density.unchecked(c, 0),
                                T = trial_temperature.unchecked(c, 0),
                                cp = heat_capacity.unchecked(c, 0);
-                  const double absolute_pressure =
+                  const double absolute_pressure = product.thermodynamics.eos_pressure(
                       attempt_pressure_reference +
-                      trial_pressure.unchecked(c, 0);
+                      trial_pressure.unchecked(c, 0));
                   const double volume =
                       detail::cell_volume(product.equations.kernels(), c);
                   if (!std::isfinite(pressure_energy_r_e.unchecked(c, 0)) ||
@@ -14908,6 +14921,7 @@ Status ProductDriver::Impl::execute_attempt(
                 std::abs(candidate_balance.total_energy_bdf_rate),
                 std::abs(candidate_balance.enthalpy_outflow),
                 std::abs(candidate_balance.kinetic_energy_outflow),
+                std::abs(candidate_balance.mechanical_pressure_work_outflow),
                 std::abs(candidate_balance.conductive_heat_input),
                 std::abs(candidate_balance.species_enthalpy_diffusion_input),
                 std::abs(candidate_balance.viscous_work_input),
@@ -15343,20 +15357,16 @@ Status ProductDriver::Impl::execute_attempt(
                         (equation_state.enthalpy.trial.unchecked(c, 0) +
                          static_cast<long double>(detail::kinetic_energy(
                              equation_state.velocity.trial, c))) -
-                    (equation_state.pressure_reference +
-                     static_cast<long double>(
-                         equation_state.pressure_perturbation.trial.unchecked(
-                             c, 0)));
+                    equation_state.eos_pressure(equation_state.pressure_reference,
+                        equation_state.pressure_perturbation.trial.unchecked(c, 0));
                 const long double old =
                     static_cast<long double>(
                         equation_state.density.accepted.unchecked(c, 0)) *
                         (equation_state.enthalpy.accepted.unchecked(c, 0) +
                          static_cast<long double>(detail::kinetic_energy(
                              equation_state.velocity.accepted, c))) -
-                    (equation_state.accepted_pressure_reference +
-                     static_cast<long double>(
-                         equation_state.pressure_perturbation.accepted
-                             .unchecked(c, 0)));
+                    equation_state.eos_pressure(equation_state.accepted_pressure_reference,
+                        equation_state.pressure_perturbation.accepted.unchecked(c, 0));
                 temporal += (now - old) / step.dt *
                             detail::cell_volume(product.equations.kernels(), c);
               }
@@ -15730,7 +15740,7 @@ Status ProductDriver::Impl::execute_attempt(
                 detail::ProductEsf::DualState published;
                 status=product.esf.publish_dual_state_cell(c,
                     {esf_trial.data(),product.fields.esf_fields.size()},esf_auxiliary,esf_mean_anchor,
-                    attempt_pressure_reference+trial_pressure.unchecked(c,0),
+                    product.thermodynamics.eos_pressure(attempt_pressure_reference+trial_pressure.unchecked(c,0)),
                     trial_enthalpy.unchecked(c,0)-esf_mean_anchor.unchecked(c,product.fields.esf_components-1),
                     {trial_velocity.unchecked(c,0),trial_velocity.unchecked(c,1),trial_velocity.unchecked(c,2)},
                     product.reaction,product.thermodynamics,{step.accepted_step,step.generation,1},published);

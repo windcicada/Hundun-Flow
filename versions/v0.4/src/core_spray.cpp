@@ -26,6 +26,7 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                                      const TransportPlan *transport) {
   if (!model.spray)
     return {};
+  fixed_pressure_=model.thermophysics.fixed_pressure_pa;
   if (enabled() || !reaction.gas_query() ||
       (model.time.scheme != TimeScheme::backward_euler &&
        model.time.scheme != TimeScheme::cn_be))
@@ -471,7 +472,7 @@ Status ProductSpray::prepare(portable::Revision revision, double duration,
   status = agree(gas_.bind(revision, duration, pressure_reference,
                            as_const(halo_views_[0]), as_const(halo_views_[1]),
                            as_const(halo_views_[2]),
-                           {species_views_.data(), species_views_.size()}));
+                           {species_views_.data(), species_views_.size()},fixed_pressure_));
   if (status && sgs_enabled()) {
     if (!turbulence || !valid_cell_view(density, patch_.cells, 0, 1, 0) ||
         !valid_cell_view(molecular_viscosity, patch_.cells, 0, 1, 0) ||

@@ -1,0 +1,18 @@
+HUNDUN_LIQUID_ASSET_V1
+units SI
+source Rachner-kerosene-phase-transport-fixture
+gas_sha 260715a5557ee3f6ac654c2aea29965d74115b38158f081476d83c98d6996797
+gas_phase kerosene-thermo
+gas_species 7 H2 H2O CO CO2 O2 N2 C12H23
+enthalpy_reference absolute-standard-formation-298.15K-v1
+vapor C12H23
+molecular_weight 167.31771000000001
+temperature_range 200 680
+liquid_reference 298.15 -1584371.4600473193
+density kerosene_density_v1 298.15 0 0 0 0
+cp kerosene_cp_v1 298.15 0 0 0 0
+latent kerosene_latent_v1 298.15 0 0 0 0
+surface_tension constant 298.15 0.025 0 0 0
+viscosity constant 298.15 0.0008 0 0 0
+saturation kerosene_v1
+end

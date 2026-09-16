@@ -2,8 +2,28 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 #pragma once
 #include "hundun/v04_flow.hpp"
+#include "solver_cartesian_detail.hpp"
 
 namespace hundun::v04::detail {
+// Extra pressure work in rho*h-p0+rho*K when EOS pressure is fixed.
+// The oriented, authoritative mass flux also defines this volume flux.
+inline double mechanical_pressure_face_work(const CartesianKernelPlan& kernels,
+    const EquationStateView& state, CartesianAxis axis, Int3 face,
+    double mass_rate) noexcept {
+  if (state.fixed_thermodynamic_pressure <= 0 || mass_rate == 0) return 0;
+  Int3 lower=face;
+  (axis==CartesianAxis::x ? lower.x : axis==CartesianAxis::y ? lower.y : lower.z)--;
+  const auto index=[&](Int3 p){return axis==CartesianAxis::x ? p.x : axis==CartesianAxis::y ? p.y : p.z;};
+  const double a=centre_coordinate(kernels,axis,index(lower)),
+               b=centre_coordinate(kernels,axis,index(face)),
+               w=(b-face_coordinate(kernels,axis,index(face)))/(b-a);
+  const double rho=w*state.density.trial.unchecked(lower,0)+
+      (1-w)*state.density.trial.unchecked(face,0);
+  const double pi=state.pressure_reference-state.fixed_thermodynamic_pressure+
+      w*state.pressure_perturbation.trial.unchecked(lower,0)+
+      (1-w)*state.pressure_perturbation.trial.unchecked(face,0);
+  return mass_rate*pi/rho;
+}
 inline double kinetic_energy(ConstFieldView velocity, Int3 cell) noexcept {
   double value=0.0;
   for(std::uint8_t c=0U;c<3U;++c) {

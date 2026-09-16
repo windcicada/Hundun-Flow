@@ -422,6 +422,7 @@ class CartesianKernelPlan {
 
   GeometryKind geometry_kind() const noexcept { return geometry_kind_; }
   Int3 cells() const noexcept { return cells_; }
+  Int3 patch_begin() const noexcept { return patch_begin_; }
   std::uint8_t reach() const noexcept { return reach_; }
   double limiter() const noexcept { return limiter_; }
   // Material ghost slots contain face coefficients here, not exterior-cell

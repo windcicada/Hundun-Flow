@@ -521,6 +521,7 @@ struct DriverConservationReport {
   double mass_outflow{};                 // kg/s
   double enthalpy_outflow{};             // W
   double kinetic_energy_outflow{};       // W
+  double mechanical_pressure_work_outflow{}; // W, fixed-EOS pressure split
   double conductive_heat_input{};        // W, physical boundary faces
   double species_enthalpy_diffusion_input{};  // W, species-carried boundary heat
   double viscous_work_input{};           // W, including prescribed IBM inlets

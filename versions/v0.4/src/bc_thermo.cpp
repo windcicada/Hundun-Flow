@@ -388,7 +388,7 @@ Status evaluate_cell(
     enthalpy=0.5*input.enthalpy.unchecked(inlet.mirror,0U)+
              0.5*input.enthalpy.unchecked(owner,0U);
   }
-  const double pressure_absolute = input.pressure_reference + perturbation;
+  const double pressure_absolute = thermodynamics.eos_pressure(input.pressure_reference + perturbation);
   if (!std::isfinite(input.pressure_reference) ||
       !std::isfinite(perturbation) || !finite_positive(pressure_absolute) ||
       !std::isfinite(enthalpy)) {

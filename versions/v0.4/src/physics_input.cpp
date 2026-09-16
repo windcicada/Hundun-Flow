@@ -339,7 +339,8 @@ double canonical_high_enthalpy_constant(
 }
 
 bool valid_spec(const ThermophysicalSpec& spec) noexcept {
-  if (!finite_positive(spec.minimum_temperature) ||
+  if (!std::isfinite(spec.fixed_pressure_pa) || spec.fixed_pressure_pa < 0 ||
+      !finite_positive(spec.minimum_temperature) ||
       !finite_positive(spec.maximum_temperature) ||
       spec.minimum_temperature >= spec.maximum_temperature ||
       !finite_positive(spec.temperature_relative_tolerance) ||
@@ -509,6 +510,10 @@ PlanFingerprint fingerprint_spec(const ThermophysicalSpec& spec) {
     SpecHash64 hash;
     hash.text("HUNDUN-FLOW-v0.4-thermophysical-spec-v1");
     hash.text(data_file);
+    if (canonical.fixed_pressure_pa > 0) {
+      hash.text("fixed-thermodynamic-pressure-v1");
+      hash.real(canonical.fixed_pressure_pa);
+    }
     hash.real(canonical.minimum_temperature);
     hash.real(canonical.maximum_temperature);
     hash.real(canonical.temperature_relative_tolerance);

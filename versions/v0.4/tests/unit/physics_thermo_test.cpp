@@ -1314,10 +1314,34 @@ bool test_isomer_composition_invariance() {
   return passed;
 }
 
+bool test_fixed_pressure() {
+  auto spec=base_spec();
+  spec.species={constant_species("air",28.96546,1004.)};
+  ThermodynamicsPlan coupled, fixed;
+  bool passed=bool(ThermodynamicsPlan::compile(spec,{},coupled));
+  spec.fixed_pressure_pa=790216.58;
+  passed &= bool(ThermodynamicsPlan::compile(spec,{},fixed));
+  double h{},cp{},r{};
+  passed &= bool(fixed.mixture_enthalpy(900.,{},h,cp,r));
+  ThermoState reference, negative, shifted;
+  passed &= bool(coupled.evaluate(spec.fixed_pressure_pa,h,{}, {},reference));
+  passed &= bool(fixed.evaluate(-17800000.,h,{}, {},negative));
+  passed &= bool(fixed.evaluate(2000000.,h,{}, {},shifted));
+  passed &= expect(negative.rho==reference.rho && shifted.rho==reference.rho &&
+      negative.temperature==reference.temperature && negative.drho_dp_hY>0 &&
+      fixed.fingerprint()!=coupled.fingerprint(),
+      "fixed EOS pressure preserves density and material derivatives under mechanical pressure shifts");
+  ThermoState state;
+  passed &= expect(bool(fixed.evaluate_from_reference_pressure(100000.,-17900000.,h,{}, {},state)) &&
+      state.rho==reference.rho,"reference/perturbation closure uses fixed p0");
+  return passed;
+}
+
 }  // namespace
 
 int main() {
   bool passed = test_constant_cp_path();
+  passed &= test_fixed_pressure();
   passed &= test_transport_coordinate();
   passed &= test_isomer_composition_invariance();
   passed &= test_binary_affine_equivalence();

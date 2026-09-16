@@ -121,7 +121,10 @@ def main():
     binary, fixture, mpi, work, validator = map(Path, sys.argv[1:6])
     mode = sys.argv[6] if len(sys.argv) > 6 else "backward_euler"
     fields = int(sys.argv[8]) if len(sys.argv) > 8 else 2
-    dynamic = mode == "cn_be_esf_ibm_tcr"
+    fixed = mode == "fixed_tcr"
+    dynamic = fixed or mode == "cn_be_esf_ibm_tcr"
+    dt = 4.1968579012063856e-7 if fixed else 1e-9
+    p0 = 790216.58 if fixed else 100000.
     breakup = dynamic or mode == "cn_be_esf_ibm_breakup"
     if breakup: mode = "cn_be_esf_ibm_sgs"
     assert mode in ("backward_euler", "cn_be", "cn_be_esf", "cn_be_esf_ibm", "cn_be_esf_ibm_sgs")
@@ -221,7 +224,26 @@ end
     case["solver"].pop("cold_stopping", None)
     case["time"]["scheme"] = scheme
     for key in ("initial_dt", "minimum_dt", "maximum_dt"):
-        case["time"][key] = 1e-9
+        case["time"][key] = dt
+    if fixed:
+        case["solver"]["cold_stopping"] = dict(reference_time=dt, momentum=1e-10, enthalpy=1e-12, species=1e-10)
+        case["flow"]["thermodynamic_pressure_pa"] = p0
+        case["boundaries"]["x_max"]["pressure"] = p0
+        case["spray"]["maximum_substep_s"] = dt/2
+        # This pressure-based low-Mach check uses a 10 mm domain. Scale
+        # parcel weights with volume so the gas/liquid inventory ratio is
+        # unchanged while the expansion velocity stays in the model range.
+        length = .01
+        for key in ("lower", "upper"):
+            case["mesh"]["domain"][key] = [x*length for x in case["mesh"]["domain"][key]]
+        case["mesh"]["minimum_spacing"] = [x*length for x in case["mesh"]["minimum_spacing"]]
+        injector = case["spray"]["injectors"][0]
+        injector["origin_m"] = [x*length for x in injector["origin_m"]]
+        injector["represented_mass_per_parcel_kg"] = 1e-4*length**3
+        injector["mass_flow_rate_kg_per_s"] = injector["represented_mass_per_parcel_kg"]/dt
+        cube = work/"cube.stl"
+        cube.write_text(re.sub(r"vertex ([^\n]+)", lambda m: "vertex "+" ".join(
+            "{:.17g}".format(float(x)*length) for x in m.group(1).split()), cube.read_text()))
     (work / "case.json").write_text(json.dumps(case, indent=2) + "\n")
 
     def command(args, path):
@@ -241,6 +263,8 @@ end
         assert "breakup=stochastic_sgs" in check
     if dynamic:
         assert "tcr_model=cdphyso_dynamic_v1 tcr_mode=experimental" in check
+    if fixed:
+        assert "pressure_model=fixed_thermodynamic" in check
     records = {}
 
     def run(label, ranks, count, restart=None):
@@ -251,12 +275,12 @@ end
             shutil.rmtree(str(output))
         args = [mpi, "--oversubscribe", "--bind-to", "none", "-n", str(ranks),
                 binary, "run", work, "--output", output, "--steps", str(count),
-                "--max-dt", "1e-9", "--output-interval", "1" if sgs else "0",
+                "--max-dt", str(dt), "--output-interval", "1" if sgs else "0",
                 "--restart-interval", "1", "--diagnostics-interval", "1"]
         if restart:
             args += ["--restart", restart / "Restart"]
         else:
-            args += ["--initial-state", "100000,900,0,0,0,0.001,0.05,0.005,0.01,0.2,0.02"]
+            args += ["--initial-state", str(p0)+",900,0,0,0,0.001,0.05,0.005,0.01,0.2,0.02"]
         command(args, work / (label + ".log"))
         validation = [sys.executable, validator, "runtime", output / "evidence.jsonl"]
         if restart:
@@ -293,7 +317,7 @@ end
         if len(sys.argv) > 7:
             command([mpi, "--oversubscribe", "--bind-to", "none", "-n", "2", sys.argv[7],
                      work, work.with_name(work.name + "r") / "Restart", two / "Restart"]
-                    + (["--wall"] if ibm else []), work / "compare.log")
+                    + (["--evaporated"] if fixed else ["--wall"] if ibm else []), work / "compare.log")
     report = dict(scope=method + " THICK_EX spray with native kerosene four-step chemistry",
                   reaction_model=reaction_model,
                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),

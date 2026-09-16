@@ -398,6 +398,9 @@ struct ThermophysicalSpec {
   std::uint32_t maximum_closed_mass_iterations{};
   double maximum_closed_mass_relative_step{};
   std::vector<SpeciesThermophysicalSpec> species;
+  // Zero selects coupled absolute pressure. A positive value fixes the EOS
+  // pressure while the flow pressure field remains the mechanical variable.
+  double fixed_pressure_pa{};
 };
 
 struct ValidatedModel {

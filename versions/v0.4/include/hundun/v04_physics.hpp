@@ -111,6 +111,10 @@ class ThermodynamicsPlan {
   ThermodynamicsPlan() noexcept = default;
   ThermodynamicsPlan(ThermodynamicsPlan&&) noexcept = default;
   ThermodynamicsPlan& operator=(ThermodynamicsPlan&&) noexcept = default;
+  double fixed_pressure_pa() const noexcept { return fixed_pressure_pa_; }
+  double eos_pressure(double pressure_absolute) const noexcept {
+    return fixed_pressure_pa_ > 0 ? fixed_pressure_pa_ : pressure_absolute;
+  }
 
   static Status compile(const ThermophysicalSpec& spec,
                         Span<const TransportedScalarSpec> scalar_catalog,
@@ -249,6 +253,7 @@ class ThermodynamicsPlan {
   std::vector<std::uint16_t> independent_to_species_;
   std::size_t dependent_species_{};
   double minimum_temperature_{};
+  double fixed_pressure_pa_{};
   double maximum_temperature_{};
   double relative_tolerance_{};
   std::uint32_t maximum_iterations_{};

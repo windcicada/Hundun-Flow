@@ -246,6 +246,12 @@ public:
       string("native-tcr-explicit-fold-evidence-v1");
       integer(fold_identity_);
     }
+    if(model.thermophysics.fixed_pressure_pa>0) {
+      string("fixed-thermodynamic-pressure-v1");
+      std::uint64_t bits{};
+      std::memcpy(&bits,&model.thermophysics.fixed_pressure_pa,8);
+      integer(bits);
+    }
     fingerprint_ = h ? h : 1;
     provider_ = bindings.gas_query;
     return {};
@@ -414,7 +420,7 @@ public:
       y_[dependent_]=double(1-sum);
       portable::GasQuery query{{step,generation,1},identity_.composition_fingerprint,
           portable::GasStateCoordinates::pressure_enthalpy,
-          state.pressure_reference+state.pressure_perturbation.trial.unchecked(cell,0),
+          state.eos_pressure(state.pressure_reference,state.pressure_perturbation.trial.unchecked(cell,0)),
           state.enthalpy.trial.unchecked(cell,0),0,y_.data(),y_.size()};
       interval_density_[flat]=storage_density;
       interval_h_[flat]=query.enthalpy_j_per_kg;
@@ -542,8 +548,8 @@ public:
       const auto i=(std::size_t(z)*cells.y+y)*cells.x+x;
       if(activity.size && activity.data[i]==0) continue;
       const Int3 c{x,y,z};
-      const double pressure=state.pressure_reference+
-          state.pressure_perturbation.trial.unchecked(c,0);
+      const double pressure=state.eos_pressure(state.pressure_reference,
+          state.pressure_perturbation.trial.unchecked(c,0));
       const double h_scale=std::max(1.,cp.unchecked(c,0)*state.temperature.trial.unchecked(c,0));
       const double error=std::max(
           std::abs(state.enthalpy.trial.unchecked(c,0)-interval_h_[i])/h_scale,
@@ -608,8 +614,8 @@ public:
               1};
           q.composition_fingerprint = identity_.composition_fingerprint;
           q.coordinates = portable::GasStateCoordinates::pressure_enthalpy;
-          q.pressure_pa = state.pressure_reference +
-                          state.pressure_perturbation.trial.unchecked(cell, 0);
+          q.pressure_pa = state.eos_pressure(state.pressure_reference,
+                          state.pressure_perturbation.trial.unchecked(cell, 0));
           q.enthalpy_j_per_kg = state.enthalpy.trial.unchecked(cell, 0);
           q.temperature_k = state.temperature.trial.unchecked(cell, 0);
           q.mass_fractions = y_.data();

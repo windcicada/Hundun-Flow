@@ -37,6 +37,7 @@ struct PlanSummary {
   double smagorinsky_coefficient{};
   CouplingKind coupling{CouplingKind::piso};
   TimeScheme time_scheme{TimeScheme::backward_euler};
+  double fixed_thermodynamic_pressure{};
   Int3 global_cells{};
   Int3 local_cells{};
   std::size_t field_count{};

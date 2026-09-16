@@ -251,6 +251,8 @@ int main(int argc, char* argv[]) {
                 << (report.summary.tcr_mode == hundun::v04::TcrMode::shadow ? "shadow" :
                     report.summary.tcr_mode == hundun::v04::TcrMode::experimental ? "experimental" :
                     report.summary.tcr_mode == hundun::v04::TcrMode::validated ? "validated" : "off")
+                << " pressure_model=" << (report.summary.fixed_thermodynamic_pressure>0 ? "fixed_thermodynamic" : "coupled")
+                << " thermodynamic_pressure_pa=" << report.summary.fixed_thermodynamic_pressure
                 << " chemistry="
                 << (report.summary.reaction_mode == hundun::v04::ReactionMode::none ? "none"
                     : report.summary.interval_chemistry ? "transport_then_interval"

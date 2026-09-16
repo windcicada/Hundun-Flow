@@ -72,6 +72,10 @@ RevisionToken state_revision(
   std::memcpy(&pressure_bits, &state.pressure_reference,
               sizeof(pressure_bits));
   hash = hash_mix(hash, pressure_bits);
+  if(state.fixed_thermodynamic_pressure>0) {
+    std::memcpy(&pressure_bits,&state.fixed_thermodynamic_pressure,sizeof(pressure_bits));
+    hash=hash_mix(hash,pressure_bits);
+  }
   std::memcpy(&pressure_bits, &state.accepted_pressure_reference,
               sizeof(pressure_bits));
   hash = hash_mix(hash, pressure_bits);
@@ -1002,12 +1006,12 @@ Status evaluate_enthalpy_cell_terms(
   }
 
   PressureWorkPoint work{
-      state.pressure_reference +
-          state.pressure_perturbation.trial.unchecked(cell, 0U),
-      state.accepted_pressure_reference +
-          state.pressure_perturbation.accepted.unchecked(cell, 0U),
-      state.previous_pressure_reference +
-          state.pressure_perturbation.previous.unchecked(cell, 0U),
+      state.eos_pressure(state.pressure_reference,
+          state.pressure_perturbation.trial.unchecked(cell, 0U)),
+      state.eos_pressure(state.accepted_pressure_reference,
+          state.pressure_perturbation.accepted.unchecked(cell, 0U)),
+      state.eos_pressure(state.previous_pressure_reference,
+          state.pressure_perturbation.previous.unchecked(cell, 0U)),
       {pressure_gradient_component(kernels,
                                    state.pressure_perturbation.trial, cell,
                                    0U),
@@ -1088,15 +1092,20 @@ Status add_kinetic_convection(
               axis, upper, hi) - lo * detail::kinetic_convection_face(
               kernels, plan.kinetic_convection(), state.velocity.trial,
               axis, cell, lo);
+          integrated += detail::mechanical_pressure_face_work(kernels,state,axis,upper,hi)-
+              detail::mechanical_pressure_face_work(kernels,state,axis,cell,lo);
         }
         if (!std::isfinite(integrated))
           return {StatusCode::numerical_failure, kEnthalpyNumerical};
         residual.unchecked(cell, 0U) +=
             integrated / detail::cell_volume(kernels, cell);
       }
-  return context.immersed_interface == nullptr ? Status{} :
-      context.immersed_interface->add_source_kinetic_convection_correction(
-          plan.kinetic_convection(), state.velocity.trial, 1.0, residual, box);
+  if(context.immersed_interface == nullptr)return {};
+  auto status=context.immersed_interface->add_source_kinetic_convection_correction(
+      plan.kinetic_convection(), state.velocity.trial, 1.0, residual, box);
+  if(status && state.fixed_thermodynamic_pressure>0)
+    status=context.immersed_interface->add_source_mechanical_pressure_work_correction(state,residual,box);
+  return status;
 }
 
 Status combine_enthalpy_cell_system(

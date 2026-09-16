@@ -323,6 +323,16 @@ These objects are closed and have the following exact fields and values:
 | `solver` | `coupling`, `pressure_correctors`, `pressure_linear`, `terminal_tolerances` | `coupling` is `CN_BE`, `PISO` or `SIMPLE`; `pressure_correctors` is unsigned integer `2`; the two nested control objects are described below |
 | `turbulence` | `model` | Optional object; `model` is `vreman_wall_function`, `wale`, or `none` |
 
+The optional positive `flow.thermodynamic_pressure_pa` selects fixed EOS
+pressure for `cn_be` / `outer_corrected` with `boundary_absolute`. For the
+624CF material state, set it to `790216.58` Pa. Thermodynamics, chemical rates,
+ESF field0, and parcel gas sampling use this value. The stored pressure
+perturbation and boundary `pressure` retain their mechanical definition.
+The pressure correction then uses zero mechanical density derivative and
+projects the mass flux after each h/Y density refresh. Omitting this option
+selects the coupled EOS closure. The value participates in the native case
+and Restart identity.
+
 `PISO` performs one momentum-predictor pass followed by two pressure
 corrections. `SIMPLE` performs two momentum--pressure outer passes while
 retaining the same exact terminal physical audit and rollback contract.

@@ -106,12 +106,13 @@ public:
   Status bind(portable::Revision revision, double duration,
               double pressure_reference, ConstFieldView pressure,
               ConstFieldView enthalpy, ConstFieldView velocity,
-              Span<const ConstFieldView> independent) noexcept {
+              Span<const ConstFieldView> independent, double fixed_pressure=0) noexcept {
     available_ = false;
     sgs_ = {};
     if (!geometry_ || revision.algorithm_version != 1 ||
         !revision.input_revision || !std::isfinite(duration) || duration <= 0 ||
         !std::isfinite(pressure_reference) || pressure_reference <= 0 ||
+        !std::isfinite(fixed_pressure) || fixed_pressure<0 ||
         independent.size != indices_.size() || !independent.data ||
         !valid_cell_view(pressure, patch_.cells, 0, 1, 0) ||
         !valid_cell_view(enthalpy, patch_.cells, 0, 1, 0) ||
@@ -123,6 +124,7 @@ public:
     revision_ = revision;
     duration_ = duration;
     pressure_reference_ = pressure_reference;
+    fixed_pressure_ = fixed_pressure;
     pressure_ = pressure;
     enthalpy_ = enthalpy;
     velocity_ = velocity;
@@ -304,6 +306,7 @@ public:
       independent_sum += y;
     scratch_[dependent_] = 1 - independent_sum;
     out.pressure_pa += pressure_reference_;
+    if(fixed_pressure_>0)out.pressure_pa=fixed_pressure_;
     if (!std::isfinite(out.pressure_pa) || out.pressure_pa <= 0 ||
         !std::isfinite(out.enthalpy_j_per_kg))
       return out;
@@ -415,6 +418,7 @@ private:
   std::size_t dependent_{};
   portable::Revision revision_{0, 1, 1};
   double duration_{}, pressure_reference_{};
+  double fixed_pressure_{};
   ConstFieldView pressure_{}, enthalpy_{}, velocity_{};
   std::vector<std::size_t> indices_;
   std::vector<ConstFieldView> species_;

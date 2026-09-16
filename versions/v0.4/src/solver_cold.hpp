@@ -111,9 +111,9 @@ class ColdPressureContinuityAudit final : public LinearConvergenceAudit {
   static constexpr double limit=32*std::numeric_limits<double>::epsilon();
   ColdPressureContinuityAudit(ConstFieldView density,ConstFieldView pressure,
       double reference,double dt,Span<const std::uint8_t> activity,
-      PlanFingerprint fingerprint) noexcept
+      PlanFingerprint fingerprint, bool fixed_pressure=false) noexcept
       : density_(density),pressure_(pressure),reference_(reference),dt_(dt),
-        activity_(activity),fingerprint_(fingerprint) {}
+        activity_(activity),fingerprint_(fingerprint),fixed_pressure_(fixed_pressure) {}
   LinearConvergenceAuditCertificate certificate() const noexcept override {
     return {fingerprint_};
   }
@@ -134,9 +134,9 @@ class ColdPressureContinuityAudit final : public LinearConvergenceAudit {
       const Int3 c{x,y,z};const double rho=density_.unchecked(c,0);
       const double p=reference_+pressure_.unchecked(c,0),dp=solution.unchecked(c,0);
       const double r=residual.unchecked(c,0);
-      if(!(rho>0) || !(p>0) || !std::isfinite(rho) || !std::isfinite(p) ||
+      if(!(rho>0) || (!fixed_pressure_ && !(p>0)) || !std::isfinite(rho) || !std::isfinite(p) ||
           !std::isfinite(dp) || !std::isfinite(r)) {local[1]=1;continue;}
-      const double updated=rho+(rho/p)*dp;
+      const double updated=fixed_pressure_ ? rho : rho+(rho/p)*dp;
       if(!(updated>0) || !std::isfinite(updated)) {local[1]=1;continue;}
       const double metric=std::abs(r)*dt_/updated;
       if(!std::isfinite(metric))local[1]=1;
@@ -157,6 +157,7 @@ class ColdPressureContinuityAudit final : public LinearConvergenceAudit {
   double reference_,dt_;
   Span<const std::uint8_t> activity_;
   PlanFingerprint fingerprint_;
+  bool fixed_pressure_{};
 };
 
 inline bool assemble_cold_pressure_row(
@@ -937,7 +938,8 @@ inline bool assemble_midpoint_cold_grid(
     double reference_pressure, double dt, ConstFaceFluxView prescribed_flux,
     std::vector<ColdPressureRow>& rows, ColdGridReport& report,
     std::vector<std::array<ColdPressureFace, 6>>* saved_faces = nullptr,
-    ConservativeMassSourceView mass_source = {}, RevisionToken time = 0) {
+    ConservativeMassSourceView mass_source = {}, RevisionToken time = 0,
+    bool fixed_pressure = false) {
   const auto cells = patch.cells;
   if (!valid_cell_view(rho, cells, 0, 1, 1) ||
       !valid_cell_view(old_rho, cells, 0, 1, 1) ||
@@ -965,7 +967,7 @@ inline bool assemble_midpoint_cold_grid(
     return !topology || topology->is_fluid_stencil(g);
   };
   const auto derivative = [&](Int3 c) {
-    return rho.unchecked(c, 0) /
+    return fixed_pressure ? 0. : rho.unchecked(c, 0) /
            (reference_pressure + pressure.unchecked(c, 0));
   };
   const auto midpoint_velocity = [&](Int3 c) {

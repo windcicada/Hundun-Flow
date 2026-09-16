@@ -26,6 +26,7 @@ class PressureEnergySchurOperator;
 class PressureEnergySharedPressureCertificate;
 class PressureEnergySharedPressureInputCertificate;
 class SurfaceQuadraturePlan;
+struct EquationStateView;
 
 using GlobalCellId = std::uint64_t;
 using SurfaceTriangleId = std::uint64_t;
@@ -759,6 +760,9 @@ class IbmEquationInterfacePlan {
   Status add_source_kinetic_convection_correction(
       ConvectionScheme scheme, ConstFieldView velocity, double scale,
       FieldView output, KernelBox box = {}) const noexcept;
+  Status add_source_mechanical_pressure_work_correction(
+      const EquationStateView& state, FieldView output,
+      KernelBox box = {}) const noexcept;
   bool has_inlet_sources() const noexcept {
     return inlet_state_bound_ && !prescribed_interface_fluxes_.empty();
   }
