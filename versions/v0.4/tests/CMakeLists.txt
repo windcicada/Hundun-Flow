@@ -2616,3 +2616,21 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "$<TARGET_FILE:v04_spray_remap>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
   set_tests_properties(v04_spray_remap_cli PROPERTIES TIMEOUT 60)
 endif()
+
+add_executable(v04_runtime_executable_test integration/runtime_executable_test.cpp)
+target_include_directories(v04_runtime_executable_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_runtime_executable_test PRIVATE hundun_v04_core MPI::MPI_C)
+add_test(NAME v04_runtime_executable COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/integration/runtime_executable_test.py"
+  "$<TARGET_FILE:v04_runtime_executable_test>")
+set_tests_properties(v04_runtime_executable PROPERTIES TIMEOUT 60)
+
+add_test(NAME v04_archive_identity COMMAND "${CMAKE_COMMAND}"
+  "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/archive-meta"
+  -P "${hundun_repository_root}/cmake/tests/archive_identity_test.cmake")
+set_tests_properties(v04_archive_identity PROPERTIES TIMEOUT 15)
+
+add_test(NAME v04_case_pack_files COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/integration/case_pack_test.py"
+  "${hundun_repository_root}/tools/v04_case_pack.py")
+set_tests_properties(v04_case_pack_files PROPERTIES TIMEOUT 15)

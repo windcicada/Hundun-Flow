@@ -52,7 +52,7 @@ endforeach()
 # Runtime Evidence V6 binds an exact executable digest to canonical build
 # material.  This generated header contains no path or timestamp: those are
 # locations/observations, not candidate identity.  The executable SHA-256 is
-# computed over /proc/self/exe by the product at run start.
+# computed over the mapped application ELF by the product at run start.
 set(HUNDUN_SOURCE_COMMIT "unavailable")
 set(HUNDUN_SOURCE_TREE "unavailable")
 set(HUNDUN_SOURCE_CLEAN "false")
@@ -60,11 +60,25 @@ set(HUNDUN_SOURCE_DIRTY_SUMMARY "unavailable")
 include("${hundun_repository_root}/cmake/HundunPerformanceSourceMetadata.cmake")
 include("${hundun_repository_root}/cmake/HundunTargetIdentity.cmake")
 find_package(Git QUIET)
+set(HUNDUN_GIT_ROOT_MATCH FALSE)
+if(Git_FOUND)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --show-toplevel
+    WORKING_DIRECTORY "${hundun_repository_root}"
+    RESULT_VARIABLE HUNDUN_GIT_ROOT_RESULT OUTPUT_VARIABLE HUNDUN_GIT_ROOT
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(HUNDUN_GIT_ROOT_RESULT EQUAL 0)
+    file(REAL_PATH "${HUNDUN_GIT_ROOT}" HUNDUN_GIT_ROOT)
+    file(REAL_PATH "${hundun_repository_root}" HUNDUN_EXPECTED_ROOT)
+    if(HUNDUN_GIT_ROOT STREQUAL HUNDUN_EXPECTED_ROOT)
+      set(HUNDUN_GIT_ROOT_MATCH TRUE)
+    endif()
+  endif()
+endif()
 hundun_v04_identity_inputs("${hundun_repository_root}" HUNDUN_V04_IDENTITY_INPUTS)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   ${HUNDUN_V04_IDENTITY_INPUTS}
   "${hundun_repository_root}/tools/v04_thin_domain_runner.cpp")
-if(Git_FOUND)
+if(HUNDUN_GIT_ROOT_MATCH)
   # Candidate identity is configure-time material, so an ordinary incremental
   # build must reconfigure when either the checked-out Git authority or any
   # v0.4 executable input changes.  In particular, linked worktrees keep HEAD
@@ -138,6 +152,17 @@ if(Git_FOUND)
   hundun_source_status_metadata(
     "${HUNDUN_GIT_STATUS_RESULT}" "${HUNDUN_GIT_STATUS}"
     HUNDUN_SOURCE_CLEAN HUNDUN_SOURCE_DIRTY_SUMMARY)
+endif()
+
+if(NOT HUNDUN_GIT_ROOT_MATCH)
+  hundun_archive_source_metadata("${hundun_repository_root}"
+    HUNDUN_SOURCE_COMMIT HUNDUN_SOURCE_TREE HUNDUN_ARCHIVE_IDENTITY_AVAILABLE)
+  if(NOT HUNDUN_ARCHIVE_IDENTITY_AVAILABLE)
+    message(FATAL_ERROR "source identity requires the project Git checkout or expanded .git_archival.txt")
+  endif()
+  set(HUNDUN_SOURCE_DIRTY_SUMMARY "exported-source-content-recorded")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${hundun_repository_root}/.git_archival.txt")
 endif()
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" HUNDUN_BUILD_TYPE_UPPER)

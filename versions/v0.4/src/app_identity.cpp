@@ -7,6 +7,8 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/auxv.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -15,6 +17,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <new>
 #include <string>
@@ -238,8 +242,52 @@ bool copy_git_object(std::string_view source,
   return true;
 }
 
-bool sha256_file(const char* path, DigestText& out) noexcept {
-  const int descriptor = ::open(path, O_RDONLY | O_CLOEXEC);
+// AT_PHDR identifies the application's mapped ELF even when the private
+// dynamic loader is invoked explicitly. /proc/self/exe then names the loader.
+// Match the mapping's device/inode to the opened file before hashing it.
+int open_running_executable() noexcept {
+  const auto address = static_cast<unsigned long long>(::getauxval(AT_PHDR));
+  if (address == 0) return -1;
+  FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps) return -1;
+  char* line = nullptr;
+  std::size_t capacity{};
+  int descriptor = -1;
+  while (::getline(&line, &capacity, maps) >= 0) {
+    unsigned long long first{}, last{}, offset{}, inode{};
+    unsigned major{}, minor{};
+    char permissions[5]{};
+    int used{};
+    if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu %n", &first,
+                    &last, permissions, &offset, &major, &minor, &inode, &used) != 7 ||
+        address < first || address >= last || inode == 0) continue;
+    const auto matches = [&](int fd) {
+      struct stat m {};
+      return fd >= 0 && ::fstat(fd, &m) == 0 && S_ISREG(m.st_mode) &&
+             static_cast<unsigned long long>(m.st_ino) == inode &&
+             m.st_dev == ::makedev(major, minor);
+    };
+    descriptor = ::open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    if (!matches(descriptor)) {
+      if (descriptor >= 0) ::close(descriptor);
+      char* path = line + used;
+      const auto size = std::strlen(path);
+      if (size && path[size - 1] == '\n') path[size - 1] = '\0';
+      descriptor = path[0] == '/' ? ::open(path, O_RDONLY | O_CLOEXEC) : -1;
+      if (!matches(descriptor)) {
+        if (descriptor >= 0) ::close(descriptor);
+        descriptor = -1;
+      }
+    }
+    break;
+  }
+  std::free(line);
+  std::fclose(maps);
+  return descriptor;
+}
+
+bool sha256_executable(DigestText& out) noexcept {
+  const int descriptor = open_running_executable();
   if (descriptor < 0) return false;
   struct stat metadata {};
   bool valid = ::fstat(descriptor, &metadata) == 0 &&
@@ -256,6 +304,13 @@ bool sha256_file(const char* path, DigestText& out) noexcept {
       valid = false;
     }
   }
+  struct stat after {};
+  valid = valid && ::fstat(descriptor, &after) == 0 &&
+          after.st_size == metadata.st_size &&
+          after.st_mtim.tv_sec == metadata.st_mtim.tv_sec &&
+          after.st_mtim.tv_nsec == metadata.st_mtim.tv_nsec &&
+          after.st_ctim.tv_sec == metadata.st_ctim.tv_sec &&
+          after.st_ctim.tv_nsec == metadata.st_ctim.tv_nsec;
   if (::close(descriptor) != 0) valid = false;
   if (valid) out = hex_digest(hash.finish());
   return valid;
@@ -350,7 +405,7 @@ Status runtime_candidate_identity(MPI_Comm communicator,
                copy_git_object(identity_source_tree, local.tree) &&
                copy_digest(target_manifest.empty() ? identity_build_manifest_sha256 : target_manifest,
                            local.build_manifest) &&
-               sha256_file("/proc/self/exe", local.executable);
+               sha256_executable(local.executable);
   if (valid) {
     local.identity = identity_digest(local);
     valid = valid_runtime_candidate_identity(local) &&
