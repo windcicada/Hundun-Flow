@@ -47,10 +47,13 @@ def validate_esf_records(records):
 def main():
     binary, fixture, mpi, work, validator = map(Path, sys.argv[1:6])
     mode = sys.argv[6] if len(sys.argv) > 6 else "backward_euler"
-    assert mode in ("backward_euler", "cn_be", "cn_be_esf")
-    esf = mode == "cn_be_esf"
+    assert mode in ("backward_euler", "cn_be", "cn_be_esf", "cn_be_esf_ibm")
+    esf = mode in ("cn_be_esf", "cn_be_esf_ibm")
+    ibm = mode == "cn_be_esf_ibm"
     scheme = "cn_be" if esf else mode
     method = "CN/BE+ESF" if esf else "CN/BE" if scheme == "cn_be" else "BE/PISO"
+    if ibm:
+        method += "+IBM"
     work.mkdir(parents=True, exist_ok=True)
     case = json.loads((fixture / "case.json").read_text())
     for name in ("gas.yaml", "thermophysics.d", "viscosity.dat"):
@@ -113,6 +116,18 @@ end
         case["reaction"]["ensemble"] = dict(
             fields=2, seed=1234, initial_species_offsets=offsets, tcr=dict(mode="off"))
         case["reaction"]["mixing"] = dict(c_z=.25, turbulent_schmidt=.7)
+    if ibm:
+        wall_case = fixture.with_name("reacting-spray-esf-ibm")
+        shutil.copyfile(str(wall_case / "cube.stl"), str(work / "cube.stl"))
+        wall_model = json.loads((wall_case / "case.json").read_text())
+        case["mesh"]["immersed_boundary"] = wall_model["mesh"]["immersed_boundary"]
+        case["mesh"]["limits"]["max_memory_bytes_per_rank"] = wall_model["mesh"]["limits"]["max_memory_bytes_per_rank"]
+        case["mesh"]["exact_cells"] = wall_model["mesh"]["exact_cells"]
+        case["mesh"]["minimum_spacing"] = wall_model["mesh"]["minimum_spacing"]
+        # The first interval reaches the cube wall. Deposition must select
+        # the fluid side while the common source and field transport retain
+        # their IBM matrix/flux constraints.
+        case["spray"]["injectors"][0]["origin_m"] = [.375 - 1e-7, .5, .5]
     case["solver"]["coupling"] = "outer_corrected" if scheme == "cn_be" else "PISO"
     case["solver"].pop("cold_stopping", None)
     case["time"]["scheme"] = scheme
@@ -163,7 +178,8 @@ end
             scale = max(1., abs(p["internal_energy_J"]) + p["kinetic_energy_J"])
             assert abs(p["total_energy_balance_defect_W"] * p["dt"]) / scale < 1e-12
             if scheme == "cn_be":
-                assert p["kinetic_energy_J"] > 1e-11 * scale
+                if not ibm:
+                    assert p["kinetic_energy_J"] > 1e-11 * scale
                 assert abs(p["total_energy_balance_defect_W"]) / max(
                     1., abs(p["phase_energy_input_W"])) < 1e-6
         records[label] = rows
@@ -181,8 +197,8 @@ end
         validate_esf_records(records)
         if len(sys.argv) > 7:
             command([mpi, "--oversubscribe", "--bind-to", "none", "-n", "1", sys.argv[7],
-                     work, work.with_name(work.name + "r") / "Restart", two / "Restart"],
-                    work / "compare.log")
+                     work, work.with_name(work.name + "r") / "Restart", two / "Restart"]
+                    + (["--wall"] if ibm else []), work / "compare.log")
     report = dict(scope=method + " THICK_EX spray with native kerosene four-step chemistry",
                   reaction_model=reaction_model,
                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),

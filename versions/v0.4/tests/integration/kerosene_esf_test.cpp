@@ -5,12 +5,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <string_view>
 #include <iostream>
 using namespace hundun::v04;
 int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);struct End{~End(){MPI_Finalize();}} end;int rank{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);
   const auto all=[&](bool value){int ok=value;MPI_Allreduce(MPI_IN_PLACE,&ok,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);return bool(ok);};
-  if(argc!=4)return 2;
+  if(argc!=4 && (argc!=5 || std::string_view(argv[4])!="--wall"))return 2;
+  const bool wall=argc==5;
   ValidatedModel model;auto s=CaseCompiler::load_and_compile(MPI_COMM_WORLD,argv[1],model);
   CompiledCasePlan plan;if(s)s=ProductCompiler::compile(MPI_COMM_WORLD,model,argv[1],plan);
   ProductDriver driver;if(s)s=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),driver);
@@ -23,6 +26,37 @@ int main(int argc,char** argv) {
       a.cell_record_identity==b.cell_record_identity && a.cell_record_bytes==b.cell_record_bytes &&
       (!model.spray || (!a.cell_records.empty() && a.cell_record_identity!=0));
   if(!all(metadata))return 4;
+  if(wall) {
+    // Native V5 variable cell records: header, TCR, parcels, injectors.
+    // Check the actual trajectory after the specified cube-wall encounter.
+    const auto integer=[](const std::uint8_t* p,unsigned width) {
+      std::uint64_t value{};for(unsigned i=0;i<width;++i)value|=std::uint64_t(p[i])<<(8*i);
+      return value;
+    };
+    const auto real=[&](const std::uint8_t* p) {
+      const auto bits=integer(p,8);double value;std::memcpy(&value,&bits,8);return value;
+    };
+    bool valid=model.spray.has_value() && model.immersed_boundary.has_value() && a.source_format_version==5;
+    std::size_t offset{};unsigned long long parcels{};
+    for(const auto bytes:a.cell_record_lengths) {
+      if(!bytes)continue;
+      if(bytes<24 || offset>a.cell_records.size() || bytes>a.cell_records.size()-offset) {valid=false;break;}
+      const auto* record=a.cell_records.data()+offset;
+      const auto count=integer(record+8,4),injectors=integer(record+12,4),tcr=integer(record+16,4);
+      if(integer(record+20,4)!=1 || 24+tcr+144*count+24*injectors!=bytes) {valid=false;break;}
+      const auto* p=record+24+tcr;
+      for(std::uint64_t i=0;i<count;++i,p+=144) {
+        const double x=real(p+16),u=real(p+40);
+        valid &= x<.375 && x>.3748 && std::isfinite(u) && u<0;
+        ++parcels;
+      }
+      offset+=bytes;
+    }
+    valid &= offset==a.cell_records.size();
+    MPI_Allreduce(MPI_IN_PLACE,&parcels,1,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+    if(!all(valid && parcels==a.step))return 9;
+    if(!rank)std::printf("ibm_parcel_wall reflected=%llu position=fluid_side velocity=outward records=exact\n",parcels);
+  }
   bool passed=true;double worst{};
   const auto role_count=[&](RestartFieldRole role) {
     return std::count_if(a.fields.begin(),a.fields.end(),[&](const auto& f){return f.role==role;});

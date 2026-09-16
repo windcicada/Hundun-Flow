@@ -9744,7 +9744,7 @@ Status ProductDriver::Impl::execute_attempt(
   auto& esf_energy_ledger = product.esf_energy_ledger;
   detail::CompositionBalanceLedger esf_composition_ledger;
   ConstFieldView esf_ledger_initial_density;
-  std::array<ConstFieldView,UINT8_MAX> esf_ledger_initial_species{};
+  std::array<ConstFieldView,UINT8_MAX> esf_ledger_initial_fields{};
   const auto solve_esf_transport = [&]() -> Status {
     const auto& fields=product.fields;
     const auto mapping=product.reaction.species_indices();
@@ -9769,10 +9769,10 @@ Status ProductDriver::Impl::execute_attempt(
       s=esf_composition_ledger.initialize(product.reaction.gas_identity(),mapping,
           product.reaction.dependent_index(),nf,step.generation,step.dt,product.spray.enabled());
     if(s && esf_composition_ledger.active()) {
-      // Later material refreshes reuse species_accepted as current query views.
-      // Preserve the gas-stage starting views before that semantic reuse.
+      // Keep the actual starting tuples. The FP64 mean material cache adds
+      // a rounding step that is absent from field transport/source ledgers.
       esf_ledger_initial_density=density;
-      for(std::size_t c=0;c<ns;++c)esf_ledger_initial_species[c]=mean_species[c];
+      for(std::size_t f=0;f<nf;++f)esf_ledger_initial_fields[f]=accepted_fields[f];
     }
     if(s)s=runtime_write_view(fields.esf_old,old);
     if(s)s=runtime_write_view(fields.esf_iter,iterate);
@@ -15157,7 +15157,8 @@ Status ProductDriver::Impl::execute_attempt(
           if(esf_composition_ledger.active()) {
             using Ledger=detail::CompositionBalanceLedger;
             const auto initial_density=esf_ledger_initial_density;
-            const auto initial_species=esf_ledger_initial_species.data();
+            const auto mapping=product.reaction.species_indices();
+            const auto fields=product.fields.esf_fields.size();
             std::size_t i{};
             for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
               if(pressure_energy_activity.cells.size && !pressure_energy_activity.cells.data[i])continue;
@@ -15169,8 +15170,16 @@ Status ProductDriver::Impl::execute_attempt(
               esf_composition_ledger.add_total(Ledger::current,current);
               esf_composition_ledger.add_total(Ledger::temporal,(current-initial)/step.dt);
               for(std::size_t c=0;c<species_trial.size();++c) {
-                const auto before=initial*initial_species[c].unchecked(cell,0);
-                const auto after=current*species_trial[c].unchecked(cell,0);
+                // Physical composition is the ensemble, rather than the
+                // separately rounded cache used by material queries. Average
+                // the original tuples in the ledger's accumulation precision.
+                long double initial_mean{},current_mean{};
+                for(std::size_t f=0;f<fields;++f) {
+                  initial_mean+=esf_ledger_initial_fields[f].unchecked(cell,mapping.data[c]);
+                  current_mean+=esf_trial[f].unchecked(cell,mapping.data[c]);
+                }
+                const auto before=initial*(initial_mean/fields);
+                const auto after=current*(current_mean/fields);
                 esf_composition_ledger.add(c,Ledger::accepted,before);
                 esf_composition_ledger.add(c,Ledger::current,after);
                 esf_composition_ledger.add(c,Ledger::temporal,(after-before)/step.dt);
