@@ -345,6 +345,8 @@ struct SolverSpec {
   PressureLinearSolverSpec pressure;
   SolverToleranceSpec terminal;
   std::optional<ColdStoppingSpec> cold_stopping;
+  // Zero uses residual stopping; 1..64 executes exactly this many reference sweeps.
+  std::uint32_t reference_outer_iterations{};
 };
 
 enum class ConvectiveCflDefinition : std::uint8_t { outgoing_sum, directional_max };

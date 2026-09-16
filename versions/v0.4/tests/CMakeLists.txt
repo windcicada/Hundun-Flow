@@ -2715,3 +2715,9 @@ add_test(NAME v04_gas_cfl_policy_cli
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_cfl_policy_test.py"
     "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
 set_tests_properties(v04_gas_cfl_policy_cli PROPERTIES PROCESSORS 4 TIMEOUT 180 RUN_SERIAL TRUE)
+
+add_test(NAME v04_gas_outer_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_outer_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
+set_tests_properties(v04_gas_outer_cli PROPERTIES PROCESSORS 4 TIMEOUT 180 RUN_SERIAL TRUE)

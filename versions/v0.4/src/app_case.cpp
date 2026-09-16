@@ -63,6 +63,7 @@ constexpr std::uint8_t kCflBandWireVersion = 20U;
 constexpr std::uint8_t kSmagorinskyWireVersion = 21U;
 constexpr std::uint8_t kSprayEvaporationWireVersion = 22U;
 constexpr std::uint8_t kCflDefinitionWireVersion = 23U;
+constexpr std::uint8_t kReferenceOuterWireVersion = 24U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaxJsonDepth = 32U;
@@ -773,6 +774,10 @@ bool parse_solver_controls(yyjson_val* value, SolverSpec& out) noexcept {
                              {"eos", "continuity", "closed_mass", "gauge"})) {
     return false;
   }
+  if (auto* outer = yyjson_obj_get(value, "reference_outer_iterations")) {
+    if (!yyjson_is_uint(outer) || yyjson_get_uint(outer) > 64U) return false;
+    out.reference_outer_iterations = static_cast<std::uint32_t>(yyjson_get_uint(outer));
+  }
   if (auto* stopping = yyjson_obj_get(value, "cold_stopping")) {
     out.cold_stopping.emplace();
     auto& spec = *out.cold_stopping;
@@ -1460,7 +1465,8 @@ bool valid_solver(const SolverSpec& solver) noexcept {
   const bool valid_coupling = solver.coupling == CouplingKind::piso ||
                               solver.coupling == CouplingKind::simple ||
                               solver.coupling == CouplingKind::outer_corrected;
-  return (!solver.cold_stopping || solver.cold_stopping->valid()) &&
+  return solver.reference_outer_iterations <= 64U &&
+         (!solver.cold_stopping || solver.cold_stopping->valid()) &&
          finite && valid_coupling && valid_algorithm && valid_scaling &&
          valid_pair && valid_restart && pressure.absolute_tolerance > 0.0 &&
          pressure.absolute_tolerance < 1.0 &&
@@ -2375,7 +2381,8 @@ Status serialize_model(const ValidatedModel& model,
         !valid_time(model.time) ||
         (model.solver.coupling == CouplingKind::outer_corrected &&
          model.time.scheme != TimeScheme::cn_be) ||
-        (model.solver.cold_stopping && model.time.scheme != TimeScheme::cn_be) ||
+        ((model.solver.cold_stopping || model.solver.reference_outer_iterations != 0U) &&
+         model.time.scheme != TimeScheme::cn_be) ||
         (model.time.scheme == TimeScheme::cn_be
              ? model.legacy_time_fingerprint == 0U ||
                    model.legacy_time_fingerprint == model.fingerprint
@@ -2431,6 +2438,10 @@ Status serialize_model(const ValidatedModel& model,
         model.solver.pressure.mg_correction_scaling !=
             MgCorrectionScaling::residual_minimizing;
     WireWriter writer;
+    if (model.solver.reference_outer_iterations != 0U) {
+      writer.byte(kReferenceOuterWireVersion);
+      writer.u32(model.solver.reference_outer_iterations);
+    }
     if (model.time.convective_cfl_definition != ConvectiveCflDefinition::outgoing_sum) {
       writer.byte(kCflDefinitionWireVersion);
       writer.byte(static_cast<std::uint8_t>(model.time.convective_cfl_definition));
@@ -2613,6 +2624,11 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
     std::uint8_t fluid_side = 0U;
     std::uint8_t reconstruction_policy = 0U;
     if (!reader.byte(version)) return invalid_case(detail_wire);
+    std::uint32_t reference_outer_iterations{};
+    if (version == kReferenceOuterWireVersion &&
+        (!reader.u32(reference_outer_iterations) || reference_outer_iterations == 0U ||
+         reference_outer_iterations > 64U || !reader.byte(version)))
+      return invalid_case(detail_wire);
     std::uint8_t cfl_definition=0;
     if (version==kCflDefinitionWireVersion &&
         (!reader.byte(cfl_definition) || cfl_definition!=1 || !reader.byte(version)))
@@ -2912,6 +2928,9 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         !reader.finished()) {
       return invalid_case(detail_wire);
     }
+    model.solver.reference_outer_iterations = reference_outer_iterations;
+    if (reference_outer_iterations != 0U && model.time.scheme != TimeScheme::cn_be)
+      return invalid_case(detail_wire);
     model.solver.coupling = effective_coupling(model.time.scheme, model.solver.coupling);
     out = std::move(model);
     return {};
@@ -3022,7 +3041,13 @@ Status compile_on_root(const fs::path& case_root, int rank,
                "terminal_tolerances"}) ||
           object_has_exact_keys(solver,
               {"coupling", "pressure_correctors", "pressure_linear",
-               "terminal_tolerances", "cold_stopping"})) ||
+               "terminal_tolerances", "cold_stopping"}) ||
+          object_has_exact_keys(solver,
+              {"coupling", "pressure_correctors", "pressure_linear",
+               "terminal_tolerances", "reference_outer_iterations"}) ||
+          object_has_exact_keys(solver,
+              {"coupling", "pressure_correctors", "pressure_linear",
+               "terminal_tolerances", "cold_stopping", "reference_outer_iterations"})) ||
         !object_has_exact_keys(boundaries,
                                {"x_min", "x_max", "y_min", "y_max",
                                 "z_min", "z_max"}) ||
@@ -3386,6 +3411,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
       hash.real(stopping.momentum);
       hash.real(stopping.enthalpy);
       hash.real(stopping.species);
+    }
+    if (model.solver.reference_outer_iterations != 0U) {
+      hash.text("reference-outer-iterations-v1");
+      hash.integer(model.solver.reference_outer_iterations);
     }
     if (cold_method) hash.mirror_remaining(legacy_time_hash);
     hash.integer(static_cast<std::uint16_t>(data_file_count));

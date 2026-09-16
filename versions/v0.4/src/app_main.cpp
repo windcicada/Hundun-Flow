@@ -264,6 +264,7 @@ int main(int argc, char* argv[]) {
                         ? "cn_be" : "backward_euler")
                 << " cfl_definition="
                 << hundun::v04::cfl_definition_name(report.summary.convective_cfl_definition)
+                << " reference_outer_iterations=" << report.summary.reference_outer_iterations
                 << " coupling="
                 << (report.summary.coupling == hundun::v04::CouplingKind::outer_corrected
                         ? "outer_corrected"

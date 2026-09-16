@@ -2598,6 +2598,7 @@ struct ColdCouplingReport {
   static constexpr std::uint32_t maximum_outer_iterations = 64U;
   bool active{};
   std::uint32_t outer_iterations{};
+  std::uint32_t reference_outer_iterations{};
   std::uint32_t momentum_solve_calls{};
   std::uint32_t pressure_solve_calls{};
   std::uint32_t enthalpy_solve_calls{};

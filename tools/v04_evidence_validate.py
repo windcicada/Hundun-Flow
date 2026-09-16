@@ -1092,6 +1092,9 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         "solid_velocity_max", "normalization", "final_momentum",
         "final_pressure", "final_enthalpy"), prefix)
     outer = require_integer(cold["outer_iterations"], prefix, 1, 64)
+    reference_outer = require_integer(cold.get("reference_outer_iterations", 0), prefix, 0, 64)
+    if reference_outer and reference_outer != outer:
+        raise EvidenceError(f"{prefix} violates the fixed outer iteration schedule")
     species_count = cold.get("independent_species_count")
     if species_count is not None:
         require_integer(species_count, prefix)

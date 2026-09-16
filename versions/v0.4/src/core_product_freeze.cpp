@@ -3091,6 +3091,7 @@ struct CompiledCasePlan::Impl {
   PlanFingerprint transport_source_schema{};
   std::array<PlanFingerprint, 4> transport_source_histories{};
   std::optional<ColdStoppingSpec> cold_stopping;
+  std::uint32_t reference_outer_iterations{};
   bool unity_lewis_enthalpy{};
   PlanFingerprint cpu_fingerprint{};
   PlanFingerprint stl_fingerprint{};
@@ -3677,7 +3678,7 @@ Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
     to.transport_source_histories[i] = detail::product_method_history_signature(
         from.time.spec().scheme, !from.fields.scalars.empty(), from.reaction.enabled(),
         from.esf.enabled(), from.esf.tcr_history.enabled(), from.spray.enabled(),
-        !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy, revisions[i], from.time.spec().convective_cfl_definition);
+        !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy, revisions[i], from.time.spec().convective_cfl_definition, from.reference_outer_iterations);
   out = std::move(candidate);
   return {};
 } catch (const std::bad_alloc&) {
@@ -3741,6 +3742,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                         unsupported_cold || incompatible_lewis ||
                         (fixed_pressure && (!cold_model ||
                          model.pressure_reference != PressureReferenceKind::boundary_absolute)) ||
+                        (model.solver.reference_outer_iterations > 64U ||
+                         (model.solver.reference_outer_iterations != 0U && !cold_model)) ||
                         (model.solver.cold_stopping &&
                          (!cold_model || !model.solver.cold_stopping->valid()))
                         ? Status{StatusCode::invalid_plan, kProductInput}
@@ -5699,6 +5702,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     return value == 0U ? 1U : value;
   };
   candidate->cold_stopping = model.solver.cold_stopping;
+  candidate->reference_outer_iterations = model.solver.reference_outer_iterations;
   candidate->fingerprint =
       finish_identity(model.fingerprint, candidate->schema_fingerprint,
                       candidate->boundary.semantic_fingerprint(),
@@ -5724,6 +5728,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       legacy.time.scheme = TimeScheme::variable_bdf2;
       legacy.solver.coupling = CouplingKind::piso;
       legacy.solver.cold_stopping.reset();
+      legacy.solver.reference_outer_iterations = 0U;
       PlanFingerprint legacy_boundary{};
       const auto identity_status = detail::boundary_identity_for_registry(
           legacy, candidate->boundary, candidate->schema_fingerprint,
@@ -5761,6 +5766,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->summary.coupling = schedule;
   candidate->summary.time_scheme = model.time.scheme;
   candidate->summary.convective_cfl_definition = model.time.convective_cfl_definition;
+  candidate->summary.reference_outer_iterations = model.solver.reference_outer_iterations;
   candidate->summary.fixed_thermodynamic_pressure = model.thermophysics.fixed_pressure_pa;
   candidate->summary.reaction_mode = model.reaction.mode;
   if(model.reaction.esf) {
@@ -7105,7 +7111,7 @@ Status ProductDriver::restart_expected(
       product.esf.enabled(), product.esf.tcr_history.enabled(),
       product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition);
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations);
   if (history_policy == RestartHistoryPolicy::rebuild_method_history) {
     out.compatible_method_schema = product.transport_source_schema;
     out.compatible_method_plan = product.transport_source_plan != 0U
@@ -7979,7 +7985,7 @@ Status ProductDriver::initialize_restart(
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition));
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool chemistry_refinement = history_policy == RestartHistoryPolicy::refine_chemistry;
@@ -12449,6 +12455,7 @@ Status ProductDriver::Impl::execute_attempt(
       report.cold.independent_species_count =
           static_cast<std::uint32_t>(species_trial.size());
       report.cold.stopping = product.cold_stopping;
+      report.cold.reference_outer_iterations = product.reference_outer_iterations;
       // Prerequisite failure can leave the equation histories unbound. Keep
       // its original cause and let the shared finish path prepare rollback.
       if (!status) return status;
@@ -13490,7 +13497,9 @@ Status ProductDriver::Impl::execute_attempt(
         return status;
       };
       double previous_energy_screen=std::numeric_limits<double>::infinity();
-      for (unsigned cold_outer = 0; cold_outer < ColdCouplingReport::maximum_outer_iterations; ++cold_outer) {
+      const auto outer_limit = product.reference_outer_iterations != 0U
+          ? product.reference_outer_iterations : ColdCouplingReport::maximum_outer_iterations;
+      for (unsigned cold_outer = 0; cold_outer < outer_limit; ++cold_outer) {
         report.cold.outer_iterations = cold_outer + 1U;
         const double outer_begin = MPI_Wtime();
         phase_timer.phase(1);
@@ -14260,8 +14269,10 @@ Status ProductDriver::Impl::execute_attempt(
             previous_energy_screen>energy_screen && previous_energy_screen>0.0)
           predicted_energy*=energy_screen/previous_energy_screen;
         previous_energy_screen=energy_screen;
-        if (product.reaction.interval_enabled() ||
-            predicted_energy < cold_energy_tolerance) {
+        // Fixed reference scheduling always audits the requested endpoint.
+        // Earlier audits retain endpoint closures required by reacting fields.
+        if ((product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) ||
+            product.reaction.interval_enabled() || predicted_energy < cold_energy_tolerance) {
           if (outer_rank == 0)
             std::fprintf(
                 stdout,
@@ -14479,7 +14490,9 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status) return status;
           const double momentum_gate_residual = reference_stopping ? momentum_gate[0] : momentum_gate[1];
           const double momentum_gate_tolerance = reference_stopping ? product.cold_stopping->momentum : 1e-10;
-          if (!audit_negative && momentum_gate[2] == 0.0 &&
+          if (!audit_negative &&
+              !(product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) &&
+              momentum_gate[2] == 0.0 &&
               momentum_gate_residual >= momentum_gate_tolerance) {
             double elapsed = MPI_Wtime() - final_audit_begin, maximum_elapsed{};
             status = product.reductions.checked_max({&elapsed, 1U}, {&maximum_elapsed, 1U});
@@ -14920,7 +14933,8 @@ Status ProductDriver::Impl::execute_attempt(
             return {StatusCode::invalid_plan,
                     final_converged ? 17832U : 17831U};
           }
-          if (!final_converged)
+          if (!final_converged ||
+              (product.reference_outer_iterations != 0U && cold_outer + 1U < outer_limit))
             continue;
 
           // A reaction can drive a small energy flux relative to rho*cp*T/dt.
@@ -22371,7 +22385,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition)};
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations)};
   out.cell_records = product.spray.enabled()
                          ? product.spray.history.snapshot()
                          : product.esf.tcr_history.snapshot();

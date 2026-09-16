@@ -38,6 +38,7 @@ struct PlanSummary {
   CouplingKind coupling{CouplingKind::piso};
   TimeScheme time_scheme{TimeScheme::backward_euler};
   ConvectiveCflDefinition convective_cfl_definition{ConvectiveCflDefinition::outgoing_sum};
+  std::uint32_t reference_outer_iterations{};
   double fixed_thermodynamic_pressure{};
   Int3 global_cells{};
   Int3 local_cells{};
