@@ -802,6 +802,7 @@ inline Status close_cold_enthalpy_rows(
     const EquationSystemView& reference, std::vector<ColdPressureRow>& rows,
     bool continuity_reduced = true) {
   auto cells = patch.cells;
+  const double response = context.enthalpy_midpoint ? 0.5 : 1.0;
   if (!valid_mass_source(state.mass_source,state.mass_source.identity,
                          context.time,cells))
     return {StatusCode::invalid_plan,17814};
@@ -855,7 +856,7 @@ inline Status close_cold_enthalpy_rows(
           double upwind_diffusion =
               context.mixture_transport ? 0.0 :
               (flux >= 0 ? 1 - weight : weight) * std::abs(flux);
-          faces[f] = {diffusion + upwind_diffusion, weight, flux};
+          faces[f] = {diffusion + response * upwind_diffusion, weight, response * flux};
         }
         ColdPressureRow spatial;
         if (!assemble_cold_transport_row(volume, faces, 0, spatial))
@@ -905,7 +906,10 @@ inline Status close_cold_enthalpy_rows(
             spatial.diagonal -= spatial.neighbour[f];
           spatial.neighbour[f] = 0;
         }
-        if (!add_cold_backward_euler_storage(spatial,0.0,rho_old,
+        // R_h - h_theta*C has storage rho_(1-theta)*(h-h_old)/dt.
+        // The endpoint response of h_theta, including mass sources, is theta.
+        if (!add_cold_backward_euler_storage(spatial,0.0,
+                                             response*rho_old+(1-response)*rho,
                                              context.dt,rows[index]))
           return {StatusCode::numerical_failure,17816};
         // Solve for delta-h. Its residual scale is independent of a constant
@@ -914,14 +918,16 @@ inline Status close_cold_enthalpy_rows(
         // retain accuracy when the two absolute-state terms nearly cancel.
         const double mass_rate=mass_source_rate(state.mass_source,c);
         const double continuity=(rho-rho_old)/context.dt+div-mass_rate;
-        rows[index].diagonal+=mass_rate;
+        rows[index].diagonal+=response*mass_rate;
         rows[index].rhs=-reference.residual.unchecked(c,0)/volume;
         if (continuity_reduced) {
-          rows[index].rhs+=h*continuity;
+          const double transported_h = context.enthalpy_midpoint
+              ? context.enthalpy_midpoint->enthalpy.unchecked(c,0) : h;
+          rows[index].rhs+=transported_h*continuity;
         } else {
           // Undo the advective mass row operation for the conservative
           // defect solve, including its diagonal derivative at fixed rho.
-          rows[index].diagonal+=continuity;
+          rows[index].diagonal+=response*continuity;
         }
         if (!std::isfinite(rows[index].diagonal) || rows[index].diagonal<=0 ||
             !std::isfinite(rows[index].rhs))

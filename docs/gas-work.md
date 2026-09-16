@@ -73,3 +73,24 @@ python3 tools/gas_time.py --float check/gt/f4/probe --double check/gt/f8/probe \
   --hundun b3/versions/v0.4/tests/v04_gas_time_probe --runner 'bash check/jam.sh' \
   --cmod check/gt/cmod.F90 --step check/gt/step.F90 --output docs/gas-time.json
 ```
+
+G1 普通焓 CN 公共算子：`EnthalpyMidpointView` 显式承载已接受／端点
+热变量的平均值。完整组装、独立残差、热扩散面系数、焓校正矩阵和
+全域能量账本共用该空间状态；`rho*h` 存储、压力功、动能项与注册
+显式热源保持各自原定义。连续性约化使用
+`R_h - h_mid*C`，其瞬态系数为 `rho_mid/dt`，端点响应为 1/2。
+PDF／既有端点调用继续通过原接口默认值选择 BE。
+
+`check/gas-mid-final.log` 定向检查通过：普通导热和 unity-Lewis 焓扩散、
+中点对流、压力功、显式热源、变密度存储、半权扩散矩阵、连续性约化、
+实体外边界的全域能量账本，以及完整／独立残差逐位一致。局部多项式
+检查与实体边界的全域检查分别构造有效输入。原有 BE、解析阶数与
+热边界检查随同通过。
+
+本节点完成公共方程组件。生产调度仍需预分配中点工作区、刷新已接受
+及试探状态的边界／halo、接入 IBM 外部热修正、冻结实际逐方程策略，
+并登记配置与 Restart 方法身份；随后执行原生入口及时间阶检查。
+
+正式程序重建成功；`check/gas-mid-app.log` 原生固定外迭代／残差拒绝／
+2→4 进程恢复检查通过。该检查确认当前生产入口沿用端点热策略，
+中点热算子的生产启用作为下一接线节点单独验收。

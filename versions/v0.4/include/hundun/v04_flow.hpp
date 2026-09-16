@@ -223,6 +223,15 @@ struct EquationContributionView {
   PlanFingerprint source_identity{};
 };
 
+// Accepted/endpoint arithmetic means including physical and MPI ghost values.
+// The caller owns these frozen spatial fields for the complete assembly epoch.
+// Storage, pressure work, kinetic energy and registered explicit sources retain
+// their endpoint/history definitions; the thermal spatial response is one half.
+struct EnthalpyMidpointView {
+  ConstFieldView enthalpy{};
+  ConstFieldView temperature{};
+};
+
 struct EquationAssemblyContext {
   double dt{};
   BdfCoefficients bdf{};
@@ -252,6 +261,7 @@ struct EquationAssemblyContext {
   // Views retain producer identity and follow ascending stage/registration
   // order within each equation. Zero selects contribution_stage alone.
   StageId additional_contribution_stage{};
+  const EnthalpyMidpointView* enthalpy_midpoint{};
 };
 
 struct EquationSystemView {

@@ -121,6 +121,46 @@ RevisionToken state_revision(
   return hash == 0U ? RevisionToken{1U} : hash;
 }
 
+// Bind only transported thermal values. Keeping the original state separately
+// preserves conservative rho*h storage and full pressure/kinetic source terms.
+EquationStateView thermal_spatial_state(const EquationStateView& state,
+    const EquationAssemblyContext& context) noexcept {
+  auto spatial = state;
+  if (context.enthalpy_midpoint) {
+    spatial.enthalpy.trial = context.enthalpy_midpoint->enthalpy;
+    spatial.temperature.trial = context.enthalpy_midpoint->temperature;
+  }
+  return spatial;
+}
+
+bool valid_thermal_midpoint(const EquationStateView& state,
+    const EquationAssemblyContext& context, Int3 cells, KernelBox box,
+    std::uint8_t reach) noexcept {
+  if (!context.enthalpy_midpoint) return true;
+  const auto& mid = *context.enthalpy_midpoint;
+  return context.bdf.order == 1U && context.bdf.a2 == 0.0 &&
+      context.bdf.a1 == -context.bdf.a0 &&
+      mid.enthalpy.field == state.enthalpy.trial.field &&
+      mid.temperature.field == state.temperature.trial.field &&
+      detail::valid_cell_view(mid.enthalpy, cells, 0U, 1U, reach) &&
+      detail::valid_cell_view(mid.temperature, cells, 0U, 1U, 1U) &&
+      detail::finite_face_neighbour_slabs(mid.enthalpy, box, 0U, 1U, reach) &&
+      detail::finite_face_neighbour_slabs(mid.temperature, box, 0U, 1U, 1U);
+}
+
+RevisionToken thermal_time_revision(RevisionToken revision,
+    const EquationAssemblyContext& context) noexcept {
+  if (!context.enthalpy_midpoint) return revision;
+  revision = hash_mix(revision, UINT64_C(0x434e544845524d31));
+  for (auto field : {context.enthalpy_midpoint->enthalpy,
+                     context.enthalpy_midpoint->temperature}) {
+    revision = hash_mix(revision, field.revision);
+    revision = hash_mix(revision, field.storage_identity);
+    revision = hash_mix(revision, field.revision_domain);
+  }
+  return revision == 0U ? 1U : revision;
+}
+
 bool compatible_history(PrimitiveHistory history, Int3 cells, FieldId field,
                         std::uint8_t components,
                         std::uint8_t trial_ghosts) noexcept {
@@ -972,7 +1012,9 @@ void form_enthalpy_linear_terms(
           : detail::diffusion_diagonal(kernels, material.enthalpy_diffusivity, cell);
   terms.diffusion_diagonal +=
       detail::mixture_diffusion_diagonal(context.mixture_transport,cell);
-  terms.diagonal = (context.bdf.a0 * rho + terms.sink) * volume +
+  const double response = context.enthalpy_midpoint ? 0.5 : 1.0;
+  terms.diffusion_diagonal *= response;
+  terms.diagonal = (context.bdf.a0 * rho + response * terms.sink) * volume +
                    terms.diffusion_diagonal;
 }
 
@@ -1129,7 +1171,8 @@ Status combine_enthalpy_cell_system(
   EnthalpyCellSystem candidate;
   candidate.residual =
       (unsteady + convection - terms.pressure_work - diffusion -
-       terms.viscous_dissipation - terms.source + terms.sink * h) *
+       terms.viscous_dissipation - terms.source + terms.sink *
+           (context.enthalpy_midpoint ? context.enthalpy_midpoint->enthalpy.unchecked(cell, 0U) : h)) *
       volume;
   candidate.diagonal = terms.diagonal;
   candidate.rhs = candidate.diagonal * h - candidate.residual;
@@ -1192,6 +1235,9 @@ Status assemble_enthalpy_impl(
   if (!convection_status) return convection_status;
   bool linear = false;
   const KernelBox box = resolved_box(context.box, plan.cells_);
+  if (!valid_thermal_midpoint(state, context, plan.cells_, box, plan.convection_reach_))
+    return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  const auto spatial = thermal_spatial_state(state, context);
   if (!valid_flux_context(*plan.kernels_, context, box) ||
       (!allow_partial && !detail::full_equation_box(box, plan.cells_)) ||
       !valid_linear_system(system, plan.cells_, linear) || !linear ||
@@ -1210,6 +1256,10 @@ Status assemble_enthalpy_impl(
       detail::output_aliases_flux(system, true, context.mass_flux)) {
     return {StatusCode::invalid_plan, kEnthalpyAssembly};
   }
+  if (context.enthalpy_midpoint &&
+      (output_aliases(spatial.enthalpy.trial, system) ||
+       output_aliases(spatial.temperature.trial, system)))
+    return {StatusCode::invalid_plan, kEnthalpyAssembly};
   const PrimitiveHistory histories[]{
       state.density, state.velocity, state.pressure_perturbation,
       state.enthalpy, state.temperature};
@@ -1261,7 +1311,7 @@ Status assemble_enthalpy_impl(
     }
   }
 
-  const std::array<ConstFieldView, 1U> reads{state.enthalpy.trial};
+  const std::array<ConstFieldView, 1U> reads{spatial.enthalpy.trial};
   const std::array<FieldView, 1U> writes{system.residual};
   const KernelInvocation convection{{reads.data(), reads.size()},
                                     {writes.data(), writes.size()}, box,
@@ -1288,12 +1338,12 @@ Status assemble_enthalpy_impl(
     status = context.immersed_interface->add_source_convection_correction(
         {IbmInterfaceInletFieldKind::enthalpy, 0U},
         context.mixture_transport ? ConvectionScheme::central2 : plan.convection_,
-        state.enthalpy.trial, 1.0, system.residual, box);
+        spatial.enthalpy.trial, 1.0, system.residual, box);
     if (!status) return status;
   }
   if (context.mixture_transport == nullptr)
     status = detail::MixtureEnthalpyConvection::add_correction(
-        plan,state,context.mass_flux,context.immersed_interface,box,system.residual);
+        plan,spatial,context.mass_flux,context.immersed_interface,box,system.residual);
   if (!status) return status;
   status = add_kinetic_convection(plan, state, *plan.kernels_, context,
                                   box, system.residual);
@@ -1302,8 +1352,8 @@ Status assemble_enthalpy_impl(
   // The frozen model selects temperature conduction or the ESF unity-Lewis
   // total-enthalpy flux. This is an equation choice, not a solver fallback.
   const std::array<ConstFieldView, 1U> thermal_reads{
-      plan.unity_lewis_total_enthalpy_ ? state.enthalpy.trial
-                                       : state.temperature.trial};
+      plan.unity_lewis_total_enthalpy_ ? spatial.enthalpy.trial
+                                       : spatial.temperature.trial};
   const KernelInvocation conduction{{thermal_reads.data(),
                                      thermal_reads.size()},
                                     {writes.data(), writes.size()}, box,
@@ -1328,7 +1378,7 @@ Status assemble_enthalpy_impl(
                                conduction);
   if (status)
     status = detail::MixtureEnthalpyDiffusion::add_rate(
-        plan, state, material, context.immersed_interface, box, system.residual);
+        plan, spatial, material, context.immersed_interface, box, system.residual);
   if (status)
     status = detail::apply_heat_flux_boundary(
         plan, *plan.kernels_, thermal_reads[0U],
@@ -1376,8 +1426,21 @@ Status assemble_enthalpy_impl(
   RevisionToken assembled_state =
       state_revision(state, material, velocity_gradient, contributions);
   detail::add_mixture_face_coefficients(context.mixture_transport,box,system);
+  if (context.enthalpy_midpoint) {
+    const std::array<FaceFieldView, 3> faces{system.x_coefficient,
+        system.y_coefficient, system.z_coefficient};
+    for (unsigned axis = 0; axis < 3; ++axis) {
+      auto face_end = end;
+      (axis == 0 ? face_end.x : axis == 1 ? face_end.y : face_end.z)++;
+      for (int z = box.begin.z; z < face_end.z; ++z)
+        for (int y = box.begin.y; y < face_end.y; ++y)
+          for (int x = box.begin.x; x < face_end.x; ++x)
+            faces[axis].unchecked({x,y,z}) *= 0.5;
+    }
+  }
   if (context.mixture_transport)
     assembled_state=hash_mix(assembled_state,context.mixture_transport->linearization);
+  assembled_state = thermal_time_revision(assembled_state, context);
   if (context.wall_treatment != nullptr)
     assembled_state = hash_mix(assembled_state, context.wall_treatment->fingerprint());
   if (context.immersed_interface != nullptr) {
@@ -1457,6 +1520,9 @@ Status assemble_target_coupled_enthalpy_residual(
   }
 
   const KernelBox box = resolved_box(context.box, plan.cells_);
+  if (!valid_thermal_midpoint(state, context, plan.cells_, box, plan.convection_reach_))
+    return {StatusCode::invalid_plan, kEnthalpyAssembly};
+  const auto spatial = thermal_spatial_state(state, context);
   if (plan.kernels_ == nullptr || plan.fingerprint_ == 0U ||
       context.geometry != plan.geometry_revision_ ||
       context.boundary != plan.boundary_revision_ ||
@@ -1533,6 +1599,9 @@ Status assemble_target_coupled_enthalpy_residual(
     }
     return false;
   };
+  if (context.enthalpy_midpoint &&
+      (aliases_output(spatial.enthalpy.trial) || aliases_output(spatial.temperature.trial)))
+    return {StatusCode::invalid_plan, kEnthalpyAssembly};
   const PrimitiveHistory histories[]{
       state.density, state.velocity, state.pressure_perturbation,
       state.enthalpy, state.temperature};
@@ -1585,7 +1654,7 @@ Status assemble_target_coupled_enthalpy_residual(
     }
   }
 
-  const std::array<ConstFieldView, 1U> enthalpy_reads{state.enthalpy.trial};
+  const std::array<ConstFieldView, 1U> enthalpy_reads{spatial.enthalpy.trial};
   const std::array<FieldView, 1U> convection_writes{residual};
   const KernelInvocation convection{
       {enthalpy_reads.data(), enthalpy_reads.size()},
@@ -1603,20 +1672,20 @@ Status assemble_target_coupled_enthalpy_residual(
     status = context.immersed_interface->add_source_convection_correction(
         {IbmInterfaceInletFieldKind::enthalpy, 0U},
         context.mixture_transport ? ConvectionScheme::central2 : plan.convection_,
-        state.enthalpy.trial, 1.0, residual, box);
+        spatial.enthalpy.trial, 1.0, residual, box);
     if (!status) return status;
   }
   if (context.mixture_transport == nullptr)
     status = detail::MixtureEnthalpyConvection::add_correction(
-        plan,state,context.mass_flux,context.immersed_interface,box,residual);
+        plan,spatial,context.mass_flux,context.immersed_interface,box,residual);
   if (!status) return status;
   status = add_kinetic_convection(plan, state, *plan.kernels_, context,
                                   box, residual);
   if (!status) return status;
 
   const std::array<ConstFieldView, 1U> thermal_reads{
-      plan.unity_lewis_total_enthalpy_ ? state.enthalpy.trial
-                                       : state.temperature.trial};
+      plan.unity_lewis_total_enthalpy_ ? spatial.enthalpy.trial
+                                       : spatial.temperature.trial};
   const std::array<FieldView, 1U> diffusion_writes{workspace.diffusion};
   const KernelInvocation conduction{
       {thermal_reads.data(), thermal_reads.size()},
@@ -1629,7 +1698,7 @@ Status assemble_target_coupled_enthalpy_residual(
                                conduction);
   if (status)
     status = detail::MixtureEnthalpyDiffusion::add_rate(
-        plan, state, material, context.immersed_interface, box, workspace.diffusion);
+        plan, spatial, material, context.immersed_interface, box, workspace.diffusion);
   if (status)
     status = detail::apply_heat_flux_boundary(
         plan, *plan.kernels_, thermal_reads[0U],
@@ -1694,6 +1763,7 @@ Status assemble_target_coupled_enthalpy_residual(
   RevisionToken assembled_state = state_revision(state, material, velocity_gradient, contributions);
   if (context.mixture_transport)
     assembled_state=hash_mix(assembled_state,context.mixture_transport->linearization);
+  assembled_state = thermal_time_revision(assembled_state, context);
   if (context.wall_treatment != nullptr)
     assembled_state =
         hash_mix(assembled_state, context.wall_treatment->fingerprint());

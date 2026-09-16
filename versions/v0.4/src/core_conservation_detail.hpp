@@ -180,18 +180,29 @@ inline Status collect_boundary_balance(
     const MixtureTransportFaces* mixture = nullptr,
     bool provisional_flux = false,
     const StatisticalEnergyBalanceView* statistical = nullptr,
-    ProductPhaseSources phase = {}) noexcept {
+    ProductPhaseSources phase = {},
+    const EnthalpyMidpointView* thermal_midpoint = nullptr) noexcept {
   out = {};
   pending = {};
+  auto spatial = state;
+  if (thermal_midpoint) {
+    spatial.enthalpy.trial = thermal_midpoint->enthalpy;
+    spatial.temperature.trial = thermal_midpoint->temperature;
+  }
   const bool direct_h = enthalpy_plan.unity_lewis_total_enthalpy();
   const ConstFieldView thermal_coordinate = direct_h
-      ? state.enthalpy.trial : state.temperature.trial;
+      ? spatial.enthalpy.trial : spatial.temperature.trial;
   const ConstFieldView thermal_coefficient = direct_h
       ? material.enthalpy_diffusivity : material.thermal_conductivity;
   const Int3 cells = kernels.cells();
   const std::int32_t reach = kernels.reach();
   Status local;
-  local = MixtureEnthalpyDiffusion::validate(enthalpy_plan, state, material);
+  local = MixtureEnthalpyDiffusion::validate(enthalpy_plan, spatial, material);
+  if (thermal_midpoint &&
+      (statistical != nullptr || bdf.order != 1U || bdf.a2 != 0.0 || bdf.a1 != -bdf.a0 ||
+       !valid_cell_view(spatial.enthalpy.trial,cells,0U,1U,kernels.reach()) ||
+       !valid_cell_view(spatial.temperature.trial,cells,0U,1U,1U)))
+    local = {StatusCode::invalid_plan,10212U};
   if (!valid_cell_view(as_const(kinetic), cells, 0U, 1U, kernels.reach()) ||
       !valid_cell_view(state.velocity.trial, cells, 0U, 3U, kernels.reach()))
     local = {StatusCode::invalid_plan, 10212U};
@@ -239,10 +250,10 @@ inline Status collect_boundary_balance(
           field, 1.0, scratch, box);
     return status;
   };
-  if (local) local = convection(state.enthalpy.trial, schemes.enthalpy(),
+  if (local) local = convection(spatial.enthalpy.trial, schemes.enthalpy(),
                                 IbmInterfaceInletFieldKind::enthalpy);
   if (local && !mixture) local = MixtureEnthalpyConvection::add_correction(
-      enthalpy_plan,state,flux,immersed_interface,box,scratch);
+      enthalpy_plan,spatial,flux,immersed_interface,box,scratch);
   if (local)
     for (std::int32_t z = 0; z < cells.z; ++z)
       for (std::int32_t y = 0; y < cells.y; ++y)
@@ -362,7 +373,7 @@ inline Status collect_boundary_balance(
             double species_heat = 0.0;
             if (local)
               local = MixtureEnthalpyDiffusion::face_flux(
-                  enthalpy_plan, state, material, axis, face, species_heat);
+                  enthalpy_plan, spatial, material, axis, face, species_heat);
             sum[11U] += sign * species_heat;
             for (std::uint8_t c = 0U; c < 3U; ++c) {
               const double traction_area = viscous_face_traction_area(

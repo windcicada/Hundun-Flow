@@ -4,6 +4,7 @@
 #include "hundun/v04_flow.hpp"
 #include "core_conservation_detail.hpp"
 #include "solver_statistical_detail.hpp"
+#include "solver_cold.hpp"
 
 #include <algorithm>
 #include <array>
@@ -948,6 +949,144 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
       -dissipation * volume,
       "viscous dissipation isolates in production assembler");
 
+  // CN thermal transport: preserve endpoint conservative storage and full dp/dt,
+  // while convection/conduction and their frozen response use the midpoint.
+  {
+    reset_fields();
+    auto hm = make_field(3U, cells, 1U, 2U, 1801U);
+    auto tm = make_field(4U, cells, 1U, 2U, 1802U);
+    auto tn = make_field(4U, cells, 1U, 2U, 1803U);
+    EnthalpyMidpointView midpoint{as_const(hm.view), as_const(tm.view)};
+    context.enthalpy_midpoint = &midpoint;
+    state.temperature.accepted = as_const(tn.view);
+    state.pressure_reference = 100.3;
+    state.accepted_pressure_reference = 100.0;
+    // Integer samples keep formation-enthalpy increments exactly representable.
+    for (int z=-2; z<cells.z+2; ++z)
+      for (int y=-2; y<cells.y+2; ++y)
+        for (int x=-2; x<cells.x+2; ++x) {
+          const Int3 c{x,y,z};
+          const double d=static_cast<double>(x-oracle_cell.x);
+          h_trial.view.unchecked(c,0)=4096.+3*d;
+          h_accepted.view.unchecked(c,0)=4096.+d;
+          hm.view.unchecked(c,0)=.5*(h_trial.view.unchecked(c,0)+h_accepted.view.unchecked(c,0));
+          temperature.view.unchecked(c,0)=300.+5*d*d;
+          tn.view.unchecked(c,0)=300.+d*d;
+          tm.view.unchecked(c,0)=.5*(temperature.view.unchecked(c,0)+tn.view.unchecked(c,0));
+        }
+    select_flux(moving);
+    assemble_and_check((8.*n-3.-(unity_lewis ? 0. : 6.*n*n*conductivity))*volume,
+                       "CN midpoint convection and temperature diffusion retain full pressure work");
+    const double transmission=conductivity/heat_capacity*spacing;
+    passed &= expect(close(ax.view.unchecked({4,3,3}), .5*transmission) &&
+        close(diagonal.view.unchecked(oracle_cell,0),10.*volume+3.*transmission),
+        "CN diffusion face and diagonal have half endpoint response");
+    select_flux(stationary);
+    for (int z=-2; z<cells.z+2; ++z)
+      for (int y=-2; y<cells.y+2; ++y)
+        for (int x=-2; x<cells.x+2; ++x) {
+          const Int3 c{x,y,z};const double d=static_cast<double>(x-oracle_cell.x);
+          h_trial.view.unchecked(c,0)=4096.+2*d*d;
+          h_accepted.view.unchecked(c,0)=4096.+6*d*d;
+          hm.view.unchecked(c,0)=.5*(h_trial.view.unchecked(c,0)+h_accepted.view.unchecked(c,0));
+        }
+    assemble_and_check((-3.-(unity_lewis ? 8.*n*n*conductivity/heat_capacity : 6.*n*n*conductivity))*volume,
+                       "CN ordinary and unity-Lewis conduction use the accepted/endpoint mean");
+    // Changing endpoint density changes full conservative storage, rather than
+    // replacing it by rho_mid*(h-h_old) before continuity has converged.
+    rho_trial.view.unchecked(oracle_cell,0)=1.2;
+    const double expected=(10.*(.2*4096.)-3.-
+        (unity_lewis ? 8.*n*n*conductivity/heat_capacity : 6.*n*n*conductivity))*volume;
+    assemble_and_check(expected,"CN retains conservative density-change storage");
+    FaceFluxStorage local_storage;FaceFluxView local_flux;
+    passed &= expect(FaceFluxStorage::allocate_workspace(cells,1U,local_storage) &&
+        local_storage.workspace_view(0U,1810U,local_flux) &&
+        copy_face_flux(context.mass_flux,local_flux),"CN target flux fixture");
+    const auto saved_context=context;
+    context.scope=EquationAssemblyScope::target_coupled;
+    context.mass_flux=as_const(local_flux);context.face_flux=1810U;
+    context.face_flux_authority=0;context.face_flux_storage=0;context.face_flux_revision_domain=0;
+    EquationAssemblyCertificate full_cn,residual_cn;
+    passed &= expect(static_cast<bool>(assemble_enthalpy(fixture.equations.enthalpy(),state,material,
+        as_const(gradients.view),{},context,system,full_cn)),"CN target full assembly");
+    std::vector<detail::ColdPressureRow> cn_rows;
+    passed &= expect(static_cast<bool>(detail::close_cold_enthalpy_rows(
+        fixture.equations.kernels(),fixture.patch,fixture.geometry.global_cells(),
+        nullptr,fixture.boundary,state,context,system,cn_rows,false)),
+        "CN conservative correction rows assemble");
+    const auto centre_index=std::size_t(oracle_cell.x)+cells.x*
+        (std::size_t(oracle_cell.y)+cells.y*std::size_t(oracle_cell.z));
+    const double cn_diagonal=diagonal.view.unchecked(oracle_cell,0)/volume;
+    passed &= expect(cn_rows.size()>centre_index &&
+        close(cn_rows[centre_index].diagonal,cn_diagonal) &&
+        close(cn_rows[centre_index].neighbour[0],.5*transmission/volume),
+        "CN correction matrix matches endpoint derivative and half diffusion");
+    passed &= expect(static_cast<bool>(detail::close_cold_enthalpy_rows(
+        fixture.equations.kernels(),fixture.patch,fixture.geometry.global_cells(),
+        nullptr,fixture.boundary,state,context,system,cn_rows,true)) &&
+        close(cn_rows[centre_index].diagonal,cn_diagonal-1.),
+        "CN continuity-reduced correction uses midpoint density storage");
+    const TargetCoupledEnthalpyResidualWorkspace cn_workspace{
+        target_pressure_work_scratch.view,target_viscous_dissipation_scratch.view,
+        target_diffusion_scratch.view,true};
+    passed &= expect(static_cast<bool>(assemble_target_coupled_enthalpy_residual(fixture.equations.enthalpy(),
+        state,material,as_const(gradients.view),context,target_residual.view,cn_workspace,residual_cn)),
+        "CN independent target residual assembly");
+    passed &= expect(bitwise_equal(residual.bytes,target_residual.bytes) &&
+        bitwise_equal(diagonal.bytes,target_pressure_work_scratch.bytes) &&
+        same_certificate(full_cn,residual_cn),"CN full and residual-only paths match bitwise");
+    // Polynomial ghosts form a local oracle; physical walls also define a global ledger.
+    if (boundary_heat) {
+    auto kinetic = make_field(90U,cells,1U,2U,1811U);
+    auto balance_scratch = make_field(91U,cells,1U,2U,1812U);
+    ReductionEngine balance_reductions;
+    auto balance_status=ReductionEngine::compile(MPI_COMM_SELF,
+        ReductionMode::mpi_allreduce,12U,balance_reductions);
+    DriverConservationReport cn_balance;
+    detail::ProductBoundaryBalanceHistory cn_history;
+    if(balance_status) balance_status=detail::collect_boundary_balance(
+        fixture.equations.enthalpy(),fixture.equations.kernels(),fixture.schemes,
+        fixture.boundary,state,material,as_const(gradients.view),context.bdf,
+        context.mass_flux,{},kinetic.view,balance_scratch.view,1U,{},
+        balance_reductions,cn_balance,cn_history,nullptr,nullptr,true,nullptr,{},&midpoint);
+    long double integrated_residual=0, absolute_residual=0;
+    for(double value:residual.bytes) {
+      integrated_residual+=value;absolute_residual+=std::abs(value);
+    }
+    passed &= expect(balance_status &&
+        std::abs(double(integrated_residual)-cn_balance.total_energy_balance_defect) <=
+          1e-11*std::max(1.,double(absolute_residual)),
+        "CN physical ledger matches the integrated conservative equation residual");
+    }
+    if (current_source) {
+      auto source=make_field(9U,cells,1U,0U,1813U);
+      std::fill(source.bytes.begin(),source.bytes.end(),128.);
+      EquationContributionView contribution;
+      contribution.explicit_source_density=as_const(source.view);
+      contribution.conserved_quantity=3U;
+      contribution.units.si_exponents={1,-1,-3,0,0,0,0};
+      contribution.stage=2;contribution.explicit_source_field=9;
+      contribution.capability=ContributionCapability::parcel_exchange;
+      contribution.source_identity=12345;
+      context.contribution_stage=2;
+      passed &= expect(static_cast<bool>(assemble_enthalpy(fixture.equations.enthalpy(),
+          state,material,as_const(gradients.view),{&contribution,1},context,system,full_cn)) &&
+          close(residual.view.unchecked(oracle_cell,0),expected-128.*volume),
+          "CN preserves the complete registered explicit heat source");
+    }
+    context=saved_context;
+    auto invalid=midpoint;invalid.enthalpy=as_const(residual.view);
+    invalid.enthalpy.field=3U;context.enthalpy_midpoint=&invalid;
+    passed &= expect(!assemble_enthalpy(fixture.equations.enthalpy(),state,material,
+        as_const(gradients.view),{},context,system,full_cn),"CN midpoint/output alias rejected");
+    context.enthalpy_midpoint=&midpoint;
+    context.bdf={15.,-20.,5.,2U};
+    passed &= expect(!assemble_enthalpy(fixture.equations.enthalpy(),state,material,
+        as_const(gradients.view),{},context,system,full_cn),"CN midpoint requires two-level storage");
+    context.bdf={10.,-10.,0.,1U};context.enthalpy_midpoint=nullptr;
+    state.temperature.accepted=as_const(temperature.view);
+  }
+
   // Differential oracle for the candidate-only path: retain non-zero
   // unsteady, convection, pressure-work, conduction and dissipation terms in
   // the same target state so equality cannot pass through an all-zero seam.
@@ -1385,6 +1524,7 @@ int main(int argc, char** argv) {
   passed &= test_production_enthalpy_assembly_oracle();
   passed &= test_production_enthalpy_assembly_oracle(true);
   passed &= test_production_enthalpy_assembly_oracle(true, false, true);
+  passed &= test_production_enthalpy_assembly_oracle(false, false, true);
   passed &= test_production_enthalpy_assembly_oracle(false, true);
   MPI_Finalize();
   return passed ? 0 : 1;
