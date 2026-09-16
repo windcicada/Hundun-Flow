@@ -4,6 +4,7 @@
 #include "core_spray_gas_detail.hpp"
 #include "models_exchange_owner_detail.hpp"
 #include "models_spray_parcel_detail.hpp"
+#include "models_spray_sgs_step_detail.hpp"
 #include <memory>
 
 namespace hundun::v04::detail {
@@ -51,6 +52,7 @@ private:
   Status move() noexcept;
   Status wave(portable::Revision, double start, double duration,
               std::uint32_t index) noexcept;
+  Status sgs_step(portable::Revision, double duration) noexcept;
   Status append(const portable::ExchangeSegment &) noexcept;
   Status audit_id(spray::ParcelId, portable::Revision) noexcept;
   Status inventory(const spray::SprayParcelState &,
@@ -74,7 +76,8 @@ private:
   std::size_t parcel_capacity_{}, segment_capacity_{};
   double maximum_step_{}, minimum_step_{}, relative_tolerance_{},
       minimum_width_{};
-  bool tab_enabled_{}, available_{};
+  bool tab_enabled_{}, sgs_enabled_{}, available_{};
+  std::uint64_t seed_{};
   std::uint64_t owned_bytes_{}, local_anchor_{};
   std::uint32_t waves_{};
   portable::Revision revision_{};

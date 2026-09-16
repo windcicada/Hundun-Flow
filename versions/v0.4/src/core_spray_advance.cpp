@@ -52,18 +52,19 @@ Status ProductParcelAdvance::configure(MPI_Comm comm,
   auto status = agree(local);
   if (!status)
     return status;
-  std::uint64_t controls[5]{}, minima[5]{}, maxima[5]{};
+  std::uint64_t controls[6]{}, minima[6]{}, maxima[6]{};
   std::memcpy(controls, &spec.maximum_substep_s, 8);
   std::memcpy(controls + 1, &spec.minimum_substep_s, 8);
   std::memcpy(controls + 2, &spec.relative_tolerance, 8);
-  controls[3] = spec.tab_breakup;
+  controls[3] = static_cast<std::uint8_t>(spec.breakup);
   controls[4] = static_cast<std::uint8_t>(spec.evaporation);
-  if (MPI_Allreduce(controls, minima, 5, MPI_UINT64_T, MPI_MIN, comm_) !=
+  controls[5] = spec.seed;
+  if (MPI_Allreduce(controls, minima, 6, MPI_UINT64_T, MPI_MIN, comm_) !=
           MPI_SUCCESS ||
-      MPI_Allreduce(controls, maxima, 5, MPI_UINT64_T, MPI_MAX, comm_) !=
+      MPI_Allreduce(controls, maxima, 6, MPI_UINT64_T, MPI_MAX, comm_) !=
           MPI_SUCCESS)
     return {StatusCode::mpi_failure, 10263};
-  if (!std::equal(minima, minima + 5, maxima))
+  if (!std::equal(minima, minima + 6, maxima) || controls[3] > 2)
     return invalid();
   const std::uint64_t nc =
       std::uint64_t(patch.cells.x) * patch.cells.y * patch.cells.z;
@@ -123,7 +124,9 @@ Status ProductParcelAdvance::configure(MPI_Comm comm,
   maximum_step_ = spec.maximum_substep_s;
   minimum_step_ = spec.minimum_substep_s;
   relative_tolerance_ = spec.relative_tolerance;
-  tab_enabled_ = spec.tab_breakup;
+  tab_enabled_ = spec.breakup == SprayBreakupModel::tab;
+  sgs_enabled_ = spec.breakup == SprayBreakupModel::stochastic_sgs;
+  seed_ = spec.seed;
   evaporation_ = spec.evaporation;
   minimum_width_ = std::numeric_limits<double>::max();
   for (unsigned d = 0; d < 3; ++d) {
@@ -348,6 +351,63 @@ Status ProductParcelAdvance::wave(portable::Revision revision, double start,
   }
   return {};
 }
+Status ProductParcelAdvance::sgs_step(portable::Revision revision,
+                                     double duration) noexcept {
+  using namespace spray::detail;
+  next_.clear();
+  for (const auto &retained : current_) {
+    // Imported parcels supply a versioned physical history; only injectors
+    // initialize births. A missing imported history remains an input error.
+    if (retained.sgs.version != 1) return invalid(10264);
+    const auto sampled = film_.query(retained.parcel, duration,
+                                     ParcelPass::corrector, revision);
+    if (sampled.status != portable::Status::success ||
+        !sampled.environment.available || !sampled.environment.liquid)
+      return unavailable();
+    const auto &film = sampled.environment;
+    const auto liquid = film.liquid->evaluate(
+        {retained.parcel.liquid_material_fingerprint, retained.parcel.temperature_k});
+    if (!liquid.succeeded()) return invalid();
+    SgsParcelStepInput input;
+    input.retained = retained;
+    input.revision = revision;
+    input.seed = seed_;
+    input.duration_s = duration;
+    auto &env = input.environment;
+    auto status = gas_.sample_sgs(retained.parcel.position_m, revision,
+        env.dissipation_m2_per_s3, env.gas_dynamic_viscosity_pa_s);
+    if (!status) return status;
+    env.gas_velocity_m_per_s = film.gas.gas_velocity_m_per_s;
+    env.gas_density_kg_per_m3 = film.far_gas_density_kg_per_m3;
+    env.liquid_density_kg_per_m3 = liquid.properties.density_kg_per_m3;
+    env.surface_tension_n_per_m = liquid.properties.surface_tension_n_per_m;
+    env.liquid_absolute_enthalpy_j_per_kg = film.liquid_absolute_enthalpy_j_per_kg;
+    const auto result = advance_sgs_parcel_step(input);
+    if (!result.available) return invalid(10265);
+    if (result.candidate_count > parcel_capacity_ - next_.size()) return capacity();
+    if (result.parent_removed) {
+      // The COAST binary law conserves bulk mass/momentum/enthalpy. Surface
+      // creation is a separate model diagnostic, as in the audited kernel.
+      const auto &b = result.breakup_budget;
+      breakup_energy_.surface_increase_j += b.surface_energy_increase_j;
+      breakup_energy_.bulk_kinetic_increase_j += b.bulk_kinetic_energy_residual_j;
+      breakup_energy_.residual_j += b.surface_energy_increase_j +
+                                   b.bulk_kinetic_energy_residual_j;
+      ++breakup_energy_.event_count;
+      if (!std::isfinite(breakup_energy_.surface_increase_j) ||
+          !std::isfinite(breakup_energy_.bulk_kinetic_increase_j) ||
+          !std::isfinite(breakup_energy_.residual_j)) return invalid();
+    }
+    for (unsigned i = 0; i < result.candidate_count; ++i) {
+      if (result.parent_removed) {
+        status = audit_id(result.candidates[i].parcel.id, revision);
+        if (!status) return status;
+      }
+      next_.push_back(result.candidates[i]);
+    }
+  }
+  return {};
+}
 Status ProductParcelAdvance::prepare(Span<const Parcel> accepted,
                                      Span<Injector *const> injectors,
                                      portable::Revision revision,
@@ -451,6 +511,9 @@ Status ProductParcelAdvance::prepare(Span<const Parcel> accepted,
         local = invalid();
         break;
       }
+      if (sgs_enabled_)
+        value.sgs = spray::detail::initialize_sgs_lineage(
+            value.parcel.id, seed_, revision.accepted_step);
       next_.push_back(value);
       local = audit_id(value.parcel.id, revision);
       if (local)
@@ -500,6 +563,11 @@ Status ProductParcelAdvance::prepare(Span<const Parcel> accepted,
       return fail(status);
     elapsed += dt;
     ++waves_;
+  }
+  if (sgs_enabled_) {
+    status = agree(sgs_step(revision, duration));
+    if (status) status = move();
+    if (!status) return fail(status);
   }
   auto routed = route_.prepare(revision, ids_.data(), ids_.size());
   if (routed != portable::Status::success)

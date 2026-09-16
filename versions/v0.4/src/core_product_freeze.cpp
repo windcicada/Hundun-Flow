@@ -5736,6 +5736,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->summary.evaporation_model = !model.spray ? "none" :
       model.spray->evaporation == spray::EvaporationModel::thick_exchange
           ? "thick_exchange" : "abramzon_sirignano";
+  candidate->summary.breakup_model = !model.spray ? "none" :
+      model.spray->breakup == SprayBreakupModel::stochastic_sgs ? "stochastic_sgs" :
+      model.spray->breakup == SprayBreakupModel::tab ? "tab" : "none";
     candidate->summary.interval_chemistry = candidate->reaction.interval_enabled();
     candidate->summary.reaction_model = candidate->reaction.reaction_model();
   candidate->summary.reaction_workspace_bytes = candidate->reaction.interval_workspace_bytes();
@@ -9356,6 +9359,46 @@ Status ProductDriver::Impl::execute_attempt(
       }
     }
   }
+  FieldView accepted_source_mu, accepted_source_gradient, accepted_source_effective;
+  if ((cold_method && product.reaction.mixing_enabled()) || product.spray.sgs_enabled()) {
+    // COAST refreshes viscosity before scalar/chemistry advancement. Rebuild
+    // the accepted transport state after every attempt, including retries;
+    // endpoint and candidate solves may have replaced the shared workspace.
+    FieldView mu, effective, gradient;
+    if (status) status = runtime_write_view(product.fields.molecular_viscosity, mu);
+    if (status) status = runtime_write_view(product.fields.effective_viscosity, effective);
+    if (status) status = runtime_write_view(product.fields.velocity_gradient, gradient);
+    for (int z = 0; z < cells.z && status; ++z)
+      for (int y = 0; y < cells.y && status; ++y)
+        for (int x = 0; x < cells.x && status; ++x) {
+          const Int3 cell{x, y, z};
+          for (std::size_t species = 0; species < species_history.size(); ++species)
+            species_values[species] = species_history[species].accepted.unchecked(cell, 0);
+          MolecularTransportState material;
+          status = product.transport.evaluate(
+              temperature_history.accepted.unchecked(cell, 0),
+              {species_values.data(), species_values.size()}, material);
+          if (status) mu.unchecked(cell, 0) = material.viscosity;
+        }
+    if (status) {
+      const std::array<ConstFieldView, 1> reads{velocity_history.accepted};
+      const std::array<FieldView, 1> writes{gradient};
+      status = cartesian_gradient(product.equations.kernels(),
+          {{reads.data(), reads.size()}, {writes.data(), writes.size()},
+           full_box, 0U, 0U, 3U, 0U, nullptr});
+    }
+    if (status && product.ibm_equations)
+      status = product.ibm_equations->correct_velocity_gradient(
+          velocity_history.accepted, gradient);
+    TurbulenceCertificate certificate;
+    if (status)
+      status = product.turbulence.update(
+          {rho_history.accepted, as_const(mu), {}, gradient.revision, as_const(gradient)},
+          effective, certificate);
+    accepted_source_mu = mu;
+    accepted_source_gradient = gradient;
+    accepted_source_effective = effective;
+  }
   if (cold_method && product.reaction.enabled()) {
     // Rebuild the explicit derivative from committed state on every attempt.
     // Endpoint preparation can partially overwrite this workspace before a
@@ -9380,44 +9423,8 @@ Status ProductDriver::Impl::execute_attempt(
     accepted_state.independent_species =
         {accepted_species.data(), species_history.size()};
     EquationMaterialView accepted_material;
-    if (product.reaction.mixing_enabled()) {
-      // COAST refreshes viscosity before scalar/chemistry advancement. Rebuild
-      // the accepted transport state after every attempt, including retries;
-      // endpoint and candidate solves may have replaced the shared workspace.
-      FieldView mu, effective, gradient;
-      if (status) status = runtime_write_view(product.fields.molecular_viscosity, mu);
-      if (status) status = runtime_write_view(product.fields.effective_viscosity, effective);
-      if (status) status = runtime_write_view(product.fields.velocity_gradient, gradient);
-      for (int z = 0; z < cells.z && status; ++z)
-        for (int y = 0; y < cells.y && status; ++y)
-          for (int x = 0; x < cells.x && status; ++x) {
-            const Int3 cell{x, y, z};
-            for (std::size_t species = 0; species < species_history.size(); ++species)
-              species_values[species] = species_history[species].accepted.unchecked(cell, 0);
-            MolecularTransportState material;
-            status = product.transport.evaluate(
-                temperature_history.accepted.unchecked(cell, 0),
-                {species_values.data(), species_values.size()}, material);
-            if (status) mu.unchecked(cell, 0) = material.viscosity;
-          }
-      if (status) {
-        const std::array<ConstFieldView, 1> reads{velocity_history.accepted};
-        const std::array<FieldView, 1> writes{gradient};
-        status = cartesian_gradient(product.equations.kernels(),
-            {{reads.data(), reads.size()}, {writes.data(), writes.size()},
-             full_box, 0U, 0U, 3U, 0U, nullptr});
-      }
-      if (status && product.ibm_equations)
-        status = product.ibm_equations->correct_velocity_gradient(
-            velocity_history.accepted, gradient);
-      TurbulenceCertificate certificate;
-      if (status)
-        status = product.turbulence.update(
-            {rho_history.accepted, as_const(mu), {}, gradient.revision, as_const(gradient)},
-            effective, certificate);
-      accepted_material.molecular_viscosity = as_const(mu);
-      accepted_material.effective_viscosity = as_const(effective);
-    }
+    accepted_material.molecular_viscosity = as_const(accepted_source_mu);
+    accepted_material.effective_viscosity = as_const(accepted_source_effective);
     if (status && product.reaction.interval_enabled())
       status = product.reaction.clear_interval(product.layers, cells);
     else if (status)
@@ -9475,7 +9482,9 @@ Status ProductDriver::Impl::execute_attempt(
       status = product.spray.prepare(
           {step.accepted_step, step.generation, 1}, step.dt, pressure_reference,
           rho_history.accepted, pressure, enthalpy, velocity,
-          {inputs.data(), product.fields.reaction_conserved.size()});
+          {inputs.data(), product.fields.reaction_conserved.size()},
+          &product.turbulence, as_const(accepted_source_mu),
+          as_const(accepted_source_gradient));
     if (status)
       status =
           runtime_write_view(product.fields.coupled_mass_source, spray_mass);

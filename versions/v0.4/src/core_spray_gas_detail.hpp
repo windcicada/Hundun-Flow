@@ -108,6 +108,7 @@ public:
               ConstFieldView enthalpy, ConstFieldView velocity,
               Span<const ConstFieldView> independent) noexcept {
     available_ = false;
+    sgs_ = {};
     if (!geometry_ || revision.algorithm_version != 1 ||
         !revision.input_revision || !std::isfinite(duration) || duration <= 0 ||
         !std::isfinite(pressure_reference) || pressure_reference <= 0 ||
@@ -139,6 +140,39 @@ public:
   }
   bool bound_to(portable::Revision revision, double duration) const noexcept {
     return available_ && revision_ == revision && duration_ == duration;
+  }
+  // Prepared donor bundle: volumetric dissipation, density, dynamic viscosity.
+  Status bind_sgs(portable::Revision revision, ConstFieldView fields) noexcept {
+    sgs_ = {};
+    if (!available_ || revision != revision_ ||
+        !valid_cell_view(fields, patch_.cells, 0, 3, 0))
+      return invalid();
+    sgs_ = fields;
+    return {};
+  }
+  Status sample_sgs(spray::Vector3 position, portable::Revision revision,
+                    double &specific_dissipation, double &viscosity) const noexcept {
+    if (!available_ || revision != revision_ || !sgs_.base)
+      return invalid();
+    const auto weights = stencil(position);
+    if (!weights.succeeded()) return invalid();
+    double eps = 0, mu = 0;
+    for (unsigned i = 0; i < weights.entry_count; ++i) {
+      const auto &entry = weights.entries[i];
+      if (entry.weight == 0) continue;
+      Int3 cell{};
+      if (!local_index(sgs_, entry.global_index, cell)) return invalid();
+      const double e = sgs_.unchecked(cell, 0), rho = sgs_.unchecked(cell, 1),
+                   m = sgs_.unchecked(cell, 2);
+      if (!std::isfinite(e) || e < 0 || !std::isfinite(rho) || rho <= 0 ||
+          !std::isfinite(m) || m <= 0) return invalid();
+      eps += entry.weight * (e / rho);
+      mu += entry.weight * m;
+    }
+    if (!std::isfinite(eps) || !std::isfinite(mu)) return invalid();
+    specific_dissipation = eps;
+    viscosity = mu;
+    return {};
   }
   spray::detail::ParcelGridCouplingStencil
   stencil(spray::Vector3 position) const noexcept {
@@ -374,6 +408,7 @@ private:
   MeshPatch patch_{};
   const ImmersedSurfacePlan *surface_{};
   ConstFieldView fluid_mask_{};
+  ConstFieldView sgs_{};
   double minimum_width_{};
   std::array<bool, 3> periodic_{};
   PlanFingerprint composition_{};

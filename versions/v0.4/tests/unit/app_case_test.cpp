@@ -1995,6 +1995,12 @@ bool test_spray_json() {
   passed &= expect(bool(compile(scratch.root(), model)) &&
                        model.fingerprint != identity,
                    "injection physics participates in frozen case identity");
+  changed = json;
+  replace_once(changed, "\"tab_breakup\":true", "\"breakup\":\"stochastic_sgs\"");
+  scratch.write("case.json", changed);
+  passed &= expect(bool(compile(scratch.root(), model)) && model.spray &&
+      model.spray->breakup == hundun::v04::SprayBreakupModel::stochastic_sgs,
+      "named SGS model compiles through native JSON");
   return passed;
 }
 
@@ -2042,7 +2048,7 @@ bool test_reaction_wire() {
   spray.liquid_file = "liquid.asset";
   spray.liquid_fingerprint = UINT64_C(18446744073709551577);
   spray.seed = UINT64_C(9007199254740993);
-  spray.tab_breakup = true;
+  spray.breakup = hundun::v04::SprayBreakupModel::tab;
   spray.injectors.push_back({UINT64_C(9007199254740997),
                              {0.1, 0.2, 0.3},
                              {1, 0, 0},
@@ -2061,12 +2067,19 @@ bool test_reaction_wire() {
           recovered.spray->liquid_file == spray.liquid_file &&
           recovered.spray->maximum_local_segments ==
               spray.maximum_local_segments &&
-          recovered.spray->tab_breakup &&
+          recovered.spray->breakup == hundun::v04::SprayBreakupModel::tab &&
           recovered.spray->injectors.size() == 1 &&
           recovered.spray->injectors[0].id == spray.injectors[0].id &&
           recovered.spray->injectors[0].origin_m.y == .2 &&
           recovered.spray->injectors[0].mass_flow_rate_kg_per_s == 1e-5,
       "spray asset, exact integer lineage, injector physics survive broadcast");
+  spray.breakup = hundun::v04::SprayBreakupModel::stochastic_sgs;
+  passed &= expect(bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+      bool(hundun::v04::detail::deserialize_model_for_test(bytes, recovered)) &&
+      recovered.spray && recovered.spray->breakup == hundun::v04::SprayBreakupModel::stochastic_sgs,
+      "SGS breakup identity survives rank broadcast");
+  spray.breakup = hundun::v04::SprayBreakupModel::tab;
+  passed &= bool(hundun::v04::detail::serialize_model_for_test(model, bytes));
   const auto spray_bytes = bytes;
   spray.evaporation = hundun::v04::spray::EvaporationModel::thick_exchange;
   passed &= expect(

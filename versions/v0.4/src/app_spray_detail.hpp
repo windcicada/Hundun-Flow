@@ -10,7 +10,10 @@ inline bool valid_spray_spec(const SpraySpec &s) {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
   };
   const auto positive = [](double x) { return std::isfinite(x) && x > 0; };
-  if ((s.evaporation != spray::EvaporationModel::abramzon_sirignano &&
+  if ((s.breakup != SprayBreakupModel::none &&
+       s.breakup != SprayBreakupModel::tab &&
+       s.breakup != SprayBreakupModel::stochastic_sgs) ||
+      (s.evaporation != spray::EvaporationModel::abramzon_sirignano &&
        s.evaporation != spray::EvaporationModel::thick_exchange) ||
       s.liquid_file.empty() || s.liquid_file.has_parent_path() ||
       s.liquid_file.extension() != ".asset" ||
@@ -57,7 +60,7 @@ template <class Writer> bool write_spray(Writer &w, const SpraySpec &s) {
   w.real(s.maximum_substep_s);
   w.real(s.minimum_substep_s);
   w.real(s.relative_tolerance);
-  w.byte(s.tab_breakup);
+  w.byte(static_cast<std::uint8_t>(s.breakup));
   w.u32(static_cast<std::uint32_t>(s.injectors.size()));
   for (const auto &v : s.injectors) {
     w.u64(v.id);
@@ -80,11 +83,11 @@ template <class Reader> bool read_spray(Reader &r, SpraySpec &s) {
   if (!r.text(file) || !r.u64(s.liquid_fingerprint) || !r.u64(s.seed) ||
       !r.u32(s.maximum_local_parcels) || !r.u32(s.maximum_local_segments) ||
       !r.real(s.maximum_substep_s) || !r.real(s.minimum_substep_s) ||
-      !r.real(s.relative_tolerance) || !r.byte(tab) || tab > 1 ||
+      !r.real(s.relative_tolerance) || !r.byte(tab) || tab > 2 ||
       !r.u32(count) || count == 0 || count > 64)
     return false;
   s.liquid_file = std::move(file);
-  s.tab_breakup = tab != 0;
+  s.breakup = static_cast<SprayBreakupModel>(tab);
   s.injectors.resize(count);
   for (auto &v : s.injectors)
     if (!r.u64(v.id) || !r.real3(v.origin_m) || !r.real3(v.axis) ||
@@ -111,7 +114,7 @@ template <class Hash> void hash_spray(Hash &h, const SpraySpec &s) {
   h.real(s.maximum_substep_s);
   h.real(s.minimum_substep_s);
   h.real(s.relative_tolerance);
-  h.integer(static_cast<std::uint8_t>(s.tab_breakup));
+  h.integer(static_cast<std::uint8_t>(s.breakup));
   h.integer(s.injectors.size());
   for (const auto &v : s.injectors) {
     h.integer(v.id);

@@ -253,12 +253,12 @@ bool native_gas_halo(int rank, int ranks) {
   if (!CartesianGeometryCompiler::compile(MPI_COMM_WORLD, mesh, {}, geometry,
                                           patch))
     return false;
-  std::array<std::vector<double>, 5> data;
-  std::array<FieldView, 5> fields{};
+  std::array<std::vector<double>, 6> data;
+  std::array<FieldView, 6> fields{};
   std::array<ConstFieldView, 2> species{};
-  std::array<HaloFieldSpec, 5> halo_fields{};
+  std::array<HaloFieldSpec, 6> halo_fields{};
   for (std::size_t f = 0; f < fields.size(); ++f) {
-    const unsigned nc = f == 2 ? 3 : 1;
+    const unsigned nc = (f == 2 || f == 5) ? 3 : 1;
     const auto sy = std::size_t(patch.cells.x + 2),
                sz = sy * (patch.cells.y + 2);
     const auto stride = sz * (patch.cells.z + 2);
@@ -286,6 +286,12 @@ bool native_gas_halo(int rank, int ranks) {
                                       : f == 2 ? value
                                       : f == 3 ? .1 + .001 * value
                                                : .2 + .001 * value;
+          if (f == 5) {
+            const double rho = 1 + value;
+            v.unchecked({x, y, z}, 0) = rho * (2 + value);
+            v.unchecked({x, y, z}, 1) = rho;
+            v.unchecked({x, y, z}, 2) = 1e-5 * (1 + value);
+          }
           if (f == 2) {
             v.unchecked({x, y, z}, 1) = -value;
             v.unchecked({x, y, z}, 2) = 0;
@@ -314,7 +320,7 @@ bool native_gas_halo(int rank, int ranks) {
         donor_cells.push_back(global_id(canonical, global));
         donor_targets.push_back({x, y, z});
       }
-  std::array<RemoteDonorFieldSpec, 5> donor_fields{};
+  std::array<RemoteDonorFieldSpec, 6> donor_fields{};
   for (std::size_t i = 0; i < fields.size(); ++i)
     donor_fields[i] = {fields[i].field, fields[i].components};
   RemoteDonorExchangePlan corners;
@@ -352,6 +358,7 @@ bool native_gas_halo(int rank, int ranks) {
                     as_const(fields[1]), as_const(fields[2]),
                     {species.data(), species.size()}))
     return false;
+  if (!sampler.bind_sgs(revision, as_const(fields[5]))) return false;
   auto p = value(rank, 0, ranks, global).parcel;
   const int current[]{patch.begin.x, patch.begin.y, patch.begin.z};
   double expected = 0;
@@ -385,12 +392,15 @@ bool native_gas_halo(int rank, int ranks) {
       sampler.sample(p, .05, ParcelPass::corrector, revision, y.data(), 3);
   ParcelLocation located;
   const auto location = sampler.locate(p.position_m, revision, located);
+  double eps = -1, mu = -1;
+  const auto sgs = sampler.sample_sgs(p.position_m, revision, eps, mu);
   count_hot_allocations = false;
   const auto near = [](double a, double b) {
     return std::isfinite(a) &&
            std::abs(a - b) < 2e-12 * std::max(1.0, std::abs(b));
   };
   passed &=
+      bool(sgs) && near(eps, 2 + expected) && near(mu, 1e-5 * (1 + expected)) &&
       bool(gathered) && sampled.status == portable::Status::success &&
       hot_allocations == 0 && near(sampled.pressure_pa, 101335 + expected) &&
       near(sampled.enthalpy_j_per_kg, 300000 + 50 * expected) &&
@@ -399,6 +409,11 @@ bool native_gas_halo(int rank, int ranks) {
       near(y[2], .1 + .001 * expected) && near(y[0], .2 + .001 * expected) &&
       near(y[1], .7 - .002 * expected) && bool(location) &&
       located.owner_rank >= 0 && located.owner_rank < ranks;
+  const portable::Revision next{12, 72, 1};
+  passed &= !sampler.sample_sgs(p.position_m, next, eps, mu);
+  passed &= bool(sampler.bind(next, .1, 101325, as_const(fields[0]),
+      as_const(fields[1]), as_const(fields[2]), {species.data(), species.size()}));
+  passed &= !sampler.sample_sgs(p.position_m, next, eps, mu);
   if (!passed)
     std::cerr
         << "rank " << rank

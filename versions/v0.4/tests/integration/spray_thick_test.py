@@ -121,6 +121,8 @@ def main():
     binary, fixture, mpi, work, validator = map(Path, sys.argv[1:6])
     mode = sys.argv[6] if len(sys.argv) > 6 else "backward_euler"
     fields = int(sys.argv[8]) if len(sys.argv) > 8 else 2
+    breakup = mode == "cn_be_esf_ibm_breakup"
+    if breakup: mode = "cn_be_esf_ibm_sgs"
     assert mode in ("backward_euler", "cn_be", "cn_be_esf", "cn_be_esf_ibm", "cn_be_esf_ibm_sgs")
     sgs = mode == "cn_be_esf_ibm_sgs"
     ibm = mode in ("cn_be_esf_ibm", "cn_be_esf_ibm_sgs")
@@ -180,6 +182,9 @@ end
                         cone_half_angle_rad=0., speed_m_per_s=2.,
                         mass_flow_rate_kg_per_s=1., represented_mass_per_parcel_kg=1e-9,
                         droplet_diameter_m=1e-4, temperature_k=350.)])
+    if breakup:
+        case["spray"].pop("tab_breakup")
+        case["spray"]["breakup"] = "stochastic_sgs"
     if scheme == "cn_be":
         # A resolved synthetic exchange makes omission of gas kinetic energy
         # visible to the total-inventory balance, while retaining one parcel
@@ -228,6 +233,8 @@ end
     assert "reaction_model=" + reaction_model in check
     if sgs:
         assert "sgs=vreman" in check
+    if breakup:
+        assert "breakup=stochastic_sgs" in check
     records = {}
 
     def run(label, ranks, count, restart=None):

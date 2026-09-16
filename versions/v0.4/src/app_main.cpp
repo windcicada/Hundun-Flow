@@ -245,6 +245,7 @@ int main(int argc, char* argv[]) {
                         ? "vreman_wall_function" : "none")
                 << " smagorinsky_coefficient=" << report.summary.smagorinsky_coefficient
                 << " evaporation=" << report.summary.evaporation_model
+                << " breakup=" << report.summary.breakup_model
                 << " chemistry="
                 << (report.summary.reaction_mode == hundun::v04::ReactionMode::none ? "none"
                     : report.summary.interval_chemistry ? "transport_then_interval"

@@ -178,6 +178,7 @@ struct SprayInjectionSpec {
   double temperature_k{};
 };
 
+enum class SprayBreakupModel : std::uint8_t { none, tab, stochastic_sgs };
 struct SpraySpec {
   std::filesystem::path liquid_file;
   std::uint64_t liquid_fingerprint{}; // FNV-1a64 of exact liquid asset bytes
@@ -187,7 +188,7 @@ struct SpraySpec {
   double maximum_substep_s{1e-4};
   double minimum_substep_s{1e-12};
   double relative_tolerance{1e-6};
-  bool tab_breakup{};
+  SprayBreakupModel breakup{SprayBreakupModel::none};
   std::vector<SprayInjectionSpec> injectors;
   spray::EvaporationModel evaporation{spray::EvaporationModel::abramzon_sirignano};
 };

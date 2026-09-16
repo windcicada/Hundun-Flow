@@ -924,15 +924,17 @@ bool parse_esf(yyjson_val* value, EsfSpec& out) {
 }
 
 bool parse_spray(yyjson_val *value, SpraySpec &s) {
+  const bool named_breakup = yyjson_obj_get(value, "breakup") != nullptr;
+  const char *breakup_key = named_breakup ? "breakup" : "tab_breakup";
   if (!object_has_exact_keys(
           value,
           {"liquid_file", "liquid_fingerprint", "seed", "maximum_local_parcels",
            "maximum_local_segments", "maximum_substep_s", "minimum_substep_s",
-           "relative_tolerance", "tab_breakup", "injectors"}) &&
+           "relative_tolerance", breakup_key, "injectors"}) &&
       !object_has_exact_keys(value,
           {"liquid_file", "liquid_fingerprint", "seed", "maximum_local_parcels",
            "maximum_local_segments", "maximum_substep_s", "minimum_substep_s",
-           "relative_tolerance", "tab_breakup", "injectors", "evaporation"}))
+           "relative_tolerance", breakup_key, "injectors", "evaporation"}))
     return false;
   if (yyjson_obj_get(value, "evaporation")) {
     const auto name = string_value(value, "evaporation");
@@ -945,10 +947,11 @@ bool parse_spray(yyjson_val *value, SpraySpec &s) {
   const auto file = string_value(value, "liquid_file");
   auto *identity = yyjson_obj_get(value, "liquid_fingerprint");
   auto *seed = yyjson_obj_get(value, "seed");
-  auto *tab = yyjson_obj_get(value, "tab_breakup");
+  auto *tab = yyjson_obj_get(value, breakup_key);
   auto *injectors = yyjson_obj_get(value, "injectors");
   if (!file || !yyjson_is_uint(identity) || !yyjson_is_uint(seed) ||
-      !yyjson_is_bool(tab) || !yyjson_is_arr(injectors) ||
+      (named_breakup ? !yyjson_is_str(tab) : !yyjson_is_bool(tab)) ||
+      !yyjson_is_arr(injectors) ||
       yyjson_arr_size(injectors) > 64 ||
       !parse_uint32(yyjson_obj_get(value, "maximum_local_parcels"),
                     s.maximum_local_parcels) ||
@@ -964,7 +967,15 @@ bool parse_spray(yyjson_val *value, SpraySpec &s) {
   s.liquid_file = std::string(*file);
   s.liquid_fingerprint = yyjson_get_uint(identity);
   s.seed = yyjson_get_uint(seed);
-  s.tab_breakup = yyjson_get_bool(tab);
+  if (named_breakup) {
+    const auto name = string_value(value, breakup_key);
+    if (name == "none") s.breakup = SprayBreakupModel::none;
+    else if (name == "tab") s.breakup = SprayBreakupModel::tab;
+    else if (name == "stochastic_sgs") s.breakup = SprayBreakupModel::stochastic_sgs;
+    else return false;
+  } else {
+    s.breakup = yyjson_get_bool(tab) ? SprayBreakupModel::tab : SprayBreakupModel::none;
+  }
   for (std::size_t i = 0; i < yyjson_arr_size(injectors); ++i) {
     auto *item = yyjson_arr_get(injectors, i);
     if (!object_has_exact_keys(item,

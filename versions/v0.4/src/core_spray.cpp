@@ -230,6 +230,27 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                   ? 1.
                   : 0.;
   }
+  if (spec_.breakup == SprayBreakupModel::stochastic_sgs) {
+    const std::uint64_t sy = std::uint64_t(patch.cells.x) + 4,
+                        sz = sy * (std::uint64_t(patch.cells.y) + 4),
+                        count = sz * (std::uint64_t(patch.cells.z) + 4);
+    if (local_bytes_ > maximum_bytes_ || count > SIZE_MAX / (3 * sizeof(double)) ||
+        count > (maximum_bytes_ - local_bytes_) / (3 * sizeof(double)))
+      return {StatusCode::allocation_failure, 10342};
+    sgs_storage_.assign(3 * std::size_t(count), 0.);
+    local_bytes_ += sgs_storage_.capacity() * sizeof(double);
+    sgs_view_.base = sgs_storage_.data() + 2 + 2 * sy + 2 * sz;
+    sgs_view_.interior = patch.cells;
+    sgs_view_.ghosts = {2, 2, 2};
+    sgs_view_.components = 3;
+    sgs_view_.stride_y = sy;
+    sgs_view_.stride_z = sz;
+    sgs_view_.component_stride = count;
+    sgs_view_.field = 1;
+    sgs_view_.revision = 1;
+    sgs_view_.revision_domain = identity;
+    sgs_view_.storage_identity = reinterpret_cast<std::uintptr_t>(sgs_storage_.data());
+  }
   identity_ = identity;
   return {};
 }
@@ -282,6 +303,20 @@ ProductSpray::configure_collective(MPI_Comm comm,
     return status;
   local_bytes_ += fringe + restore;
   status = halo_.bind(comm);
+  if (status && sgs_enabled()) {
+    const RemoteDonorFieldSpec field{sgs_view_.field, 3};
+    status = RemoteDonorExchangePlan::analyze_cells(
+        comm, geometry_->global_cells(), patch_, targets, {&field, 1}, 10, sgs_halo_);
+    if (status) {
+      const auto s = sgs_halo_.stats();
+      const auto bytes = (s.received_cells + s.supplied_cells) * 256 +
+                         2 * s.bytes_per_exchange;
+      status = agree(bytes > maximum_bytes_ - local_bytes_
+                         ? Status{StatusCode::allocation_failure, 10342} : Status{});
+      if (status) local_bytes_ += bytes;
+    }
+    if (status) status = sgs_halo_.bind(comm);
+  }
   if (status && surface_) {
     // A separate cold exchange seals the binary topology mask, including
     // periodic corners. Do not infer remote fluid flags from local EB halos.
@@ -406,7 +441,10 @@ Status ProductSpray::prepare(portable::Revision revision, double duration,
                              double pressure_reference, ConstFieldView density,
                              FieldView pressure, FieldView enthalpy,
                              FieldView velocity,
-                             Span<const FieldView> independent) noexcept {
+                             Span<const FieldView> independent,
+                             const TurbulencePlan *turbulence,
+                             ConstFieldView molecular_viscosity,
+                             ConstFieldView velocity_gradient) noexcept {
   if (!enabled())
     return {};
   discard();
@@ -433,6 +471,38 @@ Status ProductSpray::prepare(portable::Revision revision, double duration,
                            as_const(halo_views_[0]), as_const(halo_views_[1]),
                            as_const(halo_views_[2]),
                            {species_views_.data(), species_views_.size()}));
+  if (status && sgs_enabled()) {
+    if (!turbulence || !valid_cell_view(density, patch_.cells, 0, 1, 0) ||
+        !valid_cell_view(molecular_viscosity, patch_.cells, 0, 1, 0) ||
+        !valid_cell_view(velocity_gradient, patch_.cells, 0, 9, 0))
+      status = invalid();
+    for (int z = 0; z < patch_.cells.z && status; ++z)
+      for (int y = 0; y < patch_.cells.y && status; ++y)
+        for (int x = 0; x < patch_.cells.x && status; ++x) {
+          const Int3 cell{x, y, z};
+          const double rho = density.unchecked(cell, 0);
+          const double mu = molecular_viscosity.unchecked(cell, 0);
+          SgsState state;
+          if (!surface_ || fluid_mask_.unchecked(cell, 0) == 1) {
+            VelocityGradient gradient;
+            for (unsigned c = 0; c < 9; ++c)
+              gradient.value[c] = velocity_gradient.unchecked(cell, c);
+            status = turbulence->evaluate_sgs_cell(cell, gradient, rho, mu, state);
+          }
+          if (status) {
+            sgs_view_.unchecked(cell, 0) = state.dissipation_w_m3;
+            sgs_view_.unchecked(cell, 1) = rho;
+            sgs_view_.unchecked(cell, 2) = mu;
+          }
+        }
+    status = agree(status);
+    if (status) {
+      sgs_view_.revision = revision.input_revision;
+      status = agree(sgs_halo_.preflight_exchange(10, {&sgs_view_, 1}));
+    }
+    if (status) status = sgs_halo_.exchange(10, {&sgs_view_, 1});
+    if (status) status = agree(gas_.bind_sgs(revision, as_const(sgs_view_)));
+  }
   if (status)
     status = advance_->prepare(history.accepted_parcels(),
                                {injector_views_.data(), injector_views_.size()},

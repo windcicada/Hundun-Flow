@@ -64,11 +64,19 @@ int main(int argc,char** argv) {
       if(bytes<24 || offset>a.cell_records.size() || bytes>a.cell_records.size()-offset) {valid=false;break;}
       const auto* record=a.cell_records.data()+offset;
       const auto count=integer(record+8,4),injectors=integer(record+12,4),tcr=integer(record+16,4);
-      if(integer(record+20,4)!=1 || 24+tcr+144*count+24*injectors!=bytes) {valid=false;break;}
+      const auto version=integer(record+20,4);
+      const unsigned width=version==2 ? 192 : 144;
+      if((version!=1 && version!=2) || 24+tcr+width*count+24*injectors!=bytes) {valid=false;break;}
       const auto* p=record+24+tcr;
-      for(std::uint64_t i=0;i<count;++i,p+=144) {
+      for(std::uint64_t i=0;i<count;++i,p+=width) {
         const double x=real(p+16),u=real(p+40);
         valid &= x<.375 && x>.3748 && std::isfinite(u) && u<0;
+        if(model.spray->breakup==SprayBreakupModel::stochastic_sgs) {
+          // Exact cross-partition record comparison above includes the full
+          // lineage; require live exposure history in this native run too.
+          valid &= version==2 && integer(p+144,8)==1 &&
+                   real(p+160)>0 && std::isfinite(real(p+152));
+        }
         ++parcels;
       }
       offset+=bytes;

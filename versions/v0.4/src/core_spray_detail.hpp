@@ -23,7 +23,10 @@ public:
   Status prepare(portable::Revision, double duration, double pressure_reference,
                  ConstFieldView density, FieldView pressure, FieldView enthalpy,
                  FieldView velocity,
-                 Span<const FieldView> independent) noexcept;
+                 Span<const FieldView> independent,
+                 const TurbulencePlan *turbulence = nullptr,
+                 ConstFieldView molecular_viscosity = {},
+                 ConstFieldView velocity_gradient = {}) noexcept;
   Status stage(RestartCellRecordsView tcr) noexcept;
   Status stage_restore(const RestartImage &) noexcept;
   Status validate_restored_positions() noexcept;
@@ -40,15 +43,23 @@ public:
       advance_->discard();
   }
   bool enabled() const noexcept { return identity_ != 0; }
+  bool sgs_enabled() const noexcept {
+    return enabled() && spec_.breakup == SprayBreakupModel::stochastic_sgs;
+  }
   PlanFingerprint fingerprint() const noexcept { return identity_; }
   std::uint64_t owned_bytes() const noexcept { return owned_bytes_; }
   RemoteDonorExchangeStats halo_stats() const noexcept {
     auto result = halo_.stats();
     const auto source = source_halo_.stats();
+    const auto sgs = sgs_halo_.stats();
     result.received_cells += source.received_cells;
     result.supplied_cells += source.supplied_cells;
     result.bytes_per_exchange += source.bytes_per_exchange;
     result.peer_messages += source.peer_messages;
+    result.received_cells += sgs.received_cells;
+    result.supplied_cells += sgs.supplied_cells;
+    result.bytes_per_exchange += sgs.bytes_per_exchange;
+    result.peer_messages += sgs.peer_messages;
     return result;
   }
   portable::ExchangeBatchReport exchange() const noexcept {
@@ -84,6 +95,9 @@ private:
   std::vector<ConstFieldView> species_views_;
   RemoteDonorExchangePlan halo_;
   RemoteDonorExchangePlan source_halo_;
+  RemoteDonorExchangePlan sgs_halo_;
+  std::vector<double> sgs_storage_;
+  FieldView sgs_view_{};
   bool source_halo_bound_{};
   spray::detail::ParcelMigrationPlan restore_migration_;
   portable::Revision revision_{};

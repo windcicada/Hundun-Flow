@@ -280,7 +280,7 @@ bool run(int rank, int ranks, const char *path, int boundary = 0) {
   // Actual TAB threshold -> child construction -> remaining-time A--S and
   // checked migration. The deformation/surface reservoir stays out of gas H.
   detail::ProductParcelAdvance tab_advance(sampler, events, asset, film);
-  spec.tab_breakup = true;
+  spec.breakup = SprayBreakupModel::tab;
   ok &= bool(tab_advance.configure(MPI_COMM_WORLD, geometry, patch, spec,
                                    UINT64_C(67108864)));
   auto triggered = initial;
@@ -301,6 +301,53 @@ bool run(int rank, int ranks, const char *path, int boundary = 0) {
   if (!status || tab_global[0] != 2 * ranks)
     std::cerr << "TAB status " << status.detail << " children " << tab_global[0]
               << '\n';
+  // SGS follows the complete evaporation interval once, with lineage state
+  // carried through checked migration. Its children begin exposure next step.
+  std::vector<double> sgs_storage(3 * fields[4].component_stride);
+  FieldView sgs = fields[2];
+  sgs.base = sgs_storage.data() + 2 + 2 * sgs.stride_y + 2 * sgs.stride_z;
+  sgs.storage_identity = reinterpret_cast<std::uintptr_t>(sgs_storage.data());
+  for (int z = -2; z < patch.cells.z + 2; ++z)
+    for (int y = -2; y < patch.cells.y + 2; ++y)
+      for (int x = -2; x < patch.cells.x + 2; ++x) {
+        sgs.unchecked({x,y,z},0) = 1e10 * o.sample.density_kg_per_m3;
+        sgs.unchecked({x,y,z},1) = o.sample.density_kg_per_m3;
+        sgs.unchecked({x,y,z},2) = 2e-5;
+      }
+  ok &= bool(sampler.bind_sgs(revision, as_const(sgs)));
+  detail::ProductParcelAdvance sgs_advance(sampler, events, asset, film);
+  spec.breakup = SprayBreakupModel::stochastic_sgs;
+  ok &= bool(sgs_advance.configure(MPI_COMM_WORLD, geometry, patch, spec, UINT64_C(67108864)));
+  triggered = initial;
+  triggered.sgs = {1, {1e10, .03, 1e8, .03, 7}};
+  allocations = 0;
+  count_allocations = true;
+  status = sgs_advance.prepare({&triggered, 1}, {}, revision, duration,
+                               as_const(fields[4]), as_const(fields[2]));
+  count_allocations = false;
+  ok &= bool(status) && allocations == 0;
+  double sgs_local[]{double(sgs_advance.parcels().size),
+      double(sgs_advance.breakup_energy().event_count)}, sgs_global[2]{};
+  MPI_Allreduce(sgs_local, sgs_global, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  ok &= sgs_global[0] == 2 * ranks && sgs_global[1] == ranks;
+  std::vector<detail::ProductParcelAdvance::Parcel> sgs_reference;
+  for (std::size_t i = 0; i < sgs_advance.parcels().size; ++i) {
+    const auto &child = sgs_advance.parcels().data[i];
+    ok &= child.sgs.version == 1 && child.sgs.history.dissipation_age_s == 0 &&
+          child.sgs.history.rate_age_s == 0 && child.parcel.age_s == duration;
+    sgs_reference.push_back(child);
+  }
+  sgs_advance.discard();
+  status = sgs_advance.prepare({&triggered, 1}, {}, revision, duration,
+                               as_const(fields[4]), as_const(fields[2]));
+  ok &= bool(status) && sgs_advance.parcels().size == sgs_reference.size();
+  for (std::size_t i = 0; i < sgs_reference.size() && status; ++i) {
+    const auto &a = sgs_reference[i], &b = sgs_advance.parcels().data[i];
+    ok &= a.parcel.id == b.parcel.id && a.parcel.droplet_mass_kg == b.parcel.droplet_mass_kg &&
+          a.sgs.history.poisson_multiplier == b.sgs.history.poisson_multiplier;
+  }
+  if (!status || sgs_global[0] != 2 * ranks)
+    std::cerr << "SGS status " << status.detail << " children " << sgs_global[0] << '\n';
   if (ranks > 1) {
     const double other_duration = rank == 0 ? duration * .5 : duration;
     ok &= !advance.prepare({&initial, 1}, injectors, revision, other_duration,
