@@ -92,3 +92,10 @@ COAST 喷雾检查点的 SI 解码入口为 `tools/v04_spray_inventory.py`。
 子滴，将微米直径转换为米，并输出带来源身份和原始模型历史的
 `parcels.jsonl`。完整记录及源文件哈希进入 `inventory.json`，
 后续按目标 IBM 网格、物性和模型定义构建 Hundun Restart。
+
+确定性／SGS 破碎核通过 `evaluate_sgs_breakup` 提供区间末候选。
+它接收单位质量耗散率、两段暴露历史、已接受的 Poisson 倍率和
+本次事件的随机数，返回破碎速率、候选历史及互补体积的子滴
+直径比。调用方负责事件身份、子滴共同提交和气液账本。20 点
+子滴分布与完整 COAST 例程的参考入口为
+`tools/v04_sgs_breakup_reference.py`；生产接线及耗散率定义见开发记录。

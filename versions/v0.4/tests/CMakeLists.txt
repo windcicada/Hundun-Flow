@@ -557,6 +557,12 @@ foreach(spray_slice IN ITEMS breakup mechanics source transfer events thick)
     COMMAND v04_models_spray_${spray_slice}_test)
 endforeach()
 
+add_executable(v04_models_spray_sgs_test unit/models_spray_sgs_test.cpp)
+target_link_libraries(v04_models_spray_sgs_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_sgs COMMAND v04_models_spray_sgs_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sgs-breakup.dat")
+set_tests_properties(v04_models_spray_sgs PROPERTIES TIMEOUT 15)
+
 add_executable(v04_models_spray_transaction_test mpi/models_spray_transaction_test.cpp)
 target_link_libraries(v04_models_spray_transaction_test PRIVATE hundun_v04_test_core)
 foreach(rank_count IN ITEMS 1 2 4)

@@ -352,4 +352,66 @@ struct TabBreakupReport {
 [[nodiscard]] TabBreakupReport
 evaluate_tab_breakup(const TabBreakupInput& input) noexcept;
 
+// Two independent exposure clocks from the selected deterministic/SGS model.
+// The dissipation clock advances each interval; the rate clock advances while
+// the mother diameter exceeds the critical diameter. Poisson(1), capped at 7,
+// is drawn once for a new lineage and supplied by its accepted history.
+struct SgsBreakupHistory {
+  double mean_dissipation_m2_per_s3{};
+  double dissipation_age_s{};
+  double mean_rate_per_s{};
+  double rate_age_s{};
+  std::uint8_t poisson_multiplier{};
+};
+
+struct SgsBreakupInput {
+  SgsBreakupHistory history{};
+  double droplet_diameter_m{};
+  double relative_speed_m_per_s{};
+  double gas_density_kg_per_m3{};
+  double liquid_density_kg_per_m3{};
+  double surface_tension_n_per_m{};
+  double gas_dynamic_viscosity_pa_s{};
+  double dissipation_m2_per_s3{};
+  double duration_s{};
+  double deterministic_time_coefficient{0.57735026918962576451};
+  double stochastic_coefficient{2.0};
+  bool stochastic_enabled{true};
+  // The caller supplies the counter-based draw for this breakup event.
+  double daughter_uniform_01{0.5};
+};
+
+enum class SgsBreakupStatus : std::uint8_t {
+  success,
+  invalid_input,
+  numerical_failure
+};
+
+struct SgsBreakupReport {
+  SgsBreakupStatus status{SgsBreakupStatus::invalid_input};
+  std::string_view model_id{"deterministic_sgs_martinez_bazan_20_v1"};
+  SgsBreakupHistory candidate{};
+  bool rate_active{};
+  bool breakup_requested{};
+  bool kolmogorov_length_available{};
+  double weber_number{};
+  double critical_diameter_m{};
+  double kolmogorov_length_m{};
+  double deterministic_rate_per_s{};
+  double stochastic_rate_per_s{};
+  double minimum_diameter_ratio{};
+  double maximum_diameter_ratio{};
+  double distribution_lambda{};
+  // Interval-end event: complementary volumes, common temperature/velocity
+  // and one parent multiplicity per daughter. The caller owns joint commit.
+  std::array<double, 2U> daughter_diameter_ratios{};
+
+  [[nodiscard]] bool succeeded() const noexcept {
+    return status == SgsBreakupStatus::success;
+  }
+};
+
+[[nodiscard]] SgsBreakupReport
+evaluate_sgs_breakup(const SgsBreakupInput& input) noexcept;
+
 }  // namespace hundun::v04::spray
