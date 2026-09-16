@@ -3710,7 +3710,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   };
   const bool implicit_esf = model.reaction.mode == ReactionMode::esf_tpdf &&
       model.reaction.esf && (model.reaction.esf->tcr.mode == TcrMode::off ||
-                            model.reaction.esf->tcr.mode == TcrMode::shadow);
+                            model.reaction.esf->tcr.mode == TcrMode::shadow ||
+                            model.reaction.esf->tcr.model == TcrModel::cdphyso_dynamic_v1);
   const bool unsupported_cold = cold_model &&
       ((model.reaction.mode != ReactionMode::none &&
         model.reaction.mode != ReactionMode::finite_rate_mean &&
@@ -4153,6 +4154,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           model.mesh.limits.max_memory_bytes_per_rank);
   }
   if (!status) return status;
+  if (status && candidate->esf.dynamic_tcr())
+    status = candidate->esf.configure_dynamic_exchange(communicator,
+        candidate->geometry, candidate->patch, model.mesh.limits.max_memory_bytes_per_rank);
   if (status && candidate->spray.enabled()) {
     std::vector<RemoteDonorFieldSpec> fields;
     status = product_local_stage(communicator, [&] {
@@ -5733,6 +5737,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->summary.coupling = schedule;
   candidate->summary.time_scheme = model.time.scheme;
   candidate->summary.reaction_mode = model.reaction.mode;
+  if(model.reaction.esf) {
+    const auto &tcr=model.reaction.esf->tcr;
+    candidate->summary.tcr_mode=tcr.mode;
+    if(tcr.mode!=TcrMode::off)candidate->summary.tcr_model=
+        tcr.model==TcrModel::cdphyso_dynamic_v1 ? "cdphyso_dynamic_v1" : "reactant_root_v1";
+  }
   candidate->summary.evaporation_model = !model.spray ? "none" :
       model.spray->evaporation == spray::EvaporationModel::thick_exchange
           ? "thick_exchange" : "abramzon_sirignano";
@@ -9962,7 +9972,8 @@ Status ProductDriver::Impl::execute_attempt(
             const Int3 cell{x,y,z};esf::detail::IemSource mixing;
             if(field && fluid(i) && esf::detail::iem_source(
                 detail::cell_volume(product.equations.kernels(),cell),cache.unchecked(cell,2),
-                cache.unchecked(cell,3),product.esf.mixing_cd(),1.,mean.unchecked(cell,component),mixing)
+                cache.unchecked(cell,3),product.esf.mixing_cd(i,component),
+                product.esf.mixing_control(i,component),mean.unchecked(cell,component),mixing)
                     !=portable::Status::success) {s={StatusCode::numerical_failure,10232};break;}
             source.unchecked(cell,0)=mixing.explicit_source_density+
                 (field && fluid(i) ? product.esf.frozen_noise_source(i,field-1,component) : 0.)+
@@ -10064,7 +10075,7 @@ Status ProductDriver::Impl::execute_attempt(
           esf::detail::IemSource mixing;
           const auto volume=detail::cell_volume(product.equations.kernels(),cell);
           if(esf::detail::iem_source(volume,cache.unchecked(cell,2),cache.unchecked(cell,3),
-              product.esf.mixing_cd(),1.,0.,mixing)!=portable::Status::success) {
+              product.esf.mixing_cd(i,component),product.esf.mixing_control(i,component),0.,mixing)!=portable::Status::success) {
             s={StatusCode::numerical_failure,10232};break;
           }
           const long double exchange=mixing.implicit_sink_density*
@@ -10177,6 +10188,12 @@ Status ProductDriver::Impl::execute_attempt(
           pressure_history.accepted, pressure_reference, time.time(), step.dt,
           step.accepted_step, step.generation,
           {esf_sources.data(), product.fields.reaction_sources.size()});
+    if(product.esf.dynamic_tcr()) {
+      status=product.reductions.consensus(status);
+      if(status)status=product.esf.finish_dynamic(
+          {esf_trial.data(),product.fields.esf_fields.size()},as_const(esf_auxiliary),
+          product.spray.enabled() ? as_const(post_rho) : rho_history.accepted,step.accepted_step);
+    }
     if(status)status=product.reaction.publish_esf_sources(
         {esf_sources.data(),product.fields.reaction_sources.size()});
     if(status && esf_composition_ledger.active()) {

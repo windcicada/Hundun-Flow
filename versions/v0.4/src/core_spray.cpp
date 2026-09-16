@@ -148,7 +148,8 @@ Status ProductSpray::configure_local(const ValidatedModel &model,
                              spec_.maximum_local_parcels,
                              asset_.pack.material_fingerprint,
                              {injector_views_.data(), injector_views_.size()},
-                             tcr, maximum_bytes_ - local_bytes_);
+                             tcr, maximum_bytes_ - local_bytes_,
+                             spec_.breakup == SprayBreakupModel::stochastic_sgs);
   if (!status)
     return status;
   local_bytes_ += history.owned_bytes();

@@ -246,6 +246,11 @@ int main(int argc, char* argv[]) {
                 << " smagorinsky_coefficient=" << report.summary.smagorinsky_coefficient
                 << " evaporation=" << report.summary.evaporation_model
                 << " breakup=" << report.summary.breakup_model
+                << " tcr_model=" << report.summary.tcr_model
+                << " tcr_mode="
+                << (report.summary.tcr_mode == hundun::v04::TcrMode::shadow ? "shadow" :
+                    report.summary.tcr_mode == hundun::v04::TcrMode::experimental ? "experimental" :
+                    report.summary.tcr_mode == hundun::v04::TcrMode::validated ? "validated" : "off")
                 << " chemistry="
                 << (report.summary.reaction_mode == hundun::v04::ReactionMode::none ? "none"
                     : report.summary.interval_chemistry ? "transport_then_interval"

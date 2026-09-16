@@ -4,6 +4,10 @@
 find_program(HUNDUN_V04_PYTHON_EXECUTABLE
   NAMES python3.6 python3
   REQUIRED)
+add_executable(v04_models_tcr_dynamic_test unit/models_tcr_dynamic_test.cpp)
+target_include_directories(v04_models_tcr_dynamic_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_tcr_dynamic_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_tcr_dynamic COMMAND v04_models_tcr_dynamic_test)
 
 # Retain the original RED executable name for reproducible historical commands.
 # The corrected method is now an ordinary acceptance suite, never WILL_FAIL.
@@ -2393,6 +2397,22 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be_esf_ibm_breakup
       "$<TARGET_FILE:v04_kerosene_esf_test>")
   set_tests_properties(v04_spray_thick_breakup_cli PROPERTIES TIMEOUT 240 PROCESSORS 4 RUN_SERIAL TRUE)
+  add_test(NAME v04_spray_thick_tcr_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_thick_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/thick-tcr"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py" cn_be_esf_ibm_tcr
+      "$<TARGET_FILE:v04_kerosene_esf_test>")
+  set_tests_properties(v04_spray_thick_tcr_cli PROPERTIES TIMEOUT 240 PROCESSORS 4 RUN_SERIAL TRUE)
+  add_test(NAME v04_jl4_tcr_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/tcr_gas_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/jl4-tcr"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py"
+      "$<TARGET_FILE:v04_kerosene_esf_test>")
+  set_tests_properties(v04_jl4_tcr_cli PROPERTIES TIMEOUT 240 PROCESSORS 2 RUN_SERIAL TRUE)
   add_test(NAME v04_spray_thick_esf16_cli
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_thick_test.py"

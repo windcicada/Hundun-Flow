@@ -121,7 +121,8 @@ def main():
     binary, fixture, mpi, work, validator = map(Path, sys.argv[1:6])
     mode = sys.argv[6] if len(sys.argv) > 6 else "backward_euler"
     fields = int(sys.argv[8]) if len(sys.argv) > 8 else 2
-    breakup = mode == "cn_be_esf_ibm_breakup"
+    dynamic = mode == "cn_be_esf_ibm_tcr"
+    breakup = dynamic or mode == "cn_be_esf_ibm_breakup"
     if breakup: mode = "cn_be_esf_ibm_sgs"
     assert mode in ("backward_euler", "cn_be", "cn_be_esf", "cn_be_esf_ibm", "cn_be_esf_ibm_sgs")
     sgs = mode == "cn_be_esf_ibm_sgs"
@@ -201,6 +202,9 @@ end
         case["reaction"]["ensemble"] = dict(
             fields=fields, seed=1234, initial_species_offsets=offsets, tcr=dict(mode="off"))
         case["reaction"]["mixing"] = dict(c_z=.25, turbulent_schmidt=.7)
+        if dynamic:
+            case["reaction"]["ensemble"]["tcr"] = dict(mode="experimental",
+                model="cdphyso_dynamic_v1", fuel="C12H23", weak_rate_threshold=1e-12)
     if ibm:
         wall_case = fixture.with_name("reacting-spray-esf-ibm")
         shutil.copyfile(str(wall_case / "cube.stl"), str(work / "cube.stl"))
@@ -235,6 +239,8 @@ end
         assert "sgs=vreman" in check
     if breakup:
         assert "breakup=stochastic_sgs" in check
+    if dynamic:
+        assert "tcr_model=cdphyso_dynamic_v1 tcr_mode=experimental" in check
     records = {}
 
     def run(label, ranks, count, restart=None):

@@ -131,12 +131,15 @@ enum class ReactionMode : std::uint8_t {
 };
 
 enum class TcrMode : std::uint8_t { off, shadow, experimental, validated };
+enum class TcrModel : std::uint8_t { reactant_root_v1, cdphyso_dynamic_v1 };
 struct TcrSpec {
   TcrMode mode{TcrMode::off};
   std::vector<std::string> reactants;
   std::vector<double> progress_weights;
   int initialization_sign{};
   double weak_rate_threshold{1e-12};
+  TcrModel model{TcrModel::reactant_root_v1};
+  std::string fuel;
 };
 struct EsfSpec {
   std::uint32_t fields{2};

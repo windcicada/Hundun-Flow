@@ -60,7 +60,9 @@ def jacobian(c, point=(.5,.5,.5)):
     return a[0]*(b[1]*c[2]-b[2]*c[1])-b[0]*(a[1]*c[2]-a[2]*c[1])+c[0]*(a[1]*b[2]-a[2]*b[1])
 
 
-def metrics(xyz):
+def metrics(xyz, scan_axis="z"):
+    axis = "xyz".index(scan_axis)
+    transverse = [d for d in range(3) if d != axis]
     c = corners(xyz)
     centers = sum(c.values()) / 8.
     # This is the source center-Jacobian volume identity, evaluated in FP64.
@@ -81,10 +83,9 @@ def metrics(xyz):
     volume = np.abs(midpoint)
     if (volume == 0).any():
         raise ValueError('zero source center Jacobian')
-    # A y-directed IBM ray uses one x,z pair for each fixed logical i,k.
-    # Peak-to-peak over INTERNAL j rows proves the required line invariance
-    # independently of boundary/halo treatment of the source j=1 anchor.
-    drift = np.ptp(centers[[0,2]], axis=2)
+    # Scan logical lines along the selected coordinate direction. Report
+    # transverse centre drift to qualify the original curvilinear geometry.
+    drift = np.ptp(centers[transverse], axis=3-axis)
     return dict(cells=int(midpoint.size),
         center_bounds_m=[[float(v.min()),float(v.max())] for v in centers],
         jacobian_range_m3=[float(midpoint.min()),float(midpoint.max())],
@@ -93,10 +94,11 @@ def metrics(xyz):
         source_abs_jacobian_sum_m3=float(volume.sum()),
         trilinear_abs_volume_sum_m3=float(np.abs(integrated).sum()),
         quadrature_vs_midpoint_relative_max=float((np.abs(integrated-midpoint)/volume).max()),
-        scan_xz_drift_max_m=[float(v.max()) for v in drift],
-        logical_ik_lines=int(drift[0].size),
-        lines_x_drift_above_1um=int((drift[0]>1e-6).sum()),
-        lines_z_drift_above_1um=int((drift[1]>1e-6).sum()))
+        scan_axis=scan_axis,
+        transverse_axes=["xyz"[d] for d in transverse],
+        scan_transverse_drift_max_m=[float(v.max()) for v in drift],
+        logical_scan_lines=int(drift[0].size),
+        lines_transverse_drift_above_1um=[int((v>1e-6).sum()) for v in drift])
 
 
 def main():
@@ -104,6 +106,7 @@ def main():
     parser.add_argument('--case', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--scan-axis', choices=('x','y','z'), default='z')
     args = parser.parse_args()
     if args.output.exists():
         parser.error('output already exists')
@@ -117,23 +120,23 @@ def main():
         if path.stat().st_size != entry['size'] or digest(path) != entry['sha256']:
             raise ValueError('input identity: '+entry['path'])
         xyz,scales = read_grid(path)
-        row = metrics(xyz)
+        row = metrics(xyz,args.scan_axis)
         row.update(path=entry['path'], sha256=entry['sha256'], scales=scales)
         if digest(path) != entry['sha256']:
             raise ValueError('input changed: '+entry['path'])
         rows.append(row)
         if len(rows)%16==0: print('geometry audited',len(rows),flush=True)
-    result = dict(schema='hundun_legacy_geometry_inventory_v1',
+    result = dict(schema='hundun_legacy_geometry_inventory_v2', scan_axis=args.scan_axis,
+        transverse_axes=rows[0]['transverse_axes'],
         scope='All interior logical cells including solids; source FP64 center Jacobian and trilinear quadrature, before IBM classification.',
         manifest_sha256=digest(args.manifest), script_sha256=digest(Path(__file__)),
         cells=sum(r['cells'] for r in rows),
         source_abs_jacobian_sum_m3=math.fsum(r['source_abs_jacobian_sum_m3'] for r in rows),
         trilinear_abs_volume_sum_m3=math.fsum(r['trilinear_abs_volume_sum_m3'] for r in rows),
         quadrature_vs_midpoint_relative_max=max(r['quadrature_vs_midpoint_relative_max'] for r in rows),
-        scan_xz_drift_max_m=[max(r['scan_xz_drift_max_m'][i] for r in rows) for i in range(2)],
-        logical_ik_lines=sum(r['logical_ik_lines'] for r in rows),
-        lines_x_drift_above_1um=sum(r['lines_x_drift_above_1um'] for r in rows),
-        lines_z_drift_above_1um=sum(r['lines_z_drift_above_1um'] for r in rows),
+        scan_transverse_drift_max_m=[max(r['scan_transverse_drift_max_m'][i] for r in rows) for i in range(2)],
+        logical_scan_lines=sum(r['logical_scan_lines'] for r in rows),
+        lines_transverse_drift_above_1um=[sum(r['lines_transverse_drift_above_1um'][i] for r in rows) for i in range(2)],
         gauss_orientation_changes=sum(r['gauss_orientation_changes'] for r in rows),rows=rows)
     args.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k!='rows'},indent=2))

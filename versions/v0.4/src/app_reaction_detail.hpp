@@ -15,6 +15,11 @@ inline bool valid_esf_spec(const EsfSpec& e) {
   const auto& t = e.tcr;
   if (!std::isfinite(t.weak_rate_threshold) || t.weak_rate_threshold <= 0 ||
       t.initialization_sign < -1 || t.initialization_sign > 1) return false;
+  if (t.model == TcrModel::cdphyso_dynamic_v1)
+    return (t.mode == TcrMode::experimental || t.mode == TcrMode::shadow) &&
+        !t.fuel.empty() && t.fuel.size() <= 255 && t.fuel.find('\0') == std::string::npos &&
+        t.reactants.empty() && t.progress_weights.empty() && t.initialization_sign == 0;
+  if (t.model != TcrModel::reactant_root_v1 || !t.fuel.empty()) return false;
   if (t.mode == TcrMode::off)
     return t.reactants.empty() && t.progress_weights.empty() && t.initialization_sign == 0;
   if ((t.mode != TcrMode::shadow && t.mode != TcrMode::experimental && t.mode != TcrMode::validated) ||

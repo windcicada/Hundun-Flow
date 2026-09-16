@@ -23,12 +23,14 @@ public:
   Status configure(PlanFingerprint identity, MeshPatch patch, Int3 global,
                    std::size_t capacity, std::uint64_t material,
                    Span<Injector *const> injectors, RestartCellRecordsView tcr,
-                   std::uint64_t maximum_bytes) {
+                   std::uint64_t maximum_bytes, bool sgs_records = false) {
     if (identity_ || !identity || !material || !capacity || global.x <= 0 ||
         global.y <= 0 || global.z <= 0 || patch.cells.x <= 0 ||
         patch.cells.y <= 0 || patch.cells.z <= 0 || injectors.size > 64 ||
         (injectors.size && !injectors.data) ||
-        (tcr.identity ? tcr.record_bytes != 120 : tcr.record_bytes != 0))
+        (tcr.identity ? (tcr.record_bytes < 24 || tcr.record_bytes % 8 != 0 ||
+                         tcr.record_bytes > UINT32_MAX - header_bytes)
+                      : tcr.record_bytes != 0))
       return invalid();
     global_count_ = 1;
     count_ = 1;
@@ -50,6 +52,7 @@ public:
     material_ = material;
     tcr_identity_ = tcr.identity;
     tcr_width_ = tcr.record_bytes;
+    sgs_records_ = sgs_records;
     if (capacity > (UINT32_MAX - header_bytes - tcr_width_) / parcel_bytes ||
         count_ > (SIZE_MAX - capacity * parcel_bytes -
                   injectors.size * injector_bytes) /
@@ -313,7 +316,7 @@ private:
         tcr.values.size != count_ * tcr_width_ ||
         (tcr.values.size && !tcr.values.data) || tcr.variable_cell_bytes.size)
       return false;
-    const bool has_sgs = std::any_of(parcels.begin(), parcels.end(),
+    const bool has_sgs = sgs_records_ || std::any_of(parcels.begin(), parcels.end(),
         [](const Parcel& p) { return p.sgs.version != 0U; });
     const unsigned version = has_sgs ? 2U : 1U;
     const auto width = has_sgs ? parcel_bytes : legacy_parcel_bytes;
@@ -492,6 +495,7 @@ private:
   std::uint64_t material_{}, step_{}, pending_step_{}, global_count_{},
       owned_bytes_{};
   std::uint32_t tcr_width_{};
+  bool sgs_records_{};
   std::vector<Injector *> injectors_;
   std::vector<spray::detail::InjectorCommittedState> injector_states_;
   std::vector<std::uint8_t> injector_seen_;

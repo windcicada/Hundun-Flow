@@ -11,12 +11,16 @@ grid = importlib.util.module_from_spec(spec);spec.loader.exec_module(grid)
 z,y,x = np.meshgrid(np.arange(7.),np.arange(6.),np.arange(5.),indexing='ij')
 # Affine tilted cell: determinant is 2*3*4 even with off-diagonal shear.
 a = np.array([2*x+.25*y,3*y,4*z])
-r = grid.metrics(a)
+r = grid.metrics(a,"y")
 assert r['cells']==24 and r['source_abs_jacobian_sum_m3']==576
 assert abs(r['trilinear_abs_volume_sum_m3']-576)<1e-12
 assert r['quadrature_vs_midpoint_relative_max']<1e-14
-assert r['scan_xz_drift_max_m']==[.5,0]
+assert r['scan_transverse_drift_max_m']==[.5,0]
 assert r['center_bounds_m']==[[3.375,5.875],[4.5,10.5],[6.,18.]]
+rz = grid.metrics(a)
+assert rz['scan_axis']=='z' and rz['transverse_axes']==['x','y']
+assert rz['scan_transverse_drift_max_m']==[0,0]
+assert grid.metrics(np.array([2*x+.25*z,3*y+.5*z,4*z]))['scan_transverse_drift_max_m']==[.75,1.5]
 # Trilinear warped map X=x(1+a*z), Y=y(1+b*z), Z=z.
 # J=(1+a*z)(1+b*z); exact volume differs from midpoint by a*b/12.
 a,b = .2,.3
@@ -52,6 +56,7 @@ with tempfile.TemporaryDirectory(prefix='grid-') as folder:
     def call():return subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     r=call();assert r.returncode==0,r.stdout
     assert json.loads(output.read_text())['cells']==24 and path.read_bytes()==original
+    assert json.loads(output.read_text())['scan_axis']=='z'
     saved=output.read_bytes()
     r=call();assert r.returncode!=0 and b'output already exists' in r.stdout
     assert output.read_bytes()==saved

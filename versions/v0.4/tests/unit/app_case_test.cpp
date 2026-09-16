@@ -2043,6 +2043,23 @@ bool test_reaction_wire() {
       recovered.reaction.esf->tcr.progress_weights == model.reaction.esf->tcr.progress_weights &&
       recovered.reaction.esf->tcr.initialization_sign == 1,
       "ESF fields, integer RNG seed, and TCR mapping survive broadcast");
+  const auto root_tcr = model.reaction.esf->tcr;
+  auto& dynamic_tcr = model.reaction.esf->tcr;
+  dynamic_tcr = {};
+  dynamic_tcr.model = hundun::v04::TcrModel::cdphyso_dynamic_v1;
+  dynamic_tcr.mode = hundun::v04::TcrMode::experimental;
+  dynamic_tcr.fuel = "air";
+  passed &= expect(bool(hundun::v04::detail::serialize_model_for_test(model, bytes)) &&
+      bool(hundun::v04::detail::deserialize_model_for_test(bytes, recovered)) &&
+      recovered.reaction.esf &&
+      recovered.reaction.esf->tcr.model == dynamic_tcr.model &&
+      recovered.reaction.esf->tcr.mode == dynamic_tcr.mode &&
+      recovered.reaction.esf->tcr.fuel == dynamic_tcr.fuel,
+      "dynamic TCR identity and fuel survive broadcast");
+  dynamic_tcr.fuel.clear();
+  passed &= expect(!hundun::v04::detail::serialize_model_for_test(model, bytes),
+      "dynamic TCR requires its fuel identity");
+  model.reaction.esf->tcr = root_tcr;
   model.spray.emplace();
   auto &spray = *model.spray;
   spray.liquid_file = "liquid.asset";

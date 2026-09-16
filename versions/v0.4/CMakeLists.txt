@@ -299,6 +299,8 @@ set(hundun_v04_core_sources
   src/models_combustion.cpp
   src/models_esf.cpp
   src/models_tcr.cpp
+  src/models_tcr_dynamic.cpp
+  src/core_tcr_dynamic.cpp
   src/models_chemistry_adapter.cpp
   src/models_exchange_batch.cpp
   src/models_exchange_routing.cpp

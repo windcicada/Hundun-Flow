@@ -900,6 +900,15 @@ bool parse_esf(yyjson_val* value, EsfSpec& out) {
   else if (*mode == "experimental") out.tcr.mode = TcrMode::experimental;
   else if (*mode == "validated") out.tcr.mode = TcrMode::validated;
   else return false;
+  if (yyjson_obj_get(tcr, "model")) {
+    if (!object_has_exact_keys(tcr, {"mode", "model", "fuel", "weak_rate_threshold"})) return false;
+    const auto model = string_value(tcr, "model"), fuel = string_value(tcr, "fuel");
+    if (model != "cdphyso_dynamic_v1" || !fuel ||
+        !finite_real(yyjson_obj_get(tcr, "weak_rate_threshold"), out.tcr.weak_rate_threshold)) return false;
+    out.tcr.model = TcrModel::cdphyso_dynamic_v1;
+    out.tcr.fuel = std::string(*fuel);
+    return detail::valid_esf_spec(out);
+  }
   if (!object_has_exact_keys(tcr, {"mode", "reactants", "progress_weights", "initialization_sign", "weak_rate_threshold"})) return false;
   auto* reactants = yyjson_obj_get(tcr, "reactants");
   auto* weights = yyjson_obj_get(tcr, "progress_weights");
@@ -2519,7 +2528,8 @@ Status serialize_model(const ValidatedModel& model,
         writer.u32(e.fields); writer.u64(e.seed);
         writer.u32(static_cast<std::uint32_t>(e.initial_species_offsets.size()));
         for (double v : e.initial_species_offsets) writer.real(v);
-        writer.byte(static_cast<std::uint8_t>(e.tcr.mode));
+        writer.byte(static_cast<std::uint8_t>(e.tcr.mode) |
+                    (e.tcr.model == TcrModel::cdphyso_dynamic_v1 ? 0x10 : 0));
         writer.u32(static_cast<std::uint32_t>(e.tcr.reactants.size()));
         for (const auto& name : e.tcr.reactants)
           if (!writer.text(name)) return invalid_case(detail_wire);
@@ -2527,6 +2537,8 @@ Status serialize_model(const ValidatedModel& model,
         for (double v : e.tcr.progress_weights) writer.real(v);
         writer.u32(static_cast<std::uint32_t>(e.tcr.initialization_sign + 1));
         writer.real(e.tcr.weak_rate_threshold);
+        if (e.tcr.model == TcrModel::cdphyso_dynamic_v1 && !writer.text(e.tcr.fuel))
+          return invalid_case(detail_wire);
       }
     }
     if (model.spray && !detail::write_spray(writer, *model.spray))
@@ -2801,7 +2813,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         e.initial_species_offsets.resize(count);
         for (double& v : e.initial_species_offsets) if (!reader.real(v)) return invalid_case(detail_wire);
         if (!reader.byte(tcr_mode) || !reader.u32(count) || count > 255) return invalid_case(detail_wire);
-        e.tcr.mode = static_cast<TcrMode>(tcr_mode);
+        e.tcr.model = (tcr_mode & 0x10) ? TcrModel::cdphyso_dynamic_v1 : TcrModel::reactant_root_v1;
+        e.tcr.mode = static_cast<TcrMode>(tcr_mode & ~0x10);
         e.tcr.reactants.resize(count);
         for (auto& name : e.tcr.reactants) if (!reader.text(name)) return invalid_case(detail_wire);
         if (!reader.u32(count) || count > 255) return invalid_case(detail_wire);
@@ -2809,6 +2822,8 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         for (double& v : e.tcr.progress_weights) if (!reader.real(v)) return invalid_case(detail_wire);
         if (!reader.u32(sign) || sign > 2 || !reader.real(e.tcr.weak_rate_threshold)) return invalid_case(detail_wire);
         e.tcr.initialization_sign = int(sign) - 1;
+        if (e.tcr.model == TcrModel::cdphyso_dynamic_v1 && !reader.text(e.tcr.fuel))
+          return invalid_case(detail_wire);
       }
       if (r.mode == ReactionMode::none || !detail::valid_reaction_spec(r) ||
           std::size_t(data_count) + (has_stl ? 1U : 0U) + (coast_axes_wire(version) ? 2U : 1U) +
@@ -3494,6 +3509,10 @@ Status compile_on_root(const fs::path& case_root, int rank,
         hash.integer(e.initial_species_offsets.size());
         for (double v : e.initial_species_offsets) hash.real(v);
         hash.integer(static_cast<std::uint8_t>(e.tcr.mode));
+        if (e.tcr.model == TcrModel::cdphyso_dynamic_v1) {
+          hash.text("cdphyso_dynamic_v1");
+          hash.text(e.tcr.fuel);
+        }
         hash.integer(e.tcr.reactants.size());
         for (const auto& name : e.tcr.reactants) hash.text(name);
         hash.integer(e.tcr.progress_weights.size());
