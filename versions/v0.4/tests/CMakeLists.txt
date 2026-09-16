@@ -2601,3 +2601,18 @@ target_include_directories(v04_models_spray_interval_test PRIVATE "${CMAKE_CURRE
 target_link_libraries(v04_models_spray_interval_test PRIVATE hundun_v04_core)
 add_test(NAME v04_models_spray_interval COMMAND v04_models_spray_interval_test)
 set_tests_properties(v04_models_spray_interval PROPERTIES TIMEOUT 15)
+
+add_executable(v04_models_spray_remap_test unit/models_spray_remap_test.cpp)
+target_include_directories(v04_models_spray_remap_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_spray_remap_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_spray_remap COMMAND v04_models_spray_remap_test)
+set_tests_properties(v04_models_spray_remap PROPERTIES TIMEOUT 15)
+
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  add_test(NAME v04_spray_remap_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/spray_remap_test.py"
+      "${hundun_repository_root}/tools/v04_spray_remap.py"
+      "$<TARGET_FILE:v04_spray_remap>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+  set_tests_properties(v04_spray_remap_cli PROPERTIES TIMEOUT 60)
+endif()

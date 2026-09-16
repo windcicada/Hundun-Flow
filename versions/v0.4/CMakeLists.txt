@@ -283,6 +283,7 @@ set(hundun_v04_core_sources
   src/models_spray_breakup.cpp
   src/models_spray_sgs.cpp
   src/models_spray_sgs_step.cpp
+  src/models_spray_remap.cpp
   src/models_spray_mechanics.cpp
   src/models_spray_migration.cpp
   src/models_spray_parcel.cpp
@@ -400,4 +401,10 @@ if(HUNDUN_BUILD_TESTS)
     HUNDUN_V04_ENABLE_TEST_ACCESS=1)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  add_executable(v04_spray_remap "${hundun_repository_root}/tools/v04_spray_remap.cpp")
+  target_include_directories(v04_spray_remap PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(v04_spray_remap PRIVATE hundun_v04_core hundun_v04_portable_cantera)
 endif()
