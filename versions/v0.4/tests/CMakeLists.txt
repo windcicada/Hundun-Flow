@@ -2649,3 +2649,7 @@ add_test(NAME v04_case_pack_files COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/case_pack_test.py"
   "${hundun_repository_root}/tools/v04_case_pack.py")
 set_tests_properties(v04_case_pack_files PROPERTIES TIMEOUT 15)
+
+add_test(NAME v04_vtk_mask_cli COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/integration/vtk_mask_test.py")
+set_tests_properties(v04_vtk_mask_cli PROPERTIES TIMEOUT 30)
