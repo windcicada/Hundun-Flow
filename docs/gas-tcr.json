@@ -12,7 +12,7 @@
     "nonuniform mixture-fraction Cphi filters, priority and smoothing"
   ],
   "remaining": [
-    "species-channel coordinate conversion",
+    "production species-coordinate policy",
     "production spatial halos and IBM",
     "production history and scheduling",
     "remixing and gas coupling",
@@ -51,16 +51,58 @@
     "cases": 67,
     "difference": 0.0,
     "source_sha256": "ba15122b54e135ebe1bd15eab7ba351f9c37ff324497bfca64462ee6e1213d9e",
-    "binary_sha256": "47728bd1e8338d84bf74f7165f233ea744b9ff7df7ad98f54c25f39bcf327068",
+    "binary_sha256": "1aec3cf092e6863909310c426bc44506bd54e25aef374099c67e01d44acfc632",
     "scope": "Complete reference Dynamic_Cphi; equal scalar channels with unit molecular weights isolate moments and bounded products"
   },
+  "species_coordinates": {
+    "dyn711": {
+      "cases": 67,
+      "source_equivalent_difference": 3.6845422309238285e-13,
+      "changed_coefficients": 489,
+      "coefficient_count": 536,
+      "worst": {
+        "case": 2,
+        "cell": 7,
+        "channel": 3,
+        "source": 6.105720881157769,
+        "mass_consistent": 1.0,
+        "absolute_difference": 5.105720881157769
+      },
+      "molecular_weights": [
+        1.0,
+        16.0,
+        17.0
+      ],
+      "policy": "source G2 uses specific-mole gradient; RD2G2 uses mass gradient; mass_consistent uses mass gradients in both"
+    },
+    "624cf": {
+      "cases": 67,
+      "source_equivalent_difference": 3.218527422530223e-15,
+      "changed_coefficients": 1584,
+      "coefficient_count": 1608,
+      "worst": {
+        "case": 2,
+        "cell": 4,
+        "channel": 1,
+        "source": 5.461260870808016,
+        "mass_consistent": 1.0,
+        "absolute_difference": 4.461260870808016
+      },
+      "molecular_weights": [
+        18.0,
+        32.0,
+        17.0
+      ],
+      "policy": "source G2 uses specific-mole gradient; RD2G2 uses mass gradient; mass_consistent uses mass gradients in both"
+    }
+  },
   "source_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3",
-  "driver_sha256": "a1eef3c3075b04601ee593fcc12567c3bc1ac6c9d3bc5839989a0bcab59ea84e",
-  "generator_sha256": "c7581ec4760886ff8e1dfc44dc977a87487f8895995e1895189a512208765332",
+  "driver_sha256": "393a103ca8308eadd42f9893f714725d9db3c39536831f1c17a2c0413d4f15a3",
+  "generator_sha256": "376d66bccc812697a97553c4d93b2178cf8690f25309e6c9462080390b2e8061",
   "binaries": {
-    "fp32": "5489838ef8056c6ca1a286104f121a7735d0aafe7f2606bbfb1f57582ea663f3",
-    "fp64": "ea8bc3d57ac3d689706d92e9d24dfb4573004e11ff13de34d0d96bc07febfc36",
-    "hundun": "f5fdb4ce815193be184ce191446c7cd4e62c15961d8d938c4e2578dcf62e2674"
+    "fp32": "d547ecc872ec828900c26f5ede6e5392826565965e93c9a707023e4eea7be118",
+    "fp64": "f40b4fd7e5df6fd077e6e232b9f67b672d6689590f9eb949daf942a050ca2236",
+    "hundun": "e6c17c63686f8ec2781e9c7b1f1d39102eead3bf11be0d3a006f14a667393a4a"
   },
   "reference_compile": [
     "gfortran -O2 -fcheck=all",

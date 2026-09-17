@@ -42,6 +42,8 @@ public:
   const Rate &accepted(std::size_t cell, std::size_t species) const noexcept {
     return accepted_[cell * ns_ + species];
   }
+  std::size_t cells() const noexcept { return cphi_.size(); }
+  std::size_t species() const noexcept { return ns_; }
   double cphi(std::size_t cell) const noexcept { return cphi_[cell]; }
   Clock clock() const noexcept { return clock_at(calls_); }
   std::uint64_t statistics_calls() const noexcept { return calls_; }

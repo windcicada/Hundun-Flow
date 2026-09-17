@@ -3,6 +3,7 @@
 #include "hundun/v04_io.hpp"
 #include "models_tcr_detail.hpp"
 #include "core_tcr_dynamic_history_detail.hpp"
+#include "core_tcr_dyn711_history_detail.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cstring>
@@ -14,8 +15,18 @@ namespace hundun::v04::detail {
 class ProductTcrHistory {
 public:
   static constexpr std::uint32_t record_bytes = 120U;
+  void configure_dyn711(PlanFingerprint model, std::size_t cells,
+                         std::size_t species, double initial_cphi) {
+    dynamic_.reset();
+    dyn711_ = std::make_unique<Dyn711History>();
+    dyn711_->configure(model, cells, species, initial_cphi);
+    identity_ = dyn711_->snapshot().identity;
+  }
+  Dyn711History *dyn711() noexcept { return dyn711_.get(); }
+  const Dyn711History *dyn711() const noexcept { return dyn711_.get(); }
   void configure_dynamic(PlanFingerprint model, std::size_t cells,
                           std::size_t species, double initial_cd) {
+    dyn711_.reset();
     dynamic_ = std::make_unique<DynamicTcrHistory>();
     dynamic_->configure(model, cells, species, initial_cd);
     identity_ = dynamic_->snapshot().identity;
@@ -24,6 +35,7 @@ public:
   const DynamicTcrHistory *dynamic() const noexcept { return dynamic_.get(); }
   void configure(PlanFingerprint model, std::size_t cells,
                  int initialization_sign) {
+    dynamic_.reset(); dyn711_.reset();
     initialization_sign_ = initialization_sign;
     identity_ =
         (model ^ UINT64_C(0x5443524849530001)) * UINT64_C(1099511628211);
@@ -39,6 +51,7 @@ public:
     }
   }
   std::uint64_t owned_bytes() const noexcept {
+    if (dyn711_) return sizeof(*this) + dyn711_->owned_bytes();
     if (dynamic_) return sizeof(*this) + dynamic_->owned_bytes();
     return sizeof(*this) +
            (accepted_.capacity() + trial_.capacity()) *
@@ -47,6 +60,7 @@ public:
   }
   bool enabled() const noexcept { return identity_ != 0; }
   RestartCellRecordsView snapshot() const noexcept {
+    if (dyn711_) return dyn711_->snapshot();
     if (dynamic_) return dynamic_->snapshot();
     return enabled() ? RestartCellRecordsView{identity_,
                                               record_bytes,
@@ -55,6 +69,7 @@ public:
                      : RestartCellRecordsView{};
   }
   RestartCellRecordsView prepared_snapshot() const noexcept {
+    if (dyn711_) return dyn711_->prepared_snapshot();
     if (dynamic_) return dynamic_->prepared_snapshot();
     return pending_ ? RestartCellRecordsView{identity_,
                                              record_bytes,
@@ -86,6 +101,7 @@ public:
     return stage(cell, tcr::detail::prepare(accepted_[cell], request), step);
   }
   Status seal() noexcept {
+    if (dyn711_) return dyn711_->seal();
     if (dynamic_) return dynamic_->seal();
     pending_ = enabled();
     return {};
@@ -93,8 +109,10 @@ public:
   void discard() noexcept {
     pending_ = false;
     if (dynamic_) dynamic_->discard();
+    if (dyn711_) dyn711_->discard();
   }
   void commit() noexcept {
+    if (dyn711_) { dyn711_->commit(); return; }
     if (dynamic_) { dynamic_->commit(); return; }
     assert(!enabled() || pending_);
     if (!pending_)
@@ -124,6 +142,7 @@ public:
   Status stage_restore_records(Span<const std::uint8_t> records,
                                std::uint64_t step) noexcept {
     discard();
+    if (dyn711_) return dyn711_->restore(records, step);
     if (dynamic_) return dynamic_->restore(records, step);
     if (records.size != accepted_bytes_.size() ||
         (records.size && !records.data))
@@ -227,6 +246,7 @@ private:
   PlanFingerprint identity_{};
   bool pending_{};
   std::unique_ptr<DynamicTcrHistory> dynamic_;
+  std::unique_ptr<Dyn711History> dyn711_;
   std::vector<tcr::detail::History> accepted_, trial_;
   std::vector<std::uint8_t> accepted_bytes_, trial_bytes_;
 };

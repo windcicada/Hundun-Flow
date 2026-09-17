@@ -83,12 +83,12 @@ program probe
  implicit none
  integer :: reset,ios,i,j,k,c,s,steps
  real :: eta,pdf(6),psr(6),composition(6),dissipation,velocity
- character(8) :: mode
+ character(16) :: mode
  do i=1,64
    nfo(i)=(i-1)*64
  enddo
  call get_command_argument(1,mode)
- if(trim(mode)=='mix'.or.trim(mode)=='cf_mix')then
+ if(trim(mode)=='mix'.or.trim(mode)=='cf_mix'.or.trim(mode)=='species'.or.trim(mode)=='cf_species')then
    call mix_probe
    stop
  endif
@@ -127,7 +127,7 @@ program probe
  ! start with zero products, so their invalid-ratio markers remain -1.
  if(trim(mode)=='mix')then
    names(6)='TRACE';jfuel=0
- else
+ else if(trim(mode)=='cf_mix')then
    wm=1
  endif
  do
@@ -135,10 +135,10 @@ program probe
    if(status/=0)exit
    f=0;f(nfo(nvf)+1:nfo(nvf)+64)=scalar
    fsc=0;dyn_LM=0;dyn_M2=0;temp_i=0;temp_k=0;dtim=1;dyn_C_time=0
-   if(trim(mode)=='cf_mix')then
+   if(trim(mode)=='cf_mix'.or.trim(mode)=='species'.or.trim(mode)=='cf_species')then
      do cell=1,6
-       fsc(cell,:)=scalar
-       f(nfo(nf+cell)+1:nfo(nf+cell)+64)=scalar
+       fsc(cell,:)=scalar/real(wm(cell))
+       f(nfo(nf+cell)+1:nfo(nf+cell)+64)=scalar/real(wm(cell))
      enddo
    endif
    call Dynamic_Cphi
@@ -146,7 +146,9 @@ program probe
    do jj=2,3
    do ii=2,3
      cell=ii+jo(jj)+ko(kk)
-     if(trim(mode)=='mix')then
+     if(trim(mode)=='species')then
+       write(*,'(4(es25.17,1x))')dyn_M2(:,cell),dyn_LM(1,cell)
+     else if(trim(mode)=='mix')then
        write(*,'(2(es25.17,1x))')dyn_M2(1,cell),dyn_LM(1,cell)
      else
        write(*,'(3(es25.17,1x))')dyn_LM(:,cell)

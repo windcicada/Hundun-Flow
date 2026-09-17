@@ -104,20 +104,47 @@ if a.cf_double:
     cf_filter = dict(cases=len(mix_rows), difference=cf_error, source_sha256=sha(a.cf_source),
         binary_sha256=sha(a.cf_double),
         scope='Complete reference Dynamic_Cphi; equal scalar channels with unit molecular weights isolate moments and bounded products')
+# Non-unit molecular weights expose a distinct source-coordinate policy.
+# Compare the literal source first, then measure the dimensional correction;
+# the latter is a documented model difference rather than an equivalence test.
+species_results = {}
+for label, path, mode in [('dyn711', a.fp64, 'species'), ('624cf', a.cf_double, 'cf_species')]:
+    if not path:
+        continue
+    literal = run(a.hundun, shlex.split(a.runner), mix_data, (mode,))
+    mass = run(a.hundun, shlex.split(a.runner), mix_data, (mode+'_mass',))
+    reference = run(path, input_text=mix_data, args=(mode,))
+    assert len(reference) == len(literal) == len(mass) == 8*len(mix_rows)
+    width = 4 if label == 'dyn711' else 3
+    assert all(len(x) == len(y) == len(z) == width for x,y,z in zip(reference,literal,mass))
+    error = max(abs(x-y)/max(1.,abs(x),abs(y)) for left,right in zip(literal,reference)
+                for x,y in zip(left,right))
+    assert error <= 1e-11, (label,error)
+    columns = [3] if label == 'dyn711' else [0,1,2]
+    differences = [dict(case=i//8, cell=i%8, channel=j, source=left[j], mass_consistent=right[j],
+                        absolute_difference=abs(left[j]-right[j]))
+                   for i,(left,right) in enumerate(zip(reference,mass)) for j in columns]
+    worst = max(differences,key=lambda x:x['absolute_difference'])
+    species_results[label] = dict(cases=len(mix_rows), source_equivalent_difference=error,
+        changed_coefficients=sum(x['absolute_difference']>1e-11 for x in differences),
+        coefficient_count=len(differences), worst=worst,
+        molecular_weights=([1.,16.,17.] if label=='dyn711' else [18.,32.,17.]),
+        policy='source G2 uses specific-mole gradient; RD2G2 uses mass gradient; mass_consistent uses mass gradients in both')
+print('species_coordinate_policy', json.dumps(species_results,indent=2))
 evidence = dict(schema='hundun.gas.tcr.v1', calls=len(rows), independent_windows=40*3,
     reference_scope='Complete statistics.F90 with uniform 2x2x2 interior, serial reduction and Cartesian gradient fixture',
     verified=['eight-interval signed accumulation', 'separate ninth evaluation call',
               'kappa lower/upper/weak-rate branches', 'time-scale branches on uniform fields',
               'Cphi update clock and uniform fallback',
               'nonuniform mixture-fraction Cphi filters, priority and smoothing'],
-    remaining=['species-channel coordinate conversion', 'production spatial halos and IBM',
+    remaining=['production species-coordinate policy', 'production spatial halos and IBM',
                'production history and scheduling',
                'remixing and gas coupling', 'parallel restart and real-case trajectories'],
     errors=errors, input_sha256=hashlib.sha256(data.encode()).hexdigest(),
     spatial_filter=dict(cases=len(mix_rows), interior_cells=8, errors=mix_errors,
         input_sha256=hashlib.sha256(mix_data.encode()).hexdigest(),
         scope='Complete Dynamic_Cphi mixture-fraction channel; uniform donor units and varying density/volume/scalar; explicit fixture ghost products'),
-    cf_filter=cf_filter,
+    cf_filter=cf_filter, species_coordinates=species_results,
     source_sha256=sha(a.source), driver_sha256=sha(Path(__file__).with_suffix('.f90')),
     generator_sha256=sha(Path(__file__)),
     binaries={k:sha(v) for k,v in [('fp32',a.fp32),('fp64',a.fp64),('hundun',a.hundun)]},

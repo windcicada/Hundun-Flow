@@ -149,6 +149,25 @@ Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> f
     }
   }
   s=agree(s);if(s)s=exchange();if(!s)return s;
+  s=spatial_products(false);if(!s)return s;
+  i=0;
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+    if(!active(i))continue;
+    auto *p=history.candidate(i);
+    for(unsigned group=0;group<3;++group) {
+      if(groups_[group]>=ns_)continue;
+      double m2{},lm{};
+      filter({x,y,z},[&](Int3 q){m2+=view_.unchecked(q,17+group);lm+=view_.unchecked(q,5+group);});
+      p[5*ns_+group]=dynamic_cd_from_products(m2,lm);
+    }
+  }
+  return history.seal();
+}
+
+Status DynamicTcrPlan::spatial_products(bool dyn711) noexcept {
+  using namespace tcr::detail;
+  const auto cells=patch_.cells;
+  Status s;
   for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
     const Int3 c{x,y,z};
     for(unsigned group=0;group<3;++group)for(unsigned d=0;d<3;++d) {
@@ -172,13 +191,13 @@ Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> f
         donor.volume=view_.unchecked(p,1);
         donor.scalar=view_.unchecked(p,2+group);
         for(unsigned d=0;d<3;++d)donor.gradient[d]=view_.unchecked(p,8+3*group+d);
-      });
+      },dyn711);
       DynamicFilterProducts products;
       if(count) {
         DynamicFilterMoments moments;
         if(!dynamic_filter_moments(donors.data(),count,moments))s=invalid();
         else {
-          products=dynamic_filter_products(moments);
+          products=dyn711 ? dyn711_filter_products(moments) : dynamic_filter_products(moments);
           if(!products.available)s=invalid();
         }
       }
@@ -189,17 +208,75 @@ Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> f
     }
   }
   s=agree(s);if(s)s=exchange();if(!s)return s;
+  return s;
+}
+
+Status DynamicTcrPlan::finish(Dyn711History &history,
+    const std::array<ConstFieldView,3> &means,
+    const std::array<ConstFieldView,3> &gradient_coordinates,
+    ConstFieldView density,Span<const std::uint8_t> activity) noexcept {
+  using namespace tcr::detail;
+  const auto cells=patch_.cells;
+  auto s=agree(history.species()!=ns_ || history.cells()!=count_ ||
+      !valid_cell_view(density,cells,0,1,0) ||
+      (activity.size && (activity.size!=count_ || !activity.data)) ? invalid() : Status{});
+  if(!s)return s;
+  for(unsigned g=0;g<3;++g)
+    if(!valid_cell_view(means[g],cells,0,1,0) ||
+        !valid_cell_view(gradient_coordinates[g],cells,0,1,0))s=invalid();
+  s=agree(s);if(!s)return s;
+  // The model clock controls collective filter exchanges. Check it across
+  // partitions before taking that branch, including imported/rebuilt history.
+  const std::uint64_t calls=history.statistics_calls();
+  std::uint64_t minimum{},maximum{};
+  if(MPI_Allreduce(&calls,&minimum,1,MPI_UINT64_T,MPI_MIN,comm_)!=MPI_SUCCESS ||
+      MPI_Allreduce(&calls,&maximum,1,MPI_UINT64_T,MPI_MAX,comm_)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,10237};
+  if(minimum!=maximum)return invalid();
+  if(!dyn711_tick(history.clock()).update_cphi)return agree(history.seal());
+  const auto active=[&](std::size_t i){return !activity.size || activity.data[i]!=0;};
+  std::size_t i{};
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+    const Int3 c{x,y,z};const double rho=density.unchecked(c,0);
+    if(active(i) && (!std::isfinite(rho) || rho<=0))s=invalid();
+    view_.unchecked(c,0)=active(i) ? rho : 0.;
+    view_.unchecked(c,1)=geometry_->x().widths().data[x+patch_.begin.x]*
+        geometry_->y().widths().data[y+patch_.begin.y]*geometry_->z().widths().data[z+patch_.begin.z];
+    for(unsigned g=0;g<3;++g) {
+      view_.unchecked(c,2+g)=means[g].unchecked(c,0);
+      view_.unchecked(c,5+g)=gradient_coordinates[g].unchecked(c,0);
+    }
+  }
+  s=agree(s);if(s)s=exchange();if(!s)return s;
+  s=spatial_products(true);if(!s)return s;
   i=0;
   for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
     if(!active(i))continue;
-    auto *p=history.candidate(i);
-    for(unsigned group=0;group<3;++group) {
-      if(groups_[group]>=ns_)continue;
+    const Int3 c{x,y,z};std::array<double,3> ratios;
+    for(unsigned g=0;g<3;++g) {
       double m2{},lm{};
-      filter({x,y,z},[&](Int3 q){m2+=view_.unchecked(q,17+group);lm+=view_.unchecked(q,5+group);});
-      p[5*ns_+group]=dynamic_cd_from_products(m2,lm);
+      filter(c,[&](Int3 p){m2+=view_.unchecked(p,17+g);lm+=view_.unchecked(p,5+g);},true);
+      ratios[g]=dyn711_filter_ratio(m2,lm);
     }
+    // Coordinates have been consumed; a separate component avoids overwriting
+    // products still read by adjacent second filters.
+    const double value=dyn711_select_cphi(ratios);
+    if(!std::isfinite(value))s=invalid();
+    view_.unchecked(c,2)=value;
   }
-  return history.seal();
+  s=agree(s);if(s)s=exchange();if(!s)return s;
+  i=0;
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+    if(!active(i))continue;
+    const Int3 c{x,y,z};std::array<double,7> neighbors;
+    // Missing boundary/solid donors have zero smoothing weight. A value at
+    // the endpoint 1 is outside the source's strict (1.5,12) inclusion band.
+    neighbors.fill(1.);unsigned count{};
+    filter(c,[&](Int3 p){if(p.x!=x || p.y!=y || p.z!=z)neighbors[count++]=view_.unchecked(p,2);},true);
+    const auto staged=history.stage_cphi(i,dyn711_smooth_cphi(view_.unchecked(c,2),neighbors));
+    if(!staged)s=staged;
+  }
+  s=agree(s);if(s)s=agree(history.seal());return s;
 }
+
 } // namespace hundun::v04::detail

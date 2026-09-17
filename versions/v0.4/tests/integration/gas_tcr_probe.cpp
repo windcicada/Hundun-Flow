@@ -6,7 +6,7 @@
 #include <string_view>
 using namespace hundun::v04::tcr::detail;
 namespace {
-int mix_probe(bool cf) {
+int mix_probe(bool cf, bool species=false, bool consistent=false) {
   constexpr std::array<std::array<int,3>,8> offsets{{
       {{0,0,0}},{{-1,0,0}},{{0,-1,0}},{{0,0,-1}},
       {{0,-1,-1}},{{-1,0,-1}},{{-1,-1,0}},{{-1,-1,-1}}}};
@@ -17,8 +17,9 @@ int mix_probe(bool cf) {
     for(unsigned i=1;i<64;++i)if(!(std::cin>>rho[i]))return 1;
     for(auto *a:{&volume,&scalar})for(double &v:*a)if(!(std::cin>>v))return 1;
     std::array<DynamicFilterDonor,64> grid;
-    std::array<DynamicFilterProducts,64> products;
-    std::array<double,64> cphi,ratio;
+    std::array<std::array<DynamicFilterProducts,64>,3> products;
+    std::array<double,64> cphi;
+    std::array<std::array<double,3>,64> ratio;
     cphi.fill(2.);
     for(int z=0;z<4;++z)for(int y=0;y<4;++y)for(int x=0;x<4;++x) {
       const auto i=index(x,y,z);
@@ -37,19 +38,34 @@ int mix_probe(bool cf) {
       }
       DynamicFilterMoments moments;
       if(!dynamic_filter_moments(donors.data(),8,moments))return 2;
-      products[index(x,y,z)]=cf ? dynamic_filter_products(moments) : dyn711_filter_products(moments);
-      if(!products[index(x,y,z)].available)return 3;
+      const unsigned groups=species ? 3 : 1;
+      // Full original species-channel conversion: RF2 and RD2G2 use Y and
+      // grad(Y), while the square of the filtered gradient retains grad(n).
+      // Keep this diagnostic source policy separate from mass-consistent
+      // products used by the existing native 624CF model.
+      const double mw[3]{cf ? 18. : 1., cf ? 32. : 16.,17.};
+      for(unsigned g=0;g<groups;++g) {
+        auto v=moments;
+        if(species && !consistent)v.gradient_squared/=mw[g]*mw[g];
+        products[g][index(x,y,z)]=cf ? dynamic_filter_products(v) : dyn711_filter_products(v);
+        if(!products[g][index(x,y,z)].available)return 3;
+      }
     }
     for(int z=1;z<3;++z)for(int y=1;y<3;++y)for(int x=1;x<3;++x) {
+      const auto i=index(x,y,z);
+      std::array<double,3> coefficients{-1.,-1.,-1.};
+      for(unsigned g=0;g<(species ? 3u : 1u);++g) {
       double m2{},lm{};
       for(const auto &o:offsets) {
-        const auto &d=products[index(x+(cf&&x==1 ? -o[0] : o[0]),
+        const auto &d=products[g][index(x+(cf&&x==1 ? -o[0] : o[0]),
             y+(cf&&y==1 ? -o[1] : o[1]),z+(cf&&z==1 ? -o[2] : o[2]))];
         m2+=d.m_squared;lm+=d.l_times_m;
       }
-      const auto i=index(x,y,z);
-      ratio[i]=dyn711_filter_ratio(m2,lm);
-      cphi[i]=cf ? dynamic_cd_from_products(m2,lm) : dyn711_select_cphi({ratio[i],-1.,-1.});
+      ratio[i][g]=dyn711_filter_ratio(m2,lm);
+      coefficients[g]=cf ? dynamic_cd_from_products(m2,lm) : ratio[i][g];
+      }
+      cphi[i]=cf ? coefficients[0] : dyn711_select_cphi(coefficients);
+      if(cf && species)ratio[i]=coefficients;
     }
     for(int z=1;z<3;++z)for(int y=1;y<3;++y)for(int x=1;x<3;++x) {
       std::array<double,7> neighbors;
@@ -57,8 +73,13 @@ int mix_probe(bool cf) {
         const auto &o=offsets[j];neighbors[j-1]=cphi[index(x+o[0],y+o[1],z+o[2])];
       }
       const auto i=index(x,y,z);
-      if(cf)std::cout<<cphi[i]<<' '<<cphi[i]<<' '<<cphi[i]<<'\n';
-      else std::cout<<ratio[i]<<' '<<dyn711_smooth_cphi(cphi[i],neighbors)<<'\n';
+      if(cf && species)std::cout<<ratio[i][0]<<' '<<ratio[i][1]<<' '<<ratio[i][2]<<'\n';
+      else if(cf)std::cout<<cphi[i]<<' '<<cphi[i]<<' '<<cphi[i]<<'\n';
+      else {
+        std::cout<<ratio[i][0]<<' ';
+        if(species)std::cout<<ratio[i][1]<<' '<<ratio[i][2]<<' ';
+        std::cout<<dyn711_smooth_cphi(cphi[i],neighbors)<<'\n';
+      }
     }
   }
   return 0;
@@ -67,6 +88,10 @@ int mix_probe(bool cf) {
 int main(int argc,char **argv) {
   if(argc==2 && std::string_view(argv[1])=="mix")return mix_probe(false);
   if(argc==2 && std::string_view(argv[1])=="cf_mix")return mix_probe(true);
+  if(argc==2 && std::string_view(argv[1])=="species")return mix_probe(false,true);
+  if(argc==2 && std::string_view(argv[1])=="species_mass")return mix_probe(false,true,true);
+  if(argc==2 && std::string_view(argv[1])=="cf_species")return mix_probe(true,true);
+  if(argc==2 && std::string_view(argv[1])=="cf_species_mass")return mix_probe(true,true,true);
   unsigned reset,step{};
   double dt,eta,epsilon,velocity,atime{},mean{};
   std::array<double,6> pdf,psr,composition,times;

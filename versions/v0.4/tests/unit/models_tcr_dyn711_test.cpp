@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "models_tcr_dyn711_detail.hpp"
 #include "core_tcr_dyn711_history_detail.hpp"
+#include "core_tcr_history_detail.hpp"
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -104,7 +105,7 @@ int main() {
     const auto b=h.snapshot().values;
     return std::vector<std::uint8_t>(b.data,b.data+b.size);
   };
-  const auto stage=[&](Dyn711History &h,std::uint64_t step,double dt) {
+  const auto stage=[&](Dyn711History &h,std::uint64_t step,double dt, bool seal_history=true) {
     ok &= bool(h.begin(step));
     for(unsigned cell=0;cell<2;++cell) {
       if(cell==1) { ok &= bool(h.stage_inactive(cell)); continue; }
@@ -113,7 +114,7 @@ int main() {
       if(dyn711_tick(h.clock()).update_cphi)
         ok &= bool(h.stage_cphi(cell,3+step%5));
     }
-    ok &= bool(h.seal());
+    if(seal_history)ok &= bool(h.seal());
   };
   for(unsigned step=0;step<20;++step) {
     const auto before=image(history);
@@ -153,6 +154,39 @@ int main() {
   corrupt=before;
   corrupt[40+32]=3; // Mutually exclusive upper-root and linear-endpoint flags.
   ok &= !history.restore({corrupt.data(),corrupt.size()},20) && image(history)==before;
+  // The native owner uses model-specific record identity and delegates the
+  // full transaction, including fixed V4 and enclosing V5 byte contracts.
+  using hundun::v04::detail::ProductTcrHistory;
+  ProductTcrHistory owner, receiver, other;
+  owner.configure_dyn711(73,2,6,2);
+  receiver.configure_dyn711(73,2,6,2);
+  other.configure_dynamic(73,2,6,2);
+  ok &= owner.enabled() && owner.dyn711() && !owner.dynamic() &&
+      owner.snapshot().identity != other.snapshot().identity &&
+      owner.owned_bytes() >= owner.dyn711()->owned_bytes();
+  hundun::v04::RestartImage native;
+  native.source_format_version=4;native.step=20;native.backward_euler_recovery=false;
+  native.cell_record_identity=record.identity;native.cell_record_bytes=record.record_bytes;
+  native.cell_records=before;
+  ok &= bool(owner.stage_restore(native)) && !other.stage_restore(native);
+  const auto pending=owner.prepared_snapshot();
+  ok &= pending.identity==record.identity && pending.record_bytes==record.record_bytes &&
+      std::equal(before.begin(),before.end(),pending.values.data);
+  owner.discard();
+  ok &= owner.prepared_snapshot().values.size==0 && owner.dyn711()->statistics_calls()==0;
+  ok &= bool(owner.stage_restore(native));owner.commit();
+  ok &= owner.dyn711()->statistics_calls()==20 && image(*owner.dyn711())==before;
+  // V5 combined owners have already validated outer identity and redistribute
+  // complete per-cell records through this same typed restore operation.
+  ok &= bool(receiver.stage_restore_records(owner.snapshot().values,20));receiver.commit();
+  ok &= image(*receiver.dyn711())==before;
+  stage(*owner.dyn711(),20,.0005,false);
+  ok &= bool(owner.seal());
+  owner.commit();
+  ok &= owner.dyn711()->statistics_calls()==21 && owner.prepared_snapshot().values.size==0;
+  native.cell_records[24]^=1;
+  ok &= !receiver.stage_restore(native) && image(*receiver.dyn711())==before &&
+      receiver.prepared_snapshot().values.size==0;
   if(!ok)std::cerr<<"dyn711 root/window/filter contract failure\n";
   return ok?0:1;
 }
