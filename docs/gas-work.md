@@ -875,3 +875,30 @@ cdphyso_dynamic 使用 κ=1 和流动步号的更新相位；两者采用
 选项、格式不匹配及非有限标量保持严格准入。证据为
 gas-history-init.json 与 check/gas-history-init-test.log（1/1）；
 原生历史保留继续使用上一节点 gas-history.json 的独立证据。
+
+### G4／I4：GTMC 实场 dyn711 输入与 IBM 标量入口（2026-09-17）
+
+`tools/gtmc_seed.py` 准备第 32000 步的独立原生算例和 V2 传输数据。
+逐文件核对既有 PDF 包哈希，并按 128 份冻结网格／Restart 的来源
+清单读入原混合分数。变量 5 与写盘例程追加的 nvf 记录逐块一致，
+每个目标单元恰由一个源块覆盖。新目录为 check/z0（算例）和
+check/z1（传输）；原始算例、源检查点和 PDF 包保持原样。
+
+几何沿用 153×325×151 的笛卡尔／IBM 资产，21 个质量流量入口、
+静压出口、JL4、4 场 ESF、Vreman 和源初始 dt 保持原配置。
+新增 dyn711 与具名 Z 输运；边界纯甲烷对应 Z=1，空气对应 Z=0。
+局部 CFL 显式采用方向最大值、0.30±0.05。源 Z 的范围为
+−7.6108472e−7 至 0.0122582391，完整保留这些原始数值。
+
+128 进程 `hundun check` 返回 invalid_case/15906。逐条边界核对
+排除了外边界温度／热类型／标量数值差异，命中的是内部入口
+label=703741800、y_min、Z=1：core_patch_inlets_detail.hpp 当前
+对 immersed patch 仅准入 species；IbmInterfaceInletState 和相应
+字段枚举也只承载物种、焓、速度及动能。因而后续修复需要贯通
+被动标量的内部入口状态、矩阵／通量与原方程审核，再恢复实场检查。
+本节点保持该准入保护，实际推进接续上述接线完成后开展。
+
+证据为 gas-gtmc-seed.json、check/gas-gtmc-prep.log 和
+check/gas-gtmc-check.log。check/z1/prepare.json 保存全部 256 份
+源网格／流场身份及传输来源；该数据准备与失败定位属于实场接线
+证据，冷态计时及完整燃烧轨迹保持各自验收范围。
