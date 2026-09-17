@@ -99,6 +99,10 @@ program probe
  enddo
  enddo
  enddo
+ if(trim(mode)=='flow')then
+   call flow_probe
+   stop
+ endif
  do
   read(*,*,iostat=ios) reset,dtim,eta,dissipation,velocity,pdf,psr,composition
   if(ios/=0)exit
@@ -120,6 +124,41 @@ program probe
    kappa(1:6,c),sum_w(:,c),sum_w0(:,c),tim_sp(:,c),tim_flow(c),dyn_LM(1,c)
  enddo
  contains
+ subroutine flow_probe
+ integer :: status,cell,ii,jj,kk,sp
+ real :: density_value,last_velocity
+ do
+   read(*,*,iostat=status) density_value,last_velocity
+   if(status/=0)exit
+   atime=0;tim=0;dtim=0.001;dyn_C_time=0;dyn_C_count=0;dstep_ww0=0;init_ww0=0
+   sum_w=0;sum_w0=0;kappa=1;fstat=0;ftau=0;fschem=0;p_mean=0;rdot_mean=0
+   dyn_LM=2;dyn_M2=0;tim_sp=0;tim_flow=1
+   ajc=1;rho=density_value;visc=1e-4;eps=1;q=1;gam_sgs=0;p=101325
+   temp=600;qdot_rad=0;field_hdot=0;f=0;arr_eta=.3;sumn=1;fsc=0
+   do kk=1,4
+   do jj=1,4
+   do ii=1,4
+     cell=ii+jo(jj)+ko(kk);f(cell)=real(ii)
+   enddo
+   enddo
+   enddo
+   f(3+jo(3)+ko(3))=last_velocity
+   do sp=1,6
+     fsc(sp,:)=1.0/6.0
+     f(nfo(nf+sp)+1:nfo(nf+sp)+64)=1.0/6.0
+   enddo
+   rdot=0;prev_rdot=0
+   call statistics
+   do kk=2,3
+   do jj=2,3
+   do ii=2,3
+     cell=ii+jo(jj)+ko(kk)
+     write(*,'(es25.17)')tim_flow(cell)
+   enddo
+   enddo
+   enddo
+ enddo
+ end subroutine
  subroutine mix_probe
  integer :: status,cell,ii,jj,kk
  real :: scalar(64)

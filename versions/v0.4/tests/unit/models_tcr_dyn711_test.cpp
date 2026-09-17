@@ -45,7 +45,36 @@ int main() {
         ok &= c.available && std::abs(defect)<1e-14L*std::max(1.L,k*k);
       }
   ok &= !root(NAN,1).available && !root(-.01,1).available && !root(1.01,1).available &&
-      !root(.3,NAN).available && !root(.3,1,1,0).available && !root(.3,1,-1,1).available;
+      !root(.3,NAN).available && !root(.3,1,1,-1).available && !root(.3,1,-1,1).available;
+  // Local dimensional times, including their laminar limits, feed the actual
+  // upper/lower root switch. Scaling all volumetric material quantities leaves
+  // the specific SGS state and both times invariant.
+  const auto times=dyn711_flow_times(2,8,4,.02);
+  ok &= times.available && near(times.integral,1) && near(times.kolmogorov,.05) &&
+      near(times.flow,std::sqrt(.05));
+  for(double scale:{.01,2.,1e6}) {
+    const auto scaled=dyn711_flow_times(2,8*scale,4*scale,.02*scale);
+    ok &= scaled.available && near(scaled.integral,times.integral) &&
+        near(scaled.kolmogorov,times.kolmogorov) && near(scaled.flow,times.flow);
+  }
+  const auto still=dyn711_flow_times(0,0,1,1e-5);
+  const auto shear=dyn711_flow_times(0,1,1,1e-5);
+  ok &= still.available && std::isinf(still.flow) && shear.available && shear.flow==0;
+  c=root(.3,1,1,still.flow);
+  ok &= c.available && !c.upper_branch && near(c.selected,3./7.);
+  c=root(.3,1,1,shear.flow);
+  ok &= c.available && c.upper_branch && c.selected==1;
+  c=root(.3,1,0,0);
+  ok &= c.available && !c.upper_branch;
+  ok &= !dyn711_flow_times(-1,1,1,1).available &&
+      !dyn711_flow_times(1,-1,1,1).available &&
+      !dyn711_flow_times(1,1,0,1).available &&
+      !dyn711_flow_times(1,1,1,0).available &&
+      !dyn711_flow_times(1,INFINITY,1,1).available &&
+      !dyn711_flow_times(NAN,1,1,1).available && !root(.3,1,1,NAN).available;
+  const auto wide=dyn711_flow_times(1e200,1e100,1e200,1e100);
+  ok &= wide.available && near(wide.integral/1e300,1) &&
+      near(wide.flow/1e150,1);
 
   Dyn711Clock clock;
   Dyn711RateState accepted;

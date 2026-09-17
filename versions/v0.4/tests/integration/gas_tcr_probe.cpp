@@ -86,6 +86,19 @@ int mix_probe(bool cf, bool species=false, bool consistent=false) {
 }
 }
 int main(int argc,char **argv) {
+  if(argc==2 && std::string_view(argv[1])=="flow") {
+    double k,epsilon,density,mu;
+    std::cout<<std::setprecision(17);
+    while(std::cin>>k>>epsilon>>density>>mu) {
+      const auto times=dyn711_flow_times(k,epsilon,density,mu);
+      if(!times.available)return 1;
+      const auto control=dyn711_species_control(.3,1,1,1,times.flow,1e-30);
+      if(!control.available)return 2;
+      std::cout<<times.integral<<' '<<times.kolmogorov<<' '<<times.flow<<' '
+               <<control.upper_branch<<' '<<control.effective<<'\n';
+    }
+    return 0;
+  }
   if(argc==2 && std::string_view(argv[1])=="mix")return mix_probe(false);
   if(argc==2 && std::string_view(argv[1])=="cf_mix")return mix_probe(true);
   if(argc==2 && std::string_view(argv[1])=="species")return mix_probe(false,true);

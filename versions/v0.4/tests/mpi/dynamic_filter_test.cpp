@@ -45,18 +45,54 @@ bool compute(MPI_Comm comm,const CartesianGeometryPlan &geometry,MeshPatch patch
     };
     const std::array<ConstFieldView,3> means{component(a.view,0),component(a.view,1),component(a.view,2)};
     const std::array<ConstFieldView,3> gradients{component(aux.view,0),component(aux.view,1),component(aux.view,2)};
+    Field pdf(n,3),psr(n,3),eta(n,1),mu(n,1),velocity_gradient(n,9);
+    const std::array<double,3> weights{16,32,28};
+    ContributionRegistry contributions;
+    const FieldId effective=1;
+    status=contributions.configure({&effective,1});
+    TurbulencePlan turbulence;
+    TurbulencePlanSpec spec;spec.kind=TurbulenceKind::vreman;
+    if(status)status=TurbulencePlan::compile(comm,spec,geometry,patch,effective,42,contributions,turbulence);
+    if(!status)return false;
+    for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+      const Int3 cell{x,y,z};const int gx=x+patch.begin.x;
+      eta.view.unchecked(cell,0)=.3;mu.view.unchecked(cell,0)=scale*1e-5;
+      // Rest, simple shear (k=0, epsilon>0), and a full Vreman state.
+      if(gx%3==1)velocity_gradient.view.unchecked(cell,1)=100;
+      if(gx%3==2) {
+        velocity_gradient.view.unchecked(cell,0)=1000;
+        velocity_gradient.view.unchecked(cell,4)=-400;
+        velocity_gradient.view.unchecked(cell,8)=-600;
+      }
+      for(unsigned q=0;q<3;++q) {
+        const double rate=q==0 ? .0001*(gx+1) : q==1 ? -100. : 0.;
+        psr.view.unchecked(cell,q)=rate;pdf.view.unchecked(cell,q)=rate;
+      }
+    }
+    auto physical=as_const(a.view);physical.components=3;
+    detail::Dyn711StatisticsInput input{physical,as_const(pdf.view),as_const(psr.view),
+        as_const(eta.view),as_const(rho.view),as_const(mu.view),as_const(velocity_gradient.view),
+        {weights.data(),weights.size()},{active.data(),active.size()},.001,1e-30};
+    int rank{},ranks{};MPI_Comm_rank(comm,&rank);MPI_Comm_size(comm,&ranks);
+    // One bad owner rejects collectively, before any partial rate publication.
+    if(!windows.begin(0))return false;
+    if(rank==0)eta.view.unchecked({0,0,0},0)=NAN;
+    if(plan.stage_rates(windows,turbulence,input).code!=StatusCode::invalid_plan)return false;
+    eta.view.unchecked({0,0,0},0)=.3;windows.discard();
+    if(ranks>1) {
+      if(!windows.begin(0))return false;
+      if(rank==0)input.dt*=2;
+      if(plan.stage_rates(windows,turbulence,input).code!=StatusCode::invalid_plan)return false;
+      input.dt=.001;windows.discard();
+    }
     std::vector<double> updated(count);
-    for(unsigned step=0;step<3 && status;++step) {
+    for(unsigned step=0;step<18 && status;++step) {
       std::vector<std::uint8_t> proposal;
       // Candidate recomputation starts from exactly the same accepted rates,
       // coefficient and clocks; a rejected attempt publishes no new history.
       for(unsigned attempt=0;attempt<2 && status;++attempt) {
         status=windows.begin(step);
-        for(std::size_t c=0;c<count && status;++c) {
-          if(!active[c]) {status=windows.stage_inactive(c);continue;}
-          for(unsigned q=0;q<3 && status;++q)
-            status=windows.stage_rate(c,q,.001,1,2,.3,1,1,1e-30);
-        }
+        if(status)status=plan.stage_rates(windows,turbulence,input);
         if(status)status=plan.finish(windows,means,gradients,as_const(rho.view),{active.data(),active.size()});
         if(!status)break;
         const auto prepared=windows.prepared_snapshot().values;
@@ -72,14 +108,32 @@ bool compute(MPI_Comm comm,const CartesianGeometryPlan &geometry,MeshPatch patch
         if(step==1)updated[c]=windows.cphi(c);
         if(step==2 && windows.cphi(c)!=updated[c])return false;
         if(!active[c] && windows.cphi(c)!=2)return false;
+        if(active[c] && (step==8 || step==17))for(unsigned q=0;q<3;++q) {
+          const unsigned gx=c%std::size_t(n.x)+patch.begin.x;
+          // Stiff destruction and the globally weak species' 1e-12 fallback
+          // select the lower root in the full SGS state. Zero-k shear selects
+          // the upper root for every positive chemical clock.
+          const bool upper=gx%3==1 || (gx%3==2 && q==0);
+          const auto value=windows.accepted(c,q);
+          if(value.upper_branch!=upper ||
+              std::abs(value.selected-(upper ? 1. : 3./7.))>1e-14 ||
+              value.pdf_sum!=0 || value.psr_sum!=0) {
+            std::cerr<<"dyn711 branch gx="<<gx<<" species="<<q<<" step="<<step
+                     <<" upper="<<value.upper_branch<<" selected="<<value.selected<<'\n';
+            return false;
+          }
+        }
       }
     }
     if(!status){std::cerr<<"dyn711 filter status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';return false;}
-    out.resize(3*count);
-    for(i=0;i<count;++i)for(unsigned g=0;g<3;++g)out[3*i+g]=windows.cphi(i);
-    int rank{},ranks{};MPI_Comm_rank(comm,&rank);MPI_Comm_size(comm,&ranks);
+    out.resize(9*count);
+    for(i=0;i<count;++i)for(unsigned g=0;g<3;++g) {
+      out[9*i+g]=windows.cphi(i);
+      out[9*i+3+g]=windows.accepted(i,g).selected;
+      out[9*i+6+g]=windows.accepted(i,g).upper_branch;
+    }
     if(ranks>1 && mode==0 && scale==1) {
-      if(rank==0)for(unsigned step=3;step<8;++step) {
+      if(rank==0)for(unsigned step=18;step<22;++step) {
         if(!windows.begin(step))return false;
         for(std::size_t c=0;c<count;++c)if(!windows.stage_inactive(c))return false;
         if(!windows.seal())return false;
@@ -89,6 +143,7 @@ bool compute(MPI_Comm comm,const CartesianGeometryPlan &geometry,MeshPatch patch
       // enters halo exchange while another rank takes the held-Cphi path.
       const auto rejected=plan.finish(windows,means,gradients,as_const(rho.view),{active.data(),active.size()});
       if(rejected.code!=StatusCode::invalid_plan)return false;
+      if(plan.stage_rates(windows,turbulence,input).code!=StatusCode::invalid_plan)return false;
     }
   } else {
   if(status)status=history.begin(0);
@@ -126,13 +181,14 @@ int main(int argc,char **argv) {
       okay=compute(MPI_COMM_WORLD,geometry,local,mode,1,distributed,dyn711)&&okay;
       okay=compute(MPI_COMM_WORLD,geometry,local,mode,2,scaled,dyn711)&&okay;
       if(!okay)MPI_Abort(MPI_COMM_WORLD,2);
+      const unsigned width=dyn711 ? 9 : 3;
       std::size_t i{};
       for(int z=0;z<local.cells.z;++z)for(int y=0;y<local.cells.y;++y)
-        for(int x=0;x<local.cells.x;++x,++i)for(unsigned g=0;g<3;++g) {
+        for(int x=0;x<local.cells.x;++x,++i)for(unsigned g=0;g<width;++g) {
           const auto j=std::size_t(x+local.begin.x+7*y+35*z);
-          partition=std::max(partition,std::abs(distributed[3*i+g]-serial[3*j+g]));
-          invariance=std::max(invariance,std::abs(distributed[3*i+g]-scaled[3*i+g]));
-          if(distributed[3*i+g]>1.01 && distributed[3*i+g]<15.99)++interior_coefficients;
+          partition=std::max(partition,std::abs(distributed[width*i+g]-serial[width*j+g]));
+          invariance=std::max(invariance,std::abs(distributed[width*i+g]-scaled[width*i+g]));
+          if(g<3 && distributed[width*i+g]>1.01 && distributed[width*i+g]<15.99)++interior_coefficients;
         }
     }
     double errors[]{partition,invariance};MPI_Allreduce(MPI_IN_PLACE,errors,2,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);

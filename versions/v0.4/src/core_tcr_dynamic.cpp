@@ -86,6 +86,105 @@ Status DynamicTcrPlan::configure(MPI_Comm comm,const CartesianGeometryPlan &geom
   count_=std::size_t(patch.cells.x)*patch.cells.y*patch.cells.z;
   return s;
 }
+Status DynamicTcrPlan::stage_rates(Dyn711History &history,
+    const TurbulencePlan &turbulence, const Dyn711StatisticsInput &input) noexcept {
+  using namespace tcr::detail;
+  if(comm_==MPI_COMM_NULL)return invalid();
+  const auto cells=patch_.cells;
+  auto status=agree(history.cells()!=count_ || history.species()!=ns_ ||
+      !std::isfinite(input.dt) || input.dt<=0 ||
+      !std::isfinite(input.weak_rate) || input.weak_rate<=0 ||
+      input.molecular_weights.size!=ns_ || !input.molecular_weights.data ||
+      !valid_cell_view(input.physical_mass_fractions,cells,0,ns_,0) ||
+      !valid_cell_view(input.pdf_rates,cells,0,ns_,0) ||
+      !valid_cell_view(input.psr_rates,cells,0,ns_,0) ||
+      !valid_cell_view(input.eta,cells,0,1,0) ||
+      !valid_cell_view(input.density,cells,0,1,0) ||
+      !valid_cell_view(input.molecular_viscosity,cells,0,1,0) ||
+      !valid_cell_view(input.velocity_gradient,cells,0,9,0) ||
+      (input.activity.size && (input.activity.size!=count_ || !input.activity.data))
+      ? invalid() : Status{});
+  if(!status)return status;
+  // Before any conditional model work, ensure each rank advances the same
+  // accepted model clock and interval. Fixed-size reductions precede ns data.
+  std::uint64_t lower[2]{history.statistics_calls(),ns_},upper[2]{lower[0],lower[1]};
+  if(MPI_Allreduce(MPI_IN_PLACE,lower,2,MPI_UINT64_T,MPI_MIN,comm_)!=MPI_SUCCESS ||
+      MPI_Allreduce(MPI_IN_PLACE,upper,2,MPI_UINT64_T,MPI_MAX,comm_)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,10237};
+  double controls[4]{input.dt,input.weak_rate,-input.dt,-input.weak_rate};
+  if(MPI_Allreduce(MPI_IN_PLACE,controls,4,MPI_DOUBLE,MPI_MAX,comm_)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,10237};
+  if(lower[0]!=upper[0] || lower[1]!=upper[1] ||
+      controls[0]!=-controls[2] || controls[1]!=-controls[3])
+    return invalid();
+  for(std::size_t q=0;q<ns_;++q)
+    if(!std::isfinite(input.molecular_weights.data[q]) || input.molecular_weights.data[q]<=0)
+      status=invalid();
+  status=agree(status);if(!status)return status;
+  const auto active=[&](std::size_t i){return !input.activity.size || input.activity.data[i]!=0;};
+  // Floors and the one-second fallback cap are the original chemical-clock
+  // policy. The physical local SGS clock has its independently approved units.
+  std::array<double,240> maxima;
+  maxima.fill(1e-12);
+  const auto finite_time=[](long double value) {
+    return static_cast<double>(std::min(value,
+        static_cast<long double>(std::numeric_limits<double>::max())));
+  };
+  std::size_t i{};
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+    if(input.activity.size && input.activity.data[i]>1)status=invalid();
+    if(!active(i))continue;
+    const Int3 cell{x,y,z};
+    const double eta=input.eta.unchecked(cell,0);
+    if(!std::isfinite(eta) || eta<0 || eta>1)status=invalid();
+    VelocityGradient gradient;
+    for(unsigned q=0;q<9;++q)gradient.value[q]=input.velocity_gradient.unchecked(cell,q);
+    SgsState sgs;
+    const double rho=input.density.unchecked(cell,0),mu=input.molecular_viscosity.unchecked(cell,0);
+    const auto evaluated=turbulence.evaluate_sgs_cell(cell,gradient,rho,mu,sgs);
+    if(!evaluated) {status=evaluated;continue;}
+    const auto times=dyn711_flow_times(sgs.kinetic_energy_m2_s2,sgs.dissipation_w_m3,rho,mu);
+    if(!times.available) {status=invalid();continue;}
+    view_.unchecked(cell,0)=times.flow;
+    double sum{};
+    for(std::size_t q=0;q<ns_;++q) {
+      const double yq=input.physical_mass_fractions.unchecked(cell,q);
+      const double rate=input.psr_rates.unchecked(cell,q),pdf=input.pdf_rates.unchecked(cell,q);
+      if(!std::isfinite(yq) || yq<0 || yq>1 || !std::isfinite(rate) || !std::isfinite(pdf)) {
+        status=invalid();continue;
+      }
+      sum+=yq;
+      const double n=yq/input.molecular_weights.data[q];
+      if(!std::isfinite(n)) {status=invalid();continue;}
+      maxima[ns_+q]=std::max(maxima[ns_+q],n);
+      if(std::abs(rate)>=input.weak_rate && n>=input.weak_rate)
+        maxima[q]=std::max(maxima[q],finite_time(static_cast<long double>(n)/std::abs(rate)));
+    }
+    if(std::abs(sum-1)>2e-12)status=invalid();
+  }
+  status=agree(status);if(!status)return status;
+  if(MPI_Allreduce(MPI_IN_PLACE,maxima.data(),static_cast<int>(2*ns_),MPI_DOUBLE,MPI_MAX,comm_)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,10237};
+  i=0;
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+    if(!active(i)) {
+      const auto staged=history.stage_inactive(i);if(!staged)status=staged;
+      continue;
+    }
+    const Int3 cell{x,y,z};
+    for(std::size_t q=0;q<ns_;++q) {
+      const double rate=input.psr_rates.unchecked(cell,q);
+      const double n=input.physical_mass_fractions.unchecked(cell,q)/input.molecular_weights.data[q];
+      const double chemical=std::abs(rate)<input.weak_rate || n<input.weak_rate
+          ? std::min(1.,maxima[q]) : finite_time(rate>0
+              ? .5L*maxima[ns_+q]/rate : static_cast<long double>(n)/std::abs(rate));
+      const auto staged=history.stage_rate(i,q,input.dt,input.pdf_rates.unchecked(cell,q),rate,
+          input.eta.unchecked(cell,0),chemical,view_.unchecked(cell,0),input.weak_rate);
+      if(!staged)status=staged;
+    }
+  }
+  return agree(status);
+}
 Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> fields,
     ConstFieldView auxiliary,ConstFieldView density,Span<const std::uint8_t> activity,
     std::uint64_t step) noexcept {

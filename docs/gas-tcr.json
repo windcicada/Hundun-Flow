@@ -8,15 +8,14 @@
     "separate ninth evaluation call",
     "kappa lower/upper/weak-rate branches",
     "time-scale branches on uniform fields",
+    "source stale-cell flow clock reproducer and approved local SI times",
     "Cphi update clock and uniform fallback",
     "nonuniform mixture-fraction Cphi filters, priority and smoothing"
   ],
   "remaining": [
-    "production species-coordinate policy",
-    "production spatial halos and IBM",
-    "production history and scheduling",
-    "remixing and gas coupling",
-    "parallel restart and real-case trajectories"
+    "native ESF terminal scheduling and mixture-fraction provenance",
+    "once-integrated PSR/PDF rates and conservative remixing",
+    "8/16-field dyn711 restart and real-case trajectories"
   ],
   "errors": {
     "fp64": {
@@ -51,7 +50,7 @@
     "cases": 67,
     "difference": 0.0,
     "source_sha256": "ba15122b54e135ebe1bd15eab7ba351f9c37ff324497bfca64462ee6e1213d9e",
-    "binary_sha256": "1aec3cf092e6863909310c426bc44506bd54e25aef374099c67e01d44acfc632",
+    "binary_sha256": "949d6e987c5f5e0712f34fdd221340deb96fad963fd74f313176904895bebd43",
     "scope": "Complete reference Dynamic_Cphi; equal scalar channels with unit molecular weights isolate moments and bounded products"
   },
   "species_coordinates": {
@@ -96,13 +95,63 @@
       "policy": "source G2 uses specific-mole gradient; RD2G2 uses mass gradient; mass_consistent uses mass gradients in both"
     }
   },
+  "flow_times": {
+    "source_cases": [
+      {
+        "density": 1.0,
+        "last_cell_velocity": 3.0,
+        "flow_times": [
+          0.057735026918962574,
+          0.057735026918962574,
+          0.057735026918962574,
+          0.057735026918962574,
+          0.057735026918962574,
+          0.057735026918962574,
+          0.057735026918962574,
+          0.057735026918962574
+        ]
+      },
+      {
+        "density": 1.0,
+        "last_cell_velocity": 12.0,
+        "flow_times": [
+          0.028867513459481287,
+          0.028867513459481287,
+          0.028867513459481287,
+          0.028867513459481287,
+          0.028867513459481287,
+          0.028867513459481287,
+          0.028867513459481287,
+          0.028867513459481287
+        ]
+      },
+      {
+        "density": 4.0,
+        "last_cell_velocity": 3.0,
+        "flow_times": [
+          0.0408248290463863,
+          0.0408248290463863,
+          0.0408248290463863,
+          0.0408248290463863,
+          0.0408248290463863,
+          0.0408248290463863,
+          0.0408248290463863,
+          0.0408248290463863
+        ]
+      }
+    ],
+    "native_cases": 67,
+    "native_max_normalized_difference": 2.2204460492503126e-16,
+    "approved_policy": "local Vreman k and volume epsilon: tauI=rho*k/epsilon; tauK=sqrt(mu/epsilon); tauFlow=sqrt(tauI*tauK)",
+    "source_difference": "source flow uses the last visited velocity and multiplies volume epsilon by density in tauK"
+  },
   "source_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3",
-  "driver_sha256": "393a103ca8308eadd42f9893f714725d9db3c39536831f1c17a2c0413d4f15a3",
-  "generator_sha256": "376d66bccc812697a97553c4d93b2178cf8690f25309e6c9462080390b2e8061",
+  "driver_sha256": "5b4557382265605de9f2c4982f53efba8ac1ba1583182a4ace219741387bcbd2",
+  "generator_sha256": "81223ea94929ca73a79eaa2a9be20ab2159df91642a33f02a537208288d5ba15",
   "binaries": {
-    "fp32": "d547ecc872ec828900c26f5ede6e5392826565965e93c9a707023e4eea7be118",
-    "fp64": "f40b4fd7e5df6fd077e6e232b9f67b672d6689590f9eb949daf942a050ca2236",
-    "hundun": "e6c17c63686f8ec2781e9c7b1f1d39102eead3bf11be0d3a006f14a667393a4a"
+    "fp32": "f6b09bd49ef97ed336415fef305d8aec6c263dc32e44f370801bb94505918f61",
+    "fp64": "8a5655dcfa61571af8db604c99a850d5c33b512705305b59e60a6df3fdcdbddc",
+    "hundun": "3a7021882193a16d2ba1d4af0c0c0c2d86642951a3df21e0cac4b28c095940b8"
   },
   "reference_compile": [
     "gfortran -O2 -fcheck=all",

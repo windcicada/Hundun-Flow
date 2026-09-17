@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import random
 import shlex
@@ -131,20 +132,58 @@ for label, path, mode in [('dyn711', a.fp64, 'species'), ('624cf', a.cf_double, 
         molecular_weights=([1.,16.,17.] if label=='dyn711' else [18.,32.,17.]),
         policy='source G2 uses specific-mole gradient; RD2G2 uses mass gradient; mass_consistent uses mass gradients in both')
 print('species_coordinate_policy', json.dumps(species_results,indent=2))
+# Reproduce the original stale-cell and density-unit defects independently of
+# the approved native local SGS closure. The complete source stays read-only.
+flow_inputs = [(1.,3.),(1.,12.),(4.,3.)]
+flow_source = run(a.fp64, input_text=''.join('%s %s\n' % v for v in flow_inputs), args=('flow',))
+assert len(flow_source)==24 and all(len(v)==1 for v in flow_source)
+source_flow_cases=[]
+for j,(rho,last_u) in enumerate(flow_inputs):
+    values=[v[0] for v in flow_source[8*j:8*(j+1)]]
+    expected=math.sqrt(.01/math.sqrt(rho)/last_u)
+    assert max(abs(v-expected) for v in values)<1e-14
+    source_flow_cases.append(dict(density=rho,last_cell_velocity=last_u,flow_times=values))
+flow_rng=random.Random(71103)
+flow_rows=[(2.,8.,4.,.02),(0.,0.,1.,1e-5),(0.,1.,1.,1e-5)]
+for _ in range(64):
+    flow_rows.append(tuple(2.**flow_rng.randrange(-30,31) for _ in range(4)))
+flow_native=run(a.hundun,shlex.split(a.runner),
+    ''.join(' '.join(format(v,'.17g') for v in row)+'\n' for row in flow_rows),('flow',))
+assert len(flow_native)==len(flow_rows)
+flow_error=0.
+for row,out in zip(flow_rows,flow_native):
+    k,eps,rho,mu=row
+    expected=[rho*k/eps,math.sqrt(mu/eps)] if eps else [math.inf,math.inf]
+    expected.append(math.sqrt(expected[0])*math.sqrt(expected[1]))
+    assert len(out)==5
+    for value,exact in zip(out[:3],expected):
+        if math.isinf(exact):
+            assert value==exact
+        else:
+            flow_error=max(flow_error,abs(value-exact)/max(1.,abs(exact)))
+    upper=1.>100.*expected[2]
+    assert out[3]==int(upper) and abs(out[4]-(1. if upper else 3./7.))<1e-14
+assert flow_error<1e-14
+flow_times=dict(source_cases=source_flow_cases,native_cases=len(flow_rows),
+    native_max_normalized_difference=flow_error,
+    approved_policy='local Vreman k and volume epsilon: tauI=rho*k/epsilon; tauK=sqrt(mu/epsilon); tauFlow=sqrt(tauI*tauK)',
+    source_difference='source flow uses the last visited velocity and multiplies volume epsilon by density in tauK')
+print('flow_times',json.dumps(flow_times,indent=2))
 evidence = dict(schema='hundun.gas.tcr.v1', calls=len(rows), independent_windows=40*3,
     reference_scope='Complete statistics.F90 with uniform 2x2x2 interior, serial reduction and Cartesian gradient fixture',
     verified=['eight-interval signed accumulation', 'separate ninth evaluation call',
               'kappa lower/upper/weak-rate branches', 'time-scale branches on uniform fields',
+              'source stale-cell flow clock reproducer and approved local SI times',
               'Cphi update clock and uniform fallback',
               'nonuniform mixture-fraction Cphi filters, priority and smoothing'],
-    remaining=['production species-coordinate policy', 'production spatial halos and IBM',
-               'production history and scheduling',
-               'remixing and gas coupling', 'parallel restart and real-case trajectories'],
+    remaining=['native ESF terminal scheduling and mixture-fraction provenance',
+               'once-integrated PSR/PDF rates and conservative remixing',
+               '8/16-field dyn711 restart and real-case trajectories'],
     errors=errors, input_sha256=hashlib.sha256(data.encode()).hexdigest(),
     spatial_filter=dict(cases=len(mix_rows), interior_cells=8, errors=mix_errors,
         input_sha256=hashlib.sha256(mix_data.encode()).hexdigest(),
         scope='Complete Dynamic_Cphi mixture-fraction channel; uniform donor units and varying density/volume/scalar; explicit fixture ghost products'),
-    cf_filter=cf_filter, species_coordinates=species_results,
+    cf_filter=cf_filter, species_coordinates=species_results, flow_times=flow_times,
     source_sha256=sha(a.source), driver_sha256=sha(Path(__file__).with_suffix('.f90')),
     generator_sha256=sha(Path(__file__)),
     binaries={k:sha(v) for k,v in [('fp32',a.fp32),('fp64',a.fp64),('hundun',a.hundun)]},

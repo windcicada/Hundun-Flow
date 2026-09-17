@@ -16,6 +16,16 @@ struct Dyn711Tick {
 };
 Dyn711Tick dyn711_tick(Dyn711Clock accepted) noexcept;
 
+// Local SGS closure: k [m2/s2], epsilon [W/m3], density [kg/m3],
+// dynamic molecular viscosity [Pa s]. A zero dissipation has infinite time;
+// positive dissipation with zero SGS energy has zero integral/flow time.
+struct Dyn711FlowTimes {
+  bool available{};
+  double integral{}, kolmogorov{}, flow{};
+};
+Dyn711FlowTimes dyn711_flow_times(double k, double epsilon, double density,
+                                double molecular_viscosity) noexcept;
+
 struct Dyn711Control {
   bool available{}, upper_branch{}, linear_endpoint{};
   double ratio{}, selected{}, effective{};

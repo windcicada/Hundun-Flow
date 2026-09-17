@@ -4,9 +4,19 @@
 #include "core_tcr_dyn711_history_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "hundun/v04_ibm.hpp"
+#include "hundun/v04_physics.hpp"
 #include <climits>
 
 namespace hundun::v04::detail {
+// Terminal candidate state and immutable, once-integrated reactor rates.
+// Rates and molecular weights use kmol/kg/s and kg/kmol, respectively.
+struct Dyn711StatisticsInput {
+  ConstFieldView physical_mass_fractions, pdf_rates, psr_rates, eta;
+  ConstFieldView density, molecular_viscosity, velocity_gradient;
+  Span<const double> molecular_weights;
+  Span<const std::uint8_t> activity;
+  double dt{}, weak_rate{};
+};
 // Cold-owned scalar statistics exchange. Source and target identities use
 // global Cartesian cells, including corners and odd MPI partitions.
 class DynamicTcrPlan {
@@ -23,6 +33,10 @@ public:
   Status finish(Dyn711History &, const std::array<ConstFieldView,3> &means,
       const std::array<ConstFieldView,3> &gradient_coordinates,
       ConstFieldView density, Span<const std::uint8_t> activity) noexcept;
+  // Collective terminal statistics. Global per-species chemical clocks and
+  // local Vreman times stage the rate window; spatial finish seals it later.
+  Status stage_rates(Dyn711History &, const TurbulencePlan &,
+                     const Dyn711StatisticsInput &) noexcept;
   std::uint64_t owned_bytes() const noexcept { return owned_bytes_; }
   RemoteDonorExchangeStats stats() const noexcept { return halo_.stats(); }
 private:

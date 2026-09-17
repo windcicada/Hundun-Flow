@@ -5,6 +5,24 @@
 #include <limits>
 
 namespace hundun::v04::tcr::detail {
+Dyn711FlowTimes dyn711_flow_times(double k, double epsilon, double density,
+    double molecular_viscosity) noexcept {
+  if (!std::isfinite(k) || k < 0 || !std::isfinite(epsilon) || epsilon < 0 ||
+      !std::isfinite(density) || density <= 0 ||
+      !std::isfinite(molecular_viscosity) || molecular_viscosity <= 0) return {};
+  if (epsilon == 0) {
+    const double infinite = std::numeric_limits<double>::infinity();
+    return {true, infinite, infinite, infinite};
+  }
+  const long double integral = static_cast<long double>(density) * k / epsilon;
+  const long double kolmogorov = std::sqrt(
+      static_cast<long double>(molecular_viscosity) / epsilon);
+  // Separate square roots avoid an intermediate product overflow.
+  const long double flow = std::sqrt(integral) * std::sqrt(kolmogorov);
+  return {true, static_cast<double>(integral), static_cast<double>(kolmogorov),
+          static_cast<double>(flow)};
+}
+
 Dyn711Tick dyn711_tick(Dyn711Clock c) noexcept {
   if (c.rate_intervals > 8 || c.cphi_count > 12 ||
       (c.cphi_count > 0 && c.cphi_count < 6)) return {};
@@ -24,7 +42,7 @@ Dyn711Control dyn711_species_control(double eta, double pdf, double psr,
   if (!std::isfinite(eta) || eta < 0 || eta > 1 ||
       !std::isfinite(pdf) || !std::isfinite(psr) ||
       !std::isfinite(chemical_time) || chemical_time < 0 ||
-      !std::isfinite(flow_time) || flow_time <= 0 ||
+      std::isnan(flow_time) || flow_time < 0 ||
       !std::isfinite(weak) || weak <= 0) return out;
   const long double e = eta, one_minus_e = 1 - e;
   long double ratio = std::abs(psr) <= weak ? 1 :
