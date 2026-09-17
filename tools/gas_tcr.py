@@ -16,6 +16,8 @@ p.add_argument('--hundun', type=Path, required=True)
 p.add_argument('--runner', default='')
 p.add_argument('--source', type=Path, required=True)
 p.add_argument('--output', type=Path, required=True)
+p.add_argument('--cf-double', type=Path)
+p.add_argument('--cf-source', type=Path)
 a = p.parse_args()
 sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 assert sha(a.source) == '31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3'
@@ -87,6 +89,21 @@ for precision, path in [('fp64', a.fp64), ('fp32', a.fp32)]:
 print('mixture_fraction_filter', json.dumps(mix_errors, indent=2))
 assert max(mix_errors['fp64'].values()) <= 1e-11, mix_errors
 assert max(mix_errors['fp32'].values()) <= 2e-4, mix_errors
+cf_filter = None
+if a.cf_double:
+    assert a.cf_source and a.cf_source.is_file()
+    assert sha(a.cf_source) == 'ba15122b54e135ebe1bd15eab7ba351f9c37ff324497bfca64462ee6e1213d9e'
+    native_cf = run(a.hundun, shlex.split(a.runner), mix_data, ('cf_mix',))
+    reference_cf = run(a.cf_double, input_text=mix_data, args=('cf_mix',))
+    assert len(native_cf) == len(reference_cf) == 8*len(mix_rows)
+    assert all(len(left) == len(right) == 3 for left,right in zip(native_cf,reference_cf))
+    cf_error = max(abs(x-y)/max(1.,abs(x),abs(y)) for left,right in zip(native_cf,reference_cf)
+                   for x,y in zip(left,right))
+    print('624CF complete Dynamic_Cphi FP64 difference', cf_error)
+    assert cf_error <= 1e-11
+    cf_filter = dict(cases=len(mix_rows), difference=cf_error, source_sha256=sha(a.cf_source),
+        binary_sha256=sha(a.cf_double),
+        scope='Complete reference Dynamic_Cphi; equal scalar channels with unit molecular weights isolate moments and bounded products')
 evidence = dict(schema='hundun.gas.tcr.v1', calls=len(rows), independent_windows=40*3,
     reference_scope='Complete statistics.F90 with uniform 2x2x2 interior, serial reduction and Cartesian gradient fixture',
     verified=['eight-interval signed accumulation', 'separate ninth evaluation call',
@@ -100,6 +117,7 @@ evidence = dict(schema='hundun.gas.tcr.v1', calls=len(rows), independent_windows
     spatial_filter=dict(cases=len(mix_rows), interior_cells=8, errors=mix_errors,
         input_sha256=hashlib.sha256(mix_data.encode()).hexdigest(),
         scope='Complete Dynamic_Cphi mixture-fraction channel; uniform donor units and varying density/volume/scalar; explicit fixture ghost products'),
+    cf_filter=cf_filter,
     source_sha256=sha(a.source), driver_sha256=sha(Path(__file__).with_suffix('.f90')),
     generator_sha256=sha(Path(__file__)),
     binaries={k:sha(v) for k,v in [('fp32',a.fp32),('fp64',a.fp64),('hundun',a.hundun)]},

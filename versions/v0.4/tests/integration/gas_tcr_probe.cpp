@@ -6,7 +6,7 @@
 #include <string_view>
 using namespace hundun::v04::tcr::detail;
 namespace {
-int mix_probe() {
+int mix_probe(bool cf) {
   constexpr std::array<std::array<int,3>,8> offsets{{
       {{0,0,0}},{{-1,0,0}},{{0,-1,0}},{{0,0,-1}},
       {{0,-1,-1}},{{-1,0,-1}},{{-1,-1,0}},{{-1,-1,-1}}}};
@@ -16,7 +16,7 @@ int mix_probe() {
   while(std::cin>>rho[0]) {
     for(unsigned i=1;i<64;++i)if(!(std::cin>>rho[i]))return 1;
     for(auto *a:{&volume,&scalar})for(double &v:*a)if(!(std::cin>>v))return 1;
-    std::array<Dyn711FilterDonor,64> grid;
+    std::array<DynamicFilterDonor,64> grid;
     std::array<DynamicFilterProducts,64> products;
     std::array<double,64> cphi,ratio;
     cphi.fill(2.);
@@ -31,24 +31,25 @@ int mix_probe() {
       }
     }
     for(int z=1;z<3;++z)for(int y=1;y<3;++y)for(int x=1;x<3;++x) {
-      std::array<Dyn711FilterDonor,8> donors;
+      std::array<DynamicFilterDonor,8> donors;
       for(unsigned j=0;j<8;++j) {
         const auto &o=offsets[j];donors[j]=grid[index(x+o[0],y+o[1],z+o[2])];
       }
       DynamicFilterMoments moments;
-      if(!dyn711_filter_moments(donors.data(),8,moments))return 2;
-      products[index(x,y,z)]=dyn711_filter_products(moments);
+      if(!dynamic_filter_moments(donors.data(),8,moments))return 2;
+      products[index(x,y,z)]=cf ? dynamic_filter_products(moments) : dyn711_filter_products(moments);
       if(!products[index(x,y,z)].available)return 3;
     }
     for(int z=1;z<3;++z)for(int y=1;y<3;++y)for(int x=1;x<3;++x) {
       double m2{},lm{};
       for(const auto &o:offsets) {
-        const auto &d=products[index(x+o[0],y+o[1],z+o[2])];
+        const auto &d=products[index(x+(cf&&x==1 ? -o[0] : o[0]),
+            y+(cf&&y==1 ? -o[1] : o[1]),z+(cf&&z==1 ? -o[2] : o[2]))];
         m2+=d.m_squared;lm+=d.l_times_m;
       }
       const auto i=index(x,y,z);
       ratio[i]=dyn711_filter_ratio(m2,lm);
-      cphi[i]=dyn711_select_cphi({ratio[i],-1.,-1.});
+      cphi[i]=cf ? dynamic_cd_from_products(m2,lm) : dyn711_select_cphi({ratio[i],-1.,-1.});
     }
     for(int z=1;z<3;++z)for(int y=1;y<3;++y)for(int x=1;x<3;++x) {
       std::array<double,7> neighbors;
@@ -56,14 +57,16 @@ int mix_probe() {
         const auto &o=offsets[j];neighbors[j-1]=cphi[index(x+o[0],y+o[1],z+o[2])];
       }
       const auto i=index(x,y,z);
-      std::cout<<ratio[i]<<' '<<dyn711_smooth_cphi(cphi[i],neighbors)<<'\n';
+      if(cf)std::cout<<cphi[i]<<' '<<cphi[i]<<' '<<cphi[i]<<'\n';
+      else std::cout<<ratio[i]<<' '<<dyn711_smooth_cphi(cphi[i],neighbors)<<'\n';
     }
   }
   return 0;
 }
 }
 int main(int argc,char **argv) {
-  if(argc==2 && std::string_view(argv[1])=="mix")return mix_probe();
+  if(argc==2 && std::string_view(argv[1])=="mix")return mix_probe(false);
+  if(argc==2 && std::string_view(argv[1])=="cf_mix")return mix_probe(true);
   unsigned reset,step{};
   double dt,eta,epsilon,velocity,atime{},mean{};
   std::array<double,6> pdf,psr,composition,times;

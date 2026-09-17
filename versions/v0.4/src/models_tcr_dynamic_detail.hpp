@@ -24,6 +24,14 @@ struct DynamicFilterMoments {
   double density_delta_squared_gradient_squared{};
   double density_scalar_squared{}, scalar{};
 };
+struct DynamicFilterDonor {
+  double density{}, volume{}, scalar{};
+  std::array<double, 3> gradient{};
+};
+// All coordinates are scalar-specific. For the mixture-fraction channel they
+// are dimensionless; species molar/mass conversion is an explicit caller duty.
+bool dynamic_filter_moments(const DynamicFilterDonor *donors, unsigned count,
+    DynamicFilterMoments &moments) noexcept;
 struct DynamicFilterProducts {
   bool available{};
   double m_squared{}, l_times_m{};

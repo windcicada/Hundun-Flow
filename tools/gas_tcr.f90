@@ -35,17 +35,34 @@ module chemistry
  real :: tim_sp(6,64),tim_flow(64),kappa(7,64),temp_i(64),temp_k(64),prev_rdot(6,64),arr_eta(64)
  real :: sum_w(6,64),sum_w0(6,64),fsc(7,64),sumn(64),temp(64),qdot_rad(64)
  real(kind=8) :: wm(7)=[32d0,28d0,16d0,18d0,44d0,17d0,1d0]
+ real :: C_products,C_reactants,C_radicals
 end module
 module exchange
  implicit none
- integer,parameter :: MPI_REAL=0,mpi_max=1,mpi_comm_world=0
+ integer,parameter :: MPI_REAL=0,mpi_max=1,mpi_comm_world=0,mpi_in_place=-1,mpi_double_precision=2,mpi_sum=3
+ interface mpi_allreduce
+   module procedure reduce_real,reduce_double_inplace
+ end interface
  contains
- subroutine mpi_allreduce(a,b,c,t,o,comm,ierr)
+ subroutine reduce_real(a,b,c,t,o,comm,ierr)
  real,intent(in)::a
  real,intent(out)::b
  integer,intent(in)::c,t,o,comm
  integer,intent(out)::ierr
  b=a;ierr=0
+ end subroutine
+ subroutine reduce_double_inplace(a,b,c,t,o,comm,ierr)
+ integer,intent(in)::a,c,t,o,comm
+ real(kind=8),intent(inout)::b
+ integer,intent(out)::ierr
+ ierr=0
+ end subroutine
+end module
+module coast_screen_summary
+ contains
+ subroutine coast_debug_log_real(label,value)
+ character(*),intent(in)::label
+ real,intent(in)::value
  end subroutine
 end module
 module extras
@@ -71,7 +88,7 @@ program probe
    nfo(i)=(i-1)*64
  enddo
  call get_command_argument(1,mode)
- if(trim(mode)=='mix')then
+ if(trim(mode)=='mix'.or.trim(mode)=='cf_mix')then
    call mix_probe
    stop
  endif
@@ -108,18 +125,32 @@ program probe
  real :: scalar(64)
  ! Isolate the complete source's mixture-fraction channel. Other channels
  ! start with zero products, so their invalid-ratio markers remain -1.
- names(6)='TRACE';jfuel=0
+ if(trim(mode)=='mix')then
+   names(6)='TRACE';jfuel=0
+ else
+   wm=1
+ endif
  do
    read(*,*,iostat=status) rho,ajc,scalar
    if(status/=0)exit
    f=0;f(nfo(nvf)+1:nfo(nvf)+64)=scalar
    fsc=0;dyn_LM=0;dyn_M2=0;temp_i=0;temp_k=0;dtim=1;dyn_C_time=0
+   if(trim(mode)=='cf_mix')then
+     do cell=1,6
+       fsc(cell,:)=scalar
+       f(nfo(nf+cell)+1:nfo(nf+cell)+64)=scalar
+     enddo
+   endif
    call Dynamic_Cphi
    do kk=2,3
    do jj=2,3
    do ii=2,3
      cell=ii+jo(jj)+ko(kk)
-     write(*,'(2(es25.17,1x))')dyn_M2(1,cell),dyn_LM(1,cell)
+     if(trim(mode)=='mix')then
+       write(*,'(2(es25.17,1x))')dyn_M2(1,cell),dyn_LM(1,cell)
+     else
+       write(*,'(3(es25.17,1x))')dyn_LM(:,cell)
+     endif
    enddo
    enddo
    enddo

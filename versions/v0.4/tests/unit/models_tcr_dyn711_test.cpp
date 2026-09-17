@@ -85,16 +85,16 @@ int main() {
   ok &= near(dyn711_smooth_cphi(16,{1,1.5,12,16,2,4,8}),46./5.);
   ok &= std::isnan(dyn711_select_cphi({2,NAN,2})) &&
       std::isnan(dyn711_smooth_cphi(2,{2,2,2,2,2,2,NAN}));
-  std::array<Dyn711FilterDonor,8> donors;
+  std::array<DynamicFilterDonor,8> donors;
   donors.fill({2,8,.5,{1,2,3}});
   DynamicFilterMoments moments;
-  ok &= dyn711_filter_moments(donors.data(),8,moments) && near(moments.delta_squared,4) &&
+  ok &= dynamic_filter_moments(donors.data(),8,moments) && near(moments.delta_squared,4) &&
       near(moments.density,2e6) && near(moments.gradient_squared,14) && near(moments.scalar,.5) &&
       near(moments.density_delta_squared_gradient_squared,112e6);
   const auto good=moments;
   donors[7].volume=-1;
-  ok &= !dyn711_filter_moments(donors.data(),8,moments) && moments.density==good.density &&
-      !dyn711_filter_moments(nullptr,8,moments) && !dyn711_filter_moments(donors.data(),0,moments);
+  ok &= !dynamic_filter_moments(donors.data(),8,moments) && moments.density==good.density &&
+      !dynamic_filter_moments(nullptr,8,moments) && !dynamic_filter_moments(donors.data(),0,moments);
 
   using hundun::v04::detail::Dyn711History;
   Dyn711History history, restored;

@@ -264,3 +264,45 @@ REAL4 的原值乘积存在相消，按精度单列记录。均匀梯度／变�
 变化体积与随机标量均纳入模板；当前外围 ghost 乘积固定初始化，
 MPI／IBM 的生产空间交换继续由后续接线检查。原累计窗口与历史
 定向检查仍通过，见 `check/gas-mix-unit.log`。
+
+G3 公共滤波修正：继续以 624CF 冻结来源
+`check/s6/statistics.F90` 的完整 `Dynamic_Cphi` 和其原辅助函数
+独立对照。三条标量通道采用共同模板及单位分子量，以隔离权重、
+有界供体乘积及二次滤波；67 组模板的 C++／FP64 差异为 0，
+见 `check/gas-cf-compare.log` 与 gas-tcr.json 的 `cf_filter`。
+这确认两类参考采用相同的 `rho*V^(5/3)` 与
+`rho^2*V^(5/3)*|grad(q)|²` 权重。
+
+现有 `DynamicTcrPlan` 对上述两项使用了 `(rho*V)^(5/3)` 与
+`(rho²*V)^(5/3)`，密度随体积一同乘幂。当前生产路径已复用经
+完整例程对照的公共 `dynamic_filter_moments`，保持 624CF 有界
+乘积、组分分组、四步更新及共同事务。动态模型方法身份加入
+`favre-volume-power-v2`；既有检查点继续保留其原来源身份，后续
+迁移按方法恢复合同处理。
+
+`check/gas-filter-green.log` 的四项检查通过。1／2／4 进程直接
+检查生产 `DynamicTcrPlan`，覆盖全局前向边界、周期面、奇数
+分区、单格分区和固体供体剔除。与整域串行结果的差异为 0；
+密度整体乘 2 后的系数差异为 0，500 个系数位于裁剪区间内部。
+JL4 真实机理原生五步计算及 1→2 进程恢复也通过，继续执行原
+组分、元素及能量门槛。初次测试的分区夹具使用了超出周期供体
+准入范围的小网格，现采用满足两格周期供体要求的 7×5×5 网格；
+原生比较工具与程序按共同方法身份重新构建后完成恢复对照。
+
+624CF 完整例程的额外构建入口（源文件保持原内容）：
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+source = Path('check/s6/statistics.F90').read_bytes()
+Path('check/gd/cf.F90').write_bytes(source[source.index(b'      subroutine Dynamic_Cphi'):])
+Path('check/gd/cf_stub.f90').write_text('subroutine statistics\n error stop 73\nend subroutine\n')
+PY
+gfortran -O2 -fcheck=all -fdefault-real-8 -fdefault-double-8 -Jcheck/gd \
+  tools/gas_tcr.f90 check/gd/cf.F90 check/gd/cf_stub.f90 -o check/gd/cf8
+```
+
+`gas_tcr.py` 的原命令追加
+`--cf-double check/gd/cf8 --cf-source check/s6/statistics.F90`。
+该入口仅调用完整动态滤波例程，外围为串行归约和坐标梯度；字段
+分子量转换及完整反应调度仍按 G3 生产组合出口接续。

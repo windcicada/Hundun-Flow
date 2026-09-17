@@ -210,7 +210,7 @@ public:
       string(dual_pressure ? "esf-dual-physical-mean-field0-pressure-v1;whole-tuple-flux-correction-v1;realized-statistical-transport-ledger-v1;statistical-face-energy-ledger-v1;thermal-frozen-transport-v1"
                            : "esf-bounded-mean-recenter-v1");
       if(spec.tcr.model==TcrModel::cdphyso_dynamic_v1) {
-        string("cdphyso-dynamic-v1;species-interval-rates;eta-0.3;cd-cadence-4;fluid-filter");
+        string("cdphyso-dynamic-v1;species-interval-rates;eta-0.3;cd-cadence-4;fluid-filter;favre-volume-power-v2");
         string(spec.tcr.fuel);
       }
       string("esf-global-transport-then-chemistry-v1");

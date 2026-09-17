@@ -47,13 +47,20 @@
     "input_sha256": "f584f2586a7ba48b69c108277f888c7f2e7d05bd21753afe3aceec96d825a95f",
     "scope": "Complete Dynamic_Cphi mixture-fraction channel; uniform donor units and varying density/volume/scalar; explicit fixture ghost products"
   },
+  "cf_filter": {
+    "cases": 67,
+    "difference": 0.0,
+    "source_sha256": "ba15122b54e135ebe1bd15eab7ba351f9c37ff324497bfca64462ee6e1213d9e",
+    "binary_sha256": "47728bd1e8338d84bf74f7165f233ea744b9ff7df7ad98f54c25f39bcf327068",
+    "scope": "Complete reference Dynamic_Cphi; equal scalar channels with unit molecular weights isolate moments and bounded products"
+  },
   "source_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3",
-  "driver_sha256": "7181ee76ceb71da1ae05c3e388f0a52225a24a97db57cbf2cab2d6b1b88b6016",
-  "generator_sha256": "4d8704bcb89109a0819c497a4266775f1036e759c1b6405e2681993550700b0d",
+  "driver_sha256": "a1eef3c3075b04601ee593fcc12567c3bc1ac6c9d3bc5839989a0bcab59ea84e",
+  "generator_sha256": "c7581ec4760886ff8e1dfc44dc977a87487f8895995e1895189a512208765332",
   "binaries": {
-    "fp32": "f644a0e2e2d4592079f304c15b98ee9dd3f4ab59bd67be173ed09a4d42387ab8",
-    "fp64": "7826af1859dc3b05b6be01603f4bff9376585a6ea77bcd365aa0f8904357dbdd",
-    "hundun": "779621a0b5edfe7d246fea07c495be07509b9c44b950422d7e8c87f76d9fbd48"
+    "fp32": "5489838ef8056c6ca1a286104f121a7735d0aafe7f2606bbfb1f57582ea663f3",
+    "fp64": "ea8bc3d57ac3d689706d92e9d24dfb4573004e11ff13de34d0d96bc07febfc36",
+    "hundun": "f5fdb4ce815193be184ce191446c7cd4e62c15961d8d938c4e2578dcf62e2674"
   },
   "reference_compile": [
     "gfortran -O2 -fcheck=all",

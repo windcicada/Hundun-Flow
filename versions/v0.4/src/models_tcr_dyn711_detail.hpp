@@ -37,14 +37,6 @@ bool dyn711_advance_rate(const Dyn711RateState &accepted, Dyn711Clock clock,
 
 // Unnormalized products preserve the relative weights of the second spatial
 // filter. This is a separate identity from the 624CF bounded-donor products.
-struct Dyn711FilterDonor {
-  double density{}, volume{}, scalar{};
-  std::array<double, 3> gradient{};
-};
-// All coordinates are scalar-specific. For the mixture-fraction channel they
-// are dimensionless; species molar/mass conversion is an explicit caller duty.
-bool dyn711_filter_moments(const Dyn711FilterDonor *donors, unsigned count,
-    DynamicFilterMoments &moments) noexcept;
 DynamicFilterProducts dyn711_filter_products(const DynamicFilterMoments &) noexcept;
 double dyn711_filter_ratio(double m_squared, double l_times_m) noexcept;
 // Ordered input: mixture fraction, fuel, OH. The source prefers an admissible

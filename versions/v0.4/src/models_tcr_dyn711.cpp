@@ -82,44 +82,6 @@ bool dyn711_advance_rate(const Dyn711RateState &accepted, Dyn711Clock clock,
   return true;
 }
 
-bool dyn711_filter_moments(const Dyn711FilterDonor *donors, unsigned count,
-    DynamicFilterMoments &moments) noexcept {
-  if (!donors || count == 0 || count > 8) return false;
-  DynamicFilterMoments m;
-  double mass{};
-  std::array<double,3> gradient{};
-  for (unsigned i=0;i<count;++i) {
-    const auto &d=donors[i];
-    if (!std::isfinite(d.density) || d.density<=0 ||
-        !std::isfinite(d.volume) || d.volume<=0 || !std::isfinite(d.scalar)) return false;
-    const double w=d.density*d.volume;
-    mass+=w;
-    m.density+=d.density*w;
-    m.delta_squared+=d.density*std::pow(d.volume,5./3.);
-    m.scalar+=w*d.scalar;
-    m.density_scalar_squared+=d.density*w*d.scalar*d.scalar;
-    double g2{};
-    for (unsigned axis=0;axis<3;++axis) {
-      if (!std::isfinite(d.gradient[axis])) return false;
-      gradient[axis]+=w*d.gradient[axis];
-      g2+=d.gradient[axis]*d.gradient[axis];
-    }
-    m.density_delta_squared_gradient_squared+=
-        d.density*d.density*std::pow(d.volume,5./3.)*g2;
-  }
-  if (!std::isfinite(mass) || mass<=0) return false;
-  m.density=1e6*m.density/mass;
-  m.delta_squared/=mass;
-  m.scalar/=mass;
-  m.density_scalar_squared=1e6*m.density_scalar_squared/mass;
-  m.density_delta_squared_gradient_squared=1e6*m.density_delta_squared_gradient_squared/mass;
-  for (double g:gradient) m.gradient_squared+=(g/mass)*(g/mass);
-  for (double v:{m.density,m.delta_squared,m.scalar,m.density_scalar_squared,
-      m.density_delta_squared_gradient_squared,m.gradient_squared})
-    if (!std::isfinite(v)) return false;
-  moments=m;
-  return true;
-}
 DynamicFilterProducts dyn711_filter_products(const DynamicFilterMoments &v) noexcept {
   for (double x : {v.density, v.delta_squared, v.gradient_squared,
       v.density_delta_squared_gradient_squared, v.density_scalar_squared, v.scalar})

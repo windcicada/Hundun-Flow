@@ -164,23 +164,23 @@ Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> f
   for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
     const Int3 c{x,y,z};
     for(unsigned group=0;group<3;++group) {
-      DynamicFilterMoments m;double mass{};std::array<double,3> gradient{};
+      std::array<DynamicFilterDonor,8> donors;
+      unsigned count{};
       filter(c,[&](Int3 p) {
-        const double rho=view_.unchecked(p,0),vol=view_.unchecked(p,1),w=rho*vol;
-        const double scalar=view_.unchecked(p,2+group);
-        mass+=w;m.density+=1e6*rho*w;m.delta_squared+=std::pow(w,5./3.);
-        m.density_scalar_squared+=1e6*rho*w*scalar*scalar;m.scalar+=w*scalar;
-        double g2{};for(unsigned d=0;d<3;++d) {
-          const double g=view_.unchecked(p,8+3*group+d);gradient[d]+=w*g;g2+=g*g;
-        }
-        m.density_delta_squared_gradient_squared+=1e6*std::pow(rho*w,5./3.)*g2;
+        auto &donor=donors[count++];
+        donor.density=view_.unchecked(p,0);
+        donor.volume=view_.unchecked(p,1);
+        donor.scalar=view_.unchecked(p,2+group);
+        for(unsigned d=0;d<3;++d)donor.gradient[d]=view_.unchecked(p,8+3*group+d);
       });
       DynamicFilterProducts products;
-      if(mass>0) {
-        m.density/=mass;m.delta_squared/=mass;m.density_scalar_squared/=mass;m.scalar/=mass;
-        m.density_delta_squared_gradient_squared/=mass;
-        for(double g:gradient)m.gradient_squared+=(g/mass)*(g/mass);
-        products=dynamic_filter_products(m);
+      if(count) {
+        DynamicFilterMoments moments;
+        if(!dynamic_filter_moments(donors.data(),count,moments))s=invalid();
+        else {
+          products=dynamic_filter_products(moments);
+          if(!products.available)s=invalid();
+        }
       }
       // Use the vacated field0/physical coordinate slots after all gradient
       // reads. Separate products storage avoids aliasing neighboring filters.
@@ -188,7 +188,7 @@ Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> f
       view_.unchecked(c,5+group)=products.available ? products.l_times_m : 0.;
     }
   }
-  s=exchange();if(!s)return s;
+  s=agree(s);if(s)s=exchange();if(!s)return s;
   i=0;
   for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
     if(!active(i))continue;
