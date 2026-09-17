@@ -269,6 +269,7 @@ set(hundun_v04_core_sources
   src/app_case.cpp
   src/app_driver.cpp
   src/app_run.cpp
+  src/app_import.cpp
   src/app_failure_report.cpp
   src/app_evidence_detail.cpp
   src/app_identity.cpp

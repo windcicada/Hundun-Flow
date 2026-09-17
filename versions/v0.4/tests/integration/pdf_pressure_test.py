@@ -46,19 +46,27 @@ def transfer(name,pressure,eos_pressure):
     for f in range(2):pack(root/('pdf%d.f64'%f),(fractions+[h])*512)
     return root
 
-def run(source,label,ranks,success=True):
+def hashes(root):
+    return {str(path.relative_to(root)):hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob('*') if path.is_file()}
+
+def run(source,label,ranks,success=True,native=False,failure='reconstruct status=1/24106'):
     output=work.with_name(work.name+'-'+label)
     if output.exists():shutil.rmtree(output)
+    before=hashes(source)
+    command=([application,'import',source,'--output',output,'--format','pdf-transfer-v1','--case',work]
+             if native else [binary,work,source,output])
     with (work/(label+'.log')).open('w') as log:
-        result=subprocess.run(list(map(str,[mpi,'--oversubscribe','--bind-to','none','-n',ranks,binary,work,source,output])),stdout=log,stderr=log)
+        result=subprocess.run(list(map(str,[mpi,'--oversubscribe','--bind-to','none','-n',ranks]+command)),stdout=log,stderr=log)
     text=(work/(label+'.log')).read_text()
+    if native:assert hashes(source)==before,'native import changed source transfer'
     assert (result.returncode==0)==success,(label,text)
     if not success:
-        assert 'reconstruct status=1/24106' in text,text
+        assert failure in text,text
         assert not (output/'current').exists()
         return
     assert 'physical_readback=exact' in text and 'native_restart status=0/0' in text,text
-    return output,json.loads((source/'native.json').read_text())
+    return output,json.loads((output/'import.json' if native else source/'native.json').read_text())
 
 def pressure_records(root,expected):
     generation=root/(root/'current').read_text().strip()
@@ -96,7 +104,7 @@ positive=lambda i: 100000.+1000*(i%8)
 negative=transfer('negative',signed,lambda i:p0)
 plus=transfer('positive',positive,lambda i:p0)
 two,audit=run(negative,'two',2)
-four,again=run(negative,'four',4)
+four,again=run(negative,'four',4,native=True)
 pos,other=run(plus,'positive',2)
 for root,expected in ((two,signed),(four,signed),(pos,positive)):pressure_records(root,expected)
 for report in (audit,again,other):
@@ -114,7 +122,7 @@ for key in ('native_mass_kg','native_energy_J','reference_mass_kg','reference_en
     assert audit[key]==other[key],(key,audit[key],other[key])
 # A boundary-matched uniform field checks the first native recovery step.
 equilibrium=transfer('equilibrium',lambda i:100000.,lambda i:p0)
-seed,equilibrium_audit=run(equilibrium,'seed',2)
+seed,equilibrium_audit=run(equilibrium,'seed',2,native=True)
 resumed=work.with_name(work.name+'-resumed')
 if resumed.exists():shutil.rmtree(resumed)
 with (work/'resume.log').open('w') as log:
@@ -126,18 +134,40 @@ generation=resumed/'Restart'/(resumed/'Restart/current').read_text().strip()
 manifest=(generation/'manifest.bin').read_bytes()
 header=struct.unpack_from('<8sIIiiiQQQdddQQI',manifest)
 assert header[12]==18 and abs(header[9]-.00101)<1e-16
+# CLI admission preserves an existing checkpoint and both input directories.
+for label,destination,extra in (
+    ('existing',seed,[]),
+    ('source',negative,[]),
+    ('inside',negative/'out',[]),
+    ('case',work,[]),
+    ('duplicate',work.with_name(work.name+'-bad'),['--format','pdf-transfer-v1']),
+    ('unknown',work.with_name(work.name+'-bad'),['--unexpected','value'])):
+    original=hashes(seed)
+    source_before=hashes(negative)
+    command=[mpi,'--oversubscribe','--bind-to','none','-n',2,application,'import',negative,
+             '--format','pdf-transfer-v1','--case',work,'--output',destination]+extra
+    result=subprocess.run(list(map(str,command)),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    assert result.returncode!=0,(label,result.stdout)
+    assert ('paths status=1/24112' if not extra else 'usage:') in result.stdout,result.stdout
+    assert hashes(seed)==original and hashes(negative)==source_before,label
 # Coupled EOS continues to require a positive absolute pressure.
 model['flow'].pop('thermodynamic_pressure_pa');(work/'case.json').write_text(json.dumps(model))
-run(negative,'rejected',2,False)
+run(negative,'rejected',2,False,native=True)
 coupled=transfer('coupled',positive,positive)
-root,coupled_audit=run(coupled,'coupled',2)
+root,coupled_audit=run(coupled,'coupled',1,native=True)
 pressure_records(root,positive)
 assert coupled_audit['pressure_model']=='coupled_eos'
 assert coupled_audit['thermodynamic_pressure_pa'] is None
 assert abs(coupled_audit['relative_mass_change'])<1e-12
+solid=transfer('solid',positive,positive)
+(solid/'fluid.u8').write_bytes(bytes(512))
+run(solid,'empty',2,False,native=True,failure='inventory status=1/24113')
 report=dict(passed=True,source_pressure_range=[signed(0),signed(7)],
-    fixed=audit,coupled=coupled_audit,source_ranks=[2,4],pressure_readback='exact',
+    fixed=audit,coupled=coupled_audit,source_ranks=[1,2,4],pressure_readback='exact',
+    public_import=dict(format='pdf-transfer-v1',source_unchanged=True,path_and_option_rejections=6,
+                       empty_inventory_rejected=True),
     native_recovery=dict(source_step=17,accepted_step=header[12],accepted_time=header[9],source_ranks=2,restart_ranks=4),
-    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
+    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+    application_sha256=hashlib.sha256(application.read_bytes()).hexdigest())
 (work/'result.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps(report,indent=2))

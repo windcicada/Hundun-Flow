@@ -109,10 +109,10 @@ field0 正权 EOS 查询采用 `M=sum(max(Y0,0))`、`Y+=max(Y0,0)/M`
 工作缓冲区为 64 KiB；`--metadata-only` 读取并核对清单。
 具体算例的模型兼容性由原生恢复入口结合 case.json 检查。
 
-PDF 当前态迁移提供独立转换入口：
+PDF 当前态迁移已接入正式程序：
 
 ```sh
-mpirun -np 4 ./v04_pdf_import CASE TRANSFER SEED
+mpirun -np 4 ./hundun import TRANSFER --format pdf-transfer-v1 --case CASE --output SEED
 mpirun -np 4 ./hundun run CASE --restart SEED --output RUN --steps 1
 ```
 
@@ -129,10 +129,16 @@ TRANSFER 使用 `state.txt` 的 `HUNDUN_PDF_TRANSFER 1` 头，依次记录
 p0；耦合 EOS 配置使用正的绝对压力。固体格重建静止 295 K 空气
 占位状态，转换器要求物种目录包含 O2 和 N2。
 
-转换报告 `TRANSFER/native.json` 记录压力分工、完整／独立物种顺序、
+CASE 为配置完备的原生算例，TRANSFER 为已映射到目标网格的传输数据。
+SEED 使用独立的新目录；路径准入保护源数据、算例与已有检查点。
+新入口完整读回和原生初始化通过后，将报告写入 `SEED/import.json`。
+独立工具 `v04_pdf_import CASE TRANSFER SEED` 共用同一实现，并延续
+`TRANSFER/native.json` 的兼容报告路径。
+
+转换报告记录压力分工、完整／独立物种顺序、
 源步号及时间、物性重建前后库存。该入口从随机场物理均值重建 field0，
 以 V1 当前态检查点登记方法历史恢复；原版完整统计历史、守恒网格
-映射和统一 `hundun import` 入口按专项后续条目接续。首步推进还需
+映射和源算例自动绑定按专项后续条目接续。首步推进还需
 源场与目标边界、时间步及物理模型匹配。
 
 气相时间配置支持 `time.convective_cfl_definition`：`outgoing_sum` 为

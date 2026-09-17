@@ -3,6 +3,7 @@
 
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_mpi_runtime.hpp"
+#include "app_import_detail.hpp"
 
 #include <mpi.h>
 
@@ -98,6 +99,8 @@ void usage(int rank) {
               << "  hundun --version\n"
               << "  hundun status <run-dir>\n"
               << "  hundun restart-info <restart-dir> [--metadata-only]\n"
+              << "  hundun import <transfer-dir> --format pdf-transfer-v1"
+                 " --case <native-case-dir> --output <fresh-restart-dir>\n"
               << "  hundun validate <case-dir> [--dry-plan]\n"
               << "  hundun check <case-dir> [--dry-plan]\n"
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
@@ -234,6 +237,24 @@ int main(int argc, char* argv[]) {
   if (argc == 2 && std::string_view{argv[1]} == "--version") {
     if (rank == 0) std::cout << "HUNDUN-FLOW 1.0.0 source=v0.4\n";
     result = 0;
+  } else if (argc >= 3 && std::string_view{argv[1]} == "import") {
+    const char* format=nullptr;
+    const char* case_root=nullptr;
+    const char* output=nullptr;
+    bool parsed=true;
+    for (int index=3; index<argc && parsed; index+=2) {
+      if (index+1>=argc) { parsed=false; break; }
+      const std::string_view flag{argv[index]};
+      const char** target=flag=="--format" ? &format :
+                          flag=="--case" ? &case_root :
+                          flag=="--output" ? &output : nullptr;
+      if (!target || *target) { parsed=false; break; }
+      *target=argv[index+1];
+    }
+    if (parsed && format && case_root && output &&
+        std::string_view{format}=="pdf-transfer-v1")
+      result=hundun::v04::detail::import_pdf_transfer(case_root,argv[2],output);
+    else usage(rank);
   } else if ((argc==3 || argc==4) && std::string_view{argv[1]}=="restart-info" &&
              (argc==3 || std::string_view{argv[3]}=="--metadata-only")) {
     std::string json;
