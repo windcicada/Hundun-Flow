@@ -284,6 +284,10 @@ Status validate_record(const IoServicePlan& services,
         cold.reference_residual == std::array<double, 3U>{};
   const bool valid_cold =
       cold.active && cold.outer_iterations > 0U &&
+      accepted_terminal_metric(cold.passive_residual,128.0*std::numeric_limits<double>::epsilon()) &&
+      accepted_terminal_metric(cold.passive_balance_defect,128.0*std::numeric_limits<double>::epsilon()) &&
+      (cold.passive_scalar_count != 0U || (cold.passive_solve_calls==0U &&
+       cold.passive_iterations==0U && cold.passive_residual==0.0 && cold.passive_balance_defect==0.0)) &&
       (!cold.midpoint_enthalpy || cold.independent_species_count == 0U) &&
       (!cold.pressure_iccg || (std::isfinite(cold.pressure_original_l2_limit) &&
        cold.pressure_original_l2_limit > 0 &&
@@ -316,7 +320,7 @@ Status validate_record(const IoServicePlan& services,
       cold.enthalpy_iterations >= cold.final_enthalpy.iterations &&
       valid_cold_norms &&
       record.linear_iterations >= cold.momentum_iterations + cold.pressure_iterations +
-                                      cold.enthalpy_iterations + cold.species_iterations &&
+                                      cold.enthalpy_iterations + cold.species_iterations + cold.passive_iterations &&
       cold.solid_velocity_max == 0.0 && record.bdf_order == 1U &&
       record.requested_bdf_order == 1U && !record.temporal_method_fallback &&
       record.pressure_solve_calls == 0U &&
@@ -1216,6 +1220,11 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"species_solve_calls\":" << cold.species_solve_calls
          << ",\"species_endpoint_solve_calls\":" << cold.species_endpoint_solve_calls
          << ",\"independent_species_count\":" << cold.independent_species_count
+         << ",\"passive_scalar_count\":" << cold.passive_scalar_count
+         << ",\"passive_solve_calls\":" << cold.passive_solve_calls
+         << ",\"passive_iterations\":" << cold.passive_iterations
+         << ",\"passive_residual\":" << cold.passive_residual
+         << ",\"passive_balance_defect\":" << cold.passive_balance_defect
          << ",\"momentum_iterations\":" << cold.momentum_iterations
          << ",\"pressure_iterations\":" << cold.pressure_iterations
          << ",\"enthalpy_iterations\":" << cold.enthalpy_iterations

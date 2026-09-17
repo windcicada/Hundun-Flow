@@ -3129,6 +3129,8 @@ struct ProductDriver::Impl {
   std::vector<SnapshotFieldView> output_fields;
   std::vector<double> output_sgs;
   std::vector<detail::ColdPressureRow> iccg_scaled_rows;
+  std::vector<detail::ColdPressureRow> passive_rows;
+  std::optional<detail::ColdPressureDilu> passive_factor;
   std::vector<std::size_t> iccg_component_parent;
   std::vector<std::uint8_t> iccg_component_grounded;
   std::optional<detail::ColdPressureIccg> iccg_factor;
@@ -3742,10 +3744,6 @@ Status ProductCompiler::compile(MPI_Comm communicator,
        (model.solver.pressure.algorithm != LinearAlgorithm::fgmres &&
         model.solver.pressure.algorithm != LinearAlgorithm::bicgstab &&
         model.solver.pressure.algorithm != LinearAlgorithm::pcg) ||
-       std::any_of(model.transported_scalars.begin(), model.transported_scalars.end(),
-           [](const TransportedScalarSpec& scalar) {
-             return scalar.role != TransportedScalarRole::species;
-           }) ||
        !std::all_of(model.boundaries.begin(), model.boundaries.end(),
                     supported_cold_boundary));
   Status status = product_collective_status(
@@ -4453,8 +4451,14 @@ Status ProductCompiler::compile(MPI_Comm communicator,
             sizeof(detail::ColdPressureRow)+sizeof(std::size_t)+sizeof(std::uint8_t)+sizeof(double),
             candidate->summary.iccg_workspace_bytes))
       return Status{StatusCode::allocation_failure,kProductAllocation};
+    if (status && cold_model && std::find(candidate->fields.scalar_roles.begin(),
+        candidate->fields.scalar_roles.end(),TransportedScalarRole::passive_scalar)!=candidate->fields.scalar_roles.end() &&
+        !detail::product_checked_multiply(local_cells,sizeof(detail::ColdPressureRow)+sizeof(double),
+            candidate->summary.passive_workspace_bytes))
+      return Status{StatusCode::allocation_failure,kProductAllocation};
     if (status && (candidate->spray.enabled() || candidate->esf.enabled() ||
-                   candidate->summary.derived_output_bytes != 0U || candidate->summary.iccg_workspace_bytes != 0U)) {
+                   candidate->summary.derived_output_bytes != 0U || candidate->summary.iccg_workspace_bytes != 0U ||
+                   candidate->summary.passive_workspace_bytes != 0U)) {
       const auto limit = model.mesh.limits.max_memory_bytes_per_rank;
       std::size_t model_bytes = 0U;
       if (!detail::product_checked_add(candidate->spray.owned_bytes(),
@@ -4463,7 +4467,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
               candidate->summary.derived_output_bytes, model_bytes) ||
           !detail::product_checked_add(model_bytes,
               candidate->summary.esf_energy_workspace_bytes, model_bytes) ||
-          !detail::product_checked_add(model_bytes,candidate->summary.iccg_workspace_bytes,model_bytes))
+          !detail::product_checked_add(model_bytes,candidate->summary.iccg_workspace_bytes,model_bytes) ||
+          !detail::product_checked_add(model_bytes,candidate->summary.passive_workspace_bytes,model_bytes))
         return Status{StatusCode::allocation_failure, kProductAllocation};
       if (model_bytes > limit || candidate->layout.total_doubles() >
               (limit - model_bytes) / sizeof(double))
@@ -4929,6 +4934,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           !detail::product_checked_add(bytes,candidate->summary.derived_output_bytes,bytes) ||
           !detail::product_checked_add(bytes,candidate->summary.esf_energy_workspace_bytes,bytes) ||
           !detail::product_checked_add(bytes,candidate->summary.iccg_workspace_bytes,bytes) ||
+          !detail::product_checked_add(bytes,candidate->summary.passive_workspace_bytes,bytes) ||
           bytes>limit || doubles>(limit-bytes)/sizeof(double))
         return Status{StatusCode::allocation_failure,kProductAllocation};
       return Status{};
@@ -5933,6 +5939,11 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
         candidate->iccg_factor.emplace(candidate->iccg_scaled_rows,n,LinearIdentity{});
       }
       candidate->output_fields.resize(product.io.snapshot_fields().size);
+      if(product.summary.passive_workspace_bytes) {
+        const auto cells=product.patch.cells;
+        candidate->passive_rows.resize(std::size_t(cells.x)*cells.y*cells.z);
+        candidate->passive_factor.emplace(candidate->passive_rows,cells,LinearIdentity{});
+      }
       candidate->output_sgs.resize(product.summary.derived_output_bytes / sizeof(double));
       const auto primary_count = 3U + product.fields.scalars.size() +
                                  product.fields.esf_fields.size() +
@@ -12492,6 +12503,7 @@ Status ProductDriver::Impl::execute_attempt(
       report.cold.active = true;
       report.cold.independent_species_count =
           static_cast<std::uint32_t>(species_trial.size());
+      report.cold.passive_scalar_count=static_cast<std::uint32_t>(passive_trial.size());
       report.cold.stopping = product.cold_stopping;
       report.cold.reference_outer_iterations = product.reference_outer_iterations;
       report.cold.midpoint_enthalpy = product.midpoint_enthalpy;
@@ -12534,6 +12546,119 @@ Status ProductDriver::Impl::execute_attempt(
           ? midpoint.enthalpy : as_const(trial_enthalpy);};
       const auto thermal_T = [&](){return product.midpoint_enthalpy
           ? midpoint.temperature : as_const(trial_temperature);};
+
+      // Passive quantities use the accepted history and the terminal physical
+      // mass flux. Their transport is independent of the pressure/EOS solve.
+      const auto solve_cold_passives=[&](ConstFaceFluxView flux) -> Status {
+        if(passive_trial.empty())return {};
+        if(!scalar_remap || !passive_factor || passive_rows.empty())
+          return {StatusCode::invalid_plan,kProductBinding};
+        FieldView diagonal,rhs,residual,gamma,variation,linear_rhs,increment,backup;
+        auto s=runtime_write_view(product.fields.pressure_energy_e_h,diagonal);
+        if(s)s=runtime_write_view(product.fields.pressure_energy_continuity_residual,rhs);
+        if(s)s=runtime_write_view(product.fields.pressure_energy_energy_residual,residual);
+        if(s)s=runtime_write_view(product.fields.scalar_diffusivity,gamma);
+        if(s)s=runtime_write_view(product.fields.pressure_energy_candidate_pressure_correction,variation);
+        if(s)s=runtime_write_view(product.fields.pressure_rhs,linear_rhs);
+        if(s)s=runtime_write_view(product.fields.pressure_correction,increment);
+        if(s)s=runtime_write_view(product.fields.pressure_energy_candidate_enthalpy,backup);
+        FaceFieldView ax,ay,az;
+        if(s)s=make_pressure_face_views(product.energy_assembly_face_storage,cells,ax,ay,az);
+        s=product.reductions.consensus(s);if(!s)return s;
+        const detail::ScalarCorrectionStorage storage{{diagonal,rhs,residual,ax,ay,az},
+            variation,linear_rhs,increment,backup};
+        auto state=equation_state;
+        state.independent_species={species_history.data(),species_history.size()};
+        state.passive_scalars={passive_history.data(),passive_history.size()};
+        std::array<ConstFieldView,UINT8_MAX> diffusivities{};
+        const auto nd=species_history.size()+passive_history.size();
+        if(nd>diffusivities.size())return {StatusCode::invalid_plan,kProductBinding};
+        std::fill_n(diffusivities.begin(),nd,as_const(gamma));
+        auto scalar_material=material;
+        scalar_material.scalar_mass_diffusivity={diffusivities.data(),nd};
+        EquationAssemblyContext context;
+        context.dt=step.dt;context.bdf={1/step.dt,-1/step.dt,0,1};context.time=step.generation;
+        context.geometry=product.geometry.topology_revision();context.boundary=product.boundary.revision();
+        context.thermo=product.thermodynamics.fingerprint();context.transport=product.transport.fingerprint();
+        context.contribution_stage=1;context.scope=EquationAssemblyScope::final_conservative;
+        context.box=full_box;context.mass_flux=flux;context.face_flux=flux.revision;
+        context.face_flux_authority=flux.certificate.authority();context.face_flux_storage=flux.certificate.storage();
+        context.face_flux_revision_domain=flux.certificate.revision_domain();
+        context.immersed_interface=product.ibm_equations ? &*product.ibm_equations : nullptr;
+        context.wall_treatment=product.ibm_equations ? &product.turbulence : nullptr;
+        const auto refresh_all=[&]() {
+          std::size_t count{};
+          append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,count);
+          return scalar_remap->close_candidate_scalars({halo_views.data(),count},boundary_values,product.reductions);
+        };
+        s=refresh_all();if(!s)return s;
+        for(std::size_t q=0;q<passive_trial.size();++q) {
+          const auto original=passive_trial[q];
+          auto &trial=passive_trial[q];auto &scalar=passive_history[q];
+          scalar.trial=as_const(trial);
+          const auto &spec=*product.equations.scalars().spec(q);
+          for(int z=-1;z<=cells.z;++z)for(int y=-1;y<=cells.y;++y)for(int x=-1;x<=cells.x;++x) {
+            if(int(x<0||x>=cells.x)+int(y<0||y>=cells.y)+int(z<0||z>=cells.z)>1)continue;
+            const Int3 c{x,y,z};const double mu=molecular_viscosity.unchecked(c,0);
+            gamma.unchecked(c,0)=mu/spec.molecular_schmidt+
+                std::max(0.,effective_viscosity.unchecked(c,0)-mu)/spec.turbulent_schmidt;
+          }
+          const auto assemble=[&](EquationAssemblyCertificate &certificate) {
+            return assemble_scalar(product.equations.scalars(),q,state,scalar_material,{},context,
+                storage.equation,certificate);
+          };
+          const auto refresh=[&](FieldView &) {return refresh_all();};
+          bool converged=false;
+          for(unsigned sweep=0;sweep<64;++sweep) {
+            EquationAssemblyCertificate certificate;
+            s=assemble(certificate);
+            double maximum[2]{},sums[2]{};
+            for(int z=0;z<cells.z && s;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+              const Int3 c{x,y,z};
+              if(product.topology && !product.topology->is_fluid_global(
+                  {x+product.patch.begin.x,y+product.patch.begin.y,z+product.patch.begin.z}))continue;
+              const double old=scalar.accepted.unchecked(c,0),value=trial.unchecked(c,0);
+              const double volume=detail::cell_volume(product.equations.kernels(),c);
+              const double r=residual.unchecked(c,0)/volume;
+              const double scale=(state.density.accepted.unchecked(c,0)+state.density.trial.unchecked(c,0))/step.dt*
+                  std::max({1.,std::abs(old),std::abs(value)});
+              if(!std::isfinite(value) || !std::isfinite(r) || !std::isfinite(scale) || scale<=0)
+                s={StatusCode::numerical_failure,17874};
+              maximum[0]=std::max(maximum[0],std::abs(r)/scale);
+              maximum[1]=std::max(maximum[1],std::abs(r));
+              sums[0]+=volume*r;sums[1]+=volume*scale;
+            }
+            double global[2]{},balance[2]{};
+            s=product.reductions.checked_max({maximum,2},{global,2},s);
+            if(s)s=product.reductions.checked_sum({sums,2},{balance,2});
+            if(!s)return s;
+            if(global[0]<128*std::numeric_limits<double>::epsilon()) {
+              report.cold.passive_residual=std::max(report.cold.passive_residual,global[0]);
+              const double defect=std::abs(balance[0])/std::max(balance[1],1e-300);
+              report.cold.passive_balance_defect=std::max(report.cold.passive_balance_defect,defect);
+              int rank{};MPI_Comm_rank(communicator,&rank);
+              if(rank==0)std::fprintf(stdout,"cold_passive field=%u sweeps=%u residual=%.17g raw_residual=%.17g balance=%.17g temporal=BE step_committed=0\n",
+                  unsigned(spec.field),sweep,global[0],global[1],defect);
+              converged=true;break;
+            }
+            const LinearIdentity identity{detail::product_mix(product.equations.scalars().fingerprint(),q+1),
+                step.generation,product.geometry.fingerprint(),equation_workspace.fingerprint(),
+                detail::product_mix(step.generation,UINT64_C(0x50415353495645)+sweep)};
+            passive_factor->reset_identity(identity);
+            detail::ScalarCorrectionRuntime runtime{passive_rows,*passive_factor,product.krylov_halo,
+                equation_workspace,product.reductions,identity,equation_solve};
+            detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,BoundaryStage::scalar,
+                product.schemes.passive_scalar(),as_const(trial_velocity),context,state.density,scalar,trial,false};
+            const auto solved=detail::correct_scalar(problem,storage,runtime,assemble,refresh);
+            ++report.cold.passive_solve_calls;report.cold.passive_iterations+=solved.iterations;
+            if(!solved.status)return solved.status;
+          }
+          if(!converged)return {StatusCode::rejected_step,17874};
+          trial=original;scalar.trial=as_const(trial);
+          passive_accepted[q]=as_const(trial);
+        }
+        return {};
+      };
 
       // This branch returns before the PISO enthalpy reconstruction. Its
       // preallocated face workspace holds the common scalar conductance.
@@ -15602,6 +15727,13 @@ Status ProductDriver::Impl::execute_attempt(
           const auto cold_audit_state = detail::product_mix(
               cold_terminal_plan, transaction.attempt_identity());
           FinalForceCertificate force_certificate;
+          // Terminal energy accounting consumes its equation scratch first.
+          // Passive transport then reuses that storage with the same flux.
+          phase_timer.phase(1);
+          status=solve_cold_passives(cold_final_flux);
+          status=product.reductions.consensus(status);
+          if(!status)return status;
+          phase_timer.phase(9);
           // Final-state rate histories are committed with the state and feed
           // the next predictor. They do not consume or publish another face
           // flux.
@@ -16082,7 +16214,7 @@ Status ProductDriver::Impl::execute_attempt(
     // work here so resource snapshots also include rejected attempts.
     const std::uint64_t cold_iterations = report.cold.momentum_iterations +
         report.cold.pressure_iterations + report.cold.enthalpy_iterations +
-        report.cold.species_iterations;
+        report.cold.species_iterations + report.cold.passive_iterations;
     resources.linear_iterations = cold_iterations > UINT64_MAX - resources.linear_iterations
         ? UINT64_MAX : resources.linear_iterations + cold_iterations;
     if (!prepared.valid()) {

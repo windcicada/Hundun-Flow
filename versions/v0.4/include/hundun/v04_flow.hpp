@@ -2622,6 +2622,11 @@ struct ColdCouplingReport {
   // before candidate acceptance audits, including candidates refined again.
   std::uint32_t species_endpoint_solve_calls{};
   std::uint32_t independent_species_count{};
+  std::uint32_t passive_scalar_count{};
+  std::uint32_t passive_solve_calls{};
+  std::uint64_t passive_iterations{};
+  double passive_residual{};
+  double passive_balance_defect{};
   std::uint64_t momentum_iterations{};
   std::uint64_t pressure_iterations{};
   std::uint64_t enthalpy_iterations{};

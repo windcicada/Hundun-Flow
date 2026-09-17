@@ -14,6 +14,9 @@ struct FrozenScalarProblem {
   PrimitiveHistory density;
   PrimitiveHistory& scalar;
   FieldView& trial;
+  // ESF uses the frozen-density advective form; passive transport uses
+  // the conservative density history and divergence form.
+  bool frozen_density{true};
 };
 struct ScalarCorrectionStorage {
   EquationSystemView equation;
@@ -35,7 +38,7 @@ struct ScalarCorrectionRuntime {
 // previous histories stay fixed across repeated corrections. Scratch and the
 // DILU factor storage are prepared once by the enclosing compiled scheduler.
 template<class Assemble,class Refresh>
-LinearSolveResult correct_frozen_scalar(const FrozenScalarProblem& p,
+LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
     const ScalarCorrectionStorage& storage, ScalarCorrectionRuntime& runtime,
     Assemble&& assemble, Refresh&& refresh) noexcept {
   constexpr std::uint32_t invalid=17864,numerical=17865;
@@ -96,10 +99,15 @@ LinearSolveResult correct_frozen_scalar(const FrozenScalarProblem& p,
   };
   EquationAssemblyCertificate certificate;
   status=assemble(certificate);
-  if(status) status=close_frozen_density_scalar_rows(p.kernels,p.boundary,
-      p.boundary_stage,q.field,p.scheme,p.boundary_velocity,p.context,p.density,
-      p.scalar.trial,storage.equation,certificate,storage.boundary_variation,
-      {runtime.rows.data(),runtime.rows.size()});
+  if(status) {
+    if(p.frozen_density) status=close_frozen_density_scalar_rows(p.kernels,p.boundary,
+        p.boundary_stage,q.field,p.scheme,p.boundary_velocity,p.context,p.density,
+        p.scalar.trial,storage.equation,certificate,storage.boundary_variation,
+        {runtime.rows.data(),runtime.rows.size()});
+    else status=close_mixture_scalar_rows(p.kernels,p.boundary,p.boundary_stage,
+        q.field,p.scheme,p.boundary_velocity,p.context,storage.equation,certificate,
+        storage.boundary_variation,{runtime.rows.data(),runtime.rows.size()});
+  }
   status=runtime.reductions.consensus(status);
   if(!status) {
     rollback();result.status=status;result.termination=LinearTermination::operator_failure;
@@ -146,5 +154,12 @@ LinearSolveResult correct_frozen_scalar(const FrozenScalarProblem& p,
   }
   p.scalar.trial=as_const(p.trial);
   return result;
+}
+template<class Assemble,class Refresh>
+LinearSolveResult correct_frozen_scalar(const FrozenScalarProblem& p,
+    const ScalarCorrectionStorage& storage, ScalarCorrectionRuntime& runtime,
+    Assemble&& assemble, Refresh&& refresh) noexcept {
+  return correct_scalar(p,storage,runtime,std::forward<Assemble>(assemble),
+      std::forward<Refresh>(refresh));
 }
 } // namespace hundun::v04::detail

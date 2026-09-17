@@ -50,6 +50,7 @@ struct PlanSummary {
   std::size_t service_staging_bytes{};
   std::size_t derived_output_bytes{};
   std::size_t iccg_workspace_bytes{};
+  std::size_t passive_workspace_bytes{};
   std::uint8_t pressure_correctors{};
   double pressure_absolute_tolerance{};
   double pressure_relative_tolerance{};

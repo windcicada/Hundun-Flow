@@ -2767,3 +2767,8 @@ add_test(NAME v04_gas_iccg_cli
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_iccg_cli_test.py"
     "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
 set_tests_properties(v04_gas_iccg_cli PROPERTIES PROCESSORS 4 TIMEOUT 240 RUN_SERIAL TRUE)
+add_test(NAME v04_gas_passive_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_passive_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
+set_tests_properties(v04_gas_passive_cli PROPERTIES PROCESSORS 4 TIMEOUT 240 RUN_SERIAL TRUE)

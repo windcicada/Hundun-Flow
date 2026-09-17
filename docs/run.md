@@ -100,3 +100,16 @@ ICCG 的缩放行 L2 阈值由原始配置与最小单元体积换算，候选�
 实际后端组合，`pressure_original_l2` 与 `pressure_original_l2_limit`
 保留原方程残差及门槛。`hundun check` 报告后端与预分配工作区字节数。
 相同配置可使用原生 Restart 在不同进程数之间续算。
+
+`cn_be`／`outer_corrected` 支持 `transported_scalars` 中的
+`passive_scalar`。被动标量采用 BE 守恒输运，使用本步终态质量通量、
+公共边界矩阵消元和 IBM 固体行。有限体积残差采用完整配置的空间格式，
+校正矩阵以迎风部分预处理限幅重构；每次候选共享已接受的标量历史。
+有符号示踪量和多个被动标量沿用同一接口。
+
+运行证据与监看中的 `cold.passive_scalar_count`、`passive_solve_calls`、
+`passive_iterations` 记录实际工作量；`passive_residual` 为局部时间尺度
+归一化的最大原方程残差，`passive_balance_defect` 为体积积分收支的
+归一化缺陷。两者提交门槛均为 128 倍 FP64 epsilon。
+`hundun check` 的 `passive_workspace_bytes` 报告各标量复用的预分配
+校正工作区，输运耗时计入 CN 的 scalar 阶段。

@@ -1125,7 +1125,15 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         require_integer(cold[name + "_iterations"], prefix)
     if species_count == 0 and (cold["species_iterations"] != 0 or cold["species_residual"] != 0):
         raise EvidenceError(f"{prefix} reports transport work for zero independent species")
-    if record["linear_iterations"] < sum(cold[name + "_iterations"]
+    passive_count = require_integer(cold.get("passive_scalar_count", 0), prefix)
+    passive_calls = require_integer(cold.get("passive_solve_calls", 0), prefix)
+    passive_iterations = require_integer(cold.get("passive_iterations", 0), prefix)
+    passive_metrics = [require_nonnegative_finite_number(cold.get(name, 0.0), prefix)
+                       for name in ("passive_residual", "passive_balance_defect")]
+    if (any(value > 128 * float.fromhex("0x1p-52") for value in passive_metrics) or
+            (not passive_count and (passive_calls or passive_iterations or any(passive_metrics)))):
+        raise EvidenceError(f"{prefix} violates passive transport residual or work accounting")
+    if record["linear_iterations"] < passive_iterations + sum(cold[name + "_iterations"]
             for name in ("momentum", "pressure", "enthalpy", "species")):
         raise EvidenceError(f"{prefix} drops split iterations from the resource total")
     for name in ("momentum_residual", "enthalpy_residual", "species_residual",

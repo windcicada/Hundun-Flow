@@ -7,7 +7,9 @@
 namespace hundun::v04::detail {
 
 // Complete correction matrix for an assembled scalar equation with frozen
-// material, flux and common central/VLS face coefficients. The reference
+// material, flux and common central/VLS face coefficients. Independent
+// limited scalars use an upwind correction with the full reconstruction
+// retained in the residual. The reference
 // supplies integrated storage, sources, diffusion diagonal and true residual.
 // Boundary values enter that residual; their homogeneous relations close the
 // correction matrix. Rows are returned per volume for native Krylov solvers.
@@ -29,7 +31,6 @@ inline Status close_mixture_scalar_rows(
       certificate.geometry!=context.geometry || certificate.face_flux!=context.face_flux ||
       certificate.scope!=context.scope || certificate.dt!=context.dt ||
       boundary.revision()!=context.boundary || rows.size!=count || !rows.data ||
-      (!context.mixture_transport && scheme!=ConvectionScheme::central2) ||
       !valid_cell_view(reference.diagonal,cells,0,1) ||
       !valid_cell_view(reference.residual,cells,0,1) ||
       !valid_cell_view(as_const(boundary_variation),cells,0,1,1) ||
@@ -83,8 +84,11 @@ inline Status close_mixture_scalar_rows(
         continue; // The inlet composition is fixed in the physical residual.
       const int normal=coordinate[a]+(high ? 1 : 0);
       const double lower=interpolate_face(kernels,axis,normal,1.,0.);
-      const double owner=high ? lower : 1.-lower;
       const double mass=F[a].unchecked(face)*(high ? 1. : -1.);
+      // Limited scalar reconstruction stays in the complete residual. Use
+      // its monotone upwind part for the deferred-correction matrix.
+      const double owner=context.mixture_transport || scheme==ConvectionScheme::central2
+          ? (high ? lower : 1.-lower) : (mass>=0. ? 1. : 0.);
       const double conductance=D[a].unchecked(face);
       if (!std::isfinite(conductance) || conductance<0 || !std::isfinite(mass))
         return {StatusCode::numerical_failure,numerical};

@@ -171,6 +171,23 @@ class ScalarMassRemap {
                          boundary.halo_topology());
   }
 
+  Status close_candidate_scalars(Span<FieldView> scalars,
+      BoundaryResolvedValues values, ReductionEngine& reductions) noexcept {
+    Status local;
+    if (!boundary_ || scalars.size!=views_.size() || !scalars.data)
+      local={StatusCode::invalid_plan,kInvalid};
+    for(std::size_t i=0;i<scalars.size && local;++i)
+      if(scalars.data[i].field!=views_[i].field)
+        local={StatusCode::invalid_plan,kInvalid};
+    auto status=reductions.consensus(local);
+    if(!status)return status;
+    HaloTicket ticket;
+    status=halo_.begin(176U,{scalars.data,scalars.size},{},ticket);
+    if(status)status=halo_.finish(ticket,{scalars.data,scalars.size});
+    if(status)status=apply_boundary_ghosts(BoundaryStage::scalar,*boundary_,
+        {scalars.data,scalars.size},values);
+    return reductions.consensus(status);
+  }
   Status reserve_coupling_history() { return history_.reserve(quantity_count_); }
   void begin_coupling_sweep(unsigned sweep) noexcept { history_.begin(sweep); }
   Status update_coupling_guess(Span<const FieldView> input,
