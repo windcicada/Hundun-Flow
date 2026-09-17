@@ -50,11 +50,11 @@ def hashes(root):
     return {str(path.relative_to(root)):hashlib.sha256(path.read_bytes()).hexdigest()
             for path in root.rglob('*') if path.is_file()}
 
-def run(source,label,ranks,success=True,native=False,failure='reconstruct status=1/24106'):
+def run(source,label,ranks,success=True,native=False,failure='reconstruct status=1/24106',version=1):
     output=work.with_name(work.name+'-'+label)
     if output.exists():shutil.rmtree(output)
     before=hashes(source)
-    command=([application,'import',source,'--output',output,'--format','pdf-transfer-v1','--case',work]
+    command=([application,'import',source,'--output',output,'--format','pdf-transfer-v%d'%version,'--case',work]
              if native else [binary,work,source,output])
     with (work/(label+'.log')).open('w') as log:
         result=subprocess.run(list(map(str,[mpi,'--oversubscribe','--bind-to','none','-n',ranks]+command)),stdout=log,stderr=log)
@@ -68,7 +68,7 @@ def run(source,label,ranks,success=True,native=False,failure='reconstruct status
     assert 'physical_readback=exact' in text and 'native_restart status=0/0' in text,text
     return output,json.loads((output/'import.json' if native else source/'native.json').read_text())
 
-def pressure_records(root,expected):
+def pressure_records(root,expected,passive_values=()):
     generation=root/(root/'current').read_text().strip()
     owned=set()
     for path in generation.iterdir():
@@ -83,13 +83,16 @@ def pressure_records(root,expected):
         common=take('iiiQQQdddQQI');assert common[:3]==(8,8,8)
         reference=common[8];fields=[take('BHB') for _ in range(common[-1])]
         box=take('iiiiii');begin=box[:3];shape=box[3:];count=math.prod(shape)
-        scalar=0
+        scalar=0;passive=0
         for role,identity,width in fields:
             size,=take('Q');assert size==width*count
             values=take('d'*size)
             if role==4:
                 name=model['transported_scalars'][scalar]['stable_name'];scalar+=1
                 assert width==1 and all(v==fractions[species.index(name)] for v in values)
+            if role==5:
+                assert width==1 and all(v==passive_values[passive] for v in values)
+                passive+=1
             if role!=1:continue
             for i,value in enumerate(values):
                 xyz=(begin[0]+i%shape[0],begin[1]+i//shape[0]%shape[1],begin[2]+i//(shape[0]*shape[1]))
@@ -97,6 +100,7 @@ def pressure_records(root,expected):
                 index=xyz[0]+8*(xyz[1]+8*xyz[2])
                 assert value+reference==expected(index),(xyz,value,reference,expected(index))
         assert scalar==6
+        assert passive==len(passive_values)
     assert len(owned)==512
 
 signed=lambda i: -17942736.+1000*(i%8)
@@ -162,10 +166,54 @@ assert abs(coupled_audit['relative_mass_change'])<1e-12
 solid=transfer('solid',positive,positive)
 (solid/'fluid.u8').write_bytes(bytes(512))
 run(solid,'empty',2,False,native=True,failure='inventory status=1/24113')
+# dyn711 requires the separately transported mixture fraction. V2 carries
+# named source scalars; their order may differ from the native catalog.
+model['flow']['thermodynamic_pressure_pa']=p0
+model['reaction']['ensemble']['tcr']=dict(model='dyn711_v1',mode='experimental',
+    fuel='C12H23',weak_rate_threshold=1e-30,mixture_fraction='Z',oxidizer_oxygen_mass_fraction=.232)
+for name,value in (('Z',0.),('tracer',-.125)):
+    model['transported_scalars'].append(dict(stable_name=name,role='passive_scalar',
+        molecular_schmidt=.7,turbulent_schmidt=.7))
+    for side in ('x_min','x_max'):
+        model['boundaries'][side]['scalars'].append(dict(stable_name=name,kind='zero_gradient',
+            value=0,backflow_kind='dirichlet',backflow_value=value))
+(work/'case.json').write_text(json.dumps(model))
+dynamic=transfer('dynamic',lambda i:100000.,lambda i:p0)
+(dynamic/'state.txt').write_text('HUNDUN_PDF_TRANSFER 2\n8 8 8 17 .001 1e-5 100000 2 7 2\n'+
+    ' '.join(species)+'\ntracer Z\n')
+pack(dynamic/'passive.f64',[-.125,0.]*512)
+run(dynamic,'format',2,False,native=True,failure='header status=1/24104')
+run(dynamic,'dyn-history',2,False,native=True,version=2,failure='restore status=2/10217')
+# Current-state migration and complete dynamic history are separate contracts.
+# Exercise the new scalar transport with TCR off; keep the dynamic rejection
+# above as the concrete history-interface follow-up.
+model['reaction']['ensemble']['tcr']=dict(mode='off')
+(work/'case.json').write_text(json.dumps(model))
+dynamic_seed,dynamic_audit=run(dynamic,'dynamic',2,native=True,version=2)
+assert dynamic_audit['transfer_version']==2 and dynamic_audit['passive_scalar_order']==['Z','tracer']
+pressure_records(dynamic_seed,lambda i:100000.,(0.,-.125))
+dynamic_run=work.with_name(work.name+'-dyn-run')
+if dynamic_run.exists():shutil.rmtree(dynamic_run)
+with (work/'dyn-resume.log').open('w') as log:
+    result=subprocess.run(list(map(str,[mpi,'--oversubscribe','--bind-to','none','-n',4,
+        application,'run',work,'--output',dynamic_run,'--steps',1,'--restart',dynamic_seed,
+        '--output-interval',0,'--restart-interval',1,'--diagnostics-interval',1])),stdout=log,stderr=log)
+assert result.returncode==0,(work/'dyn-resume.log').read_text()[-16000:]
+dynamic_generation=dynamic_run/'Restart'/(dynamic_run/'Restart/current').read_text().strip()
+dynamic_header=struct.unpack_from('<8sIIiiiQQQdddQQI',(dynamic_generation/'manifest.bin').read_bytes())
+assert dynamic_header[12]==18
+# Malformed named payloads fail before a checkpoint is published.
+pack(dynamic/'passive.f64',[float('nan'),0.]*512)
+run(dynamic,'badscalar',2,False,native=True,version=2,failure='reconstruct status=1/24107')
 report=dict(passed=True,source_pressure_range=[signed(0),signed(7)],
     fixed=audit,coupled=coupled_audit,source_ranks=[1,2,4],pressure_readback='exact',
     public_import=dict(format='pdf-transfer-v1',source_unchanged=True,path_and_option_rejections=6,
                        empty_inventory_rejected=True),
+    passive_import=dict(format='pdf-transfer-v2',model='tcr_off',passives=['Z','tracer'],
+                        source_order=['tracer','Z'],readback='exact',source_ranks=2,restart_ranks=4,
+                        accepted_step=dynamic_header[12],format_mismatch_rejected=True,nonfinite_scalar_rejected=True),
+    dynamic_history=dict(model='dyn711_v1',status='pending_native_history_migration',
+                         observed_stage='restore',observed_code=2,observed_detail=10217),
     native_recovery=dict(source_step=17,accepted_step=header[12],accepted_time=header[9],source_ranks=2,restart_ranks=4),
     binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
     application_sha256=hashlib.sha256(application.read_bytes()).hexdigest())

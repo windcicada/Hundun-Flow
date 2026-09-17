@@ -107,7 +107,9 @@ struct Header {
   double time{}, dt{}, pressure{};
   std::size_t nf{}, ns{};
   std::vector<std::string> names;
-  std::vector<std::size_t> independent;
+  std::vector<std::size_t> independent, passive_mapping;
+  std::vector<std::string> passive_names;
+  unsigned version{};
 };
 Status invalid(unsigned detail = 24104) {
   return {StatusCode::invalid_case, detail};
@@ -119,16 +121,25 @@ Status read_header(const std::filesystem::path &root, Header &h) {
   in >> magic >> version >> h.cells.x >> h.cells.y >> h.cells.z >> h.step >>
       h.time >> h.dt >> h.pressure >> h.nf >> h.ns;
   std::size_t count = 0;
-  if (!in || magic != "HUNDUN_PDF_TRANSFER" || version != 1 ||
+  if (!in || magic != "HUNDUN_PDF_TRANSFER" || (version != 1 && version != 2) ||
       !checked_product(h.cells, count) || !esf::valid_field_count(h.nf) ||
       h.ns < 2 || h.ns > 64 || h.step == 0 || !std::isfinite(h.time) ||
       h.time < 0 || !std::isfinite(h.dt) || h.dt <= 0 ||
       !std::isfinite(h.pressure) || h.pressure <= 0)
     return invalid();
+  h.version=version;
+  std::size_t passives=0;
+  if(version==2 && (!(in>>passives) || passives>64)) return invalid();
+  h.passive_names.resize(passives);
   h.names.resize(h.ns);
   for (auto &name : h.names)
     if (!(in >> name))
       return invalid();
+  for(auto& name:h.passive_names) if(!(in>>name)) return invalid();
+  for(std::size_t i=0;i<h.passive_names.size();++i) {
+    if(std::find(h.names.begin(),h.names.end(),h.passive_names[i])!=h.names.end()) return invalid();
+    if(std::find(h.passive_names.begin(),h.passive_names.begin()+i,h.passive_names[i])!=h.passive_names.begin()+i) return invalid();
+  }
   std::string extra;
   if (in >> extra)
     return invalid();
@@ -136,7 +147,7 @@ Status read_header(const std::filesystem::path &root, Header &h) {
 }
 struct Block {
   Int3 begin{}, cells{};
-  std::vector<double> flow, reference_density, density, mean, cache;
+  std::vector<double> flow, reference_density, density, mean, cache, passives;
   std::vector<std::vector<double>> pdf;
   std::vector<std::uint8_t> fluid;
   std::size_t offset(Int3 g) const {
@@ -198,11 +209,14 @@ Status read_block(const std::filesystem::path &root, const Header &h,
   for (std::size_t f = 0; s && f < h.nf; ++f)
     s = read_box(root / ("pdf" + std::to_string(f) + ".f64"), h, b, h.ns + 1,
                  b.pdf[f]);
+  if(s && !h.passive_names.empty())
+    s=read_box(root / "passive.f64",h,b,h.passive_names.size(),b.passives);
   return s;
 }
 Status reconstruct(const Header &h, const ThermodynamicsPlan &thermo,
                    const TransportPlan &transport, Block &b) {
   const std::size_t stride = h.ns + 1, count = b.fluid.size();
+  for(double value:b.passives) if(!std::isfinite(value)) return invalid(24107);
   b.mean.assign(count * stride, 0);
   b.density.resize(count);
   b.cache.assign(count * 4, 0);
@@ -330,7 +344,7 @@ Status fill(const Header &h, const RestartExpected &e,
   image.source_format_version = 1;
   image.backward_euler_recovery = true;
   image.final_mass_flux_revision = 1;
-  std::size_t scalar = 0, stochastic = 0, count = 0;
+  std::size_t scalar = 0, passive = 0, stochastic = 0, count = 0;
   if (!checked_product(image.patch.cells, count))
     return invalid();
   const auto c = image.patch.cells;
@@ -376,6 +390,10 @@ Status fill(const Header &h, const RestartExpected &e,
               return invalid();
             *v = b.mean[i * (h.ns + 1) + h.independent[scalar]];
             break;
+          case RestartFieldRole::transported_scalar:
+            if(d.components!=1 || passive>=h.passive_mapping.size()) return invalid();
+            *v=b.passives[i*h.passive_names.size()+h.passive_mapping[passive]];
+            break;
           case RestartFieldRole::stochastic_field:
             if (d.components != h.ns + 1 || stochastic >= h.nf)
               return invalid();
@@ -398,11 +416,12 @@ Status fill(const Header &h, const RestartExpected &e,
         }
     if (d.role == RestartFieldRole::independent_species)
       ++scalar;
+    if (d.role == RestartFieldRole::transported_scalar) ++passive;
     if (d.role == RestartFieldRole::stochastic_field)
       ++stochastic;
     image.fields.push_back(std::move(out));
   }
-  if (scalar != h.ns - 1 || stochastic != h.nf)
+  if (scalar != h.ns - 1 || stochastic != h.nf || passive!=h.passive_names.size())
     return invalid(24108);
   for (unsigned a = 0; a < 3; ++a) {
     auto ext = c;
@@ -452,7 +471,7 @@ Status exact_physical_fields(const RestartImage &image,
   return {};
 }
 int run(const char *case_root, const char *transfer, const char *output,
-        int rank, bool legacy_report) {
+        int rank, bool legacy_report, unsigned expected_version) {
   const auto comm = MPI_COMM_WORLD;
   auto stage = [&](const char *name, Status s) {
     s = consensus(comm, s);
@@ -480,12 +499,16 @@ int run(const char *case_root, const char *transfer, const char *output,
       }))) return 3;
   Header h;
   if (!stage("header",
-             local_stage(comm, [&] { return read_header(transfer, h); })))
+             local_stage(comm, [&] {
+               auto status=read_header(transfer,h);
+               if(status && expected_version && h.version!=expected_version) return invalid();
+               return status;
+             })))
     return 3;
   ValidatedModel model;
   auto s = CaseCompiler::load_and_compile(comm, case_root, model);
   if (s && (!model.reaction.esf || model.reaction.esf->fields != h.nf ||
-            model.transported_scalars.size() != h.ns - 1 ||
+            model.transported_scalars.size() != h.ns - 1 + h.passive_names.size() ||
             model.thermophysics.species.size() != h.ns))
     s = invalid(24110);
   for (std::size_t i = 0; s && i < h.ns; ++i) {
@@ -495,11 +518,18 @@ int run(const char *case_root, const char *transfer, const char *output,
   s = local_stage(comm, [&]() -> Status {
     if (!s) return s;
     for (const auto& scalar : model.transported_scalars) {
-      const auto found = std::find(h.names.begin(), h.names.end(), scalar.stable_name);
-      if (scalar.role != TransportedScalarRole::species || found == h.names.end())
-        return invalid(24110);
-      h.independent.push_back(static_cast<std::size_t>(found-h.names.begin()));
+      if(scalar.role==TransportedScalarRole::passive_scalar) {
+        const auto found=std::find(h.passive_names.begin(),h.passive_names.end(),scalar.stable_name);
+        if(found==h.passive_names.end()) return invalid(24110);
+        h.passive_mapping.push_back(static_cast<std::size_t>(found-h.passive_names.begin()));
+      } else {
+        const auto found = std::find(h.names.begin(), h.names.end(), scalar.stable_name);
+        if (scalar.role != TransportedScalarRole::species || found == h.names.end())
+          return invalid(24110);
+        h.independent.push_back(static_cast<std::size_t>(found-h.names.begin()));
+      }
     }
+    if(h.independent.size()!=h.ns-1 || h.passive_mapping.size()!=h.passive_names.size()) return invalid(24110);
     return {};
   });
   if (!stage("case", s))
@@ -593,7 +623,10 @@ int run(const char *case_root, const char *transfer, const char *output,
     file << "],\"independent_species_order\":[";
     for (std::size_t i=0; i<h.independent.size(); ++i)
       file << (i ? "," : "") << std::quoted(h.names[h.independent[i]]);
-    file << ']'
+    file << "],\"transfer_version\":" << h.version << ",\"passive_scalar_order\":[";
+    for(std::size_t i=0;i<h.passive_mapping.size();++i)
+      file << (i ? "," : "") << std::quoted(h.passive_names[h.passive_mapping[i]]);
+    file << "]"
          << ",\"scope\":\"fixed PDF p/h/Y, canonical native mean EOS versus "
             "COAST startup harmonic PDF EOS\"}\n";
     if (!file)
@@ -691,11 +724,11 @@ int run(const char *case_root, const char *transfer, const char *output,
 
 namespace hundun::v04::detail {
 int import_pdf_transfer(const char* case_root, const char* transfer,
-                        const char* output, bool legacy_report) {
+                        const char* output, bool legacy_report, unsigned expected_version) {
   int rank=0;
   if (MPI_Comm_rank(MPI_COMM_WORLD,&rank)!=MPI_SUCCESS) return 2;
   try {
-    return run(case_root,transfer,output,rank,legacy_report);
+    return run(case_root,transfer,output,rank,legacy_report,expected_version);
   } catch (const std::exception& error) {
     std::cerr << "rank=" << rank << " exception=" << error.what() << std::endl;
     MPI_Abort(MPI_COMM_WORLD,11);

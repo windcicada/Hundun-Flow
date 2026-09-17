@@ -99,7 +99,7 @@ void usage(int rank) {
               << "  hundun --version\n"
               << "  hundun status <run-dir>\n"
               << "  hundun restart-info <restart-dir> [--metadata-only]\n"
-              << "  hundun import <transfer-dir> --format pdf-transfer-v1"
+              << "  hundun import <transfer-dir> --format pdf-transfer-v1|pdf-transfer-v2"
                  " --case <native-case-dir> --output <fresh-restart-dir>\n"
               << "  hundun validate <case-dir> [--dry-plan]\n"
               << "  hundun check <case-dir> [--dry-plan]\n"
@@ -252,8 +252,9 @@ int main(int argc, char* argv[]) {
       *target=argv[index+1];
     }
     if (parsed && format && case_root && output &&
-        std::string_view{format}=="pdf-transfer-v1")
-      result=hundun::v04::detail::import_pdf_transfer(case_root,argv[2],output);
+        (std::string_view{format}=="pdf-transfer-v1" || std::string_view{format}=="pdf-transfer-v2"))
+      result=hundun::v04::detail::import_pdf_transfer(case_root,argv[2],output,false,
+          std::string_view{format}=="pdf-transfer-v1" ? 1U : 2U);
     else usage(rank);
   } else if ((argc==3 || argc==4) && std::string_view{argv[1]}=="restart-info" &&
              (argc==3 || std::string_view{argv[3]}=="--metadata-only")) {
