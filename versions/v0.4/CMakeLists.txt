@@ -301,6 +301,7 @@ set(hundun_v04_core_sources
   src/models_esf.cpp
   src/models_tcr.cpp
   src/models_tcr_dynamic.cpp
+  src/models_tcr_dyn711.cpp
   src/core_tcr_dynamic.cpp
   src/models_chemistry_adapter.cpp
   src/models_exchange_batch.cpp

@@ -1,0 +1,45 @@
+{
+  "schema": "hundun.gas.tcr.v1",
+  "calls": 1080,
+  "independent_windows": 120,
+  "reference_scope": "Complete statistics.F90 with uniform 2x2x2 interior, serial reduction and Cartesian gradient fixture",
+  "verified": [
+    "eight-interval signed accumulation",
+    "separate ninth evaluation call",
+    "kappa lower/upper/weak-rate branches",
+    "time-scale branches on uniform fields",
+    "Cphi update clock and uniform fallback"
+  ],
+  "remaining": [
+    "nonuniform dynamic Cphi spatial filters",
+    "production history and scheduling",
+    "remixing and gas coupling",
+    "parallel restart and real-case trajectories"
+  ],
+  "errors": {
+    "fp64": {
+      "max_normalized_difference": 5.551115123125783e-16,
+      "row": 116,
+      "column": 4
+    },
+    "fp32": {
+      "max_normalized_difference": 1.740346515422267e-07,
+      "row": 223,
+      "column": 11
+    }
+  },
+  "input_sha256": "f30dfa0f61611242df700e430480bfcd99e8dbd3687fe67e19eaf115c15b78c4",
+  "source_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3",
+  "driver_sha256": "c79e1e3caf84206edf6255f35ea1365a96c25c4f1241bad0fe05646000f27042",
+  "generator_sha256": "ff40e44f1cb8102423c6cf4daac158704acf9fc30ed047bf4438f229ecfe31ff",
+  "binaries": {
+    "fp32": "bc143c31cad5900f393a9b058eb92785f0414573a7d498d262848379b19dfe58",
+    "fp64": "7cd3080bc57f1713131146b880aed33eb87d9d991392184ce31b4fba6120200c",
+    "hundun": "c21f2626f058f4a7d4099edba3e70821ccc712b830a1936e7dadc61dfcbf5b12"
+  },
+  "reference_compile": [
+    "gfortran -O2 -fcheck=all",
+    "gfortran -O2 -fcheck=all -fdefault-real-8 -fdefault-double-8"
+  ],
+  "identity": "dyn711_candidate_kernel; existing cdphyso_dynamic_v1 production semantics preserved"
+}

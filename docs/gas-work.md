@@ -7,7 +7,7 @@
 | G0 | gas-ref.json：131 文件哈希、关键调用表；gas-cfl.json：完整 courant 例程的 259 输入对照 | 实际参考构建、算例后端与端到端计时窗口 |
 | G1 | CFL 定义贯通配置、准入、自适应 dt、运行证据与 Restart 方法身份；固定外迭代参考模式贯通末次完整审计、方法身份和证据；定向检查见文末 | 普通焓 CN 已接线；完整 jstep 调度及非均匀场自适应重试 |
 | G2 | Vreman 无散度反例定向回归 | ICCG 原生正确性接线见文末；矩阵／通量、壁函数、精度及大规模同场性能继续 |
-| G3 | 继承 S28–S29 动态 TCR 与恢复证据 | 原始 dyn711 八步统计与分支／重新混合对齐，8/16 场动态模型组合（TCR off 复用 S24） |
+| G3 | 继承 S28–S29；dyn711 独立代数／累计时钟、候选历史及完整统计例程的均匀场对照见文末 | 动态空间滤波、原生接线／重新混合，8/16 场动态模型组合（TCR off 复用 S24） |
 | G4 | 继承 JL4 原时间步组合检查 | 化学筛选／任务均衡、热源／边界及实场轨迹 |
 | I1 | 独立监看、CN 十阶段计时、接受点 stop/output、请求回执、状态查询；2→4 进程恢复通过 | 化学细分和通信包含关系，重试阶段状态通知 |
 | I2 | 当前目录启动、run.json、显式覆盖、步数／时间结束，严格模式检查通过 | 简洁物理输入模板及最终方法说明扩展 |
@@ -209,3 +209,44 @@ G2 ICCG 原生接线：`pressure_linear.algorithm=pcg` 选择 CN/BE 外迭代
 入口。外部证据校验器 self-test 返回成功。该节点完成 ICCG 原生正确性
 接线；严格 SPD 充分条件及换算阈值会影响适用矩阵和求解成本，实际
 冷态 10＋100 步性能窗口仍按 G2 原出口执行。
+
+G3 原始统计定义：完整 `statistics.F90` 的实际调用条件为
+`boffin` 的 `turbstat` 分支。κ 窗口先累计 8 次统计调用的带符号
+`dt*1e5*rate`，第 9 次调用计算并清零；该次区间速率在窗口之外。
+初次窗口的 κ 为 0.2。Cφ 的计数器从 0 开始，更新发生于第
+1、2、9、16……次统计调用。模型时钟与流动外迭代分别管理。
+
+新增 `models_tcr_dyn711` 内核保留该节奏、弱累计速率的单位比值、
+带符号比值的正值规则、η 上限及化学／流动时间比超过 100 时的上支。
+混合系数使用 `min(κ,1)`；小根采用有理化表达式，η=1 使用退化
+线性方程的有限根，η=0 保留其有限上下根。Cφ 独立实现原始双重
+空间滤波之间的原值乘积、OH→燃料→混合分数的优先级、范围判断
+和邻居平滑。现有 `cdphyso_dynamic_v1` 的 624CF 定义保持原身份。
+
+`tools/gas_tcr.f90` 连接逐字复制的完整 `statistics.F90`，包括
+`Dynamic_Cphi` 与 `test_avg`。外围提供 2×2×2 均匀内点、坐标梯度
+和单进程归约，当前对照范围为累计窗口、代数／弱反应分支、均匀场
+时间尺度及 Cφ 时钟／均匀回退。40 组、每组 27 次调用，共 1,080
+次调用的最大归一化差异为 FP64 5.55e-16、原生 REAL4 1.74e-7；
+对应日志 `check/gas-tcr-compare.log`，哈希及覆盖范围见
+[gas-tcr.json](gas-tcr.json)。空间变化的完整滤波和重新混合单列接续。
+
+```sh
+mkdir -p check/gd
+cp /home/wyf/code_dev/src.TCR.dyn711/statistics.F90 check/gd/statistics.F90
+gfortran -O2 -fcheck=all -Jcheck/gd tools/gas_tcr.f90 check/gd/statistics.F90 -o check/gd/ref4
+gfortran -O2 -fcheck=all -fdefault-real-8 -fdefault-double-8 -Jcheck/gd \
+  tools/gas_tcr.f90 check/gd/statistics.F90 -o check/gd/ref8
+python3 tools/gas_tcr.py --float check/gd/ref4 --double check/gd/ref8 \
+  --hundun b3/versions/v0.4/tests/v04_gas_tcr_probe --runner 'bash check/jam.sh' \
+  --source check/gd/statistics.F90 --output docs/gas-tcr.json
+```
+
+`Dyn711History` 以独立版本身份保存每个单元的累计速率、κ 上下支、
+有限退化根状态、Cφ 及统计时钟。所有候选计算从已接受窗口起步，
+显式完成各单元／组分后才形成待提交记录，提交使用预分配缓冲交换。
+原生逐单元记录格式支持通用恢复器按全局单元重分发。
+`check/gas-tcr-history.log` 通过 20 步候选丢弃／新 dt 重算、8→9
+窗口交界、恢复后字节一致、单单元记录重分配、固体保持、部分提交
+检测及损坏时钟／分支拒绝。这是历史组件验证；原生运行入口及
+跨进程数动态模型组合接续接线。

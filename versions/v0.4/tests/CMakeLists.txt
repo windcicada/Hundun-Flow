@@ -8,6 +8,13 @@ add_executable(v04_models_tcr_dynamic_test unit/models_tcr_dynamic_test.cpp)
 target_include_directories(v04_models_tcr_dynamic_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(v04_models_tcr_dynamic_test PRIVATE hundun_v04_core)
 add_test(NAME v04_models_tcr_dynamic COMMAND v04_models_tcr_dynamic_test)
+add_executable(v04_models_tcr_dyn711_test unit/models_tcr_dyn711_test.cpp)
+target_include_directories(v04_models_tcr_dyn711_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_models_tcr_dyn711_test PRIVATE hundun_v04_core)
+add_test(NAME v04_models_tcr_dyn711 COMMAND v04_models_tcr_dyn711_test)
+add_executable(v04_gas_tcr_probe integration/gas_tcr_probe.cpp)
+target_include_directories(v04_gas_tcr_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_gas_tcr_probe PRIVATE hundun_v04_core)
 
 # Retain the original RED executable name for reproducible historical commands.
 # The corrected method is now an ordinary acceptance suite, never WILL_FAIL.
