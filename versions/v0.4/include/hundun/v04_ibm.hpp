@@ -349,12 +349,15 @@ struct IbmInterfaceInletState {
   Real3 velocity{};
   double enthalpy{};
   Span<const double> independent_species{};
+  // Values follow the passive equation order, independently of species.
+  Span<const double> passive_scalars{};
 };
 
 enum class IbmInterfaceInletFieldKind : std::uint8_t {
   velocity,
   enthalpy,
   independent_species,
+  passive_scalar,
   kinetic_energy
 };
 
@@ -857,6 +860,7 @@ class IbmEquationInterfacePlan {
     double enthalpy{};
     std::size_t independent_species_begin{};
     bool has_inlet_state{};
+    std::size_t passive_scalars_begin{};
   };
   const PrescribedInterfaceFlux* inlet_for_link(
       std::uint32_t topology_link) const noexcept;
@@ -883,6 +887,8 @@ class IbmEquationInterfacePlan {
   std::vector<FrozenConvectionFixedFace> prescribed_source_faces_;
   std::vector<double> prescribed_independent_species_;
   std::size_t independent_species_count_{};
+  std::vector<double> prescribed_passive_scalars_;
+  std::size_t passive_scalar_count_{};
   bool inlet_state_bound_{};
   IbmPressureGradientKind pressure_gradient_{IbmPressureGradientKind::quadratic_neumann};
   PlanFingerprint fingerprint_{};

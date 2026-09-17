@@ -73,6 +73,7 @@ struct CompiledPatchInlets {
   std::vector<double> inlet_enthalpy;
   std::vector<double> inlet_density;
   std::vector<std::vector<double>> independent_species;
+  std::vector<std::vector<double>> passive_scalars;
   std::vector<IbmInterfaceInletState> immersed_states;
   // Preallocated collective scratch: no allocation in the boundary hot loop.
   std::vector<double> local_capacity;
@@ -131,6 +132,7 @@ inline Status compile_patch_inlets(const ValidatedModel& model,
   plan.inlet_enthalpy.resize(spec.patches.size());
   plan.inlet_density.resize(spec.patches.size());
   plan.independent_species.resize(spec.patches.size());
+  plan.passive_scalars.resize(spec.patches.size());
   std::array<double, 6U> face_mass{};
   for (std::size_t i = 0U; i < spec.patches.size(); ++i) {
     const auto& p = spec.patches[i];
@@ -164,10 +166,13 @@ inline Status compile_patch_inlets(const ValidatedModel& model,
       const auto found = std::find_if(p.boundary.scalars.begin(), p.boundary.scalars.end(),
           [&](const auto& value) { return value.stable_name == scalar.stable_name; });
       if (found == p.boundary.scalars.end() || found->kind != ScalarBoundaryKind::dirichlet ||
-          (p.immersed && scalar.role != TransportedScalarRole::species))
+          !std::isfinite(found->value))
         return {StatusCode::invalid_case, 15906U};
       if (scalar.role == TransportedScalarRole::species)
         plan.independent_species[i].push_back(found->value);
+      else if (scalar.role == TransportedScalarRole::passive_scalar)
+        plan.passive_scalars[i].push_back(found->value);
+      else return {StatusCode::invalid_case, 15906U};
     }
     double cp = 0.0, gas = 0.0;
     const auto& y = plan.independent_species[i];
@@ -238,6 +243,7 @@ inline Status compile_patch_inlets(const ValidatedModel& model,
       if (static_cast<unsigned>(link.direction) != inlet.face) continue;
       ++bound_sources[index];
       const auto& y = plan.independent_species[index];
+      const auto& q = plan.passive_scalars[index];
       const double inward = inlet.face < 2U ? inlet.boundary.direction.x :
           (inlet.face < 4U ? inlet.boundary.direction.y : inlet.boundary.direction.z);
       const double sign = inlet.face % 2U == 0U ? 1.0 : -1.0;
@@ -247,7 +253,7 @@ inline Status compile_patch_inlets(const ValidatedModel& model,
       plan.immersed_states.push_back({link.global_link,
           sign * inlet.boundary.mass_flow_rate * link.cartesian_control_face_area / plan.global_area[index],
           {speed * inlet.boundary.direction.x, speed * inlet.boundary.direction.y,
-           speed * inlet.boundary.direction.z}, plan.inlet_enthalpy[index], {y.data(), y.size()}});
+           speed * inlet.boundary.direction.z}, plan.inlet_enthalpy[index], {y.data(), y.size()}, {q.data(), q.size()}});
     }
   }
   if (owned_sources != bound_sources) return {StatusCode::invalid_case, 15908U};

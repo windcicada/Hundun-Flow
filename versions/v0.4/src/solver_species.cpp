@@ -440,7 +440,9 @@ Status assemble_transport(
   if (context.immersed_interface != nullptr && inlet_field != nullptr) {
     const detail::IbmScalarTransport::Field field{
         statistical_enthalpy ? detail::IbmScalarTransport::Quantity::enthalpy
-                             : detail::IbmScalarTransport::Quantity::independent_species,
+          : inlet_field->kind == IbmInterfaceInletFieldKind::passive_scalar
+              ? detail::IbmScalarTransport::Quantity::passive_scalar
+              : detail::IbmScalarTransport::Quantity::independent_species,
         inlet_field->component};
     evaluated = mixture
         ? detail::IbmScalarTransport::transport(*context.immersed_interface,
@@ -987,6 +989,7 @@ Status assemble_scalar_impl(
       plan.specs_[scalar].role != TransportedScalarRole::passive_scalar) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
+  const IbmInterfaceInletField inlet_field{IbmInterfaceInletFieldKind::passive_scalar, scalar};
   return assemble_transport(
       *plan.kernels_, plan.cells_, plan.fingerprint_, plan.density_,
       plan.convection_, plan.specs_[scalar],
@@ -998,7 +1001,7 @@ Status assemble_scalar_impl(
                 plan.contribution_counts_[scalar]},
       state.passive_scalars.data[scalar], state,
       material.scalar_mass_diffusivity.data[diffusivity], contributions,
-      context, system, certificate, allow_partial, nullptr);
+      context, system, certificate, allow_partial, &inlet_field);
 }
 
 Status assemble_tile(

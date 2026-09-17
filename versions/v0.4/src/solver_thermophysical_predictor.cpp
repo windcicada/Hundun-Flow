@@ -1547,6 +1547,11 @@ Status ThermophysicalPredictorPlan::predict(
             input.passive_scalar_nonadvective_rhs.data[index],
             output.low_order_passive_scalars.data[index]) &&
         bdf_candidate_finite;
+    if (slow_path.immersed_interface != nullptr && local)
+      local = slow_path.immersed_interface->add_source_first_order_upwind_correction(
+          {IbmInterfaceInletFieldKind::passive_scalar, index},
+          input.passive_scalars_accepted.data[index], -1.0 / input.bdf.a0,
+          output.low_order_passive_scalars.data[index]);
   }
 
   const bool locally_bdf_admissible =
@@ -2490,12 +2495,18 @@ Status ThermophysicalPredictorPlan::predict(
                           -1.0 / input.bdf.a0,
                           output.low_order_independent_species.data[index]);
       }
-      for (std::size_t index = 0U; index < passive_count && local; ++index)
+      for (std::size_t index = 0U; index < passive_count && local; ++index) {
         build_limited_quantity(
             input.passive_scalars_accepted.data[index],
             input.passive_scalars_previous.data[index],
             input.passive_scalar_nonadvective_rhs.data[index],
             output.low_order_passive_scalars.data[index]);
+        if (slow_path.immersed_interface != nullptr)
+          local = slow_path.immersed_interface->add_source_first_order_upwind_correction(
+              {IbmInterfaceInletFieldKind::passive_scalar, index},
+              input.passive_scalars_accepted.data[index], -1.0 / input.bdf.a0,
+              output.low_order_passive_scalars.data[index]);
+      }
       if (!tuple_admissible(
               as_const(output.low_order_density_workspace),
               as_const(output.low_order_enthalpy_workspace),
@@ -3754,9 +3765,13 @@ Status ThermophysicalPredictorPlan::predict_high_local(
             input.mass_flux_accepted,box,output.accepted_advection_workspace,
             *input.mixture_transport);
       } else {
-        status = inlet_field->kind==IbmInterfaceInletFieldKind::independent_species
+        status = (inlet_field->kind==IbmInterfaceInletFieldKind::independent_species ||
+                  inlet_field->kind==IbmInterfaceInletFieldKind::passive_scalar)
           ? detail::IbmScalarTransport::convection(*immersed_interface,
-              inlet_field->component,convection,common ? transported : accepted,
+              {inlet_field->kind==IbmInterfaceInletFieldKind::passive_scalar
+                  ? detail::IbmScalarTransport::Quantity::passive_scalar
+                  : detail::IbmScalarTransport::Quantity::independent_species, inlet_field->component},
+              convection,common ? transported : accepted,
               input.mass_flux_accepted, box,output.accepted_advection_workspace,
               common ? input.mixture_transport : nullptr)
           : immersed_interface->add_source_convection_correction(
@@ -3810,9 +3825,13 @@ Status ThermophysicalPredictorPlan::predict_high_local(
         return status;
       }
       if (immersed_interface != nullptr && inlet_field != nullptr) {
-        status = inlet_field->kind==IbmInterfaceInletFieldKind::independent_species
+        status = (inlet_field->kind==IbmInterfaceInletFieldKind::independent_species ||
+                  inlet_field->kind==IbmInterfaceInletFieldKind::passive_scalar)
             ? detail::IbmScalarTransport::convection(*immersed_interface,
-                inlet_field->component,convection,previous,input.mass_flux_previous,
+                {inlet_field->kind==IbmInterfaceInletFieldKind::passive_scalar
+                    ? detail::IbmScalarTransport::Quantity::passive_scalar
+                    : detail::IbmScalarTransport::Quantity::independent_species, inlet_field->component},
+                convection,previous,input.mass_flux_previous,
                 box,output.previous_advection_workspace)
             : immersed_interface->add_source_convection_correction(
             *inlet_field, convection, previous, 1.0,
@@ -3954,12 +3973,13 @@ Status ThermophysicalPredictorPlan::predict_high_local(
     }
   }
   for (std::size_t i = 0U; i < passive_scalars_.size(); ++i) {
+    const IbmInterfaceInletField passive_inlet{IbmInterfaceInletFieldKind::passive_scalar, i};
     status = predict_quantity(
         input.passive_scalars_accepted.data[i],
         input.passive_scalars_previous.data[i],
         input.passive_scalar_nonadvective_rhs.data[i],
         passive_scalar_convection_, output.passive_scalars.data[i],
-        nullptr,
+        &passive_inlet,
         ThermophysicalPredictorFailureField::passive_scalar,
         static_cast<std::uint32_t>(i));
     if (!status) {

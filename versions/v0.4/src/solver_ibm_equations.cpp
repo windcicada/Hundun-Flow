@@ -1013,6 +1013,18 @@ Status IbmEquationInterfacePlan::compile_sources(
         return {StatusCode::invalid_plan, kIbmEquationPlan};
       candidate.prescribed_independent_species_.reserve(
           ordered_states.size() * independent_species_count);
+      const auto passive_count = ordered_states.empty() ? 0U
+          : ordered_states.front().passive_scalars.size;
+      if (passive_count != 0U && ordered_states.size() >
+          std::numeric_limits<std::size_t>::max() / passive_count)
+        return {StatusCode::invalid_plan, kIbmEquationPlan};
+      candidate.passive_scalar_count_ = passive_count;
+      candidate.prescribed_passive_scalars_.reserve(ordered_states.size() * passive_count);
+      // Preserve the identity of existing species-only inlet plans.
+      if (passive_count != 0U) {
+        fingerprint = mix(fingerprint, UINT64_C(0x50415353494e4c54));
+        fingerprint = mix(fingerprint, passive_count);
+      }
       fingerprint = mix(fingerprint, UINT64_C(0x69626d696e6c6574));
       fingerprint = mix(fingerprint, ordered_states.size());
       fingerprint = mix(fingerprint, independent_species_count);
@@ -1024,6 +1036,8 @@ Status IbmEquationInterfacePlan::compile_sources(
             !std::isfinite(source.velocity.y) ||
             !std::isfinite(source.velocity.z) ||
             !std::isfinite(source.enthalpy) ||
+            source.passive_scalars.size != passive_count ||
+            (passive_count != 0U && source.passive_scalars.data == nullptr) ||
             source.independent_species.size != independent_species_count ||
             (independent_species_count != 0U &&
              source.independent_species.data == nullptr) ||
@@ -1068,9 +1082,16 @@ Status IbmEquationInterfacePlan::compile_sources(
             return {StatusCode::invalid_plan, kIbmEquationPlan};
           candidate.prescribed_independent_species_.push_back(value);
         }
+        const auto passive_begin = candidate.prescribed_passive_scalars_.size();
+        for (std::size_t q = 0; q < passive_count; ++q) {
+          const double value = source.passive_scalars.data[q];
+          if (!std::isfinite(value)) return {StatusCode::invalid_plan, kIbmEquationPlan};
+          candidate.prescribed_passive_scalars_.push_back(value);
+          fingerprint = mix(fingerprint, double_bits(value));
+        }
         candidate.prescribed_interface_fluxes_.push_back(
             {static_cast<std::uint32_t>(topology_link), source.face_mass_flux,
-             source.velocity, source.enthalpy, species_begin, true});
+             source.velocity, source.enthalpy, species_begin, true, passive_begin});
         fingerprint = mix(fingerprint, source.global_link);
         fingerprint = mix(fingerprint, double_bits(source.face_mass_flux));
         fingerprint = mix(fingerprint, double_bits(source.velocity.x));
@@ -1342,6 +1363,8 @@ Status IbmEquationInterfacePlan::override_source_face_values(
         return field.component < 3U;
       case IbmInterfaceInletFieldKind::enthalpy:
         return field.component == 0U;
+      case IbmInterfaceInletFieldKind::passive_scalar:
+        return field.component < passive_scalar_count_;
       case IbmInterfaceInletFieldKind::independent_species:
         return field.component < independent_species_count_;
       case IbmInterfaceInletFieldKind::kinetic_energy:
@@ -1362,6 +1385,8 @@ Status IbmEquationInterfacePlan::override_source_face_values(
         !std::isfinite(source.velocity.y) ||
         !std::isfinite(source.velocity.z) ||
         !std::isfinite(source.enthalpy) ||
+        source.passive_scalars_begin > prescribed_passive_scalars_.size() ||
+        passive_scalar_count_ > prescribed_passive_scalars_.size() - source.passive_scalars_begin ||
         source.independent_species_begin >
             prescribed_independent_species_.size() ||
         independent_species_count_ >
@@ -1386,6 +1411,10 @@ Status IbmEquationInterfacePlan::override_source_face_values(
           break;
         case IbmInterfaceInletFieldKind::enthalpy:
           prescribed = source.enthalpy;
+          break;
+        case IbmInterfaceInletFieldKind::passive_scalar:
+          prescribed = prescribed_passive_scalars_[
+              source.passive_scalars_begin + field.component];
           break;
         case IbmInterfaceInletFieldKind::independent_species:
           prescribed = prescribed_independent_species_[
@@ -1462,6 +1491,8 @@ Status IbmEquationInterfacePlan::validate_frozen_source_face_values(
       case IbmInterfaceInletFieldKind::enthalpy:
       case IbmInterfaceInletFieldKind::kinetic_energy:
         return field.component == 0U;
+      case IbmInterfaceInletFieldKind::passive_scalar:
+        return field.component < passive_scalar_count_;
       case IbmInterfaceInletFieldKind::independent_species:
         return field.component < independent_species_count_;
     }
@@ -1497,6 +1528,8 @@ Status IbmEquationInterfacePlan::validate_frozen_source_face_values(
   for (const PrescribedInterfaceFlux& source :
        prescribed_interface_fluxes_) {
     if (source.topology_link >= links.size || !source.has_inlet_state ||
+        source.passive_scalars_begin > prescribed_passive_scalars_.size() ||
+        passive_scalar_count_ > prescribed_passive_scalars_.size() - source.passive_scalars_begin ||
         source.independent_species_begin >
             prescribed_independent_species_.size() ||
         independent_species_count_ >
@@ -1514,6 +1547,10 @@ Status IbmEquationInterfacePlan::validate_frozen_source_face_values(
         break;
       case IbmInterfaceInletFieldKind::enthalpy:
         expected = source.enthalpy;
+        break;
+      case IbmInterfaceInletFieldKind::passive_scalar:
+        expected = prescribed_passive_scalars_[
+            source.passive_scalars_begin + field.component];
         break;
       case IbmInterfaceInletFieldKind::independent_species:
         expected = prescribed_independent_species_[
@@ -1594,6 +1631,8 @@ Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
       case IbmInterfaceInletFieldKind::enthalpy:
       case IbmInterfaceInletFieldKind::kinetic_energy:
         return field.component == 0U;
+      case IbmInterfaceInletFieldKind::passive_scalar:
+        return field.component < passive_scalar_count_;
       case IbmInterfaceInletFieldKind::independent_species:
         return field.component < independent_species_count_;
     }
@@ -1607,6 +1646,8 @@ Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
                                     double& value) noexcept {
     if (source.topology_link >= links.size || !source.has_inlet_state ||
         !std::isfinite(source.face_mass_flux) ||
+        source.passive_scalars_begin > prescribed_passive_scalars_.size() ||
+        passive_scalar_count_ > prescribed_passive_scalars_.size() - source.passive_scalars_begin ||
         source.independent_species_begin >
             prescribed_independent_species_.size() ||
         independent_species_count_ >
@@ -1622,6 +1663,10 @@ Status IbmEquationInterfacePlan::add_source_convection_correction_impl(
         break;
       case IbmInterfaceInletFieldKind::enthalpy:
         value = source.enthalpy;
+        break;
+      case IbmInterfaceInletFieldKind::passive_scalar:
+        value = prescribed_passive_scalars_[
+            source.passive_scalars_begin + field.component];
         break;
       case IbmInterfaceInletFieldKind::independent_species:
         value = prescribed_independent_species_[
@@ -2565,13 +2610,14 @@ Status detail::IbmScalarTransport::convection_impl(const IbmEquationInterfacePla
   status=plan.validate_interface_flux(flux);
   if(!status) return status;
   if (field.quantity!=Quantity::independent_species &&
-      field.quantity!=Quantity::dependent_species && field.quantity!=Quantity::enthalpy)
+      field.quantity!=Quantity::dependent_species && field.quantity!=Quantity::passive_scalar && field.quantity!=Quantity::enthalpy)
     return {StatusCode::invalid_plan,kIbmEquationApply};
-  if (field.quantity!=Quantity::independent_species && field.component!=0)
+  if (field.quantity!=Quantity::independent_species && field.quantity!=Quantity::passive_scalar && field.component!=0)
     return {StatusCode::invalid_plan,kIbmEquationApply};
   if(!plan.prescribed_interface_fluxes_.empty() &&
      (!plan.inlet_state_bound_ || (field.quantity==Quantity::independent_species &&
-      field.component>=plan.independent_species_count_)))
+      field.component>=plan.independent_species_count_) || (field.quantity==Quantity::passive_scalar &&
+      field.component>=plan.passive_scalar_count_)))
     return {StatusCode::invalid_plan,kIbmEquationApply};
   const auto links=plan.topology_->links();
   const auto physical_row=[&](Int3 c,const std::array<std::size_t,6U>& cut,double& value) noexcept -> Status {
@@ -2588,7 +2634,9 @@ Status detail::IbmScalarTransport::convection_impl(const IbmEquationInterfacePla
         if(source==nullptr || !source->has_inlet_state)
           return {StatusCode::invalid_plan,kIbmEquationApply};
         if (field.quantity==Quantity::enthalpy) face_q=source->enthalpy;
-        else {
+        else if (field.quantity==Quantity::passive_scalar) {
+          face_q=plan.prescribed_passive_scalars_[source->passive_scalars_begin+field.component];
+        } else {
           const auto begin=source->independent_species_begin;
           if (begin>plan.prescribed_independent_species_.size() ||
               plan.independent_species_count_>plan.prescribed_independent_species_.size()-begin)
@@ -2640,7 +2688,8 @@ Status detail::IbmScalarTransport::constrain_flux(const IbmEquationInterfacePlan
   if(status)status=plan.validate_interface_flux(mass_flux);
   if(!status)return status;
   if((field.quantity!=Quantity::independent_species && field.quantity!=Quantity::dependent_species &&
-      field.quantity!=Quantity::enthalpy) || (field.quantity!=Quantity::independent_species && field.component!=0))
+      field.quantity!=Quantity::enthalpy && field.quantity!=Quantity::passive_scalar) ||
+      (field.quantity!=Quantity::independent_species && field.quantity!=Quantity::passive_scalar && field.component!=0))
     return {StatusCode::invalid_plan,kIbmEquationApply};
   const std::array<ConstFaceFieldView,3> mass{mass_flux.x,mass_flux.y,mass_flux.z};
   for(unsigned a=0;a<3;++a) {
@@ -2659,7 +2708,11 @@ Status detail::IbmScalarTransport::constrain_flux(const IbmEquationInterfacePlan
     const auto* source=plan.inlet_for_link(static_cast<std::uint32_t>(i));
     if(!source || !source->has_inlet_state)return {StatusCode::invalid_plan,kIbmEquationApply};
     long double q=source->enthalpy;
-    if(field.quantity!=Quantity::enthalpy) {
+    if(field.quantity==Quantity::passive_scalar) {
+      if(field.component>=plan.passive_scalar_count_)
+        return {StatusCode::invalid_plan,kIbmEquationApply};
+      q=plan.prescribed_passive_scalars_[source->passive_scalars_begin+field.component];
+    } else if(field.quantity!=Quantity::enthalpy) {
       const auto begin=source->independent_species_begin;
       if(begin>plan.prescribed_independent_species_.size() ||
           plan.independent_species_count_>plan.prescribed_independent_species_.size()-begin ||

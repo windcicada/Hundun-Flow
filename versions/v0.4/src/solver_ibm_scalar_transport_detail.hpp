@@ -9,7 +9,7 @@ namespace hundun::v04::detail {
 // contract differs from the public additive-correction compatibility API.
 class IbmScalarTransport {
  public:
-  enum class Quantity { independent_species, dependent_species, enthalpy };
+  enum class Quantity { independent_species, dependent_species, enthalpy, passive_scalar };
   struct Field { Quantity quantity; std::size_t component{}; };
   static Status convection(const IbmEquationInterfacePlan& plan,Field field,
       ConvectionScheme scheme,ConstFieldView q,ConstFaceFluxView flux,

@@ -117,8 +117,9 @@ bool test_small_species_interface_transport() {
     if(links.data[i].direction==ImmersedFaceDirection::y_negative) { source=i; break; }
   if(!expect(source<links.size,"small-species fixture has an inlet link")) return false;
   const std::array<double,1U> inlet_y{0.0};
+  const std::array<double,2U> inlet_z{-0.125,1.25};
   const std::array<IbmInterfaceInletState,1U> inlet{{
-      {links.data[source].global_link,0.125,{0.0,1.0,0.0},450000.0,{inlet_y.data(),1U}}}};
+      {links.data[source].global_link,0.125,{0.0,1.0,0.0},450000.0,{inlet_y.data(),1U},{inlet_z.data(),inlet_z.size()}}}};
   IbmEquationInterfacePlan interface;
   status=IbmEquationInterfacePlan::compile(kernels,fixture.topology,fixture.boundary,
       fixture.topology.interface_metric(),{inlet.data(),1U},1U,interface);
@@ -170,6 +171,21 @@ bool test_small_species_interface_transport() {
       std::cerr<<"IBM small-species convection placeholder="<<placeholder<<" actual="<<actual<<" expected="<<expected<<'\n';
     passed &= expect(status && std::abs(actual-expected)<=64.0*std::numeric_limits<double>::epsilon()*expected,
         "physical inlet scalar rate does not lose a small fluid flux by cancelling a large solid-placeholder flux");
+    for(std::size_t passive=0;passive<inlet_z.size();++passive) {
+      status=cartesian_provisional_convection(kernels,ConvectionScheme::tvd2,as_const(flux),call);
+      if(status)status=detail::IbmScalarTransport::convection(interface,
+          {detail::IbmScalarTransport::Quantity::passive_scalar,passive},
+          ConvectionScheme::tvd2,as_const(q.view),as_const(flux),box,rate.view);
+      const double target=(1e-5*fluid_q-0.125*inlet_z[passive])/volume;
+      passed &= expect(status && std::abs(rate.view.unchecked(c,0U)-target)<1e-13*std::abs(target),
+          "passive inlet uses its signed value independently of species and solid placeholders");
+      long double balance=0;
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+        if(region.data[flat(cells,{x,y,z})]==static_cast<std::uint8_t>(RegionFlag::fluid))
+          balance+=rate.view.unchecked({x,y,z},0U)*volume;
+      passed &= expect(std::abs(balance+0.125L*inlet_z[passive])<1e-14L,
+          "whole fluid passive balance equals the prescribed inlet flux");
+    }
     call.required_face_flux_revision=0U;
     status=cartesian_diffusion(kernels,as_const(gamma.view),call);
     if(status) status=detail::IbmScalarTransport::diffusion(interface,as_const(q.view),as_const(gamma.view),box,rate.view);
@@ -234,10 +250,12 @@ bool test_prescribed_interface_mass_flux() {
 
   constexpr double prescribed_phi = 2.7866666668e-6;
   const std::array<double, 2U> prescribed_species{{0.875, 0.125}};
+  const std::array<double, 2U> prescribed_passives{{1.0, -0.125}};
   const std::array<IbmInterfaceInletState, 1U> sources{{
       {links.data[source_index].global_link, prescribed_phi,
        {1.25, 2.5, 3.75}, 450000.0,
-       {prescribed_species.data(), prescribed_species.size()}},
+       {prescribed_species.data(), prescribed_species.size()},
+       {prescribed_passives.data(), prescribed_passives.size()}},
   }};
   IbmEquationInterfacePlan interface;
   passed &= expect(IbmEquationInterfacePlan::compile(
@@ -541,6 +559,14 @@ bool test_prescribed_interface_mass_flux() {
                        source_value() == prescribed_species[0U] &&
                        sealed_value() == 7.0,
                    "the same inlet state overrides independent species");
+  passed &= expect(interface.override_source_face_values(
+      {IbmInterfaceInletFieldKind::passive_scalar, 1U},
+      IbmInterfaceInletEvaluation::value, face_values) && source_value() == -0.125 && sealed_value() == 7.0,
+      "passive source selects its own component");
+  passed &= expect(!interface.override_source_face_values(
+      {IbmInterfaceInletFieldKind::passive_scalar, 2U},
+      IbmInterfaceInletEvaluation::value, face_values) && source_value() == -0.125,
+      "invalid passive component rejects before output changes");
   passed &= expect(interface.override_source_face_values(
                        {IbmInterfaceInletFieldKind::enthalpy, 0U},
                        IbmInterfaceInletEvaluation::fixed_state_variation,

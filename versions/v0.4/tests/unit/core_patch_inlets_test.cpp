@@ -57,10 +57,13 @@ int main(int argc, char** argv) {
   air.temperature = 295;
   air.direction = {1,0,0};
   air.relaxation = 1;
+  model.transported_scalars.push_back({"Z", TransportedScalarRole::passive_scalar});
+  air.scalars.push_back({"Z", ScalarBoundaryKind::dirichlet, 0.0});
   model.boundaries[0] = air;
   BoundaryFaceSpec fuel = air;
   fuel.mass_flow_rate = 0.002;
   fuel.direction = {0,1,0};
+  fuel.scalars[0].value = 1.0;
   model.patch_inlets.emplace();
   model.patch_inlets->labels_file = "labels.d";
   model.patch_inlets->patches = {{7,0,false,air},{11,2,true,fuel}};
@@ -85,6 +88,9 @@ int main(int argc, char** argv) {
         &fixture.topology, thermo, plan), "real fluid owners and solid backing bind");
     if (!plan.immersed_states.empty()) {
       const auto& state = plan.immersed_states.front();
+      ok &= check(state.passive_scalars.size == 1U && state.passive_scalars.data[0] == 1.0 &&
+          state.independent_species.size == 0U && plan.passive_scalars[0][0] == 0.0,
+          "passive fuel and air streams keep independent inlet values");
       ok &= check(plan.immersed_states.size() == 1U && state.global_link == source->global_link &&
           std::abs(state.face_mass_flux - 0.002) < 1e-18 && state.velocity.y > 0.0 &&
           state.enthalpy > 0.0, "fuel state and oriented exact mass source");
