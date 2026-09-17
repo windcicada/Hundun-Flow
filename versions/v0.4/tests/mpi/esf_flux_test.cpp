@@ -101,11 +101,11 @@ bool run(int mode, bool immersed=false) {
       return Status{};
     };
     detail::StatisticalFluxReport report;
-    const auto correct=[&] {
+    const auto correct=[&](ConstFieldView initial=ConstFieldView{}) {
       return detail::correct_statistical_flux(kernels,as_const(density),
           as_const(seed.view),as_const(frozen),as_const(final),dt,{active.data(),active.size()},field==5,
           boundary,as_const(velocity),iterate.view,next.view,halo,178,
-          reductions,close,report);
+          reductions,close,report,initial,false);
     };
     status=correct();
     if(!status) {
@@ -169,6 +169,10 @@ bool run(int mode, bool immersed=false) {
           reductions,close,report,submitted,true);
     };
     const auto submitted=candidate.storage;
+    // A converged initial guess keeps the frozen physical seed and equation.
+    status=correct(as_const(candidate.view));
+    passed &= status && report.iterations==0 && iterate.storage==solved &&
+        candidate.storage==submitted && seed.storage==immutable;
     status=audit(as_const(candidate.view));
     passed &= status && report.convergence_residual<1e-12 &&
         candidate.storage==submitted && seed.storage==immutable;
@@ -183,6 +187,12 @@ bool run(int mode, bool immersed=false) {
     passed &= status && report.convergence_residual>1e-8 &&
         report.composition_closure<2e-12 && candidate.storage==perturbed && seed.storage==immutable;
     passed &= !audit(as_const(iterate.view)) && !audit({});
+    // A displaced initial guess converges to the same dense-reference solution.
+    status=correct(as_const(candidate.view));
+    passed &= status && candidate.storage==perturbed && seed.storage==immutable;
+    for(std::size_t i=0;i<solved.size();++i)
+      passed &= std::abs(iterate.storage[i]-solved[i])
+          <=6e-14*std::max(1.,std::abs(solved[i]));
     status=correct();
     passed &= status && iterate.storage==solved;
     // Late validation failures preserve the previous candidate on all ranks.

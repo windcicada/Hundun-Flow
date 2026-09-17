@@ -475,7 +475,12 @@
       "restore_compatibility": "checked_against_case_on_load"
     },
     "publication": "Restart/current and 128-partition VTK output completed",
-    "final_build_note": "Real-field run used the repair implementation before the final decision-mask revision-token bookkeeping update; final MPI and dynamic recovery tests cover that update."
+    "final_build_note": "Real-field run used the repair implementation before the final decision-mask revision-token bookkeeping update; final MPI and dynamic recovery tests cover that update.",
+    "decision_mask_followup": {
+      "evidence": "gas-warm.json",
+      "observed_failure": "The subsequent production run reached halo invalid_plan 304: product_mix(1,1) yields the reserved revision token zero.",
+      "repair": "Map the generated token to max(1,token); the follow-up real-field run exercises the production halo."
+    }
   },
   "scope": "Selected GTMC first-step recovery and operator correctness; complete trajectory, time/space accuracy and performance gates remain in gas-work.md."
 }

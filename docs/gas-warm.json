@@ -1,0 +1,395 @@
+{
+  "schema": "esf_flux_warm_start_v1",
+  "method": {
+    "initial_guess": "most recent candidate random-field tuple",
+    "equation": "same immutable postchemistry seed, accepted density, frozen and final flux, dt and full residual tolerance",
+    "history": "same accepted state and unified commit",
+    "reserved_revision_fix": "max(1, product_mix(generation, 1+field*64+bound_round)); the first generation and first round previously produced reserved zero"
+  },
+  "tests": {
+    "log": "check/gas-warm-test.log",
+    "passed": 3,
+    "ranks": [
+      1,
+      2,
+      4
+    ],
+    "coverage": [
+      "converged guess exits at iteration zero",
+      "perturbed guess agrees with cold-start dense-reference solution within 6e-14 scaled error",
+      "immutable seed and candidate",
+      "periodic, open, sealed immersed plane, affine enthalpy and signed auxiliary"
+    ]
+  },
+  "failed_preflight": {
+    "log": "check/gas-warm-gtmc.log",
+    "step": 32000,
+    "detail": 304,
+    "cause": "decision mask revision zero",
+    "accepted_steps": 0
+  },
+  "gtmc": {
+    "case": "check/z0",
+    "source": "check/z2",
+    "output": "check/z8",
+    "ranks": 128,
+    "start_step": 32000,
+    "step": 32001,
+    "time": 0.021807289680828033,
+    "candidate_identity": {
+      "schema": "HUNDUN_V04_RUNTIME_CANDIDATE_IDENTITY_V2",
+      "head": "d347939d5187fcd0a468b75fa7f6fab1209acbf9",
+      "tree": "04ce6078f8aac62474ef5c5aaa9a7b6af02b4e36",
+      "build_manifest_sha256": "c4212b85c818f67bc043200e82764b2fb83935016a37ea6329a418a4f2796361",
+      "executable_sha256": "b1b3b506206f0d9b76e427d00380f5c7f8a5fdd0544e49f95553c1e714cfacb9",
+      "identity_sha256": "29630a3b3186328c8bb52784a31a17f2ffef57b9b264b4d1d2b3ff323c0b335e"
+    },
+    "baseline": {
+      "dt": 9.918570412992266e-07,
+      "seconds": 549.060237596,
+      "timing_scope": "max_rank_advance",
+      "cfl_definition": "directional_max",
+      "advective_convective_cfl_directional": 0,
+      "committed_convective_cfl_directional": 0.2847065639501804,
+      "enthalpy_scheme": "BE",
+      "pressure_iccg": false,
+      "pressure_original_l2": 5.252582451649757e-14,
+      "pressure_original_l2_limit": 1e-13,
+      "outer_iterations": 12,
+      "momentum_iterations": 168,
+      "pressure_iterations": 211,
+      "enthalpy_iterations": 119,
+      "species_iterations": 4932,
+      "passive_scalar_count": 1,
+      "passive_scheme": "CN",
+      "passive_solve_calls": 28,
+      "passive_iterations": 192,
+      "passive_residual": 1.9167126182865558e-14,
+      "passive_balance_defect": 1.2692409219452237e-24,
+      "attempts": 1,
+      "candidate_baseline_evaluations": 0,
+      "candidate_extrapolation_evaluations": 0,
+      "candidate_ladder_evaluations": 0,
+      "candidate_incomplete_evaluations": 0,
+      "continuity": 1.794329680076478e-16,
+      "energy": 1.7225536942326376e-08,
+      "eos": 3.733172141286604e-15,
+      "advective_convective_cfl_out": 0,
+      "advective_convective_cfl_abs": 0,
+      "advective_convective_cfl_limit": 0,
+      "committed_convective_cfl_out": 0.45319186657040256,
+      "committed_convective_cfl_abs": 0.45131353724710366,
+      "committed_convective_cfl_limit": 0.35,
+      "predictor_limited": false,
+      "predictor_theta": 1,
+      "cn_phases": {
+        "scope": "max_rank_all_attempts_inclusive_mpi",
+        "seconds": {
+          "preparation": 0.006463277000000001,
+          "scalars": 341.109684178,
+          "state": 4.210219733000001,
+          "momentum_assembly": 5.102979587,
+          "momentum_solve": 2.0797254780000003,
+          "pressure_assembly": 0.738433533,
+          "pressure_setup": 0.334032486,
+          "pressure_solve": 5.416160481,
+          "correction": 2.3157410670000003,
+          "audit": 52.732746665
+        }
+      },
+      "physics_modules": {
+        "scope": "max_rank_all_attempts_inclusive_modules",
+        "containment": "inside_advance_overlaps_cn_phases",
+        "seconds": {
+          "reaction_sources": 0,
+          "mean_reaction": 0,
+          "esf_reaction": 88.09753796700001,
+          "tcr_statistics": 0.25725431200000004
+        }
+      },
+      "communication_observations": {
+        "scope": "max_rank_all_attempts_named_operations",
+        "containment": "inside_advance_overlaps_modules_and_cn_phases",
+        "seconds": {
+          "structured_wait": 1.475449398,
+          "structured_control": 39.284412026000005,
+          "linear_reductions": 379.66508715400005
+        }
+      }
+    },
+    "current": {
+      "dt": 9.918570412992266e-07,
+      "seconds": 526.769671174,
+      "timing_scope": "max_rank_advance",
+      "cfl_definition": "directional_max",
+      "advective_convective_cfl_directional": 0,
+      "committed_convective_cfl_directional": 0.2847065639501804,
+      "enthalpy_scheme": "BE",
+      "pressure_iccg": false,
+      "pressure_original_l2": 5.252582451649757e-14,
+      "pressure_original_l2_limit": 1e-13,
+      "outer_iterations": 12,
+      "momentum_iterations": 168,
+      "pressure_iterations": 211,
+      "enthalpy_iterations": 119,
+      "species_iterations": 4403,
+      "passive_scalar_count": 1,
+      "passive_scheme": "CN",
+      "passive_solve_calls": 28,
+      "passive_iterations": 192,
+      "passive_residual": 1.9167126182865558e-14,
+      "passive_balance_defect": 1.2692409219452237e-24,
+      "attempts": 1,
+      "candidate_baseline_evaluations": 0,
+      "candidate_extrapolation_evaluations": 0,
+      "candidate_ladder_evaluations": 0,
+      "candidate_incomplete_evaluations": 0,
+      "continuity": 1.794329680076478e-16,
+      "energy": 1.7225536942326376e-08,
+      "eos": 3.733172141286604e-15,
+      "advective_convective_cfl_out": 0,
+      "advective_convective_cfl_abs": 0,
+      "advective_convective_cfl_limit": 0,
+      "committed_convective_cfl_out": 0.45319186657040256,
+      "committed_convective_cfl_abs": 0.45131353724710366,
+      "committed_convective_cfl_limit": 0.35,
+      "predictor_limited": false,
+      "predictor_theta": 1,
+      "cn_phases": {
+        "scope": "max_rank_all_attempts_inclusive_mpi",
+        "seconds": {
+          "preparation": 0.006452315,
+          "scalars": 316.847627494,
+          "state": 4.203983122,
+          "momentum_assembly": 5.1666055570000005,
+          "momentum_solve": 2.052073833,
+          "pressure_assembly": 0.729836881,
+          "pressure_setup": 0.332174558,
+          "pressure_solve": 5.370691882,
+          "correction": 2.311884176,
+          "audit": 50.955097908000006
+        }
+      },
+      "physics_modules": {
+        "scope": "max_rank_all_attempts_inclusive_modules",
+        "containment": "inside_advance_overlaps_cn_phases",
+        "seconds": {
+          "reaction_sources": 0,
+          "mean_reaction": 0,
+          "esf_reaction": 91.44725912700001,
+          "tcr_statistics": 0.256670605
+        }
+      },
+      "communication_observations": {
+        "scope": "max_rank_all_attempts_named_operations",
+        "containment": "inside_advance_overlaps_modules_and_cn_phases",
+        "seconds": {
+          "structured_wait": 1.4052735280000002,
+          "structured_control": 35.992415218000005,
+          "linear_reductions": 365.17045279900003
+        }
+      }
+    },
+    "baseline_corrections": [
+      {
+        "phase": "flux",
+        "outer": 0,
+        "residual": 0.0,
+        "seconds": 0.32378717300000004
+      },
+      {
+        "phase": "flux",
+        "outer": 1,
+        "residual": 3.0314230362579205e-15,
+        "seconds": 18.824405947
+      },
+      {
+        "phase": "flux",
+        "outer": 2,
+        "residual": 5.555076792882783e-17,
+        "seconds": 18.735101455
+      },
+      {
+        "phase": "flux",
+        "outer": 3,
+        "residual": 4.606773621975004e-16,
+        "seconds": 18.677264897
+      },
+      {
+        "phase": "flux",
+        "outer": 4,
+        "residual": 5.55479820096409e-17,
+        "seconds": 18.625019921999993
+      },
+      {
+        "phase": "flux",
+        "outer": 5,
+        "residual": 5.554079903631995e-17,
+        "seconds": 18.66935811900001
+      },
+      {
+        "phase": "endpoint",
+        "outer": 5,
+        "residual": 6.9356853585621e-17,
+        "seconds": 22.11424266099999
+      },
+      {
+        "phase": "flux",
+        "outer": 6,
+        "residual": 6.9356853585621e-17,
+        "seconds": 18.729834016999973
+      },
+      {
+        "phase": "flux",
+        "outer": 7,
+        "residual": 6.774544281259444e-15,
+        "seconds": 18.507695428999995
+      },
+      {
+        "phase": "flux",
+        "outer": 8,
+        "residual": 5.55484661536492e-17,
+        "seconds": 18.730785502000003
+      },
+      {
+        "phase": "flux",
+        "outer": 9,
+        "residual": 6.8280769380521195e-15,
+        "seconds": 18.61217447200005
+      },
+      {
+        "phase": "flux",
+        "outer": 10,
+        "residual": 1.5672599814623176e-16,
+        "seconds": 18.708799209000006
+      },
+      {
+        "phase": "flux",
+        "outer": 11,
+        "residual": 5.553417222456652e-17,
+        "seconds": 18.683112219999998
+      },
+      {
+        "phase": "endpoint",
+        "outer": 11,
+        "residual": 5.553783346170349e-17,
+        "seconds": 22.094553297999994
+      }
+    ],
+    "current_corrections": [
+      {
+        "phase": "flux",
+        "outer": 0,
+        "residual": 0.0,
+        "seconds": 0.32200124900000004
+      },
+      {
+        "phase": "flux",
+        "outer": 1,
+        "residual": 3.0314230362579205e-15,
+        "seconds": 18.679986096
+      },
+      {
+        "phase": "flux",
+        "outer": 2,
+        "residual": 6.548928740843231e-16,
+        "seconds": 18.342949618999995
+      },
+      {
+        "phase": "flux",
+        "outer": 3,
+        "residual": 7.395246691899903e-16,
+        "seconds": 18.369695438999997
+      },
+      {
+        "phase": "flux",
+        "outer": 4,
+        "residual": 3.268238967503873e-16,
+        "seconds": 18.281490114999997
+      },
+      {
+        "phase": "flux",
+        "outer": 5,
+        "residual": 5.6969013986041766e-15,
+        "seconds": 18.099507251999995
+      },
+      {
+        "phase": "endpoint",
+        "outer": 5,
+        "residual": 3.079851666711502e-15,
+        "seconds": 21.53756377800002
+      },
+      {
+        "phase": "flux",
+        "outer": 6,
+        "residual": 3.079851666711502e-15,
+        "seconds": 0.5168844559999854
+      },
+      {
+        "phase": "flux",
+        "outer": 7,
+        "residual": 8.141852650467796e-16,
+        "seconds": 17.872757164999996
+      },
+      {
+        "phase": "flux",
+        "outer": 8,
+        "residual": 3.0078283480356857e-16,
+        "seconds": 17.930106948000002
+      },
+      {
+        "phase": "flux",
+        "outer": 9,
+        "residual": 1.4405323341182193e-15,
+        "seconds": 17.750771716999964
+      },
+      {
+        "phase": "flux",
+        "outer": 10,
+        "residual": 1.6823014090409525e-15,
+        "seconds": 17.636125020999998
+      },
+      {
+        "phase": "flux",
+        "outer": 11,
+        "residual": 1.3873302912597284e-15,
+        "seconds": 17.594893447000004
+      },
+      {
+        "phase": "endpoint",
+        "outer": 11,
+        "residual": 2.2475518408925784e-15,
+        "seconds": 20.880695951000007
+      }
+    ],
+    "reduction_percent": 4.0597670156551136,
+    "run_exit_code": 0,
+    "restart_metadata": {
+      "generation": "generation-32001-158899673306102",
+      "version": 4,
+      "step": 32001,
+      "time": 0.021807289680828033,
+      "dt": 9.918570412992266e-07,
+      "source_ranks": 128,
+      "global_cells": [
+        153,
+        325,
+        151
+      ],
+      "plan": 2035753815793830144,
+      "schema": 11095739752573790056,
+      "method_history_signature": 16964221192612747479,
+      "model_record_identity": 4248249473451394385,
+      "pressure_reference_pa": 100000,
+      "rank_file_bytes": 10453840320,
+      "field_count": 16,
+      "integrity": "manifest_checksum",
+      "restore_compatibility": "checked_against_case_on_load"
+    }
+  },
+  "source_sha256": {
+    "versions/v0.4/src/core_product_freeze.cpp": "430b8cf5f1a3ce33aee2cd3e4f77ede5357d068ffd9056f979542a1c8417480b",
+    "versions/v0.4/tests/mpi/esf_flux_test.cpp": "6ee208eaae9e6cc137c2a50de62113e13bd6fc8778e0cde583c7ad2d343ead6b"
+  },
+  "scope": "One same-input GTMC step with unchanged dt, grid, ranks and output cadence. This provides a runnable delivery node; long-window performance, trajectory and other gas-work.md items remain subsequent work under the user stop instruction."
+}

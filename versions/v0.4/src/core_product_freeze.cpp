@@ -10100,7 +10100,10 @@ Status ProductDriver::Impl::execute_attempt(
                   // accepted history. Exchange only a decision mask; both MPI
                   // owners subsequently raise the same shared face coefficient.
                   if(global_bad[1]==0)return Status{StatusCode::rejected_step,10233};
-                  mask.revision=detail::product_mix(step.generation,1+field*64+bound_round);
+                  // Halo revision zero is reserved; equal hash inputs can
+                  // produce it on the first accepted-state generation.
+                  mask.revision=std::max<std::uint64_t>(1,
+                      detail::product_mix(step.generation,1+field*64+bound_round));
                   HaloTicket mask_ticket;
                   s=product.krylov_halo.begin(140,{&mask,1},mask_ticket);
                   if(s)s=product.krylov_halo.finish(mask_ticket,{&mask,1});
@@ -13047,7 +13050,7 @@ Status ProductDriver::Impl::execute_attempt(
               product.topology ? product.topology->region() : Span<const std::uint8_t>{},
               false,product.boundary,as_const(trial_velocity),iterate,next,
               product.esf_transport_halo,178,product.reductions,close,solved,
-              audit ? as_const(esf_trial[f]) : ConstFieldView{},audit,
+              as_const(esf_trial[f]),audit,
               product.ibm_equations ? &*product.ibm_equations : nullptr);
           if(!local) {
             if(solved.failure_reason) {
