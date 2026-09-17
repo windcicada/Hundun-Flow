@@ -33,6 +33,12 @@ std::string field_name(std::string_view name) {
   if(name=="T")return "Temperature";
   if(name=="rho")return "Density";
   if(name=="h")return "Enthalpy";
+  if(name=="rho_mean_eos")return "DensityMeanEOS";
+  if(name=="rho_pdf_mean")return "DensityStatistical";
+  if(name=="rho_field0")return "DensityField0";
+  if(name=="T_field0")return "TemperatureField0";
+  if(name=="h_field0")return "EnthalpyField0";
+  if(name=="Y_field0")return "MassFractionsField0";
   std::string out(name);
   for(auto& c:out) if(!std::isalnum(static_cast<unsigned char>(c)) && c!='_')c='_';
   return out;
@@ -189,7 +195,9 @@ Status VisitWriter::write_legacy(MPI_Comm comm,const std::filesystem::path& dire
     for(std::size_t field=0;field<snapshot.fields.size;++field) {
       const auto& f=snapshot.fields.data[field];
       const auto name=field_name(f.stable_name);const auto width=f.values.components;
-      if(width==3)ascii(bytes,"VECTORS "+name+" double\n");
+      if(f.source==SnapshotSource::esf_auxiliary_species)
+        ascii(bytes,"FIELD FieldData 1\n"+name+" "+std::to_string(width)+" "+std::to_string(points)+" double\n");
+      else if(width==3)ascii(bytes,"VECTORS "+name+" double\n");
       else if(width<=4)ascii(bytes,"SCALARS "+name+" double "+std::to_string(width)+"\nLOOKUP_TABLE default\n");
       else ascii(bytes,"FIELD FieldData 1\n"+name+" "+std::to_string(width)+" "+std::to_string(points)+" double\n");
       for(std::size_t p=0;p<points;++p)for(unsigned c=0;c<width;++c)real(bytes,values[p*components+component+c]);

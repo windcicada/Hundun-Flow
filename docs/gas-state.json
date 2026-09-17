@@ -1,0 +1,58 @@
+{
+  "passed": true,
+  "cells": 512,
+  "source_ranks": 2,
+  "restart_ranks": 4,
+  "closure_checks": [
+    "ESF output closure error=2.06439e-16 distinct_density_gap=2.51891e-08\n",
+    "ESF output closure error=2.06439e-16 distinct_density_gap=2.51891e-08\n",
+    "ESF output closure error=2.68196e-15 distinct_density_gap=2.5152e-08\n"
+  ],
+  "output_quiet_restart": "byte-identical",
+  "xml_legacy_restart": "byte-identical",
+  "vtk_payloads": "identical by global coordinate, including overlap",
+  "binary_sha256": "f8aa66e91604dce6569dc30828fd1e14e692942945084647b03cf4125657c0d3",
+  "schema": "hundun_esf_output_v1",
+  "base_commit": "cc76b5a",
+  "scope": "I3 accepted ESF thermochemical output catalog; gas G0-G4/I1-I4 remains in progress",
+  "derived_fields": {
+    "DensityMeanEOS": "rho(p, mean h, mean Y)",
+    "DensityStatistical": "1/mean(1/rho_f)",
+    "DensityField0": "field0 pressure density",
+    "TemperatureField0": "positive-weight field0 EOS temperature",
+    "EnthalpyField0": "raw accepted h0",
+    "MassFractionsField0": "raw accepted Y0 in thermophysics species order"
+  },
+  "workspace": "(species_count+5)*owned_cells*sizeof(double), plus existing SGS output; included in compile budget",
+  "dyn711_prior_checkpoint": {
+    "case": "b3/versions/v0.4/tests/d8",
+    "restart": "b3/versions/v0.4/tests/d8r/Restart",
+    "result": "ESF output closure error=2.05466e-16 distinct_density_gap=9.97353e-09",
+    "manifest_sha256": "353b165faaf920a3b4534b1ee20fca49de3d5d62fe6c77f99245b0be7f33821e"
+  },
+  "checks": [
+    {
+      "name": "v04_esf_output_cli",
+      "log": "check/gas-state-wire-test.log",
+      "passed": true
+    },
+    {
+      "name": "v04_io_product_path",
+      "log": "check/gas-state-final-test.log",
+      "passed": true
+    },
+    {
+      "name": "v04_spray_fixed_tcr_cli",
+      "log": "check/gas-state-final-test.log",
+      "passed": true
+    }
+  ],
+  "diagnostic_followup": "The existing I/O JSON fixture now includes the directional CFL fields introduced by 073a5e9; production evidence retains its current format.",
+  "log_sha256": {
+    "check/gas-state-final-build.log": "dad613ad479f61335031c1983e3034eebda56d5b6b561b687bed2270b5bba5ad",
+    "check/gas-state-probe-build.log": "e1f29cd014cab1ca738f4076595671770d766e31b21525e30033d96a472768cc",
+    "check/gas-state-wire-test.log": "7aac25135862acc108277eca88a61f631887110dfa8878e1d21ae9d30c6afa7d",
+    "check/gas-state-final-test.log": "b6854a4a5901436bf0d1c91b0dde770709451cc7c7683983701c63a5a181610d",
+    "check/gas-state-dyn.log": "5247c96ab63957de9ae8f1c40e48ef6b2a93fcaaaaaef8df1bccacd29d6dc3d3"
+  }
+}

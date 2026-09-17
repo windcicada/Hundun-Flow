@@ -1347,6 +1347,7 @@ public:
     double statistical_density{};
     double physical_enthalpy{};
     double auxiliary_enthalpy{};
+    double auxiliary_temperature{};
     double enthalpy_increment{};
   };
   // The field/auxiliary tuples are the same frozen flux-correction anchor.
@@ -1379,7 +1380,9 @@ public:
     for (std::size_t c=0;c<stride_;++c)
       raw_auxiliary[c]=auxiliary.unchecked(cell,c)+(c==ns_ ? delta_h : 0.);
     esf::detail::AuxiliaryPressureState pressure_state;
-    auto status=query_auxiliary(gas,thermo,raw_auxiliary.data(),pressure,revision,&pressure_state);
+    double auxiliary_temperature{};
+    auto status=query_auxiliary(gas,thermo,raw_auxiliary.data(),pressure,revision,
+                                &pressure_state,&auxiliary_temperature);
     if (!status) return status;
     for (std::size_t f=0;f<fields.size;++f) {
       for (std::size_t c=0;c<stride_;++c)
@@ -1405,6 +1408,7 @@ public:
     candidate.statistical_density=moments.statistical_density_kg_per_m3;
     candidate.physical_enthalpy=means_[ns_];
     candidate.auxiliary_enthalpy=raw_auxiliary[ns_];
+    candidate.auxiliary_temperature=auxiliary_temperature;
     candidate.enthalpy_increment=delta_h;
     for (std::size_t c=0;c<stride_;++c)physical_mean.data[c]=means_[c];
     out=candidate;
@@ -1535,7 +1539,8 @@ private:
   }
   Status query_auxiliary(const ProductReactionSources& gas,
       const ThermodynamicsPlan& thermo,const double* row,double pressure,
-      portable::Revision revision, esf::detail::AuxiliaryPressureState* output=nullptr) noexcept {
+      portable::Revision revision, esf::detail::AuxiliaryPressureState* output=nullptr,
+      double* temperature=nullptr) noexcept {
     std::array<double,UINT8_MAX> normalized{};
     const auto coordinates=esf::detail::auxiliary_eos_coordinates(
         {revision,gas.chemistry_identity().fingerprint,1,ns_,row},revision,normalized.data(),ns_);
@@ -1549,6 +1554,7 @@ private:
         gas.gas_identity().composition_fingerprint,pressure_state)!=portable::Status::success)
       return numerical();
     if (output) *output=pressure_state;
+    if (temperature) *temperature=sample.temperature_k;
     return {};
   }
   Status query(const ProductReactionSources &gas,

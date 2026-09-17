@@ -3128,6 +3128,7 @@ struct ProductDriver::Impl {
   MPI_Comm communicator{MPI_COMM_NULL};
   std::vector<SnapshotFieldView> output_fields;
   std::vector<double> output_sgs;
+  std::vector<double> output_thermo;
   std::vector<detail::ColdPressureRow> iccg_scaled_rows;
   std::vector<detail::ColdPressureRow> passive_rows;
   std::optional<detail::ColdPressureDilu> passive_factor;
@@ -4283,23 +4284,37 @@ Status ProductCompiler::compile(MPI_Comm communicator,
                                              {candidate->fields.temperature, 1U}};
     for (FieldId scalar : candidate->fields.scalars)
       snapshots.push_back({scalar, 1U});
+    std::size_t derived_components = 0U;
     if (model.turbulence != TurbulenceKind::none) {
       for (SnapshotSource source : {SnapshotSource::sgs_kinematic_viscosity,
                                     SnapshotSource::sgs_kinetic_energy,
                                     SnapshotSource::sgs_dissipation_volume,
                                     SnapshotSource::sgs_dissipation_specific})
         snapshots.push_back({candidate->fields.velocity, 1U, source});
-      if (!detail::product_field_bytes(local_cells, 4U,
-              candidate->summary.derived_output_bytes))
-        return {StatusCode::invalid_plan, kProductAnalysis};
+      derived_components = 4U;
     }
+    if (candidate->esf.implicit_transport()) {
+      for (SnapshotSource source : {SnapshotSource::esf_mean_eos_density,
+                                    SnapshotSource::esf_statistical_density,
+                                    SnapshotSource::esf_auxiliary_density,
+                                    SnapshotSource::esf_auxiliary_temperature,
+                                    SnapshotSource::esf_auxiliary_enthalpy,
+                                    SnapshotSource::esf_auxiliary_species})
+        snapshots.push_back({candidate->fields.enthalpy,
+            static_cast<std::uint8_t>(source == SnapshotSource::esf_auxiliary_species
+                ? candidate->fields.esf_components - 1U : 1U), source});
+      derived_components += 4U + candidate->fields.esf_components;
+    }
+    if (!detail::product_field_bytes(local_cells, derived_components,
+            candidate->summary.derived_output_bytes))
+      return {StatusCode::invalid_plan, kProductAnalysis};
     std::size_t snapshot_components = 0U;
     std::size_t snapshot_bytes = 0U;
     std::size_t coordinate_values = 0U;
     std::size_t coordinate_bytes = 0U;
     std::size_t staging_bytes = 0U;
     if (!detail::product_checked_add(
-            model.turbulence == TurbulenceKind::none ? 7U : 11U,
+            7U + derived_components,
             candidate->fields.scalars.size(), snapshot_components) ||
         !detail::product_field_bytes(local_cells, snapshot_components,
                                      snapshot_bytes) ||
@@ -5952,7 +5967,11 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
         candidate->passive_rows.resize(std::size_t(cells.x)*cells.y*cells.z);
         candidate->passive_factor.emplace(candidate->passive_rows,cells,LinearIdentity{});
       }
-      candidate->output_sgs.resize(product.summary.derived_output_bytes / sizeof(double));
+      const auto cells = product.patch.cells;
+      const auto count = std::size_t(cells.x)*cells.y*cells.z;
+      candidate->output_sgs.resize(product.turbulence.kind() == TurbulenceKind::none ? 0U : 4U*count);
+      candidate->output_thermo.resize(product.summary.derived_output_bytes / sizeof(double)
+                                      - candidate->output_sgs.size());
       const auto primary_count = 3U + product.fields.scalars.size() +
                                  product.fields.esf_fields.size() +
                                  (product.fields.esf_fields.empty() ? 0U : 2U);
@@ -22426,7 +22445,78 @@ Status ProductDriver::committed_sgs_output_snapshot(
     return {StatusCode::invalid_plan, kProductInput};
   auto& runtime = *implementation_;
   auto& product = *runtime.plan.implementation_;
-  if (runtime.output_sgs.empty()) return committed_output_snapshot(out);
+  const auto finish_snapshot = [&]() -> Status {
+    CommittedOutputSnapshot snapshot;
+    Status status = committed_output_snapshot(snapshot);
+    if (!runtime.output_thermo.empty()) {
+      const auto cells = product.patch.cells;
+      const auto count = std::size_t(cells.x)*cells.y*cells.z;
+      const auto ns = product.fields.esf_components - 1U;
+      std::array<FieldView, esf::maximum_fields> fields{};
+      ConstFieldView auxiliary, pressure, velocity, enthalpy;
+      for (std::size_t f=0; f<product.fields.esf_fields.size() && status; ++f)
+        status = product.layers.view(StateRole::accepted_n, product.fields.esf_fields[f], fields[f]);
+      const StateLayers& layers = product.layers;
+      if (status) status = layers.view(StateRole::accepted_n, product.fields.esf_auxiliary, auxiliary);
+      if (status) status = layers.view(StateRole::accepted_n, product.fields.pressure, pressure);
+      if (status) status = layers.view(StateRole::accepted_n, product.fields.velocity, velocity);
+      if (status) status = layers.view(StateRole::accepted_n, product.fields.enthalpy, enthalpy);
+      // Read accepted tuples into the existing thermodynamic scratch only.
+      // Solid cells have zero diagnostic values, matching the SGS convention.
+      std::fill(runtime.output_thermo.begin(), runtime.output_thermo.end(), 0.);
+      const auto activity = product.topology ? product.topology->region() : Span<const std::uint8_t>{};
+      std::size_t flat = 0U;
+      for (int z=0; z<cells.z && status; ++z)
+        for (int y=0; y<cells.y && status; ++y)
+          for (int x=0; x<cells.x && status; ++x, ++flat) {
+            if (activity.size && activity.data[flat]==0U) continue;
+            const Int3 cell{x,y,z};
+            std::array<double,UINT8_MAX> mean{};
+            detail::ProductEsf::DualState state;
+            status = product.esf.evaluate_dual_state_cell(cell,
+                {fields.data(),product.fields.esf_fields.size()},auxiliary,
+                runtime.pressure_reference+pressure.unchecked(cell,0U),0.,
+                {velocity.unchecked(cell,0U),velocity.unchecked(cell,1U),velocity.unchecked(cell,2U)},
+                product.reaction,product.thermodynamics,
+                {runtime.time.accepted_step(),enthalpy.revision,1U},
+                {mean.data(),product.fields.esf_components},state);
+            if (!status) break;
+            runtime.output_thermo[flat] = state.physical.rho;
+            runtime.output_thermo[count+flat] = state.statistical_density;
+            runtime.output_thermo[2U*count+flat] = state.pressure.density_kg_per_m3;
+            runtime.output_thermo[3U*count+flat] = state.auxiliary_temperature;
+            runtime.output_thermo[4U*count+flat] = state.auxiliary_enthalpy;
+            for (std::size_t s=0; s<ns; ++s)
+              runtime.output_thermo[(5U+s)*count+flat] = auxiliary.unchecked(cell,s);
+          }
+      if (status) {
+        constexpr std::array<std::string_view,6U> names{
+            "rho_mean_eos","rho_pdf_mean","rho_field0","T_field0","h_field0","Y_field0"};
+        const auto offset = product.io.primary_field_count() + (runtime.output_sgs.empty() ? 0U : 4U);
+        const auto sealed = product.io.snapshot_fields();
+        for (std::size_t q=0; q<names.size(); ++q) {
+          ConstFieldView view;
+          view.base = runtime.output_thermo.data()+q*count;
+          view.interior = cells;
+          view.components = sealed.data[offset+q].components;
+          view.stride_y = static_cast<std::size_t>(cells.x);
+          view.stride_z = view.stride_y*static_cast<std::size_t>(cells.y);
+          view.component_stride = count;
+          view.field = product.fields.enthalpy;
+          view.revision = enthalpy.revision;
+          view.storage_identity = reinterpret_cast<std::uintptr_t>(view.base);
+          view.revision_domain = enthalpy.revision_domain;
+          runtime.output_fields[offset+q] = {names[q],view,view.revision,sealed.data[offset+q].source};
+        }
+      }
+    }
+    status = product.reductions.consensus(status);
+    if (!status) return status;
+    snapshot.fields = {runtime.output_fields.data(),runtime.output_fields.size()};
+    out = snapshot;
+    return {};
+  };
+  if (runtime.output_sgs.empty()) return finish_snapshot();
   const StateLayers& layers = product.layers;
   FieldView velocity, gradient;
   ConstFieldView density, temperature, enthalpy;
@@ -22555,9 +22645,7 @@ Status ProductDriver::committed_sgs_output_snapshot(
     runtime.output_fields[primary+quantity] = {
         names[quantity],view,velocity.revision,sealed.data[primary+quantity].source};
   }
-  snapshot.fields = {runtime.output_fields.data(),runtime.output_fields.size()};
-  out = snapshot;
-  return {};
+  return finish_snapshot();
 }
 
 Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept {

@@ -717,7 +717,8 @@ class ProductDriver {
   Status committed_output_snapshot(CommittedOutputSnapshot& out) noexcept;
   // Collective on the driver's communicator at a quiescent boundary. Rebuilds
   // algebraic SGS output from accepted primitives, including boundary/IBM
-  // gradients. The ordinary snapshot above stays rank-local and inexpensive.
+  // gradients, plus ESF thermochemical diagnostics from accepted PDF/field0.
+  // The ordinary snapshot above stays rank-local and inexpensive.
   Status committed_sgs_output_snapshot(CommittedOutputSnapshot& out) noexcept;
   Status committed_restart_snapshot(RestartSnapshot& out) noexcept;
   Status committed_surface_force(SurfaceForce& force,

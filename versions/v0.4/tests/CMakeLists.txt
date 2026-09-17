@@ -1349,6 +1349,15 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   set_tests_properties(v04_kerosene_flow PROPERTIES PROCESSORS 4 TIMEOUT 120)
   add_executable(v04_kerosene_esf_test integration/kerosene_esf_test.cpp)
   target_link_libraries(v04_kerosene_esf_test PRIVATE hundun_v04_core MPI::MPI_C)
+  add_executable(v04_esf_output_test integration/esf_output_test.cpp)
+  target_link_libraries(v04_esf_output_test PRIVATE hundun_v04_core MPI::MPI_C)
+  add_test(NAME v04_esf_output_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/esf_output_test.py"
+      "$<TARGET_FILE:hundun>" "$<TARGET_FILE:v04_esf_output_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-flow" "${MPIEXEC_EXECUTABLE}"
+      "${CMAKE_CURRENT_BINARY_DIR}/eo")
+  set_tests_properties(v04_esf_output_cli PROPERTIES TIMEOUT 120 PROCESSORS 4 RUN_SERIAL TRUE)
   add_test(NAME v04_kerosene_esf COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/kerosene_esf_test.py"
     "$<TARGET_FILE:hundun>" "$<TARGET_FILE:v04_kerosene_esf_test>" "${MPIEXEC_EXECUTABLE}"

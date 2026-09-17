@@ -76,6 +76,26 @@ CFL 数值及定义、方程残差、迭代次数和最大进程推进壁钟时�
 `PressureGauge`、`Density`、`Enthalpy` 使用 SI 单位。Pressure 为
 参考压力加 pi，PressureGauge 为 pi。双状态 ESF 的 Density 对应
 压力耦合 field0 密度；Temperature 与 Enthalpy 对应物理均值热状态。
+双状态 ESF 的场输出同时提供以下诊断目录：
+
+| legacy VTK 名称 | XML 名称 | 定义／单位 |
+|---|---|---|
+| DensityMeanEOS | rho_mean_eos | 物理均值组分、焓的 EOS 密度，kg/m³ |
+| DensityStatistical | rho_pdf_mean | 随机场比容均值的倒数 `1/mean(1/rho_f)`，kg/m³ |
+| DensityField0 | rho_field0 | field0 压力闭合密度，kg/m³，与 Density 同一状态 |
+| TemperatureField0 | T_field0 | field0 正权 EOS 查询温度，K |
+| EnthalpyField0 | h_field0 | 已接受的原始 field0 焓，J/kg |
+| MassFractionsField0 | Y_field0 | 原始 field0 组分权重，多分量数组，kg/kg |
+
+组分数组依照 `thermophysics.d` 的完整 species 顺序排列，包含余组分。
+field0 正权 EOS 查询采用 `M=sum(max(Y0,0))`、`Y+=max(Y0,0)/M`
+和 `h+=h0/M`，压力闭合密度为 `rho(p,h+,Y+)/M`；原始权重与焓
+保持其独立状态。固定热力学压力配置使用 p0 查询全部 EOS，机械
+压力继续由 Pressure／PressureGauge 表示。物理均值组分沿用各组分
+具名标量及组成闭合定义。
+
+上述诊断从接受态重建，按三维场周期输出；工作区和写盘容量进入
+编译资源预算。固体格的诊断值采用零占位，按算例 IBM 几何选择流体区域。
 原有变量目录继续通过 `--visit-format xml` 或运行文件
 `"visit_format":"xml"` 选择。
 

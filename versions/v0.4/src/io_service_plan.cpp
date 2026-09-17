@@ -37,7 +37,7 @@ Status IoServicePlan::compile(
   for (std::size_t index = 0U; index < snapshot_fields.size; ++index) {
     const SnapshotFieldSpec field = snapshot_fields.data[index];
     if (field.components == 0U ||
-        field.source > SnapshotSource::sgs_dissipation_specific) {
+        field.source > SnapshotSource::esf_auxiliary_species) {
       return {StatusCode::invalid_plan, kIoServicePlan};
     }
     if (field.source == SnapshotSource::registered_field) {
@@ -45,11 +45,13 @@ Status IoServicePlan::compile(
         return {StatusCode::invalid_plan, kIoServicePlan};
       ++primary_count;
     } else {
-      bool velocity_origin = false;
+      const bool esf = field.source >= SnapshotSource::esf_mean_eos_density;
+      bool registered_origin = false;
       for (std::size_t prior = 0U; prior < primary_count; ++prior)
-        velocity_origin |= snapshot_fields.data[prior].field == field.field &&
-                           snapshot_fields.data[prior].components == 3U;
-      if (!velocity_origin || field.components != 1U)
+        registered_origin |= snapshot_fields.data[prior].field == field.field &&
+                           snapshot_fields.data[prior].components == (esf ? 1U : 3U);
+      if (!registered_origin ||
+          (field.source != SnapshotSource::esf_auxiliary_species && field.components != 1U))
         return {StatusCode::invalid_plan, kIoServicePlan};
     }
     for (std::size_t prior = 0U; prior < index; ++prior) {

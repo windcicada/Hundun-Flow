@@ -36,13 +36,20 @@ enum class SnapshotSource : std::uint8_t {
   sgs_kinematic_viscosity,
   sgs_kinetic_energy,
   sgs_dissipation_volume,
-  sgs_dissipation_specific
+  sgs_dissipation_specific,
+  esf_mean_eos_density,
+  esf_statistical_density,
+  esf_auxiliary_density,
+  esf_auxiliary_temperature,
+  esf_auxiliary_enthalpy,
+  esf_auxiliary_species
 };
 
 struct SnapshotFieldSpec {
   FieldId field{};
   std::uint8_t components{};
-  // Derived fields identify their registered velocity origin. They form an
+  // SGS fields identify their velocity origin; ESF fields identify enthalpy.
+  // Derived fields form an
   // optional complete suffix; the primary prefix remains a valid snapshot.
   SnapshotSource source{SnapshotSource::registered_field};
 };

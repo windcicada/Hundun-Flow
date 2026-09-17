@@ -786,7 +786,7 @@ bool run_case(const fs::path& root, bool stretched,
             evidence_text.find("\"momentum_predictor\":[") !=
                 std::string::npos &&
             evidence_text.find(
-                "\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v3_owner\",\"limited\":false,\"correction_metrics_applicability\":\"not_applicable\",\"retained_correction_l1_ratio\":null,\"minimum_face_alpha\":null,\"active_correction_faces\":0,\"limited_faces\":0,\"limited_face_fraction\":null,\"advective_cfl\":{\"present\":true,\"plan\":41,\"time_revision_collective\":14,\"density_view_collective\":15,\"face_flux_view_collective\":16,\"activity_collective\":0,\"dt\":0.25,\"out_max\":0.125,\"abs_max\":0.25,\"limit\":0.5}}") !=
+                "\"momentum_predictor_limiter\":{\"scheme\":\"common_face_afc_v3_owner\",\"limited\":false,\"correction_metrics_applicability\":\"not_applicable\",\"retained_correction_l1_ratio\":null,\"minimum_face_alpha\":null,\"active_correction_faces\":0,\"limited_faces\":0,\"limited_face_fraction\":null,\"advective_cfl\":{\"present\":true,\"plan\":41,\"time_revision_collective\":14,\"density_view_collective\":15,\"face_flux_view_collective\":16,\"activity_collective\":0,\"dt\":0.25,\"out_max\":0.125,\"abs_max\":0.25,\"definition\":\"outgoing_sum\",\"directional_max\":0,\"limit\":0.5}}") !=
                 std::string::npos &&
             evidence_text.find("\"low_state\":\"none\"") !=
                 std::string::npos &&
