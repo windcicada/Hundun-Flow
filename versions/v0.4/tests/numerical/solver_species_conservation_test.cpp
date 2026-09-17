@@ -416,6 +416,8 @@ bool check_scalar_correction_rows(const ProductionFixture& fixture,
   const auto count=std::size_t(cells.x)*cells.y*cells.z;
   auto shifted=make_field(q.field,cells,1,2,q.revision+1);
   auto direction=make_field(95,cells,1,2,1201);
+  auto shifted_mid=make_field(q.field,cells,1,2,1211);
+  ScalarMidpointView midpoint;
   auto variation=make_field(96,cells,1,1,1202);
   auto mass_divergence=make_field(97,cells,1,0,1203);
   std::vector<detail::ColdPressureRow> rows(count);
@@ -512,6 +514,13 @@ bool check_scalar_correction_rows(const ProductionFixture& fixture,
   if (!status) {std::cerr<<"correction boundary status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';return false;}
   for (int z=-2;z<cells.z+2;++z) for (int y=-2;y<cells.y+2;++y) for (int x=-2;x<cells.x+2;++x)
     shifted.view.unchecked({x,y,z},0)=q.unchecked({x,y,z},0)+direction.view.unchecked({x,y,z},0);
+  if(context.scalar_midpoint) {
+    for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x) {
+      const Int3 c{x,y,z};
+      shifted_mid.view.unchecked(c,0)=context.scalar_midpoint->value.unchecked(c,0)+.5*direction.view.unchecked(c,0);
+    }
+    midpoint.value=as_const(shifted_mid.view);context.scalar_midpoint=&midpoint;
+  }
   const auto histories=heat ? Span<const PrimitiveHistory>{&state.enthalpy,1}
       : passive ? state.passive_scalars : state.independent_species;
   std::vector<PrimitiveHistory> shifted_histories(histories.data,histories.data+histories.size);
@@ -571,6 +580,113 @@ bool test_frozen_scalar_rows() {
   context.face_flux_revision_domain=flux.certificate.revision_domain();
   return check_scalar_correction_rows(fixture,as_const(q.view),state,material,{},context,
       {diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view},false,true);
+}
+
+bool test_passive_midpoint() {
+  ProductionFixture fixture;
+  if(!make_production_fixture(8,fixture,false))return false;
+  const auto cells=fixture.patch.cells;
+  auto rho=make_field(kDensity,cells,1,2,1401),oldrho=make_field(kDensity,cells,1,2,1402);
+  auto q=make_field(kPassive,cells,1,2,1403),old=make_field(kPassive,cells,1,2,1404);
+  auto mid=make_field(kPassive,cells,1,2,1405),gamma=make_field(25,cells,1,2,1406);
+  auto diagonal=make_field(30,cells,1,0,1407),rhs=make_field(31,cells,1,0,1408);
+  auto residual=make_field(32,cells,1,0,1409);
+  auto ax=make_face_field(CartesianAxis::x,cells,1410);
+  auto ay=make_face_field(CartesianAxis::y,cells,1411);
+  auto az=make_face_field(CartesianAxis::z,cells,1412);
+  fill_field(rho,1.3);fill_field(oldrho,1.1);fill_field(gamma,.2);
+  for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x) {
+    const Int3 c{x,y,z};const double X=(x+.5)/8.,Y=(y+.5)/8.;
+    q.view.unchecked(c,0)=.3+X*X+.2*Y;
+    old.view.unchecked(c,0)=.2+.5*X*X+.1*Y;
+    mid.view.unchecked(c,0)=.5*(q.view.unchecked(c,0)+old.view.unchecked(c,0));
+  }
+  PrimitiveHistory tracer{as_const(q.view),as_const(old.view),as_const(old.view)};
+  EquationStateView state;
+  state.density={as_const(rho.view),as_const(oldrho.view),as_const(oldrho.view)};
+  state.passive_scalars={&tracer,1};
+  const auto diffusivity=as_const(gamma.view);
+  EquationMaterialView material;material.scalar_mass_diffusivity={&diffusivity,1};
+  FinalFluxFixture owner;ConstFaceFluxView flux;
+  if(!make_linear_final_flux(fixture.equations.kernels(),cells,owner,flux))return false;
+  EquationAssemblyContext context;
+  context.dt=.1;context.bdf={10,-10,0,1};context.time=1413;
+  context.geometry=fixture.geometry.topology_revision();context.boundary=fixture.boundary.revision();
+  context.thermo=fixture.thermodynamics.fingerprint();context.transport=fixture.transport.fingerprint();
+  context.contribution_stage=1;context.scope=EquationAssemblyScope::final_conservative;
+  context.mass_flux=flux;context.face_flux=flux.revision;
+  context.face_flux_authority=flux.certificate.authority();context.face_flux_storage=flux.certificate.storage();
+  context.face_flux_revision_domain=flux.certificate.revision_domain();
+  ScalarMidpointView midpoint{as_const(mid.view)};context.scalar_midpoint=&midpoint;
+  EquationSystemView system{diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view};
+  EquationAssemblyCertificate certificate;
+  auto status=assemble_scalar(fixture.equations.scalars(),0,state,material,{},context,system,certificate);
+  if(!expect(bool(status),"passive CN assembly"))return false;
+  bool passed=true;double error{};
+  const double dx=1./8,V=dx*dx*dx,D=.2*dx;
+  for(int z=1;z<7;++z)for(int y=1;y<7;++y)for(int x=1;x<7;++x) {
+    const Int3 c{x,y,z},lo{x-1,y,z},hi{x+1,y,z};
+    const double expected=V*(10*(1.3*q.view.unchecked(c,0)-1.1*old.view.unchecked(c,0))-.2*1.5)+
+        flux.x.unchecked(hi)*.5*(mid.view.unchecked(c,0)+mid.view.unchecked(hi,0))-
+        flux.x.unchecked(c)*.5*(mid.view.unchecked(c,0)+mid.view.unchecked(lo,0));
+    error=std::max(error,std::abs(expected-residual.view.unchecked(c,0)));
+    passed &= close(diagonal.view.unchecked(c,0),13*V+3*D);
+    passed &= close(ax.view.unchecked(c),.5*D);
+  }
+  passed &= expect(error<1e-13,"CN conservative storage, analytic midpoint convection/diffusion and half matrix");
+  passed &= check_scalar_correction_rows(fixture,as_const(q.view),state,material,{},context,system,true);
+  // Solve the complete diffusion equation in its invariant Fourier
+  // subspace using two independently assembled residuals for each step.
+  // Compare with the exact semidiscrete exponential to isolate time order.
+  FinalFluxFixture quiet_owner;ConstFaceFluxView quiet;
+  if(!make_linear_final_flux(fixture.equations.kernels(),cells,quiet_owner,quiet,true))return false;
+  context.mass_flux=quiet;context.face_flux=quiet.revision;
+  context.face_flux_authority=quiet.certificate.authority();
+  context.face_flux_storage=quiet.certificate.storage();
+  context.face_flux_revision_domain=quiet.certificate.revision_domain();
+  fill_field(rho,1.);fill_field(oldrho,1.);
+  const double pi=std::acos(-1.),lambda=4*.2*64*std::pow(std::sin(pi/8),2);
+  std::array<double,3> errors{};
+  for(unsigned refinement=0;refinement<3;++refinement) {
+    const unsigned steps=4u<<refinement;context.dt=.08/steps;
+    context.bdf={1/context.dt,-1/context.dt,0,1};
+    double amplitude=.1;
+    const auto trial=[&](double value) {
+      for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x) {
+        const Int3 c{x,y,z};const double mode=std::sin(2*pi*(x+.5)/8);
+        q.view.unchecked(c,0)=.5+value*mode;
+        mid.view.unchecked(c,0)=.5*(q.view.unchecked(c,0)+old.view.unchecked(c,0));
+      }
+    };
+    for(unsigned step=0;step<steps;++step) {
+      for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x)
+        old.view.unchecked({x,y,z},0)=.5+amplitude*std::sin(2*pi*(x+.5)/8);
+      trial(0.);
+      status=assemble_scalar(fixture.equations.scalars(),0,state,material,{},context,system,certificate);
+      if(!status)return false;
+      const double r0=residual.view.unchecked({2,2,2},0);
+      trial(1.);
+      status=assemble_scalar(fixture.equations.scalars(),0,state,material,{},context,system,certificate);
+      if(!status)return false;
+      amplitude=-r0/(residual.view.unchecked({2,2,2},0)-r0);
+      trial(amplitude);
+      status=assemble_scalar(fixture.equations.scalars(),0,state,material,{},context,system,certificate);
+      if(!status)return false;
+      double worst{};
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+        worst=std::max(worst,std::abs(residual.view.unchecked({x,y,z},0))/V);
+      passed &= expect(worst<1e-12,"CN Fourier solve satisfies every complete scalar row");
+    }
+    errors[refinement]=std::abs(amplitude-.1*std::exp(-lambda*.08));
+  }
+  const double order1=std::log2(errors[0]/errors[1]),order2=std::log2(errors[1]/errors[2]);
+  passed &= expect(order1>1.9 && order2>1.9,"passive CN has second order time convergence");
+  std::cout<<"passive CN temporal orders="<<order1<<','<<order2<<'\n';
+  midpoint.value=as_const(residual.view);
+  const auto rejected=assemble_scalar(fixture.equations.scalars(),0,state,material,{},context,system,certificate);
+  passed &= expect(rejected.code==StatusCode::invalid_plan,"CN rejects invalid midpoint storage");
+  std::cout<<"passive CN analytic row error="<<error<<" passed="<<passed<<'\n';
+  return passed;
 }
 
 bool mixture_face_probe(bool implicit=false) {
@@ -1171,7 +1287,13 @@ bool test_ibm_species_matrix(bool passive = false, bool periodic = false) {
            <<" solid_residual="<<solid_residual<<'\n';
   bool passed=expect(error<1e-11 && cut_coefficient==0.0 && solid_residual==0.0,
       "species matrix excludes solid edges and constrains solid corrections");
-  if (passive) return passed;
+  if (passive) {
+    ScalarMidpointView midpoint{as_const(q.view)};
+    context.scalar_midpoint=&midpoint;
+    passed &= check_scalar_correction_rows(fixture,as_const(q.view),state,material,
+        {},context,system,true);
+    return passed;
+  }
   {
     auto source=make_field(10,cells,1,0,850);
     auto sink=make_field(11,cells,1,0,851);
@@ -2748,9 +2870,11 @@ int main(int argc, char** argv) {
   passed &= test_species_storage_increment();
   passed &= test_mixture_equation_faces();
   passed &= test_frozen_scalar_rows();
+  passed &= test_passive_midpoint();
   passed &= test_inlet_scalar_material();
   passed &= test_ibm_species_matrix();
   passed &= test_ibm_species_matrix(true);
+  passed &= test_ibm_species_matrix(true,true);
   passed &= test_ibm_species_matrix(false,true);
   passed &= test_composition_dependent_production_eos();
   passed &= test_scalar_catalog_contract();

@@ -84,7 +84,8 @@ inline Status close_mixture_scalar_rows(
         continue; // The inlet composition is fixed in the physical residual.
       const int normal=coordinate[a]+(high ? 1 : 0);
       const double lower=interpolate_face(kernels,axis,normal,1.,0.);
-      const double mass=F[a].unchecked(face)*(high ? 1. : -1.);
+      const double mass=F[a].unchecked(face)*(high ? 1. : -1.)*
+          (context.scalar_midpoint ? .5 : 1.);
       // Limited scalar reconstruction stays in the complete residual. Use
       // its monotone upwind part for the deferred-correction matrix.
       const double owner=context.mixture_transport || scheme==ConvectionScheme::central2
@@ -130,7 +131,7 @@ inline Status close_frozen_density_scalar_rows(
       !valid_cell_view(density.trial,cells,0,1,0) ||
       !valid_cell_view(density.accepted,cells,0,1,0) ||
       !valid_cell_view(density.previous,cells,0,1,0) ||
-      context.reaction_endpoint.base || context.bdf.a2!=0 ||
+      context.reaction_endpoint.base || context.scalar_midpoint || context.bdf.a2!=0 ||
       context.bdf.a1!=-context.bdf.a0 ||
       !std::isfinite(context.dt*context.bdf.a0) ||
       std::abs(context.dt*context.bdf.a0-1.)>4*std::numeric_limits<double>::epsilon() ||

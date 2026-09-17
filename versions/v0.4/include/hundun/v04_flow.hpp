@@ -232,6 +232,13 @@ struct EnthalpyMidpointView {
   ConstFieldView temperature{};
 };
 
+// Accepted/endpoint arithmetic mean with the transported field identity.
+// Passive storage stays conservative; spatial and implicit-sink responses
+// to the endpoint are one half. The caller closes both time-layer ghosts.
+struct ScalarMidpointView {
+  ConstFieldView value{};
+};
+
 struct EquationAssemblyContext {
   double dt{};
   BdfCoefficients bdf{};
@@ -262,6 +269,7 @@ struct EquationAssemblyContext {
   // order within each equation. Zero selects contribution_stage alone.
   StageId additional_contribution_stage{};
   const EnthalpyMidpointView* enthalpy_midpoint{};
+  const ScalarMidpointView* scalar_midpoint{};
 };
 
 struct EquationSystemView {

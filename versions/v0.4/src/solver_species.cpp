@@ -272,6 +272,8 @@ Status assemble_transport(
           context.additional_contribution_stage, descriptors)) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
+  const auto spatial = context.scalar_midpoint ? context.scalar_midpoint->value : scalar.trial;
+  const double response = context.scalar_midpoint ? .5 : 1.;
   const std::uint8_t required_ghosts =
       convection == ConvectionScheme::central2 ? 1U : 2U;
   KernelBox box{};
@@ -293,6 +295,15 @@ Status assemble_transport(
       detail::output_aliases_flux(system, true, context.mass_flux)) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
+  if (context.scalar_midpoint &&
+      (spec.role != TransportedScalarRole::passive_scalar || density_units ||
+       retain_diagonal || statistical_enthalpy || context.reaction_endpoint.base ||
+       context.enthalpy_midpoint || context.bdf.order!=1 || context.bdf.a2!=0 ||
+       context.bdf.a1!=-context.bdf.a0 || spatial.field!=scalar.trial.field ||
+       !detail::valid_cell_view(spatial,cells,0,1,required_ghosts) ||
+       !detail::finite_face_neighbour_slabs(spatial,box,0,1,required_ghosts) ||
+       detail::output_aliases_input(spatial,system,true)))
+    return {StatusCode::invalid_plan,kScalarAssembly};
   if (context.reaction_endpoint.base &&
       (spec.role != TransportedScalarRole::species || context.bdf.order != 1U ||
        context.reaction_endpoint.field != spec.field ||
@@ -388,15 +399,15 @@ Status assemble_transport(
               context.bdf.a2 * rho_previous * q_previous;
         const double diagonal = retain_diagonal
             ? system.diagonal.unchecked(cell, 0U)
-            : (context.bdf.a0 * rho_trial + implicit_sink) * volume +
-            diffusion_diagonal;
+            : (context.bdf.a0 * rho_trial + response * implicit_sink) * volume +
+            response * diffusion_diagonal;
         const double reaction_storage = context.reaction_endpoint.base
             ? rho_trial*(context.reaction_endpoint.unchecked(cell,0U)-q_trial)/context.dt : 0.0;
         const double source_balance = context.reaction_endpoint.base && contributions.size>1
             ? interval_source_balance(reaction_storage,contributions,cell)
             : reaction_storage-explicit_source;
         const double non_diffusive_without_convection =
-            (unsteady + source_balance + implicit_sink * q_trial) * volume;
+            (unsteady + source_balance + implicit_sink * spatial.unchecked(cell,0U)) * volume;
         if (!finite_positive(diagonal) ||
             !std::isfinite(non_diffusive_without_convection)) {
           return {StatusCode::numerical_failure, kScalarNumerical};
@@ -409,7 +420,7 @@ Status assemble_transport(
   // multiplication by the composition jump. At its upwind limit this keeps
   // a vanishing downwind coefficient exact, including trace/zero species.
   // The separate kernels otherwise share the same allocation-free scratch.
-  const std::array<ConstFieldView, 1U> reads{scalar.trial};
+  const std::array<ConstFieldView, 1U> reads{spatial};
   const std::array<FieldView, 1U> writes{system.residual};
   const KernelInvocation invocation{{reads.data(), reads.size()},
                                     {writes.data(), writes.size()}, box,
@@ -433,10 +444,10 @@ Status assemble_transport(
         inlet_field->component};
     evaluated = mixture
         ? detail::IbmScalarTransport::transport(*context.immersed_interface,
-              field,scalar.trial,diffusivity,context.mass_flux,box,
+              field,spatial,diffusivity,context.mass_flux,box,
               system.residual,*mixture)
         : detail::IbmScalarTransport::convection(*context.immersed_interface,
-              field,convection,scalar.trial,context.mass_flux,box,
+              field,convection,spatial,context.mass_flux,box,
               system.residual);
     if (!evaluated) return evaluated;
   }
@@ -499,8 +510,8 @@ Status assemble_transport(
         const double diagonal = retain_diagonal
             ? system.diagonal.unchecked(cell, 0U)
             : density_units
-            ? context.bdf.a0 * rho_trial + implicit_sink + diffusion_diagonal / volume
-            : (context.bdf.a0 * rho_trial + implicit_sink) * volume + diffusion_diagonal;
+            ? context.bdf.a0 * rho_trial + response * implicit_sink + response * diffusion_diagonal / volume
+            : (context.bdf.a0 * rho_trial + response * implicit_sink) * volume + response * diffusion_diagonal;
         // Combine the reaction storage with its interval source before
         // adding the much smaller transport residual. Both retain their
         // original values for the independent source/conservation ledger.
@@ -511,7 +522,7 @@ Status assemble_transport(
             : reaction_storage-explicit_source;
         const double non_diffusive =
             (unsteady + system.residual.unchecked(cell, 0U) +
-             source_balance + implicit_sink * q_trial) *
+             source_balance + implicit_sink * spatial.unchecked(cell,0U)) *
             (density_units ? 1.0 : volume);
         if (!finite_positive(rho_trial) || !std::isfinite(rho_accepted) ||
             !std::isfinite(rho_previous) || !std::isfinite(q_trial) ||
@@ -545,7 +556,7 @@ Status assemble_transport(
   }
   if(context.immersed_interface!=nullptr && mixture==nullptr) {
     evaluated=detail::IbmScalarTransport::diffusion(*context.immersed_interface,
-        scalar.trial,diffusivity,box,system.residual);
+        spatial,diffusivity,box,system.residual);
     if(!evaluated) return evaluated;
   }
   if (statistical_enthalpy) {
@@ -605,8 +616,26 @@ Status assemble_transport(
           }
     }
   }
+  if (!retain_diagonal && context.scalar_midpoint && system.x_coefficient.base) {
+    for(auto face : {system.x_coefficient,system.y_coefficient,system.z_coefficient}) {
+      auto begin=box.begin,end=box.begin;
+      end.x+=box.cells.x;end.y+=box.cells.y;end.z+=box.cells.z;
+      const auto axis=face.axis;
+      if(axis==CartesianAxis::x){begin.x+=box.begin.x!=0; ++end.x;}
+      if(axis==CartesianAxis::y){begin.y+=box.begin.y!=0; ++end.y;}
+      if(axis==CartesianAxis::z){begin.z+=box.begin.z!=0; ++end.z;}
+      for(int z=begin.z;z<end.z;++z)for(int y=begin.y;y<end.y;++y)for(int x=begin.x;x<end.x;++x)
+        face.unchecked({x,y,z})*=response;
+    }
+  }
   RevisionToken assembled_state =
       scalar_state_revision(state, scalar, diffusivity, contributions);
+  if (context.scalar_midpoint) {
+    assembled_state=hash_mix(assembled_state,UINT64_C(0x434e5343414c4152));
+    assembled_state=hash_mix(assembled_state,spatial.revision);
+    assembled_state=hash_mix(assembled_state,spatial.storage_identity);
+    assembled_state=hash_mix(assembled_state,spatial.revision_domain);
+  }
   if (mixture) assembled_state=hash_mix(assembled_state,mixture->linearization);
   if (context.reaction_endpoint.base) {
     assembled_state=hash_mix(assembled_state,context.reaction_endpoint.field);
