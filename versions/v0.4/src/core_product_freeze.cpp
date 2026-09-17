@@ -22094,7 +22094,8 @@ Status ProductDriver::set_cell_trace_window(const DriverCellTraceWindow& window)
 }
 
 Status ProductDriver::advance(LocalTimeLimits limits,
-                              DriverStepReport& report) noexcept {
+                              DriverStepReport& report,
+                              DriverAttemptObserver observer) noexcept {
   report = {};
   if (implementation_ == nullptr || !implementation_->initialized ||
       implementation_->time.has_active_proposal()) {
@@ -22131,11 +22132,15 @@ Status ProductDriver::advance(LocalTimeLimits limits,
     return status;
   }
   Status last_attempt_status;
+  StepAttemptFailure previous_observed_failure;
   std::uint32_t scalar_sweep = 0U;
   while (status) {
     if (scalar_sweep == 0U) ++candidate.attempts;
     implementation_->scalar_coupling_sweep = ++scalar_sweep;
     candidate.proposal = proposal;
+    if (observer.notify)
+      observer.notify(observer.context,
+          {proposal, candidate.attempts, scalar_sweep, previous_observed_failure});
     PisoAttemptReport attempt_report;
     PreparedAttemptFinish prepared_attempt;
     const Status attempt_status =
@@ -22143,6 +22148,9 @@ Status ProductDriver::advance(LocalTimeLimits limits,
                                          prepared_attempt);
     implementation_->accumulate_stage_timings(candidate);
     last_attempt_status = attempt_status;
+    if (!attempt_status)
+      previous_observed_failure = {attempt_status, implementation_->attempt_stage,
+                                   candidate.attempts, proposal.dt};
     candidate.effective_bdf = implementation_->effective_bdf;
     candidate.thermophysical_predictor_calls =
         implementation_->thermophysical_predictor_calls;

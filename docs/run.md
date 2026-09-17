@@ -61,6 +61,16 @@ CFL 数值及定义、方程残差、迭代次数和最大进程推进壁钟时�
 写入期间采用 `.pending` 标记保存请求身份，新到请求留给下次处理。
 `hundun status OUT` 查看 `status.json` 的阶段、接受步和更新时间。
 
+状态在每次步内尝试开始时更新。`phase=solving` 表示首次尝试，
+`phase=retrying` 表示正在重试；`step/time` 对应已接受状态，
+`target_step` 对应当前目标步。`attempt` 和 `coupling_sweep` 从 1
+开始，`dt` 表示此次实际时间步；`retry_kind=time_step` 表示时间步
+回退，`scalar_coupling` 表示同 dt 的标量耦合重算。
+`previous_failure` 保存上次失败的 code、detail、stage、attempt 和 dt。
+根进程通过临时文件和原子替换发布状态；写入错误在推进返回后由
+应用统一报告，接受／回退始终由求解事务决定。状态发布耗时计入
+实际推进壁钟。结束、保存停止和写盘阶段继续使用各自明确状态。
+
 三维场默认采用 legacy 二进制 `.vtk`，在 `Visit/solution.visit` 中按真实
 物理时间组织。向量 `Velocity` 与标量 `Temperature`、`Pressure`、
 `PressureGauge`、`Density`、`Enthalpy` 使用 SI 单位。Pressure 为

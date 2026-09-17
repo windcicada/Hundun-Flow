@@ -342,6 +342,24 @@ struct StepAttemptFailure {
   double dt{};
 };
 
+// Immutable observation at the start of each numerical candidate. Attempts
+// and coupling sweeps are one-based; previous_failure.attempt == 0 marks the
+// first candidate. Proposal time/step still describe the accepted state.
+struct DriverAttemptProgress {
+  StepTime proposal{};
+  std::uint32_t attempt{};
+  std::uint32_t coupling_sweep{};
+  StepAttemptFailure previous_failure{};
+};
+
+// Rank-local synchronous observation only: no MPI, driver reentry, or model
+// mutation. The caller owns context throughout advance and reports observer
+// errors after advance returns; the callback cannot alter commit/rollback.
+struct DriverAttemptObserver {
+  void* context{};
+  void (*notify)(void*, const DriverAttemptProgress&) noexcept{};
+};
+
 struct StepCompletionReport {
   Status outcome{};  // Exactly the status returned by advance.
   // The controller/commit decision, before preserving a legacy attempt error
@@ -687,7 +705,8 @@ class ProductDriver {
   // explicit diffusion/acoustic bounds. No-op for a fixed-dt product.
   Status constrain_convective_time_limit(LocalTimeLimits& limits) noexcept;
   // Programmatic callers retain authority over explicit physical time scales.
-  Status advance(LocalTimeLimits limits, DriverStepReport& report) noexcept;
+  Status advance(LocalTimeLimits limits, DriverStepReport& report,
+                 DriverAttemptObserver observer = {}) noexcept;
   // Synchronous borrowed views. Consume before any advance/initialization,
   // another snapshot of the same kind, or destruction of the storage owner.
   // This conservative lifetime also applies after a rejected advance. Writers

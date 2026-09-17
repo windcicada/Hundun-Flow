@@ -3,6 +3,7 @@
 #pragma once
 
 #include "io_output_detail.hpp"
+#include "hundun/v04_app.hpp"
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -37,25 +38,67 @@ inline Status application_requests(MPI_Comm comm, int rank,
   return status;
 }
 
-inline Status application_status(MPI_Comm comm, int rank,
+// A local writer also serves in-step observers. Their failures are converged
+// by the application after advance; filesystem errors leave physics untouched.
+inline Status application_status_local(
     const std::filesystem::path& directory, const char* phase,
-    std::uint64_t step, double time) {
-  return output_collective_stage(comm,[&]() -> Status {
-    if (rank != 0) return {};
+    std::uint64_t step, double time,
+    const DriverAttemptProgress* progress = nullptr) noexcept {
+  try {
     std::filesystem::create_directories(directory);
     std::ostringstream json;
+    json.imbue(std::locale::classic());
     const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     json << std::setprecision(17) << "{\"phase\":\"" << phase
          << "\",\"step\":" << step << ",\"time\":" << time
-         << ",\"updated_unix_ms\":" << now << "}\n";
+         << ",\"updated_unix_ms\":" << now;
+    if (progress) {
+      const auto& failure=progress->previous_failure;
+      json << ",\"target_step\":" << progress->proposal.accepted_step+1U
+           << ",\"attempt\":" << progress->attempt
+           << ",\"coupling_sweep\":" << progress->coupling_sweep
+           << ",\"dt\":" << progress->proposal.dt
+           << ",\"retry_kind\":\"" << (progress->coupling_sweep>1 ? "scalar_coupling" :
+               progress->attempt>1 ? "time_step" : "none")
+           << "\",\"previous_failure\":{\"code\":" << unsigned(failure.failure.code)
+           << ",\"detail\":" << failure.failure.detail
+           << ",\"stage\":" << failure.stage
+           << ",\"attempt\":" << failure.attempt
+           << ",\"dt\":" << failure.dt << '}';
+    }
+    json << "}\n";
     const auto temporary=directory/"status.tmp";
     if (!output_write_file(temporary,json.str()))
       return {StatusCode::io_failure,kOutputFile};
     std::filesystem::rename(temporary,directory/"status.json");
     return {};
-  });
+  } catch (const std::bad_alloc&) {
+    return {StatusCode::allocation_failure,kOutputCapacity};
+  } catch (...) {
+    return {StatusCode::io_failure,kOutputFile};
+  }
 }
+
+inline Status application_status(MPI_Comm comm, int rank,
+    const std::filesystem::path& directory, const char* phase,
+    std::uint64_t step, double time) {
+  return output_collective_status(comm,rank==0
+      ? application_status_local(directory,phase,step,time) : Status{});
+}
+
+struct ApplicationAttemptObserver {
+  const std::filesystem::path* directory{};
+  int rank{};
+  Status status{};
+  static void observe(void* context, const DriverAttemptProgress& progress) noexcept {
+    auto& self=*static_cast<ApplicationAttemptObserver*>(context);
+    if (self.rank!=0 || !self.status) return;
+    self.status=application_status_local(*self.directory,
+        progress.previous_failure.attempt ? "retrying" : "solving",
+        progress.proposal.accepted_step,progress.proposal.time,&progress);
+  }
+};
 
 inline Status application_acknowledge(MPI_Comm comm,int rank,
     const std::filesystem::path& directory,const std::array<int,2>& requests,

@@ -1457,6 +1457,13 @@ foreach(rank_count IN ITEMS 1 2 4)
             ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_pressure_energy_retry_mpi_${rank_count}
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180)
+  add_test(NAME v04_attempt_progress_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS}
+            "$<TARGET_FILE:v04_product_pressure_energy_retry_mpi_test>"
+            --attempt-progress ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_attempt_progress_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
   add_test(NAME v04_product_generic_thermal_halo_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
             ${MPIEXEC_PREFLAGS}

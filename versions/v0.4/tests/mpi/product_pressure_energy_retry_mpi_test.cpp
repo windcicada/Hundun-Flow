@@ -5,6 +5,8 @@
 
 #include "../support/product_fixture.hpp"
 #include "core_product_freeze_detail.hpp"
+#include "app_control_detail.hpp"
+#include <fstream>
 
 #include <mpi.h>
 
@@ -1018,9 +1020,49 @@ bool run_retry_certificate(int rank) {
   profile_valid &= cold_profile.enabled == profiling_enabled &&
                    !cold_profile.initialized && cold_profile.cumulative == nullptr &&
                    cold_profile.level_count == default_profile.level_count;
+  const auto status_directory=std::filesystem::temp_directory_path() /
+      ("hf-retry-"+std::to_string(::getpid()));
+  struct ProgressCapture {
+    detail::ApplicationAttemptObserver writer;
+    std::array<DriverAttemptProgress,4> events{};
+    std::size_t count{};
+    bool live_file{true};
+  } progress{{&status_directory,rank,{}}};
+  const DriverAttemptObserver observer{&progress,
+      [](void* context,const DriverAttemptProgress& event) noexcept {
+        auto& capture=*static_cast<ProgressCapture*>(context);
+        if(capture.count<capture.events.size())capture.events[capture.count]=event;
+        ++capture.count;
+        detail::ApplicationAttemptObserver::observe(&capture.writer,event);
+        if(capture.writer.rank!=0)return;
+        try {
+          std::ifstream input(*capture.writer.directory/"status.json");
+          const std::string text{std::istreambuf_iterator<char>(input),{}};
+          std::cout << "attempt-status " << text;
+          const auto expected=event.attempt==1 ? "\"phase\":\"solving\"" : "\"phase\":\"retrying\"";
+          capture.live_file &= bool(capture.writer.status) &&
+              text.find(expected)!=std::string::npos &&
+              text.find("\"updated_unix_ms\":")!=std::string::npos &&
+              text.find("\"target_step\":2")!=std::string::npos &&
+              text.find(event.attempt==1 ? "\"retry_kind\":\"none\"" :
+                  "\"retry_kind\":\"time_step\"")!=std::string::npos;
+        } catch (...) {capture.live_file=false;}
+      }};
   DriverStepReport retry_first;
   if (retry.status)
-    retry.status = retry.driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, retry_first);
+    retry.status = retry.driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, retry_first,observer);
+  const bool progress_valid=progress.count==2 && progress.live_file &&
+      progress.events[0].attempt==1 && progress.events[1].attempt==2 &&
+      progress.events[0].coupling_sweep==1 && progress.events[1].coupling_sweep==1 &&
+      progress.events[0].proposal.accepted_step==1 && progress.events[1].proposal.accepted_step==1 &&
+      progress.events[0].proposal.dt==kFullDt && progress.events[1].proposal.dt==kHalfDt &&
+      progress.events[0].previous_failure.attempt==0 &&
+      progress.events[1].previous_failure.attempt==1 &&
+      progress.events[1].previous_failure.failure.code==StatusCode::rejected_step &&
+      progress.events[1].previous_failure.failure.detail==10210U &&
+      progress.events[1].previous_failure.stage==54U &&
+      progress.events[1].previous_failure.dt==kFullDt;
+  if(rank==0)std::filesystem::remove_all(status_directory);
   const auto first_profile_view = retry.driver.pressure_mg_profile();
   // Own this value before the next advance invalidates the borrowed view.
   const MgApplyProfile first_profile = first_profile_view.cumulative != nullptr
@@ -1056,9 +1098,16 @@ bool run_retry_certificate(int rank) {
   DriverHarness control = make_driver(
       retry_model(kHalfDt, kHalfDt, 1U, UINT64_C(0x18000c301)), kHalfDt);
   DriverStepReport control_first;
+  // A root-local status-file failure is observable while the driver still
+  // reaches the same accepted physical state as the successful observer.
+  if(rank==0)std::filesystem::create_directories(status_directory/"status.tmp");
+  detail::ApplicationAttemptObserver failed_writer{&status_directory,rank,{}};
   if (control.status)
-    control.status =
-        control.driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, control_first);
+    control.status = control.driver.advance({1.0, 1.0, 1.0, 1.0, 1.0}, control_first,
+        {&failed_writer,detail::ApplicationAttemptObserver::observe});
+  const bool writer_failure_valid=rank!=0 ||
+      (failed_writer.status.code==StatusCode::io_failure && failed_writer.status.detail==10404U);
+  if(rank==0)std::filesystem::remove_all(status_directory);
   const auto control_first_view = control.driver.pressure_mg_profile();
   const MgApplyProfile control_first_profile = control_first_view.cumulative != nullptr
       ? *control_first_view.cumulative : MgApplyProfile{};
@@ -1184,7 +1233,10 @@ bool run_retry_certificate(int rank) {
       profile_valid, rank,
       "rank-local ProductDriver MG profiles cover all retry and next-target "
       "solves, reconcile cumulative work, and leave disabled ranks empty");
-  const bool local = probe.passed && first_retry_semantics &&
+  if(rank==0)std::cout << "attempt-progress live=" << progress_valid
+      << " io-failure-observed=" << writer_failure_valid << '\n';
+  const bool local = progress_valid && writer_failure_valid &&
+                     progress.count==2 && probe.passed && first_retry_semantics &&
                      first_control_semantics && same_first && first_terminal &&
                      second_semantics && same_second && terminal &&
                      observation_valid && profile_observation_valid;
@@ -1575,6 +1627,11 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::string(argv[1]) == "--generic-thermal-halo") {
     const bool passed = run_generic_thermal_halo_certificate(rank);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--attempt-progress") {
+    const bool passed = run_retry_certificate(rank);
     MPI_Finalize();
     return passed ? 0 : 1;
   }

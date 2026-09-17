@@ -701,7 +701,14 @@ static Status run_application(MPI_Comm communicator,
     if (status) {
       report.failure_phase = ApplicationFailurePhase::advance;
       timing.phase(2U);
-      status = driver.advance(time_limits, step);
+      detail::ApplicationAttemptObserver observation{&options.run_directory,rank,{}};
+      status = driver.advance(time_limits, step,
+          {&observation,detail::ApplicationAttemptObserver::observe});
+      const auto observed=detail::output_collective_status(communicator,observation.status);
+      if (status && !observed) {
+        status=observed;
+        report.failure_phase=ApplicationFailurePhase::monitor;
+      }
     }
     timing.phase(3U);
     report.attempts = step.attempts;
