@@ -1091,11 +1091,15 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         "momentum_residual", "enthalpy_residual", "species_residual",
         "solid_velocity_max", "normalization", "final_momentum",
         "final_pressure", "final_enthalpy"), prefix)
+    if cold.get("enthalpy_scheme", "BE") not in ("CN", "BE"):
+        raise EvidenceError(f"{prefix} has an unknown enthalpy time policy")
     outer = require_integer(cold["outer_iterations"], prefix, 1, 64)
     reference_outer = require_integer(cold.get("reference_outer_iterations", 0), prefix, 0, 64)
     if reference_outer and reference_outer != outer:
         raise EvidenceError(f"{prefix} violates the fixed outer iteration schedule")
     species_count = cold.get("independent_species_count")
+    if cold.get("enthalpy_scheme", "BE") == "CN" and species_count not in (0, None):
+        raise EvidenceError(f"{prefix} combines ordinary CN heat with BE species")
     if species_count is not None:
         require_integer(species_count, prefix)
     retained = require_integer(cold.get("enthalpy_retained_calls", 0),

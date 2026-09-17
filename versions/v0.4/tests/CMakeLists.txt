@@ -1455,6 +1455,8 @@ add_executable(v04_product_cn_time_test integration/product_cn_time_test.cpp)
 target_link_libraries(v04_product_cn_time_test PRIVATE hundun_v04_test_core MPI::MPI_C)
 add_test(NAME v04_product_cn_time COMMAND v04_product_cn_time_test)
 add_test(NAME v04_product_be_shear_time COMMAND v04_product_cn_time_test --be)
+add_test(NAME v04_product_cn_heat_time COMMAND v04_product_cn_time_test --heat)
+set_tests_properties(v04_product_cn_heat_time PROPERTIES TIMEOUT 120)
 set_tests_properties(v04_product_cn_time v04_product_be_shear_time PROPERTIES TIMEOUT 120)
 
 add_executable(v04_product_pressure_energy_temporal_convergence_test
@@ -2517,6 +2519,11 @@ foreach(rank_count IN ITEMS 1 2 4)
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
       "$<TARGET_FILE:v04_ibm_open_test>")
   set_tests_properties(v04_ibm_open_mpi_${rank_count}
+    PROPERTIES PROCESSORS ${rank_count} TIMEOUT 120 LABELS "v04_focused")
+  add_test(NAME v04_ibm_heat_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_ibm_open_test>" --heat)
+  set_tests_properties(v04_ibm_heat_mpi_${rank_count}
     PROPERTIES PROCESSORS ${rank_count} TIMEOUT 120 LABELS "v04_focused")
   add_test(NAME v04_heat_wall_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"

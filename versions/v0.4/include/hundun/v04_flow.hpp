@@ -2609,6 +2609,7 @@ struct ColdCouplingReport {
   bool active{};
   std::uint32_t outer_iterations{};
   std::uint32_t reference_outer_iterations{};
+  bool midpoint_enthalpy{};
   std::uint32_t momentum_solve_calls{};
   std::uint32_t pressure_solve_calls{};
   std::uint32_t enthalpy_solve_calls{};

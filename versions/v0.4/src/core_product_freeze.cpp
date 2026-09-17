@@ -3089,10 +3089,11 @@ struct CompiledCasePlan::Impl {
   PlanFingerprint transport_source_plan{};
   PlanFingerprint chemistry_source_plan{};
   PlanFingerprint transport_source_schema{};
-  std::array<PlanFingerprint, 4> transport_source_histories{};
+  std::array<PlanFingerprint, 5> transport_source_histories{};
   std::optional<ColdStoppingSpec> cold_stopping;
   std::uint32_t reference_outer_iterations{};
   bool unity_lewis_enthalpy{};
+  bool midpoint_enthalpy{};
   PlanFingerprint cpu_fingerprint{};
   PlanFingerprint stl_fingerprint{};
   std::uintptr_t state_address{};
@@ -3679,6 +3680,12 @@ Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
         from.time.spec().scheme, !from.fields.scalars.empty(), from.reaction.enabled(),
         from.esf.enabled(), from.esf.tcr_history.enabled(), from.spray.enabled(),
         !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy, revisions[i], from.time.spec().convective_cfl_definition, from.reference_outer_iterations);
+  to.transport_source_histories.back() = detail::product_method_history_signature(
+      from.time.spec().scheme, !from.fields.scalars.empty(), from.reaction.enabled(),
+      from.esf.enabled(), from.esf.tcr_history.enabled(), from.spray.enabled(),
+      !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy,
+      detail::ColdHistoryRevision::pressure_coupled, from.time.spec().convective_cfl_definition,
+      from.reference_outer_iterations, from.midpoint_enthalpy);
   out = std::move(candidate);
   return {};
 } catch (const std::bad_alloc&) {
@@ -3773,6 +3780,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     });
   if (status)
     candidate->unity_lewis_enthalpy = candidate->esf.enabled() || cold_perry;
+  // Original input.d disables ordinary h whenever PDF transport is active.
+  // A mean composition/reactor is the single-field branch of that transport;
+  // keep its h and species on the same BE layer (formation-h covariance).
+  candidate->midpoint_enthalpy = cold_model &&
+      model.reaction.mode == ReactionMode::none && !model.spray &&
+      std::none_of(model.transported_scalars.begin(),model.transported_scalars.end(),
+          [](const auto& scalar){return scalar.role == TransportedScalarRole::species;});
   CpuExecutionRequest cpu_request;
   cpu_request.threads_per_rank = 1U;
   cpu_request.pure_mpi = true;
@@ -5759,6 +5773,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->phases[8U] = ProductFreezePhase::validation;
   candidate->phases[9U] = ProductFreezePhase::sealed;
   candidate->summary.unity_lewis_enthalpy = candidate->unity_lewis_enthalpy;
+  candidate->summary.midpoint_enthalpy = candidate->midpoint_enthalpy;
   candidate->summary.conservative_total_energy = candidate->equations.enthalpy().conservative_total_energy();
   candidate->summary.turbulence = model.turbulence;
   candidate->summary.smagorinsky_coefficient = model.turbulence == TurbulenceKind::smagorinsky
@@ -7111,7 +7126,7 @@ Status ProductDriver::restart_expected(
       product.esf.enabled(), product.esf.tcr_history.enabled(),
       product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations);
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy);
   if (history_policy == RestartHistoryPolicy::rebuild_method_history) {
     out.compatible_method_schema = product.transport_source_schema;
     out.compatible_method_plan = product.transport_source_plan != 0U
@@ -7985,7 +8000,7 @@ Status ProductDriver::initialize_restart(
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations));
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool chemistry_refinement = history_policy == RestartHistoryPolicy::refine_chemistry;
@@ -12456,10 +12471,46 @@ Status ProductDriver::Impl::execute_attempt(
           static_cast<std::uint32_t>(species_trial.size());
       report.cold.stopping = product.cold_stopping;
       report.cold.reference_outer_iterations = product.reference_outer_iterations;
+      report.cold.midpoint_enthalpy = product.midpoint_enthalpy;
       // Prerequisite failure can leave the equation histories unbound. Keep
       // its original cause and let the shared finish path prepare rollback.
       if (!status) return status;
       const bool reference_stopping = product.cold_stopping.has_value();
+      // CN exits before PISO candidate evaluation. Its preallocated rho/T
+      // buffers are dormant here; alias them as h_mid/T_mid without extending
+      // persistent fields, Restart storage or the resource budget.
+      auto mid_h = pressure_energy_candidate_density;
+      auto mid_T = pressure_energy_candidate_temperature;
+      mid_h.field = product.fields.enthalpy;
+      mid_T.field = product.fields.temperature;
+      EnthalpyMidpointView midpoint{as_const(mid_h),as_const(mid_T)};
+      const auto prepare_midpoint = [&](EquationAssemblyContext& context) -> Status {
+        context.enthalpy_midpoint = nullptr;
+        if (!product.midpoint_enthalpy) return {};
+        for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)
+          for(int x=-2;x<cells.x+2;++x) {
+            if(int(x<0 || x>=cells.x)+int(y<0 || y>=cells.y)+int(z<0 || z>=cells.z)>1)
+              continue;
+            const Int3 c{x,y,z};
+            const double h=.5*equation_state.enthalpy.trial.unchecked(c,0)+
+                           .5*equation_state.enthalpy.accepted.unchecked(c,0);
+            if(!std::isfinite(h))return {StatusCode::numerical_failure,17865};
+            mid_h.unchecked(c,0)=h;
+            if(x>=-1 && x<=cells.x && y>=-1 && y<=cells.y && z>=-1 && z<=cells.z) {
+              const double T=.5*equation_state.temperature.trial.unchecked(c,0)+
+                             .5*equation_state.temperature.accepted.unchecked(c,0);
+              if(!std::isfinite(T))return {StatusCode::numerical_failure,17865};
+              mid_T.unchecked(c,0)=T;
+            }
+          }
+        context.enthalpy_midpoint = &midpoint;
+        return {};
+      };
+      const auto thermal_h = [&](){return product.midpoint_enthalpy
+          ? midpoint.enthalpy : as_const(trial_enthalpy);};
+      const auto thermal_T = [&](){return product.midpoint_enthalpy
+          ? midpoint.temperature : as_const(trial_temperature);};
+
       // This branch returns before the PISO enthalpy reconstruction. Its
       // preallocated face workspace holds the common scalar conductance.
       FaceFluxView mixture_workspace{energy_frozen_x_enthalpy,
@@ -12899,6 +12950,7 @@ Status ProductDriver::Impl::execute_attempt(
                 cold_energy_context.mass_flux = target_flux;
                 cold_energy_context.provisional_mass_flux = false;
               }
+              if (assembled) assembled = prepare_midpoint(cold_energy_context);
               EquationAssemblyCertificate energy_certificate;
               auto enthalpy_assembly = cold_energy_context;
               select_enthalpy_sources(enthalpy_assembly);
@@ -12927,9 +12979,7 @@ Status ProductDriver::Impl::execute_attempt(
                   zero_field(pressure_energy_e_p);
                   assembled = product.ibm_equations
                                   ->correct_impermeable_scalar_diffusion(
-                                      product.unity_lewis_enthalpy
-                                          ? as_const(trial_enthalpy)
-                                          : as_const(trial_temperature),
+                                      product.unity_lewis_enthalpy ? thermal_h() : thermal_T(),
                                       product.unity_lewis_enthalpy
                                           ? as_const(enthalpy_diffusivity)
                                           : as_const(conductivity),
@@ -13193,12 +13243,13 @@ Status ProductDriver::Impl::execute_attempt(
               "cold_energy_audit status=%u/%u conservative_total_energy=%d "
               "assembly_audit_s=%.17g imbalance_W=%.17g "
               "max_residual_W_m3=%.17g diagonal_dh_max=%.17g "
-              "diagonal_dT_max=%.17g rho_cp_T_dt_scaled=%.17g temporal=BE "
+              "diagonal_dT_max=%.17g rho_cp_T_dt_scaled=%.17g temporal=%s "
               "step_committed=0\n",
               unsigned(status.code), status.detail,
               int(product.equations.enthalpy().conservative_total_energy()),
               energy_max_time, energy_global[0], energy_global[1],
-              energy_global[2], energy_global[3], energy_global[4]);
+              energy_global[2], energy_global[3], energy_global[4],
+              product.midpoint_enthalpy ? "CN" : "BE");
         if (!status)
           return status;
         cold_E = energy_global[4];
@@ -14582,6 +14633,7 @@ Status ProductDriver::Impl::execute_attempt(
                     cold_energy_context.mass_flux = target_flux;
                     cold_energy_context.provisional_mass_flux = false;
                   }
+                  if (assembled) assembled = prepare_midpoint(cold_energy_context);
                   EquationAssemblyCertificate energy_certificate;
                   auto enthalpy_assembly = cold_energy_context;
                   select_enthalpy_sources(enthalpy_assembly);
@@ -14611,9 +14663,7 @@ Status ProductDriver::Impl::execute_attempt(
                       zero_field(pressure_energy_e_p);
                       assembled = product.ibm_equations
                                       ->correct_impermeable_scalar_diffusion(
-                                          product.unity_lewis_enthalpy
-                                              ? as_const(trial_enthalpy)
-                                              : as_const(trial_temperature),
+                                          product.unity_lewis_enthalpy ? thermal_h() : thermal_T(),
                                           product.unity_lewis_enthalpy
                                               ? as_const(enthalpy_diffusivity)
                                               : as_const(conductivity),
@@ -14964,7 +15014,7 @@ Status ProductDriver::Impl::execute_attempt(
                 candidate_balance, candidate_history,
                 product.ibm_equations ? &*product.ibm_equations : nullptr,
                 &balance_mixture, true,dual_esf ? &statistical_balance : nullptr,
-                phase_sources);
+                phase_sources, product.midpoint_enthalpy ? &midpoint : nullptr);
             status = product.reductions.consensus(status);
             if (!status) return status;
             const double scale = std::max({1.0,
@@ -15175,7 +15225,8 @@ Status ProductDriver::Impl::execute_attempt(
           };
           auto &cfl_certificate = report.committed_convective_cfl;
           cfl_certificate.plan = detail::product_mix(
-              product.equations.fingerprint(), 0x434e4245434f4c44ULL);
+              product.equations.fingerprint(), product.midpoint_enthalpy
+                  ? UINT64_C(0x434e544845524d31) : UINT64_C(0x434e4245434f4c44));
           cfl_certificate.correction_state = detail::product_mix(
               cfl_certificate.plan, transaction.attempt_identity());
           cfl_certificate.density = trial_density.revision;
@@ -15249,7 +15300,7 @@ Status ProductDriver::Impl::execute_attempt(
                 pressure_energy_e_p, time.accepted_step(), balance_history,
                 product.reductions, conservation, pending_balance,
                 product.ibm_equations ? &*product.ibm_equations : nullptr,
-                &mixture_faces,false,dual_esf ? &statistical_balance : nullptr, phase_sources);
+                &mixture_faces,false,dual_esf ? &statistical_balance : nullptr, phase_sources, product.midpoint_enthalpy ? &midpoint : nullptr);
           status = product.reductions.consensus(status);
           if (!status)
             return status;
@@ -15310,12 +15361,12 @@ Status ProductDriver::Impl::execute_attempt(
             std::fprintf(stdout,
                          "cold_final_balance status=%u/%u mass_defect=%.17g "
                          "energy_defect=%.17g mass_out=%.17g pending_valid=%d "
-                         "seconds=%.17g temporal=BE step_committed=0\n",
+                         "seconds=%.17g temporal=%s step_committed=0\n",
                          unsigned(status.code), status.detail,
                          conservation.mass_balance_defect,
                          conservation.total_energy_balance_defect,
                          conservation.mass_outflow, int(pending_balance.valid),
-                         max_balance_s);
+                         max_balance_s,product.midpoint_enthalpy ? "CN" : "BE");
 
           const double decomposition_begin = MPI_Wtime();
           const auto integrate_fluid = [&](ConstFieldView field) {
@@ -15359,7 +15410,7 @@ Status ProductDriver::Impl::execute_attempt(
             return status;
           parts[0] = integrate_fluid(as_const(pressure_energy_e_p));
           const auto thermal_coordinate = product.unity_lewis_enthalpy
-              ? equation_state.enthalpy.trial : equation_state.temperature.trial;
+              ? thermal_h() : thermal_T();
           const auto thermal_coefficient = product.unity_lewis_enthalpy
               ? material.enthalpy_diffusivity : material.thermal_conductivity;
           const std::array<ConstFieldView, 1> reads{
@@ -15455,7 +15506,8 @@ Status ProductDriver::Impl::execute_attempt(
           // The split solver owns this terminal audit. No legacy C2 certificate
           // or PISO solve count is synthesized for this method.
           const auto cold_terminal_plan = detail::product_mix(
-              product.equations.fingerprint(), 0x434e4245434f4c44ULL);
+              product.equations.fingerprint(), product.midpoint_enthalpy
+                  ? UINT64_C(0x434e544845524d31) : UINT64_C(0x434e4245434f4c44));
           const auto cold_audit_state = detail::product_mix(
               cold_terminal_plan, transaction.attempt_identity());
           FinalForceCertificate force_certificate;
@@ -15887,7 +15939,7 @@ Status ProductDriver::Impl::execute_attempt(
                 stdout,
                 "cold_final_rates status=%u/%u h_max=%.17g Y_max=%.17g "
                 "certificate=%d seconds=%.17g velocity=endpoint SGS=endpoint "
-                "temporal=BE step_committed=0\n",
+                "rate_layer=endpoint step_committed=0\n",
                 unsigned(status.code), status.detail, rate_global[0],
                 rate_global[1], int(rate_certificate.valid()), max_rates_s);
           if (!rate_certificate.valid())
@@ -15923,11 +15975,12 @@ Status ProductDriver::Impl::execute_attempt(
                 "cold_commit_preflight status=%u/%u prepared=%d "
                 "accepted_decision=%d force_enabled=%d force_pending=%d "
                 "history=endpoint SGS_solve=midpoint momentum=CN "
-                "mass_energy_species=BE step_committed=0\n",
+                "mass_species=BE enthalpy=%s step_committed=0\n",
                 unsigned(status.code), status.detail, int(prepared.valid()),
                 int(prepared.valid() &&
                     prepared.decision() == AttemptFinishDecision::accept),
-                int(final_force_cache.has_value()), int(pending_force_cache));
+                int(final_force_cache.has_value()), int(pending_force_cache),
+                product.midpoint_enthalpy ? "CN" : "BE");
           return status;
         }
       }
@@ -22385,7 +22438,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations)};
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy)};
   out.cell_records = product.spray.enabled()
                          ? product.spray.history.snapshot()
                          : product.esf.tcr_history.snapshot();

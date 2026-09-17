@@ -8,10 +8,11 @@
 #include <iomanip>
 #include <iostream>
 #include <mpi.h>
+#include <string_view>
 using namespace hundun::v04;
 
 bool run(int axis, ImmersedFluidSide side, bool mass_inlet, bool reverse,
-         bool immersed, int rank) {
+         bool immersed, int rank, double initial_temperature = 300) {
   auto model = test::product_model({16, 16, 16});
   model.mesh.lower = {-2, -2, -2};
   model.mesh.upper = {2, 2, 2};
@@ -62,7 +63,7 @@ bool run(int axis, ImmersedFluidSide side, bool mass_inlet, bool reverse,
   if (status) { phase = "create"; status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver); }
   DriverInitialState initial;
   initial.pressure_reference = 100000;
-  initial.temperature = 300;
+  initial.temperature = initial_temperature;
   if (status) { phase = "initialize"; status = driver.initialize(initial); }
   DriverStepReport report;
   for (int step = 0; status && step < 2; ++step) {
@@ -80,7 +81,7 @@ bool run(int axis, ImmersedFluidSide side, bool mass_inlet, bool reverse,
     if (field.role == RestartFieldRole::velocity) velocity = &field;
     if (field.role == RestartFieldRole::pressure_perturbation) pressure = &field;
   }
-  bool valid = status && velocity && pressure && output.committed &&
+  bool valid = status && report.piso.cold.midpoint_enthalpy && velocity && pressure && output.committed &&
       restart.final_mass_flux.certificate.valid();
   std::array<double, 6U> sums{}; // inlet/outlet flow, opening areas, fluid/solid cells
   std::array<double, 2U> errors{}; // inactive-face flux and inlet EOS flux error
@@ -155,6 +156,13 @@ int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   int rank = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   bool passed = true;
+  if (argc == 2 && std::string_view(argv[1]) == "--heat") {
+    for (int axis = 0; axis < 3; ++axis)
+      for (auto side : {ImmersedFluidSide::inside, ImmersedFluidSide::outside})
+        passed &= run(axis, side, true, false, true, rank, 299.9);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   for (int axis = 0; axis < 3; ++axis)
     for (auto side : {ImmersedFluidSide::inside, ImmersedFluidSide::outside})
       for (bool mass : {false, true})

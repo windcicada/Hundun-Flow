@@ -47,7 +47,7 @@ bool run(const std::filesystem::path& assets,const std::filesystem::path& restar
   outlet.scalars[0].backflow_kind=ScalarBoundaryKind::dirichlet;outlet.scalars[0].backflow_value=backflow ? 0. : .25;
   const auto create=[&](ProductDriver& driver) {
     CompiledCasePlan plan;auto s=ProductCompiler::compile(MPI_COMM_WORLD,model,assets,plan);
-    if(s && !plan.summary().conservative_total_energy)s={StatusCode::invalid_plan,19130};
+    if(s && (!plan.summary().conservative_total_energy || plan.summary().midpoint_enthalpy))s={StatusCode::invalid_plan,19130};
     if(s)s=ProductDriver::create(MPI_COMM_WORLD,std::move(plan),driver);
     return s;
   };

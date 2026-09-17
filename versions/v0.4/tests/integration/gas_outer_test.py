@@ -52,12 +52,15 @@ with tempfile.TemporaryDirectory(prefix='hf-outer-') as tmp:
         if not okay: return text
         row = json.loads((root/name/'evidence.jsonl').read_text().splitlines()[-1])
         validator.validate_v6_v8_runtime_record(row, 1, 8)
+        assert row['cold']['enthalpy_scheme'] == 'CN'
         expected = model['solver'].get('reference_outer_iterations', 0)
         assert row['cold']['reference_outer_iterations'] == expected
         if expected:
             assert row['cold']['outer_iterations'] == expected
             assert text.count('cold_outer outer=') == expected
         return row
+    write()
+    assert 'enthalpy_scheme=CN' in call(2, ['check', case])
     natural = run('natural')
     for count in (1, 3):
         model['solver']['reference_outer_iterations'] = count
@@ -73,6 +76,13 @@ with tempfile.TemporaryDirectory(prefix='hf-outer-') as tmp:
     assert resumed['step'] == 2
     model['solver']['reference_outer_iterations'] = 1
     run('drift', restart=root/'n3/Restart', okay=False)
+    model['solver']['reference_outer_iterations'] = 0
+    model['boundaries']['x_min']['temperature'] = 310.
+    transient = run('thermal')
+    assert transient['cold']['enthalpy_residual'] < 1e-10
+    continued = run('thermalr', n=4, restart=root/'thermal/Restart')
+    assert continued['step'] == 2
+    model['solver']['reference_outer_iterations'] = 1
     # A genuine thermal transient cannot meet near-roundoff original-equation
     # tolerances in one sweep. Fixed scheduling must preserve the rejected step.
     model['boundaries']['x_min']['temperature'] = 310.

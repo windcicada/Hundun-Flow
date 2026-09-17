@@ -262,6 +262,7 @@ int main(int argc, char* argv[]) {
                 << " time_scheme="
                 << (report.summary.time_scheme == hundun::v04::TimeScheme::cn_be
                         ? "cn_be" : "backward_euler")
+                << " enthalpy_scheme=" << (report.summary.midpoint_enthalpy ? "CN" : "BE")
                 << " cfl_definition="
                 << hundun::v04::cfl_definition_name(report.summary.convective_cfl_definition)
                 << " reference_outer_iterations=" << report.summary.reference_outer_iterations

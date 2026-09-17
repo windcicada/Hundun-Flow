@@ -17,7 +17,7 @@ constexpr double gas_constant=kUniversalGasConstant/28.96546;
 constexpr double cp=3.5*gas_constant;
 double wave(int x) {return std::sin(2*std::acos(-1.)*(x+.5)/cells.x);}
 
-bool run(double dt, bool be, double& error) {
+bool run(double dt, bool be, bool thermal, double& error) {
   const auto scheme=be ? TimeScheme::backward_euler : TimeScheme::cn_be;
   const auto coupling=be ? CouplingKind::piso : CouplingKind::outer_corrected;
   auto model=test::product_model(cells);
@@ -37,6 +37,15 @@ bool run(double dt, bool be, double& error) {
   model.schemes.momentum=ConvectionScheme::central2;
   model.schemes.enthalpy=ConvectionScheme::central2;
   model.thermophysics.species[0].viscosity_reference=viscosity;
+  const double conductivity=pressure/(gas_constant*temperature)*cp;
+  if(thermal) {
+    model.thermophysics.fixed_pressure_pa=pressure;
+    model.thermophysics.species[0].conductivity=conductivity;
+    model.thermophysics.species[0].viscosity_reference=1.8e-5;
+    model.solver.cold_stopping=ColdStoppingSpec{1.,1e-10,1e-13,1e-10};
+    model.solver.pressure.absolute_tolerance=1e-17;
+    model.solver.pressure.relative_tolerance=1e-14;
+  }
   // The exact shear has zero outlet-normal velocity. Keep the transverse
   // extrapolation condition continuous through FP64 normal-velocity noise.
   for(unsigned face: {4U,5U}) {
@@ -66,9 +75,9 @@ bool run(double dt, bool be, double& error) {
       out.values.resize(std::size_t(cells.x)*cells.y*cells.z*d.components);
       for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
         const auto i=(std::size_t(z)*cells.y+y)*cells.x+x;
-        if(d.role==RestartFieldRole::enthalpy) out.values[i]=cp*temperature;
+        if(d.role==RestartFieldRole::enthalpy) out.values[i]=cp*(temperature+(thermal ? amplitude*wave(x) : 0.));
         if(d.role==RestartFieldRole::pressure_absolute) out.values[i]=pressure;
-        if(d.role==RestartFieldRole::velocity) out.values[3*i+1]=amplitude*wave(x);
+        if(d.role==RestartFieldRole::velocity && !thermal) out.values[3*i+1]=amplitude*wave(x);
       }
       seed.fields.push_back(std::move(out));
     }
@@ -78,7 +87,7 @@ bool run(double dt, bool be, double& error) {
     seed.final_mass_flux[2].assign(std::size_t(cells.x)*cells.y*(cells.z+1),0);
     const double area=(2./cells.x)*(.5/cells.z);
     for(int z=0;z<cells.z;++z) for(int y=0;y<=cells.y;++y) for(int x=0;x<cells.x;++x)
-      seed.final_mass_flux[1][(std::size_t(z)*(cells.y+1)+y)*cells.x+x]=rho*amplitude*wave(x)*area;
+      seed.final_mass_flux[1][(std::size_t(z)*(cells.y+1)+y)*cells.x+x]=thermal ? 0. : rho*amplitude*wave(x)*area;
     status=driver.initialize_restart(seed);
     if(!status) std::cerr<<"CN shear restart failure\n";
   }
@@ -97,46 +106,57 @@ bool run(double dt, bool be, double& error) {
   RestartSnapshot snapshot;
   if(status) status=driver.committed_restart_snapshot(snapshot);
   if(!status) {
-    std::cerr<<"CN shear dt="<<dt<<" status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';
+    std::cerr<<(thermal ? "CN heat dt=" : "CN shear dt=")<<dt<<" status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';
     return false;
   }
   // The periodic central Laplacian has this exact Fourier eigenvalue.
   // This semi-discrete reference separates time error from spatial error.
   // O(amplitude^2) thermodynamic feedback is resolved by the energy equation.
   const double dx=2./cells.x, rho=pressure/(gas_constant*temperature);
-  const double lambda=4*viscosity/rho*std::pow(std::sin(std::acos(-1.)/cells.x),2)/(dx*dx);
+  const double lambda=4*(thermal ? conductivity/(rho*cp) : viscosity/rho)*std::pow(std::sin(std::acos(-1.)/cells.x),2)/(dx*dx);
   const double exact_amplitude=amplitude*std::exp(-lambda*duration);
   // COAST cmod halves each spatial row and adds its accepted-state action
   // before step adds rho/dt. For this eigenmode that gives the CN rational
   // factor below; the BE control uses the full implicit spatial row.
   const double factor=be ? 1/(1+lambda*dt) : (1-.5*lambda*dt)/(1+.5*lambda*dt);
   const double discrete_amplitude=amplitude*std::pow(factor,steps);
-  bool found=false; long double square{}; double method_error{};
+  bool found=false; long double square{}, projection{}, norm{}; double method_error{};
   for(std::size_t f=0;f<snapshot.fields.size;++f) {
     const auto& field=snapshot.fields.data[f];
-    if(field.role!=RestartFieldRole::velocity) continue;
+    if(field.role!=(thermal ? RestartFieldRole::enthalpy : RestartFieldRole::velocity)) continue;
     found=true;
     for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
-      const double residual=field.values.unchecked({x,y,z},1)-exact_amplitude*wave(x);
+      const double value=thermal ? field.values.unchecked({x,y,z},0)/cp-temperature
+                                 : field.values.unchecked({x,y,z},1);
+      projection+=value*wave(x);norm+=wave(x)*wave(x);
+      const double residual=value-exact_amplitude*wave(x);
       square+=residual*residual;
-      method_error=std::max(method_error,std::abs(field.values.unchecked({x,y,z},1)-discrete_amplitude*wave(x)));
+      method_error=std::max(method_error,std::abs(value-discrete_amplitude*wave(x)));
     }
   }
   error=std::sqrt(double(square)/(cells.x*cells.y*cells.z));
-  std::cout<<std::setprecision(17)<<(be?"BE":"CN")<<" shear dt="<<dt<<" steps="<<steps<<" lambda="<<lambda
+  if(thermal) {
+    // Project the fundamental mode: quadratic expansion/advection feeds the
+    // second harmonic, while this amplitude isolates the linear time scheme.
+    const double resolved=static_cast<double>(projection/norm);
+    error=std::abs(resolved-exact_amplitude);
+    method_error=std::abs(resolved-discrete_amplitude);
+  }
+  std::cout<<std::setprecision(17)<<(be?"BE":"CN")<<(thermal ? " heat dt=" : " shear dt=")<<dt<<" steps="<<steps<<" lambda="<<lambda
            <<" error="<<error<<" discrete_method_error="<<method_error<<" energy_defect="<<report.conservation.cumulative_energy_defect<<'\n';
   return found && std::isfinite(error) && error>1e-13 &&
-      method_error<=1e-11*amplitude && std::abs(snapshot.time-duration)<1e-14;
+      method_error<=(thermal ? 3e-7 : 1e-11)*amplitude && std::abs(snapshot.time-duration)<1e-14;
 }
 }
 int main(int argc,char** argv) {
   if(MPI_Init(&argc,&argv)!=MPI_SUCCESS) return 2;
   const bool be=argc==2 && std::string_view(argv[1])=="--be";
+  const bool thermal=argc==2 && std::string_view(argv[1])=="--heat";
   bool passed=true; std::array<double,3> errors{};
-  for(unsigned i=0;i<3;++i) passed=run(.005/std::pow(2.,i),be,errors[i]) && passed;
+  for(unsigned i=0;i<3;++i) passed=run(.005/std::pow(2.,i),be,thermal,errors[i]) && passed;
   if(passed) {
     const double first=std::log2(errors[0]/errors[1]),second=std::log2(errors[1]/errors[2]);
-    std::cout<<(be?"BE":"CN")<<" momentum time order="<<first<<','<<second<<'\n';
+    std::cout<<(be?"BE":"CN")<<(thermal ? " enthalpy time order=" : " momentum time order=")<<first<<','<<second<<'\n';
     passed=be ? first>=.9 && second>=.9 && first<1.2 && second<1.2
               : first>=1.8 && second>=1.8;
   }

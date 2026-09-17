@@ -60,6 +60,7 @@ struct PlanSummary {
   double terminal_closed_mass_tolerance{};
   double terminal_gauge_tolerance{};
   bool unity_lewis_enthalpy{};
+  bool midpoint_enthalpy{};
   bool immersed{};
   IbmReconstructionAudit ibm_boundary_reconstruction{};
   IbmReconstructionAudit ibm_surface_reconstruction{};

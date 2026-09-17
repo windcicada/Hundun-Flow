@@ -486,7 +486,11 @@ bool test_method_history_identity() {
   constexpr auto mach = detail::product_method_history_signature(
       TimeScheme::cn_be, true, false, false, false, false, true, false,
       detail::ColdHistoryRevision::mach_tvd);
-  return expect(quadratic == UINT64_C(98744320109196643) &&
+  constexpr auto ordinary_be = detail::product_method_history_signature(TimeScheme::cn_be,false);
+  constexpr auto ordinary_cn = detail::product_method_history_signature(
+      TimeScheme::cn_be,false,false,false,false,false,false,false,
+      detail::ColdHistoryRevision::pressure_coupled,ConvectiveCflDefinition::outgoing_sum,0U,true);
+  return expect(ordinary_cn != ordinary_be && quadratic == UINT64_C(98744320109196643) &&
                     fluid == UINT64_C(2172767200665140607) &&
                     mach == UINT64_C(16011690793152888057) && cold != mach &&
                     cold != UINT64_C(98744320109196643) && cold != bdf && be == bdf,
@@ -906,7 +910,7 @@ bool test_freeze() {
                          contains_trial(graph.invalidations(50U), field),
                      "C1/C2 declare the complete same-target primitive state");
   }
-  passed &= expect(plan.io_services()->snapshot_fields().size == 7U &&
+  passed &= expect(plan.io_services()->snapshot_fields().size == 9U &&
                        plan.io_services()->services().size == 5U,
                    "all cold services share the committed snapshot schema");
 
