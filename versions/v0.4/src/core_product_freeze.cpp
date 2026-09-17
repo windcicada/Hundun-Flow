@@ -9954,6 +9954,8 @@ Status ProductDriver::Impl::execute_attempt(
             if(int(x<0||x>=cells.x)+int(y<0||y>=cells.y)+int(z<0||z>=cells.z)<=1)
               for(std::size_t c=0;c<ns+2;++c)output.unchecked({x,y,z},c)=input.unchecked({x,y,z},c);
     };
+    std::size_t closing_field{};
+    unsigned closing_sweep{};
     const auto close_composition=[&](FieldView frame) {
       std::size_t i{};
       for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
@@ -9963,6 +9965,12 @@ Status ProductDriver::Impl::execute_attempt(
         for (std::size_t c=0;c<ns+1;++c) tuple[c]=frame.unchecked(cell,c);
         if (!detail::close_statistical_composition({tuple.data(),ns+1},
                                                   product.reaction.dependent_index())) {
+          int rank{};MPI_Comm_rank(communicator,&rank);
+          std::fprintf(stderr,"esf_composition_failure rank=%d field=%zu sweep=%u cell=%d,%d,%d dt=%.17g fractions=",
+              rank,closing_field,closing_sweep,x+product.patch.begin.x,
+              y+product.patch.begin.y,z+product.patch.begin.z,step.dt);
+          for(std::size_t c=0;c<ns+1;++c)std::fprintf(stderr,"%s%.17g",c ? "," : "",frame.unchecked(cell,c));
+          std::fputc('\n',stderr);
           return Status{StatusCode::numerical_failure,10230};
         }
         for (std::size_t c=0;c<ns+1;++c) frame.unchecked(cell,c)=tuple[c];
@@ -10031,6 +10039,7 @@ Status ProductDriver::Impl::execute_attempt(
     };
     copy_tuple(as_const(old),mean);
     for(std::size_t field=0;field<=nf;++field) {
+      closing_field=field;closing_sweep=0;
       auto current=field==0 ? mean : iterate;
       const auto accepted=field==0 ? as_const(old) : accepted_fields[field-1];
       if(field) {
@@ -10040,6 +10049,7 @@ Status ProductDriver::Impl::execute_attempt(
       }
       s=close_frame(current);if(!s)return s;
       for(unsigned sweep=0;sweep<2;++sweep) {
+        closing_sweep=sweep+1;
         MixtureTransportFaces mixture;
         EquationAssemblyContext context;
         context.dt=step.dt;context.bdf={1/step.dt,-1/step.dt,0,1};context.time=step.generation;
@@ -10134,6 +10144,7 @@ Status ProductDriver::Impl::execute_attempt(
               velocity_history.accepted,context,state.density,scalar,q};
           const auto solved=detail::correct_frozen_scalar(problem,storage,runtime,assemble,refresh);
           s=solved.status;if(!s)return s;
+
         }
         s=close_frame(current);if(!s)return s;
         if(dual_esf && field>0 && sweep==1) {
