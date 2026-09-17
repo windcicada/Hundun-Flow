@@ -66,9 +66,15 @@ program probe
  implicit none
  integer :: reset,ios,i,j,k,c,s,steps
  real :: eta,pdf(6),psr(6),composition(6),dissipation,velocity
+ character(8) :: mode
  do i=1,64
    nfo(i)=(i-1)*64
  enddo
+ call get_command_argument(1,mode)
+ if(trim(mode)=='mix')then
+   call mix_probe
+   stop
+ endif
  do k=1,4
  do j=1,4
  do i=1,4
@@ -96,6 +102,29 @@ program probe
   write(*,'(4(i0,1x),32(es25.17,1x))')steps,dstep_ww0,init_ww0,dyn_C_count, &
    kappa(1:6,c),sum_w(:,c),sum_w0(:,c),tim_sp(:,c),tim_flow(c),dyn_LM(1,c)
  enddo
+ contains
+ subroutine mix_probe
+ integer :: status,cell,ii,jj,kk
+ real :: scalar(64)
+ ! Isolate the complete source's mixture-fraction channel. Other channels
+ ! start with zero products, so their invalid-ratio markers remain -1.
+ names(6)='TRACE';jfuel=0
+ do
+   read(*,*,iostat=status) rho,ajc,scalar
+   if(status/=0)exit
+   f=0;f(nfo(nvf)+1:nfo(nvf)+64)=scalar
+   fsc=0;dyn_LM=0;dyn_M2=0;temp_i=0;temp_k=0;dtim=1;dyn_C_time=0
+   call Dynamic_Cphi
+   do kk=2,3
+   do jj=2,3
+   do ii=2,3
+     cell=ii+jo(jj)+ko(kk)
+     write(*,'(2(es25.17,1x))')dyn_M2(1,cell),dyn_LM(1,cell)
+   enddo
+   enddo
+   enddo
+ enddo
+ end subroutine
 end program
 subroutine pbsrhl(a,components)
  use global,only:lower,upper

@@ -38,8 +38,8 @@ for case in range(40):
         rows.append([int(call == 0), dt, eta, epsilon, velocity]+pdf+psr+composition)
 data = ''.join(' '.join(format(v, '.17g') for v in row)+'\n' for row in rows)
 
-def run(path, prefix=()):
-    result = subprocess.run(list(prefix)+[str(path.resolve())], input=data.encode(),
+def run(path, prefix=(), input_text=data, args=()):
+    result = subprocess.run(list(prefix)+[str(path.resolve())]+list(args), input=input_text.encode(),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     return [list(map(float, line.split())) for line in result.stdout.decode().splitlines()]
 
@@ -61,14 +61,45 @@ for precision, reference in results.items():
 print(json.dumps(errors, indent=2))
 assert errors['fp64']['max_normalized_difference'] <= 1e-11, errors
 assert errors['fp32']['max_normalized_difference'] <= 5e-7, errors
+mix_rows = []
+for case in range(67):
+    density = [1. if case < 3 else rng.randrange(8, 65)/32. for _ in range(64)]
+    volume = [1. if case < 3 else rng.randrange(8, 65)/32. for _ in range(64)]
+    scalar = []
+    for z in range(4):
+        for y in range(4):
+            for x in range(4):
+                scalar.append(.25 if case == 0 else .125*x+.0625*y+.03125*z if case == 1 else
+                              (x*x+2*y*y+3*z*z)/64. if case == 2 else rng.randrange(8, 57)/64.)
+    mix_rows.append(density+volume+scalar)
+mix_data = ''.join(' '.join(format(v, '.17g') for v in row)+'\n' for row in mix_rows)
+mix_native = run(a.hundun, shlex.split(a.runner), mix_data, ('mix',))
+mix_errors = {}
+for precision, path in [('fp64', a.fp64), ('fp32', a.fp32)]:
+    reference = run(path, input_text=mix_data, args=('mix',))
+    assert len(reference) == len(mix_native) == 8*len(mix_rows)
+    maxima = [0., 0.]
+    for left, right in zip(mix_native, reference):
+        assert len(left) == len(right) == 2
+        for col, (x, y) in enumerate(zip(left, right)):
+            maxima[col] = max(maxima[col], abs(x-y)/max(1., abs(x), abs(y)))
+    mix_errors[precision] = dict(raw_ratio=maxima[0], cphi=maxima[1])
+print('mixture_fraction_filter', json.dumps(mix_errors, indent=2))
+assert max(mix_errors['fp64'].values()) <= 1e-11, mix_errors
+assert max(mix_errors['fp32'].values()) <= 2e-4, mix_errors
 evidence = dict(schema='hundun.gas.tcr.v1', calls=len(rows), independent_windows=40*3,
     reference_scope='Complete statistics.F90 with uniform 2x2x2 interior, serial reduction and Cartesian gradient fixture',
     verified=['eight-interval signed accumulation', 'separate ninth evaluation call',
               'kappa lower/upper/weak-rate branches', 'time-scale branches on uniform fields',
-              'Cphi update clock and uniform fallback'],
-    remaining=['nonuniform dynamic Cphi spatial filters', 'production history and scheduling',
+              'Cphi update clock and uniform fallback',
+              'nonuniform mixture-fraction Cphi filters, priority and smoothing'],
+    remaining=['species-channel coordinate conversion', 'production spatial halos and IBM',
+               'production history and scheduling',
                'remixing and gas coupling', 'parallel restart and real-case trajectories'],
     errors=errors, input_sha256=hashlib.sha256(data.encode()).hexdigest(),
+    spatial_filter=dict(cases=len(mix_rows), interior_cells=8, errors=mix_errors,
+        input_sha256=hashlib.sha256(mix_data.encode()).hexdigest(),
+        scope='Complete Dynamic_Cphi mixture-fraction channel; uniform donor units and varying density/volume/scalar; explicit fixture ghost products'),
     source_sha256=sha(a.source), driver_sha256=sha(Path(__file__).with_suffix('.f90')),
     generator_sha256=sha(Path(__file__)),
     binaries={k:sha(v) for k,v in [('fp32',a.fp32),('fp64',a.fp64),('hundun',a.hundun)]},

@@ -8,10 +8,12 @@
     "separate ninth evaluation call",
     "kappa lower/upper/weak-rate branches",
     "time-scale branches on uniform fields",
-    "Cphi update clock and uniform fallback"
+    "Cphi update clock and uniform fallback",
+    "nonuniform mixture-fraction Cphi filters, priority and smoothing"
   ],
   "remaining": [
-    "nonuniform dynamic Cphi spatial filters",
+    "species-channel coordinate conversion",
+    "production spatial halos and IBM",
     "production history and scheduling",
     "remixing and gas coupling",
     "parallel restart and real-case trajectories"
@@ -29,13 +31,29 @@
     }
   },
   "input_sha256": "f30dfa0f61611242df700e430480bfcd99e8dbd3687fe67e19eaf115c15b78c4",
+  "spatial_filter": {
+    "cases": 67,
+    "interior_cells": 8,
+    "errors": {
+      "fp64": {
+        "raw_ratio": 0.0,
+        "cphi": 0.0
+      },
+      "fp32": {
+        "raw_ratio": 6.619603655399575e-05,
+        "cphi": 1.828529064243024e-06
+      }
+    },
+    "input_sha256": "f584f2586a7ba48b69c108277f888c7f2e7d05bd21753afe3aceec96d825a95f",
+    "scope": "Complete Dynamic_Cphi mixture-fraction channel; uniform donor units and varying density/volume/scalar; explicit fixture ghost products"
+  },
   "source_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3",
-  "driver_sha256": "c79e1e3caf84206edf6255f35ea1365a96c25c4f1241bad0fe05646000f27042",
-  "generator_sha256": "ff40e44f1cb8102423c6cf4daac158704acf9fc30ed047bf4438f229ecfe31ff",
+  "driver_sha256": "7181ee76ceb71da1ae05c3e388f0a52225a24a97db57cbf2cab2d6b1b88b6016",
+  "generator_sha256": "4d8704bcb89109a0819c497a4266775f1036e759c1b6405e2681993550700b0d",
   "binaries": {
-    "fp32": "bc143c31cad5900f393a9b058eb92785f0414573a7d498d262848379b19dfe58",
-    "fp64": "7cd3080bc57f1713131146b880aed33eb87d9d991392184ce31b4fba6120200c",
-    "hundun": "c21f2626f058f4a7d4099edba3e70821ccc712b830a1936e7dadc61dfcbf5b12"
+    "fp32": "f644a0e2e2d4592079f304c15b98ee9dd3f4ab59bd67be173ed09a4d42387ab8",
+    "fp64": "7826af1859dc3b05b6be01603f4bff9376585a6ea77bcd365aa0f8904357dbdd",
+    "hundun": "779621a0b5edfe7d246fea07c495be07509b9c44b950422d7e8c87f76d9fbd48"
   },
   "reference_compile": [
     "gfortran -O2 -fcheck=all",
