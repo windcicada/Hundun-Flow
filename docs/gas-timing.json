@@ -50,7 +50,8 @@
       "eos": 1.9517562113731302e-16,
       "reaction_input": 2.8923774308455583e-08,
       "detail": 17837
-    }
+    },
+    "follow_up": "gas-plateau.json"
   },
   "samples": {
     "d8s": {

@@ -2670,6 +2670,16 @@ Status prepare_cartesian_mixture_face(
             (lower ? 1.0-weight : weight)*std::abs(mass_rate));
       return true;
     }
+    // A resolved upstream slope can end on an FP64-flat middle pair. Its
+    // one-ULP sign otherwise flips the shared VLS coefficient between central
+    // and upwind, injecting finite diffusion changes into other scalars.
+    // Keep the zero-middle-gradient upwind limit across the same resolution
+    // band already used above for a completely flat coordinate.
+    if (std::abs(sample[2]-sample[1])<=roundoff) {
+      conductance=std::max(conductance,
+          (lower ? 1.0-weight : weight)*std::abs(mass_rate));
+      return true;
+    }
     const double middle = (sample[2]-sample[1])/distance[1];
     const double upstream = lower ? (sample[1]-sample[0])/distance[0]
                                   : (sample[3]-sample[2])/distance[2];

@@ -1,0 +1,68 @@
+{
+  "base": "cae60e2",
+  "root_cause": "common VLS gradient ratio divides by an unresolved face-pair difference; a one-ULP sign toggles finite conductance applied to enthalpy",
+  "reference": {
+    "file": "/home/wyf/code_dev/src.TCR.dyn711/vls.F90",
+    "sha256": "0aee8e14e4f0b52efdce550975e20713dd2219bc379f9b02b55604deb214db96",
+    "scope": "read-only VLS ratio and upwind coefficient reference"
+  },
+  "observed": {
+    "cell_face": [
+      4,
+      7,
+      4
+    ],
+    "outer": 10,
+    "previous_extra": 0.0,
+    "next_extra": 0.0007672582437423995,
+    "log": "check/gas-mean-face2.log"
+  },
+  "fix": "Use the existing 128*epsilon stencil resolution band for the middle face-pair jump; retain its zero-gradient upwind limit when the upstream stencil remains resolved.",
+  "tests": {
+    "build": "check/gas-plateau-build.log",
+    "checks": "check/gas-plateau-test.log",
+    "passed": 3,
+    "mean_second_step": [
+      {
+        "ranks": 1,
+        "species_residual": 1.3399174584485115e-15,
+        "outer": 16
+      },
+      {
+        "ranks": 2,
+        "species_residual": 1.334882960466225e-15,
+        "outer": 16
+      },
+      {
+        "ranks": 4,
+        "species_residual": 1.3308639002962352e-15,
+        "outer": 16
+      }
+    ],
+    "plateau_directions": 6,
+    "plateau_ulp_variants": 3,
+    "red_input": "check/gas-plateau.in",
+    "red_output": "check/gas-plateau-red.log",
+    "red_conductance": [
+      0,
+      0.5,
+      0.5
+    ],
+    "expected_conductance": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "dyn711": {
+      "fields": 8,
+      "source_ranks": 2,
+      "restart_ranks": 4,
+      "passed": true,
+      "mass_defect": 3.8878336247710744e-17,
+      "energy_defect": 2.31845947013592e-14,
+      "element_defect": 3.6557651877324524e-10
+    }
+  },
+  "binary_sha256": "3a784f7d499c3bff697963441e782aea9afff1743fa5e5b593082dd848c9c9ad",
+  "scope": "operator precision and native small-case convergence; whole-case COAST performance remains separate"
+}

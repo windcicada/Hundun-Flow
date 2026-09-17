@@ -802,6 +802,28 @@ bool test_mixture_face_closure() {
         amplitude<1e-14 ? 0.0 : .5-1e-6),
         "resolved species extrema limit flux; composition roundoff is neutral");
   }
+  // The native mean-reactor plateau: an upstream gradient is resolved,
+  // while the two face-adjacent compositions differ by at most one ULP.
+  // All signs must give the zero-middle-gradient upwind limit, so the
+  // common coefficient cannot inject finite changes into the thermal flux.
+  const double plateau=.24900199739488843;
+  for (unsigned axis=0;axis<3;++axis) for(double direction : {1.,-1.})
+    for(double middle : {std::nextafter(plateau,0.),plateau,std::nextafter(plateau,1.)}) {
+      for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)
+        for(int x=-2;x<cells.x+2;++x) {
+          const int coordinate=axis==0 ? x : axis==1 ? y : z;
+          const int i=direction>0 ? coordinate : 5-coordinate;
+          first.view.unchecked({x,y,z},0)=i<=1 ? plateau+1.3747336602421001e-13 :
+              i==3 ? middle : plateau;
+          thermal.view.unchecked({x,y,z},0)=1.+.1*coordinate;
+        }
+      const auto q=as_const(first.view);
+      const auto status=prepare_cartesian_mixture_face(fixture.equations.kernels(),
+          {&q,1},as_const(thermal.view),static_cast<CartesianAxis>(axis),
+          {3,3,3},direction,0.,smooth);
+      passed &= expect(bool(status) && close(smooth.diffusion,.5),
+          "resolved upstream to FP64 plateau has a sign-stable common face coefficient");
+    }
   return passed;
 }
 
