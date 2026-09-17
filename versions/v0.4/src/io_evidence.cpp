@@ -284,6 +284,7 @@ Status validate_record(const IoServicePlan& services,
         cold.reference_residual == std::array<double, 3U>{};
   const bool valid_cold =
       cold.active && cold.outer_iterations > 0U &&
+      (!cold.midpoint_passive || cold.passive_scalar_count != 0U) &&
       accepted_terminal_metric(cold.passive_residual,128.0*std::numeric_limits<double>::epsilon()) &&
       accepted_terminal_metric(cold.passive_balance_defect,128.0*std::numeric_limits<double>::epsilon()) &&
       (cold.passive_scalar_count != 0U || (cold.passive_solve_calls==0U &&
@@ -1221,6 +1222,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
          << ",\"species_endpoint_solve_calls\":" << cold.species_endpoint_solve_calls
          << ",\"independent_species_count\":" << cold.independent_species_count
          << ",\"passive_scalar_count\":" << cold.passive_scalar_count
+         << ",\"passive_scheme\":\"" << (cold.midpoint_passive ? "CN" : "BE") << '"'
          << ",\"passive_solve_calls\":" << cold.passive_solve_calls
          << ",\"passive_iterations\":" << cold.passive_iterations
          << ",\"passive_residual\":" << cold.passive_residual

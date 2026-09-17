@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 
 
@@ -91,17 +92,29 @@ def main():
     parser.add_argument("--native", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("check"))
     parser.add_argument("--compiler", default="gfortran")
+    parser.add_argument("--dyn711", action="store_true", help="original gas VLS with upwind flat policy")
+    parser.add_argument("--runner", default="", help="native executable launcher")
     args = parser.parse_args()
     coast, native, output = args.coast.resolve(), args.native.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    vls = coast / "SRC.Coast/vls.F90"
-    ibm = coast / "SRC.Coast/physics/coast_ibm_operators.F90"
-    original = ibm.read_text()
-    wrapper = routine(original, "ibm_diffusion_limiter_allows_upwind_operator")
-    limiter = routine(original, "imb_diffusion_limiter_allows_upwind")
+    vls = coast / ("vls.F90" if args.dyn711 else "SRC.Coast/vls.F90")
+    assets = [vls, native, Path(__file__).resolve()]
     source = output / "vls.F90"
-    source.write_text(MODULES + wrapper + limiter + "end module\n" +
-                      vls.read_text() + DRIVER)
+    if args.dyn711:
+        # The gas reference has no IBM selector argument. Keep its full routine
+        # unchanged and adapt only the standalone caller and module stubs.
+        modules = MODULES[:MODULES.index("module imb_config")]
+        driver = DRIVER.replace("call vls(field,0,b11", "call vls(field,b11")
+        source.write_text(modules + vls.read_text() + driver)
+    else:
+        ibm = coast / "SRC.Coast/physics/coast_ibm_operators.F90"
+        original = ibm.read_text()
+        wrapper = routine(original, "ibm_diffusion_limiter_allows_upwind_operator")
+        limiter = routine(original, "imb_diffusion_limiter_allows_upwind")
+        source.write_text(MODULES + wrapper + limiter + "end module\n" +
+                          vls.read_text() + DRIVER)
+        assets.append(ibm)
+    assets.append(source)
     profiles = [
         ("closure", [[0.0, .2, .5, .5], [.6, .7, .5, .5]], []),
         ("linear", [[.1, .2, .3, .4], [.15, .2, .25, .3]], [[280, 290, 300, 310]]),
@@ -113,10 +126,13 @@ def main():
         ("trace_roundoff", [[.1, .2, .3, .4], [1e-15, 2e-15, 1e-15, 2e-15]], []),
         ("trace_resolved", [[.1, .2, .3, .4], [1e-8, 2e-8, 1e-8, 2e-8]], []),
     ]
+    if args.dyn711:
+        profiles += [("signed", [[-2., -.5, .25, 1.5]], []),
+                     ("signed_extremum", [[-1., .5, -.25, -2.]], [])]
     cases = []
     for name, fractions, thermal in profiles:
         for phi in (1.0, -1.0):
-            for allow in (0, 1):
+            for allow in ((1,) if args.dyn711 else (0, 1)):
                 for physical in (0.0, .8):
                     cases.append((name, phi, physical, allow, fractions, thermal))
     records, reference_records = [], []
@@ -133,14 +149,16 @@ def main():
                                  for field in fractions + [dependent] + thermal)
     data = "\n".join(records) + "\n"
     reference_data = "\n".join(reference_records) + "\n"
-    native_values = list(map(float, run([str(native), "--face"], output, data).split()))
+    native_values = list(map(float, run(shlex.split(args.runner)+[str(native), "--flat-face" if args.dyn711 else "--face"], output, data).split()))
     if len(native_values) != len(cases):
         raise ValueError("Native face count mismatch")
-    result = {"scope": "uniform Cartesian face VLS plus complete IBM gradient selector",
-              "coast_head": run(["git", "rev-parse", "HEAD"], coast).strip(),
+    result = {"scope": ("dyn711 uniform Cartesian VLS; upwind flat policy; signed passive coordinates"
+                         if args.dyn711 else "uniform Cartesian face VLS plus complete IBM gradient selector"),
+              "source_directory": str(coast),
+              "coast_head": (None if args.dyn711 else run(["git", "rev-parse", "HEAD"], coast).strip()),
               "compiler": run([args.compiler, "--version"], output).splitlines()[0],
               "inputs": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                         for path in (vls, ibm, native, Path(__file__).resolve(), source)}, "comparisons": []}
+                         for path in assets}, "comparisons": []}
     passed = True
     for bits, flags, tolerance in ((32, [], 2e-6), (64, ["-fdefault-real-8"], 1e-11)):
         binary = output / ("vls" + str(bits))
@@ -153,7 +171,7 @@ def main():
         exceptions, rounding = [], []
         for case, observed, expected in zip(cases, native_values, values):
             name, phi, physical, allow, _, _ = case
-            if (name.startswith("constant") or name=="trace_roundoff") and physical == 0.0:
+            if not args.dyn711 and (name.startswith("constant") or name=="trace_roundoff") and physical == 0.0:
                 # Constant and sub-resolution coordinates leave the resolved
                 # linear component at its central reconstruction.
                 native_expected = .5 if name=="constant_dependent" and phi>0 and allow else 0.0
@@ -173,6 +191,7 @@ def main():
             passed = passed and error <= tolerance
         result["comparisons"].append({"real_bits": bits, "cases": len(cases),
                                       "equivalent_max_difference": maximum,
+                                      "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                                       "tolerance": tolerance, "constant_coordinate": exceptions,
                                       "fp32_flat_gradient_rounding": rounding})
     for name in ("global", "arrays", "imb_config", "coast_ibm_operators"):

@@ -6,8 +6,8 @@
 |---|---|---|
 | G0 | gas-ref.json：131 文件哈希、关键调用表；gas-cfl.json：完整 courant 例程的 259 输入对照 | 实际参考构建、算例后端与端到端计时窗口 |
 | G1 | CFL 定义贯通配置、准入、自适应 dt、运行证据与 Restart 方法身份；固定外迭代参考模式贯通末次完整审计、方法身份和证据；定向检查见文末 | 普通焓 CN 已接线；完整 jstep 调度及非均匀场自适应重试 |
-| G2 | Vreman、ICCG 原生接线及 CN/BE 被动标量 BE 守恒输运，证据见文末 | 矩阵／通量、壁函数、精度及大规模同场性能继续；原版混合分数 CN 时间层单列 |
-| G3 | 继承 S28–S29；dyn711 独立代数／累计时钟、候选历史及完整统计例程的均匀场对照见文末 | 动态空间滤波、原生接线／重新混合，8/16 场动态模型组合（TCR off 复用 S24） |
+| G2 | Vreman、ICCG 原生接线及 CN/BE 被动标量 CN 守恒输运，证据见文末 | 矩阵／通量、壁函数、精度及大规模同场性能继续；原版混合分数元素定义及生产模型调用单列 |
+| G3 | 继承 S28–S29；dyn711 独立代数／累计时钟、候选历史及完整统计／非均匀滤波例程对照见文末 | 动态空间计划、原生接线／重新混合，8/16 场动态模型组合（TCR off 复用 S24） |
 | G4 | 继承 JL4 原时间步组合检查 | 化学筛选／任务均衡、热源／边界及实场轨迹 |
 | I1 | 独立监看、CN 十阶段计时、接受点 stop/output、请求回执、状态查询；2→4 进程恢复通过 | 化学细分和通信包含关系，重试阶段状态通知 |
 | I2 | 当前目录启动、run.json、显式覆盖、步数／时间结束，严格模式检查通过 | 简洁物理输入模板及最终方法说明扩展 |
@@ -371,3 +371,38 @@ G3 混合分数 CN 公共算子：`ScalarMidpointView` 为公共被动标量方�
 时间层；G3 接续工作为中点工作区与公共面 VLS 系数、逐次调用顺序、
 终态审核及 Restart 方法身份的共同接线。元素重建及源检查点的
 混合分数身份随实际 GTMC 配置一起处理。
+
+
+G2/G3 被动标量 CN 生产接线：中点存储复用已完成热收支审核的候选
+工作区，VLS 面系数由端点迭代计算，再用于中点输运。物理扩散与 VLS
+取共同最大系数，校正行包含 1/2 响应；固体值、原方程审核与终态
+非对流率继续进入共同事务。各标量依次复用既有面数组及预分配矩阵。
+`passive_scheme=CN` 同步进入 check、证据和 monitor；BE 调度身份保持。
+
+完整只读 `src.TCR.dyn711/vls.F90` 的 44 个模板涵盖双向通量、物理
+扩散、常值／痕量、组分闭合、热变量及有符号单标量。原版 FP64 与
+当前 upwind_constraint 公共面策略的差异为 0；默认 REAL 在近乎平坦
+梯度处产生离散分支差异，逐例保存，其他模板差异处于 2e-6 内。
+该入口覆盖均匀笛卡尔内面；IBM、MPI 与边界由原生组合检查承接。
+数据见 [gas-vls.json](gas-vls.json)，复现：
+
+```sh
+python3 tools/vls.py --dyn711 --coast /home/wyf/code_dev/src.TCR.dyn711 \
+  --native b3/versions/v0.4/tests/v04_solver_species_conservation_test \
+  --runner 'bash /home/wyf/code_dev/flow/check/jam.sh' --output check/gv
+```
+
+`check/gas-passive-cn-test.log` 的原生 CN 入口通过变密度、有符号仿射
+示踪量、周期边界、2→4 进程恢复和 IBM 组合。仿射误差 4.44e-16，
+连续／恢复最大归一化差异 1.54e-11，原方程残差 6.79e-16，积分
+收支缺陷 2.08e-16；216 个固体单元值逐位保持。详细输出保存于
+`check/gas-passive-cn-values.log`。时间阶证据沿用前述公共算子细化，
+完整原生瞬态细化继续按 G2 范围登记。
+
+方法身份加入 `passive-cn-vls-v1`。此前原生 BE 标量检查点
+`check/ps-i4m6spwj/r3/Restart` 的直接恢复返回 10213；显式方法
+恢复完成 step 2 并写入新身份，随后 4 进程直接恢复完成 step 3。
+三份记录为 `check/gas-passive-identity.log`、
+`check/gas-passive-recovery.log`、`check/gas-passive-recovered-exact.log`。
+来源检查点保持原样。该节点为原版混合分数 CN 输运提供公共生产能力；
+元素重建、dyn711 统计调度和独立动态模型历史继续按 G3 出口接线。

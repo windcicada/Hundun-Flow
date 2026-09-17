@@ -2631,6 +2631,7 @@ struct ColdCouplingReport {
   std::uint32_t species_endpoint_solve_calls{};
   std::uint32_t independent_species_count{};
   std::uint32_t passive_scalar_count{};
+  bool midpoint_passive{};
   std::uint32_t passive_solve_calls{};
   std::uint64_t passive_iterations{};
   double passive_residual{};

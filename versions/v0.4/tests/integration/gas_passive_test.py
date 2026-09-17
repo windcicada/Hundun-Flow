@@ -87,9 +87,10 @@ with tempfile.TemporaryDirectory(prefix='hf-passive-') as tmp:
             validator.validate_v6_v8_runtime_record(row,1,8)
             cold=row['cold']
             assert cold['passive_scalar_count']==2 and cold['passive_iterations']>0
+            assert cold['passive_scheme']=='CN'
             assert cold['passive_residual']<128*sys.float_info.epsilon
             assert cold['passive_balance_defect']<128*sys.float_info.epsilon
-            for key in ('passive_scalar_count','passive_solve_calls','passive_iterations',
+            for key in ('passive_scheme','passive_scalar_count','passive_solve_calls','passive_iterations',
                         'passive_residual','passive_balance_defect'):
                 assert monitors[row['step']][key]==cold[key],key
         return rows[-1]

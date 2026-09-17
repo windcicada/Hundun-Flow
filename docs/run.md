@@ -102,10 +102,17 @@ ICCG 的缩放行 L2 阈值由原始配置与最小单元体积换算，候选�
 相同配置可使用原生 Restart 在不同进程数之间续算。
 
 `cn_be`／`outer_corrected` 支持 `transported_scalars` 中的
-`passive_scalar`。被动标量采用 BE 守恒输运，使用本步终态质量通量、
-公共边界矩阵消元和 IBM 固体行。有限体积残差采用完整配置的空间格式，
-校正矩阵以迎风部分预处理限幅重构；每次候选共享已接受的标量历史。
-有符号示踪量和多个被动标量沿用同一接口。
+`passive_scalar`。被动标量采用 CN 空间中点与完整 rho*q 守恒存储，
+使用本步终态质量通量、公共边界矩阵消元和 IBM 固体行。中心格式直接
+使用中点值；限幅格式从当前端点计算 VLS 面系数，再作用于中点。
+校正矩阵包含空间项的 1/2 响应，每次候选共享已接受的标量历史。
+有符号示踪量和多个被动标量沿用同一接口。`backward_euler` 入口继续
+使用其 BE 标量调度。`hundun check`、运行证据和监看的 `passive_scheme`
+记录当前 CN/BE 入口的被动标量时间身份。
+
+CN 接线使用独立的 Restart 方法标记。此前 BE 被动标量检查点通过
+`--restart-method-recovery` 显式重建方法历史后进入 CN 计算；新写出的
+检查点可直接跨进程数续算。方法恢复的初始化身份与来源随运行记录保存。
 
 运行证据的 `cold` 与监看的 `payload` 中，`passive_scalar_count`、
 `passive_solve_calls`、`passive_iterations` 记录实际工作量；

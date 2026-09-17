@@ -269,6 +269,7 @@ int main(int argc, char* argv[]) {
                 << hundun::v04::cfl_definition_name(report.summary.convective_cfl_definition)
                 << " iccg_workspace_bytes=" << report.summary.iccg_workspace_bytes
                 << " passive_workspace_bytes=" << report.summary.passive_workspace_bytes
+                << " passive_scheme=" << (report.summary.passive_workspace_bytes ? "CN" : "BE")
                 << " reference_outer_iterations=" << report.summary.reference_outer_iterations
                 << " coupling="
                 << (report.summary.coupling == hundun::v04::CouplingKind::outer_corrected

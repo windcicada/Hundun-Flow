@@ -1126,6 +1126,9 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
     if species_count == 0 and (cold["species_iterations"] != 0 or cold["species_residual"] != 0):
         raise EvidenceError(f"{prefix} reports transport work for zero independent species")
     passive_count = require_integer(cold.get("passive_scalar_count", 0), prefix)
+    passive_scheme = cold.get("passive_scheme", "BE")
+    if passive_scheme not in ("CN", "BE") or (passive_scheme == "CN" and not passive_count):
+        raise EvidenceError(f"{prefix} has an inconsistent passive time policy")
     passive_calls = require_integer(cold.get("passive_solve_calls", 0), prefix)
     passive_iterations = require_integer(cold.get("passive_iterations", 0), prefix)
     passive_metrics = [require_nonnegative_finite_number(cold.get(name, 0.0), prefix)

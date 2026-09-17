@@ -948,6 +948,7 @@ static Status run_application(MPI_Comm communicator,
             << ",\"enthalpy_iterations\":" << step.piso.cold.enthalpy_iterations
             << ",\"species_iterations\":" << step.piso.cold.species_iterations
             << ",\"passive_scalar_count\":" << step.piso.cold.passive_scalar_count
+            << ",\"passive_scheme\":\"" << (step.piso.cold.midpoint_passive ? "CN" : "BE") << '"'
             << ",\"passive_solve_calls\":" << step.piso.cold.passive_solve_calls
             << ",\"passive_iterations\":" << step.piso.cold.passive_iterations
             << ",\"passive_residual\":" << step.piso.cold.passive_residual

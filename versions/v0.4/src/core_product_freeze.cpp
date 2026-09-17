@@ -3692,7 +3692,7 @@ Status ProductCompiler::compile_transport_restart(MPI_Comm communicator,
       from.esf.enabled(), from.esf.tcr_history.enabled(), from.spray.enabled(),
       !from.patch_inlets.patches.empty(), from.unity_lewis_enthalpy,
       detail::ColdHistoryRevision::pressure_coupled, from.time.spec().convective_cfl_definition,
-      from.reference_outer_iterations, from.midpoint_enthalpy);
+      from.reference_outer_iterations, from.midpoint_enthalpy, from.summary.passive_workspace_bytes != 0U);
   out = std::move(candidate);
   return {};
 } catch (const std::bad_alloc&) {
@@ -7160,7 +7160,7 @@ Status ProductDriver::restart_expected(
       product.esf.enabled(), product.esf.tcr_history.enabled(),
       product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy);
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy, product.summary.passive_workspace_bytes != 0U);
   if (history_policy == RestartHistoryPolicy::rebuild_method_history) {
     out.compatible_method_schema = product.transport_source_schema;
     out.compatible_method_plan = product.transport_source_plan != 0U
@@ -8034,7 +8034,7 @@ Status ProductDriver::initialize_restart(
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy));
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy, product.summary.passive_workspace_bytes != 0U));
   const bool current_identity = image.plan == runtime.plan.fingerprint() &&
                                 image.schema == product.schema_fingerprint;
   const bool chemistry_refinement = history_policy == RestartHistoryPolicy::refine_chemistry;
@@ -12504,6 +12504,7 @@ Status ProductDriver::Impl::execute_attempt(
       report.cold.independent_species_count =
           static_cast<std::uint32_t>(species_trial.size());
       report.cold.passive_scalar_count=static_cast<std::uint32_t>(passive_trial.size());
+      report.cold.midpoint_passive=!passive_trial.empty();
       report.cold.stopping = product.cold_stopping;
       report.cold.reference_outer_iterations = product.reference_outer_iterations;
       report.cold.midpoint_enthalpy = product.midpoint_enthalpy;
@@ -12586,6 +12587,11 @@ Status ProductDriver::Impl::execute_attempt(
         context.face_flux_revision_domain=flux.certificate.revision_domain();
         context.immersed_interface=product.ibm_equations ? &*product.ibm_equations : nullptr;
         context.wall_treatment=product.ibm_equations ? &product.turbulence : nullptr;
+        auto spatial=pressure_energy_candidate_density;
+        ScalarMidpointView scalar_midpoint;
+        FaceFluxView limiter_workspace{energy_frozen_x_enthalpy,energy_frozen_y_enthalpy,
+            energy_frozen_z_enthalpy,step.generation};
+        MixtureTransportFaces limiter;
         const auto refresh_all=[&]() {
           std::size_t count{};
           append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,count);
@@ -12603,7 +12609,26 @@ Status ProductDriver::Impl::execute_attempt(
             gamma.unchecked(c,0)=mu/spec.molecular_schmidt+
                 std::max(0.,effective_viscosity.unchecked(c,0)-mu)/spec.turbulent_schmidt;
           }
-          const auto assemble=[&](EquationAssemblyCertificate &certificate) {
+          const auto assemble=[&](EquationAssemblyCertificate &certificate) -> Status {
+            // The thermal audit has consumed its midpoint scratch. Reuse it
+            // for q_mid while the limiter is frozen on the endpoint iterate,
+            // matching condif -> cmod with the same accepted q history.
+            spatial.field=trial.field;spatial.revision=trial.revision;
+            for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x) {
+              if(int(x<0||x>=cells.x)+int(y<0||y>=cells.y)+int(z<0||z>=cells.z)>1)continue;
+              const Int3 c{x,y,z};
+              spatial.unchecked(c,0)=.5*trial.unchecked(c,0)+.5*scalar.accepted.unchecked(c,0);
+            }
+            scalar_midpoint.value=as_const(spatial);context.scalar_midpoint=&scalar_midpoint;
+            context.mixture_transport=nullptr;
+            if(product.schemes.passive_scalar()!=ConvectionScheme::central2) {
+              const auto coordinate=as_const(trial);
+              const auto prepared=prepare_cartesian_mixture_transport(product.equations.kernels(),
+                  {&coordinate,1},{},as_const(gamma),flux,limiter_workspace,context.time,limiter,
+                  context.immersed_interface,MixtureFlatStencilPolicy::upwind_constraint);
+              if(!prepared)return prepared;
+              context.mixture_transport=&limiter;
+            }
             return assemble_scalar(product.equations.scalars(),q,state,scalar_material,{},context,
                 storage.equation,certificate);
           };
@@ -12637,7 +12662,7 @@ Status ProductDriver::Impl::execute_attempt(
               const double defect=std::abs(balance[0])/std::max(balance[1],1e-300);
               report.cold.passive_balance_defect=std::max(report.cold.passive_balance_defect,defect);
               int rank{};MPI_Comm_rank(communicator,&rank);
-              if(rank==0)std::fprintf(stdout,"cold_passive field=%u sweeps=%u residual=%.17g raw_residual=%.17g balance=%.17g temporal=BE step_committed=0\n",
+              if(rank==0)std::fprintf(stdout,"cold_passive field=%u sweeps=%u residual=%.17g raw_residual=%.17g balance=%.17g temporal=CN step_committed=0\n",
                   unsigned(spec.field),sweep,global[0],global[1],defect);
               converged=true;break;
             }
@@ -22661,7 +22686,7 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
           product.esf.enabled(), product.esf.tcr_history.enabled(),
           product.spray.enabled(), !product.patch_inlets.patches.empty(),
       product.time.spec().scheme == TimeScheme::cn_be && product.unity_lewis_enthalpy,
-      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy)};
+      detail::ColdHistoryRevision::pressure_coupled, product.time.spec().convective_cfl_definition, product.reference_outer_iterations, product.midpoint_enthalpy, product.summary.passive_workspace_bytes != 0U)};
   out.cell_records = product.spray.enabled()
                          ? product.spray.history.snapshot()
                          : product.esf.tcr_history.snapshot();

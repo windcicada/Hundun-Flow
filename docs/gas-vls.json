@@ -1,0 +1,70 @@
+{
+  "scope": "dyn711 uniform Cartesian VLS; upwind flat policy; signed passive coordinates",
+  "source_directory": "/home/wyf/code_dev/src.TCR.dyn711",
+  "coast_head": null,
+  "compiler": "GNU Fortran (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0",
+  "inputs": {
+    "/home/wyf/code_dev/src.TCR.dyn711/vls.F90": "0aee8e14e4f0b52efdce550975e20713dd2219bc379f9b02b55604deb214db96",
+    "/home/wyf/code_dev/flow/b3/versions/v0.4/tests/v04_solver_species_conservation_test": "8aeddbb491af1cd6d95749682c799d79095b33a89985e39373da46991f12d748",
+    "/home/wyf/code_dev/flow/tools/vls.py": "6c396807a872491b83a32712d842c40be0beba39e6ffbf590f42ab06bfa5df16",
+    "/home/wyf/code_dev/flow/check/gv/vls.F90": "e8c6e6e969e6fb884f39cb0868e34355c246a59171cbe502a156be6358331a82"
+  },
+  "comparisons": [
+    {
+      "real_bits": 32,
+      "cases": 44,
+      "equivalent_max_difference": 2.980232233218416e-08,
+      "binary_sha256": "b2ec17fc4df18372d5b0893a7900e084ecbf34f1ccf6204e749a6b9d6ab7aa02",
+      "tolerance": 2e-06,
+      "constant_coordinate": [],
+      "fp32_flat_gradient_rounding": [
+        {
+          "case": "near_flat",
+          "phi": 1.0,
+          "allow": 1,
+          "physical": 0.0,
+          "hundun": 0.5,
+          "coast": 0.5,
+          "difference": 0.0
+        },
+        {
+          "case": "near_flat",
+          "phi": 1.0,
+          "allow": 1,
+          "physical": 0.8,
+          "hundun": 0.8,
+          "coast": 0.800000011920929,
+          "difference": 1.1920928910669204e-08
+        },
+        {
+          "case": "near_flat",
+          "phi": -1.0,
+          "allow": 1,
+          "physical": 0.0,
+          "hundun": 0.0,
+          "coast": 0.5,
+          "difference": 0.5
+        },
+        {
+          "case": "near_flat",
+          "phi": -1.0,
+          "allow": 1,
+          "physical": 0.8,
+          "hundun": 0.8,
+          "coast": 0.800000011920929,
+          "difference": 1.1920928910669204e-08
+        }
+      ]
+    },
+    {
+      "real_bits": 64,
+      "cases": 44,
+      "equivalent_max_difference": 0.0,
+      "binary_sha256": "9aba6c4a0e55dac702ea4f506e72c9f0f94cfdf496f5ef477db9648bce06cc94",
+      "tolerance": 1e-11,
+      "constant_coordinate": [],
+      "fp32_flat_gradient_rounding": []
+    }
+  ],
+  "passed": true
+}
