@@ -3,6 +3,7 @@
 """Native dyn711: partial-window Restart, terminal statistics and physical ledgers."""
 import hashlib
 import json
+from timing_check import check_timing
 from pathlib import Path
 import shutil
 import subprocess
@@ -79,6 +80,7 @@ def run(label, ranks, steps, restart=None):
         generation = (restart/'Restart/current').read_text().strip()
         args += ['--run-start-manifest', restart/'Restart'/generation/'manifest.bin']
     call(args, work/(label+'-audit.log'))
+    check_timing(output/'monitor.jsonl', {'esf_reaction', 'tcr_statistics'})
     for row in map(json.loads, (output/'diagnostics.jsonl').read_text().splitlines()):
         p = row['payload']
         mass = abs(p['mass_balance_defect_kg_s']*p['dt'])/p['mass_kg']

@@ -3258,6 +3258,7 @@ struct ProductDriver::Impl {
   std::uint64_t temporal_preconditioner_applications{};
   std::array<DriverStageTiming, kDriverTimedStageCapacity> attempt_timings{};
   std::array<std::uint64_t, kCnPhaseNames.size()> cn_phase_nanoseconds{};
+  std::array<std::uint64_t, kPhysicsPhaseNames.size()> physics_nanoseconds{};
   std::size_t attempt_timing_count{};
   StageId timed_stage{};
   std::chrono::steady_clock::time_point timed_stage_begin{};
@@ -3372,6 +3373,7 @@ void ProductDriver::Impl::commit_pending_attempt_side_state() noexcept {
 void ProductDriver::Impl::reset_stage_timings(StageId stage) noexcept {
   attempt_timings = {};
   cn_phase_nanoseconds = {};
+  physics_nanoseconds = {};
   attempt_timing_count = 0U;
   timed_stage = stage;
   timed_stage_begin = std::chrono::steady_clock::now();
@@ -3402,6 +3404,11 @@ void ProductDriver::Impl::accumulate_stage_timings(
   for (std::size_t i = 0; i < cn_phase_nanoseconds.size(); ++i) {
     auto& total = report.cn_phase_nanoseconds[i];
     const auto value = cn_phase_nanoseconds[i];
+    total = value > UINT64_MAX - total ? UINT64_MAX : total + value;
+  }
+  for (std::size_t i = 0; i < physics_nanoseconds.size(); ++i) {
+    auto& total = report.physics_nanoseconds[i];
+    const auto value = physics_nanoseconds[i];
     total = value > UINT64_MAX - total ? UINT64_MAX : total + value;
   }
   for (std::size_t source = 0U; source < attempt_timing_count; ++source) {
@@ -9523,12 +9530,15 @@ Status ProductDriver::Impl::execute_attempt(
     if (status && product.reaction.interval_enabled())
       status = product.reaction.clear_interval(product.layers, cells);
     else if (status)
-      status = product.reaction.prepare(
+      status = detail::measure_elapsed(physics_nanoseconds[0U],
+          product.reaction.enabled() && !product.reaction.esf_enabled(), [&]() noexcept {
+        return product.reaction.prepare(
           accepted_state, product.thermodynamics, accepted_material,
           product.equations.kernels(), product.layers, cells,
           {product.pressure_mg_cell_activity.data(),
            product.pressure_mg_cell_activity.size()},
           time.accepted_step());
+      });
     status = product.reductions.consensus(status);
     if (!status) {
       const Status prepare_status =
@@ -10267,17 +10277,21 @@ Status ProductDriver::Impl::execute_attempt(
         pressure_history.accepted,pressure_reference,time.time(),step.dt,step.accepted_step,step.generation);
     status = product.reductions.consensus(status);
     if (status)
-      status = product.esf.react(product.reaction, product.thermodynamics,
+      status = detail::measure_elapsed(physics_nanoseconds[2U], true, [&]() noexcept {
+        return product.esf.react(product.reaction, product.thermodynamics,
           {esf_trial.data(), product.fields.esf_fields.size()}, esf_auxiliary,
           product.spray.enabled() ? as_const(post_rho) : rho_history.accepted,
           pressure_history.accepted, pressure_reference, time.time(), step.dt,
           step.accepted_step, step.generation,
           {esf_sources.data(), product.fields.reaction_sources.size()});
+      });
     if(product.esf.dynamic_tcr()) {
       status=product.reductions.consensus(status);
-      if(status)status=product.esf.finish_dynamic(
+      if(status)status=detail::measure_elapsed(physics_nanoseconds[3U], true, [&]() noexcept {
+        return product.esf.finish_dynamic(
           {esf_trial.data(),product.fields.esf_fields.size()},as_const(esf_auxiliary),
           product.spray.enabled() ? as_const(post_rho) : rho_history.accepted,step.accepted_step);
+      });
     }
     if(status)status=product.reaction.publish_esf_sources(
         {esf_sources.data(),product.fields.reaction_sources.size()});
@@ -13303,12 +13317,14 @@ Status ProductDriver::Impl::execute_attempt(
             double change{}, maximum_change{};
             std::uint64_t internal_steps{}, total_internal_steps{};
             const double reaction_begin=MPI_Wtime();
-            status=product.reaction.advance_transport(equation_state,
+            status=detail::measure_elapsed(physics_nanoseconds[1U], true, [&]() noexcept {
+              return product.reaction.advance_transport(equation_state,
                 product.thermodynamics, product.layers,
                 {species_trial.data(),species_trial.size()}, cells,
                 {product.pressure_mg_cell_activity.data(),product.pressure_mg_cell_activity.size()},
                 time.time(),step.dt,step.accepted_step,step.generation,
                 change,internal_steps);
+            });
             status=product.reductions.consensus(status);
             double elapsed=MPI_Wtime()-reaction_begin, maximum_elapsed{};
             MPI_Allreduce(&elapsed,&maximum_elapsed,1,MPI_DOUBLE,MPI_MAX,communicator);
@@ -16138,12 +16154,15 @@ Status ProductDriver::Impl::execute_attempt(
           if (status)
             attempt_stage = 62U;
           if (status)
-            status = product.reaction.prepare(
+            status = detail::measure_elapsed(physics_nanoseconds[0U],
+                product.reaction.enabled() && !product.reaction.esf_enabled(), [&]() noexcept {
+              return product.reaction.prepare(
                 equation_state, product.thermodynamics, material,
                 product.equations.kernels(), product.layers, cells,
                 {product.pressure_mg_cell_activity.data(),
                  product.pressure_mg_cell_activity.size()},
                 step.accepted_step);
+            });
           status = product.reductions.consensus(status);
           if (status)
             status = evaluate_thermophysical_rates(
@@ -16225,10 +16244,12 @@ Status ProductDriver::Impl::execute_attempt(
             // Terminal statistics contain collectives: agree local participant
             // preflight before every rank enters the statistics branch.
             status=product.reductions.consensus(status);
-            if(status)status=product.esf.finish_dyn711(
+            if(status)status=detail::measure_elapsed(physics_nanoseconds[3U], true, [&]() noexcept {
+              return product.esf.finish_dyn711(
                 product.reaction,product.turbulence,{esf_trial.data(),product.fields.esf_fields.size()},
                 as_const(esf_auxiliary),{passive_trial.data(),passive_trial.size()},
                 as_const(trial_density),as_const(molecular_viscosity),as_const(velocity_gradient));
+            });
             status=product.reductions.consensus(status);
           }
           const auto prepare_status =
@@ -21755,9 +21776,12 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) trace_state(step, 61U);
   if (status) attempt_stage = 62U;
   if (status)
-    status = product.reaction.prepare(equation_state, product.thermodynamics,
+    status = detail::measure_elapsed(physics_nanoseconds[0U],
+        product.reaction.enabled() && !product.reaction.esf_enabled(), [&]() noexcept {
+      return product.reaction.prepare(equation_state, product.thermodynamics,
         material, product.equations.kernels(), product.layers, cells,
         {product.pressure_mg_cell_activity.data(), product.pressure_mg_cell_activity.size()}, step.accepted_step);
+    });
   status = product.reductions.consensus(status);
   if (status)
     status = evaluate_thermophysical_rates(

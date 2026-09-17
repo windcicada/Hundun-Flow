@@ -25,6 +25,16 @@ class LocalElapsedTimer {
   std::chrono::steady_clock::time_point begin_;
 };
 
+// Time a complete module invocation, including its early failure return.
+// Disabled models retain zero cost and avoid a clock read.
+template <class Function>
+auto measure_elapsed(std::uint64_t& total, bool enabled, Function&& function)
+    noexcept(noexcept(function())) -> decltype(function()) {
+  if (!enabled) return function();
+  LocalElapsedTimer timer(total);
+  return function();
+}
+
 // Disjoint local elapsed intervals. No allocation, synchronization, or MPI;
 // unwinding and early returns account for the active phase as well.
 template <std::size_t N>

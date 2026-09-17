@@ -4,6 +4,7 @@
 import copy
 import importlib.util
 import json
+from timing_check import check_timing
 from pathlib import Path
 import subprocess
 import sys
@@ -50,6 +51,7 @@ with tempfile.TemporaryDirectory(prefix='hf-outer-') as tmp:
         args += ['--restart', restart] if restart else ['--initial-state', '101325,300,1,0,0']
         text = call(n, args, okay)
         if not okay: return text
+        check_timing(root/name/'monitor.jsonl', set())
         row = json.loads((root/name/'evidence.jsonl').read_text().splitlines()[-1])
         validator.validate_v6_v8_runtime_record(row, 1, 8)
         assert row['cold']['enthalpy_scheme'] == 'CN'

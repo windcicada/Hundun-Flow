@@ -924,6 +924,22 @@ static Status run_application(MPI_Comm communicator,
         status = {StatusCode::mpi_failure, kApplicationInput};
         break;
       }
+      // Existing communication counters measure named operations only. They
+      // overlap module/phase wall times and intentionally have no MPI total.
+      constexpr std::array<const char*, 3> communication_names{
+          "structured_wait", "structured_control", "linear_reductions"};
+      std::array<std::uint64_t, kPhysicsPhaseNames.size() + 3> local_modules{}, maximum_modules{};
+      for (std::size_t i = 0; i < kPhysicsPhaseNames.size(); ++i)
+        local_modules[i] = step.physics_nanoseconds[i];
+      local_modules[kPhysicsPhaseNames.size()] = step.resources.structured_wait_nanoseconds;
+      local_modules[kPhysicsPhaseNames.size() + 1] = step.resources.structured_control_nanoseconds;
+      local_modules[kPhysicsPhaseNames.size() + 2] = step.resources.reduction_nanoseconds;
+      if (MPI_Allreduce(local_modules.data(), maximum_modules.data(),
+                        static_cast<int>(maximum_modules.size()), MPI_UINT64_T,
+                        MPI_MAX, communicator) != MPI_SUCCESS) {
+        status = {StatusCode::mpi_failure, kApplicationInput};
+        break;
+      }
       std::string monitor_text;
       status = detail::output_collective_stage(communicator, [&] {
         local_allocation_checkpoint(report.failure_phase, rank);
@@ -991,6 +1007,19 @@ static Status run_application(MPI_Comm communicator,
         for (std::size_t i = 0; i < maximum_phases.size(); ++i) {
           if (i) phases << ',';
           phases << '\"' << kCnPhaseNames[i] << "\":" << maximum_phases[i] * 1e-9;
+        }
+        phases << "}},\"physics_modules\":{\"scope\":\"max_rank_all_attempts_inclusive_modules\","
+                  "\"containment\":\"inside_advance_overlaps_cn_phases\",\"seconds\":{";
+        for (std::size_t i = 0; i < kPhysicsPhaseNames.size(); ++i) {
+          if (i) phases << ',';
+          phases << '\"' << kPhysicsPhaseNames[i] << "\":" << maximum_modules[i] * 1e-9;
+        }
+        phases << "}},\"communication_observations\":{\"scope\":\"max_rank_all_attempts_named_operations\","
+                  "\"containment\":\"inside_advance_overlaps_modules_and_cn_phases\",\"seconds\":{";
+        for (std::size_t i = 0; i < communication_names.size(); ++i) {
+          if (i) phases << ',';
+          phases << '\"' << communication_names[i] << "\":"
+                 << maximum_modules[kPhysicsPhaseNames.size() + i] * 1e-9;
         }
         phases << "}}}";
         monitor_text = text + phases.str();

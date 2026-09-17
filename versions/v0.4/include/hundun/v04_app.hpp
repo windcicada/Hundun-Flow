@@ -595,6 +595,12 @@ inline constexpr std::array<const char*, 10> kCnPhaseNames{
     "preparation", "scalars", "state", "momentum_assembly", "momentum_solve",
     "pressure_assembly", "pressure_setup", "pressure_solve", "correction", "audit"};
 
+// Inclusive module intervals, accumulated over all candidates and retries.
+// These overlap CN phases and communication counters; they are not additive
+// components of advance wall time. Initialization lies outside this scope.
+inline constexpr std::array<const char*, 4> kPhysicsPhaseNames{
+    "reaction_sources", "mean_reaction", "esf_reaction", "tcr_statistics"};
+
 struct DriverStepReport {
   StepCompletionReport completion{};
   TimeProposalDiagnostic initial_time_proposal{};
@@ -618,6 +624,7 @@ struct DriverStepReport {
   std::array<DriverStageTiming, kDriverTimedStageCapacity> stage_timings{};
   std::size_t stage_timing_count{};
   std::array<std::uint64_t, kCnPhaseNames.size()> cn_phase_nanoseconds{};
+  std::array<std::uint64_t, kPhysicsPhaseNames.size()> physics_nanoseconds{};
   bool accepted{};
   PressureEnergyPerformanceTotals pressure_energy_performance{};
   DriverTerminalEquationReport terminal_equations{};

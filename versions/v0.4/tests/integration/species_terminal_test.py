@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The default local-time species audit drives refinement across outer solves."""
 import json
+from timing_check import check_timing
 from pathlib import Path
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix='species-') as directory:
                                 universal_newlines=True, timeout=60)
         if result.returncode:
             raise RuntimeError(' '.join(args) + '\n' + result.stdout[-7000:])
+        check_timing(output/'monitor.jsonl', {'reaction_sources', 'mean_reaction'})
         records = [json.loads(line) for line in (output / 'evidence.jsonl').read_text().splitlines()]
         assert [row['step'] for row in records] == [1, 2]
         for row in records:

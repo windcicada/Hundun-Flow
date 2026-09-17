@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise public algorithm selection, evidence and cross-rank Restart."""
 import json
+from timing_check import check_timing
 from pathlib import Path
 import re
 import subprocess
@@ -195,11 +196,14 @@ def main():
                 native(1, 'run', case, '--output', seed, *reaction_options,
                        '--initial-state', '101325,300,0,0,0,0.25', '--restart-interval', '1')
                 evidence(seed, 'cn_be', 'outer_corrected')
+                timed = {'reaction_sources', 'mean_reaction'} if mode == 'finite_rate_mean' else {'reaction_sources'}
+                check_timing(seed/'monitor.jsonl', timed)
                 manifests = list((seed / 'Restart').glob('generation-*/manifest.bin'))
                 assert len(manifests) == 1
                 native(4, 'run', case, '--output', resumed, *reaction_options,
                        '--restart', seed / 'Restart', '--restart-interval', '0')
                 evidence(resumed, 'cn_be', 'outer_corrected', 1, manifests[0])
+                check_timing(resumed/'monitor.jsonl', timed)
     print('algorithm CLI: cold/mean/PaSR CN/BE 1->4 Restart, BE PISO/SIMPLE; Cantera={}'.format(cantera))
 
 

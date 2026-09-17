@@ -1,0 +1,133 @@
+{
+  "base_commit": "2362f677069ac0fd5abad5d78bb3071d569f2294",
+  "build": {
+    "binary": "b3/versions/v0.4/hundun",
+    "sha256": "5fc093b266e37d16d07ca2dc1bd5d2bcc7530502d076aac79db1daaf6e76b863",
+    "log": "check/gas-timing-final-build.log"
+  },
+  "checks": [
+    {
+      "name": "missing timing fields on prior binary",
+      "result": "expected_failure",
+      "log": "check/gas-timing-red.log"
+    },
+    {
+      "name": "v04_gas_outer_cli",
+      "result": "pass",
+      "log": "check/gas-timing-test.log"
+    },
+    {
+      "name": "v04_dyn711_8_cli",
+      "result": "pass",
+      "log": "check/gas-timing-test.log"
+    },
+    {
+      "name": "v04_app_algorithm_cli",
+      "result": "pass",
+      "log": "check/gas-timing-alg-test.log"
+    }
+  ],
+  "existing_failure": {
+    "name": "v04_species_terminal_refinement",
+    "result": "reproduced on base commit",
+    "baseline_binary_sha256": "42da3e3e0527d6f269d2eb744a52814f0543af293475215148193f465e130f53",
+    "baseline_log": "check/gas-timing-base-test.log",
+    "current_log": "check/gas-timing-test.log",
+    "baseline": {
+      "outer": 64,
+      "momentum": 3.1640373358929264e-11,
+      "energy": 8.143944016277927e-09,
+      "species": 8.177584472760565e-14,
+      "eos": 1.9517562113731302e-16,
+      "reaction_input": 2.8923774308455583e-08,
+      "detail": 17837
+    },
+    "current": {
+      "outer": 64,
+      "momentum": 3.1640373358929264e-11,
+      "energy": 8.143944016277927e-09,
+      "species": 8.177584472760565e-14,
+      "eos": 1.9517562113731302e-16,
+      "reaction_input": 2.8923774308455583e-08,
+      "detail": 17837
+    }
+  },
+  "samples": {
+    "d8s": {
+      "seconds": 0.6047099220000001,
+      "attempts": 1,
+      "physics_modules": {
+        "scope": "max_rank_all_attempts_inclusive_modules",
+        "containment": "inside_advance_overlaps_cn_phases",
+        "seconds": {
+          "reaction_sources": 0,
+          "mean_reaction": 0,
+          "esf_reaction": 0.30292909100000004,
+          "tcr_statistics": 0.00017770600000000002
+        }
+      },
+      "communication_observations": {
+        "scope": "max_rank_all_attempts_named_operations",
+        "containment": "inside_advance_overlaps_modules_and_cn_phases",
+        "seconds": {
+          "structured_wait": 3.3111e-05,
+          "structured_control": 0.002467388,
+          "linear_reductions": 0.012881808000000002
+        }
+      }
+    },
+    "d8r": {
+      "seconds": 0.617595741,
+      "attempts": 1,
+      "physics_modules": {
+        "scope": "max_rank_all_attempts_inclusive_modules",
+        "containment": "inside_advance_overlaps_cn_phases",
+        "seconds": {
+          "reaction_sources": 0,
+          "mean_reaction": 0,
+          "esf_reaction": 0.308724078,
+          "tcr_statistics": 0.0006930440000000001
+        }
+      },
+      "communication_observations": {
+        "scope": "max_rank_all_attempts_named_operations",
+        "containment": "inside_advance_overlaps_modules_and_cn_phases",
+        "seconds": {
+          "structured_wait": 3.1799000000000005e-05,
+          "structured_control": 0.0024633230000000003,
+          "linear_reductions": 0.007648933
+        }
+      }
+    },
+    "d8x": {
+      "seconds": 0.6553662020000001,
+      "attempts": 1,
+      "physics_modules": {
+        "scope": "max_rank_all_attempts_inclusive_modules",
+        "containment": "inside_advance_overlaps_cn_phases",
+        "seconds": {
+          "reaction_sources": 0,
+          "mean_reaction": 0,
+          "esf_reaction": 0.310697962,
+          "tcr_statistics": 0.000922492
+        }
+      },
+      "communication_observations": {
+        "scope": "max_rank_all_attempts_named_operations",
+        "containment": "inside_advance_overlaps_modules_and_cn_phases",
+        "seconds": {
+          "structured_wait": 5.1898000000000004e-05,
+          "structured_control": 0.034860464,
+          "linear_reductions": 0.144207111
+        }
+      }
+    }
+  },
+  "scope": "512-cell diagnostic timing; whole-case COAST performance acceptance remains separate",
+  "remaining": [
+    "mean two-step local-time convergence",
+    "I1 live retry status",
+    "I1 additional MPI and output timing attribution"
+  ],
+  "reference_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3"
+}

@@ -32,6 +32,29 @@ CFL 数值及定义、方程残差、迭代次数和最大进程推进壁钟时�
 包含阶段内部通信；每阶段取最大进程值，其所属进程可以随阶段变化。
 整步时间使用 `seconds`，BE/PISO 的 CN 阶段项为零。
 
+`physics_modules.seconds` 提供四类完整调用耗时：
+
+| 项目 | 计时范围 |
+|---|---|
+| `reaction_sources` | 平均场有限速率／PaSR 的本步源准备，含物性查询与源写入 |
+| `mean_reaction` | 输运后平均场化学区间推进，含状态检查、响应缓存及源更新 |
+| `esf_reaction` | 随机场化学推进，含 PSR 参考、热状态重构与共同源更新 |
+| `tcr_statistics` | 动态 TCR 终态统计调用，含调用内部的通信与历史准备 |
+
+各项累计本步全部候选、重试及失败调用，并按最大进程壁钟输出。
+计时位于 `advance` 内，部分调用同时属于 `cn_phases`；初始化独立于
+本步计时，关闭的模型对应零值。ESF 的输运和隐式混合归入其实际执行
+阶段，`esf_reaction` 聚焦化学与其直接状态处理。计时属于运行观测，
+物理状态与 Restart 身份保持原定义。
+
+`communication_observations.seconds` 分别提供 `structured_wait`
+（已登记结构化 halo 的 MPI_Waitall）、`structured_control`
+（这些 halo 的集体状态检查）、`linear_reductions`（公共线性归约对象
+登记的通信）。这些观测覆盖各自具名操作，并与方程／物理模块耗时
+重叠。IBM 供体、TCR 内部和直接 MPI 调用的通信仍由所属模块壁钟
+承载。各项 scope 与 containment 字段记录统计口径；性能比较以
+整步 `seconds` 为总耗时，逐模块观测用于定位成本。
+
 在输出目录创建 `stop` 文件，本步接受后保存 Restart 并停止；
 创建 `output` 文件，本步接受后额外保存场数据。请求由根进程接收，
 全体进程执行，写入成功后登记 `control.jsonl` 回执并消费请求。
