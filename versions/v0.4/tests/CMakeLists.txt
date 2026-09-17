@@ -4,6 +4,11 @@
 find_program(HUNDUN_V04_PYTHON_EXECUTABLE
   NAMES python3.6 python3
   REQUIRED)
+add_test(NAME v04_input_catalog
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/input_test.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/input.py")
+set_tests_properties(v04_input_catalog PROPERTIES TIMEOUT 15)
 add_executable(v04_models_tcr_dynamic_test unit/models_tcr_dynamic_test.cpp)
 target_include_directories(v04_models_tcr_dynamic_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(v04_models_tcr_dynamic_test PRIVATE hundun_v04_core)

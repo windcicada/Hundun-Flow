@@ -1,0 +1,73 @@
+{
+  "scope": "versioned input.d source catalog; native case and extension model binding pending",
+  "date": "2026-09-17",
+  "passed": true,
+  "test": "v04_input_catalog",
+  "test_log": "check/gas-input-test.log",
+  "unit_checks": 7,
+  "fixture": "versions/v0.4/tests/fixtures/input.d",
+  "fixture_provenance": "GTMC frozen core records with three focused extension records; legacy layout derived by removing optional records",
+  "tool_sha256": "41c83cbe0b0ed7fa536e6c42522e2b851976c2e7e2b6fa2ed16c57e5cda2bdf9",
+  "cases": [
+    {
+      "profile": "gtmc",
+      "source": {
+        "path": "/home/wyf/code_dev/flow/check/gas-gtmc-input.d",
+        "sha256": "b38285918f14e2ea7eea31f42ee9cd99903a3e60b7dd25473f3d28707444b849"
+      },
+      "reader": {
+        "path": "/home/wyf/code_dev/flow/check/gk/input.F90",
+        "sha256": "edd0671b800a670e436b0c00ae528cbe3828a00e9e712dd9f255ad8fd9b983f6"
+      },
+      "catalog": "check/ig.json",
+      "catalog_sha256": "fa34994016c1aa357aa56ea5bd906d97cc40b6edcdabcfc1d08374e0059a9b40",
+      "core_fields": 43,
+      "extension_records": 58,
+      "source_model": "vreman",
+      "pdf_fields": 4,
+      "pressure_reference_pa": 100000.0,
+      "compressible": true,
+      "cfl": [
+        0.2,
+        0.3,
+        0.25
+      ],
+      "source_mechanism": "jl4",
+      "status": "source_catalog_ready_native_case_binding_pending"
+    },
+    {
+      "profile": "624cf",
+      "source": {
+        "path": "/home/wyf/code_dev/flow/check/ji/case/input.d",
+        "sha256": "c31711acdfa1a307f8bdd489bcf6fc2bafecba26ed65a12904bd6fac2136ee45"
+      },
+      "reader": {
+        "path": "/home/wyf/code_dev/flow/check/ji/input.F90",
+        "sha256": "a755ae994ea7d740cafd617d152055b3283d1150ce41af1e63aa5c8193bba92a"
+      },
+      "catalog": "check/ic.json",
+      "catalog_sha256": "0d50e540381416a875ec57b6fd6b21a20d8910a1199b0f862ceb368459d8c8ac",
+      "core_fields": 43,
+      "extension_records": 26,
+      "source_model": "smagorinsky",
+      "pdf_fields": 2,
+      "pressure_reference_pa": 790216.58,
+      "compressible": false,
+      "cfl": [
+        0.2,
+        0.3,
+        0.25
+      ],
+      "source_mechanism": "4_step",
+      "status": "source_catalog_ready_native_case_binding_pending"
+    }
+  ],
+  "pending": [
+    "native case model and boundary binding",
+    "extension reader semantics",
+    "complete build precision manifest",
+    "statistics and dynamic model histories",
+    "conservative real-case grid mapping",
+    "unified hundun import"
+  ]
+}

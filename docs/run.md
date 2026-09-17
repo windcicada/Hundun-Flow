@@ -222,3 +222,27 @@ VρY 的包络用乘积展开计算，避免大数相减；前后两层包络相
 输出格式。小变化率使用 `mass_bdf_rate_kg_s` 和
 `total_energy_bdf_rate_W`；直接相减已输出的绝对存量会再次引入
 FP64 抵消误差。
+
+### COAST 输入参数目录
+
+`tools/input.py` 按已登记的 `input.F90` SHA-256 选择 dyn711、GTMC
+或 624CF 的 `input.d` 行布局。用法如下：
+
+```sh
+python3 tools/input.py source/input.d --reader source/input.F90 --output check/input.json
+```
+
+输出含每项参数的原始行、行号、单位、读取值、尾随值及读取器默认值，
+同时记录输入与读取器的路径和 SHA-256。数值表示源文件的十进制值；
+源程序的 REAL 精度由配套构建清单另行确定。`steps` 保存源 `lstep`；
+实际终止步数由原版启动／续算语义与源检查点共同确定。
+
+扩展参数与 namelist 以原始记录保存，模型接线阶段按对应扩展读取器
+解析。当前标量语法支持逗号、D 指数、逻辑值、引号字符串及行注释；
+空值和重复语法先展开为明确的标量值，namelist 名称单独占一行。
+
+目录标记为 `source_catalog_ready_native_case_binding_pending`。
+压力模型和 CFL 映射单独列出；非对称 CFL 窗口附带策略选择状态。
+完整原生算例还需绑定机理、几何、边界、同步 Restart／PDF 及历史，
+并应用已批准的模型选择。例如 624CF 的源 SGS 名称作为来源保留，
+Hundun 的 Vreman 选择在原生模型配置中登记。
