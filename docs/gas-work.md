@@ -167,3 +167,15 @@ python3 tools/gas_iccg.py --reference check/gi/ref \
   --hundun b3/versions/v0.4/tests/v04_gas_iccg_probe --runner 'bash check/jam.sh' \
   --source check/gi/cgsol.F90 --output docs/gas-iccg.json
 ```
+
+
+G2 分布式 ICCG 准入组件：对体积缩放后的行检查相邻面精确对称、
+非负邻接系数、弱对角占优及每个连通分量的严格占优行。先合并本地
+连通分量，再通过 halo 传播约束标志。矩阵系数保持原值；此项作为
+充分条件使用，一般矩阵沿用适配的 Krylov 方法。
+
+`check/gas-iccg-mpi.log` 的 1／2／4 进程检查通过。覆盖周期、单格
+分区、跨分区压力约束传播、IBM 隔离后的多连通域、缺少压力参考的
+分量、非对称面系数，以及单一进程出现非有限矩阵行时的集体返回。
+全部工作数组由调用方预分配。生产后端配置和原方程单位下的残差
+审核继续接线。

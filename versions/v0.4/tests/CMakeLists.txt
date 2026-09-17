@@ -2738,3 +2738,12 @@ add_executable(v04_gas_iccg_test integration/gas_iccg_test.cpp)
 target_link_libraries(v04_gas_iccg_test PRIVATE hundun_v04_core)
 add_test(NAME v04_gas_iccg COMMAND v04_gas_iccg_test)
 set_tests_properties(v04_gas_iccg PROPERTIES TIMEOUT 30 LABELS v04_focused)
+add_executable(v04_iccg_matrix_test mpi/iccg_matrix_test.cpp)
+target_link_libraries(v04_iccg_matrix_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_iccg_matrix_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      "$<TARGET_FILE:v04_iccg_matrix_test>")
+  set_tests_properties(v04_iccg_matrix_mpi_${rank_count}
+    PROPERTIES PROCESSORS ${rank_count} TIMEOUT 60 LABELS v04_focused)
+endforeach()

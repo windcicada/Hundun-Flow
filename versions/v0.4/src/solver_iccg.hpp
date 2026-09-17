@@ -24,6 +24,118 @@ inline Status scale_iccg_row(const ColdPressureRow& row, double volume,
   return {};
 }
 
+struct IccgMatrixAdmissionReport {
+  std::uint32_t grounding_exchanges{};
+  bool spd{};
+};
+
+// Sufficient global SPD proof for the volume-scaled pressure M matrix:
+// exact opposite-face symmetry, weak row dominance, and one strictly
+// dominant row in every connected component. Local union/find collapses
+// each rank before propagating grounded flags over the actual halo graph.
+// Exact symmetry keeps admission distinct from changing the matrix.
+// exchange owns the supplied scratch halo; all physical exterior ghosts
+// start at zero. The final collective result is uniform across ranks.
+// Storage allocations are made by callers before entering this collective
+// routine so allocation failures can participate in ordinary consensus.
+template<class Exchange>
+Status admit_iccg_matrix(const std::vector<ColdPressureRow>& rows,
+    MeshPatch patch, Int3 global_cells, const std::array<bool,3>& periodic,
+    FieldView scratch, Span<std::size_t> parent, Span<std::uint8_t> grounded,
+    Exchange&& exchange, ReductionEngine& reductions,
+    IccgMatrixAdmissionReport& report) noexcept {
+  report = {};
+  const auto n=patch.cells;
+  const auto count=std::size_t(n.x)*n.y*n.z;
+  Status local;
+  if(n.x<=0 || n.y<=0 || n.z<=0 || rows.size()!=count ||
+      parent.size!=count || grounded.size!=count || !parent.data || !grounded.data ||
+      !valid_cell_view(as_const(scratch),n,0,1,1))
+    local={StatusCode::invalid_plan,17869};
+  const int starts[]{patch.begin.x,patch.begin.y,patch.begin.z};
+  const int extents[]{global_cells.x,global_cells.y,global_cells.z};
+  const int widths[]{n.x,n.y,n.z};
+  for(unsigned a=0;a<3;++a)
+    if(starts[a]<0 || extents[a]<=0 || std::int64_t(starts[a])+widths[a]>extents[a])
+      local={StatusCode::invalid_plan,17869};
+  auto status=reductions.consensus(local);if(!status)return status;
+  const auto flat=[&](Int3 c){return std::size_t(c.x)+n.x*(c.y+std::size_t(n.y)*c.z);};
+  const auto root=[&](std::size_t i) {
+    while(parent.data[i]!=i) {parent.data[i]=parent.data[parent.data[i]];i=parent.data[i];}
+    return i;
+  };
+  for(std::size_t i=0;i<count;++i) {parent.data[i]=i;grounded.data[i]=0;}
+  for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+    const Int3 c{x,y,z};const auto i=flat(c);const auto& row=rows[i];
+    long double sum=0;
+    if(!(row.diagonal>0) || !std::isfinite(row.diagonal))local={StatusCode::invalid_plan,17869};
+    for(unsigned f=0;f<6;++f) {
+      const double a=row.neighbour[f];
+      if(!(a>=0) || !std::isfinite(a))local={StatusCode::invalid_plan,17869};
+      sum+=a;
+      Int3 nb=c;auto& coord=f/2==0 ? nb.x : f/2==1 ? nb.y : nb.z;
+      coord+=f%2 ? 1:-1;
+      const int start=f/2==0 ? patch.begin.x : f/2==1 ? patch.begin.y : patch.begin.z;
+      const int extent=f/2==0 ? global_cells.x : f/2==1 ? global_cells.y : global_cells.z;
+      if(!periodic[f/2] && (coord+start<0 || coord+start>=extent) && a!=0)
+        local={StatusCode::invalid_plan,17869};
+      if(f%2 && a>0 && nb.x<n.x && nb.y<n.y && nb.z<n.z)
+        parent.data[root(flat(nb))]=root(i);
+    }
+    if(row.diagonal<sum)local={StatusCode::invalid_plan,17870};
+    grounded.data[i]=row.diagonal>sum;
+  }
+  status=reductions.consensus(local);if(!status)return status;
+  const auto clear_ghosts=[&]() {
+    for(int z=-1;z<=n.z;++z)for(int y=-1;y<=n.y;++y)for(int x=-1;x<=n.x;++x)
+      if(int(x<0 || x>=n.x)+int(y<0 || y>=n.y)+int(z<0 || z>=n.z)==1)
+        scratch.unchecked({x,y,z},0)=0;
+  };
+  for(unsigned axis=0;axis<3;++axis) {
+    clear_ghosts();
+    for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x)
+      scratch.unchecked({x,y,z},0)=rows[flat({x,y,z})].neighbour[2*axis];
+    status=exchange(scratch);status=reductions.consensus(status);if(!status)return status;
+    for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+      Int3 nb{x,y,z};(axis==0 ? nb.x : axis==1 ? nb.y : nb.z)++;
+      if(rows[flat({x,y,z})].neighbour[2*axis+1]!=scratch.unchecked(nb,0))
+        local={StatusCode::invalid_plan,17871};
+    }
+    status=reductions.consensus(local);if(!status)return status;
+  }
+  for(std::size_t i=0;i<count;++i)if(grounded.data[i])grounded.data[root(i)]=1;
+  const auto ungrounded=[&]() {
+    for(std::size_t i=0;i<count;++i)if(!grounded.data[root(i)])return 1.;
+    return 0.;
+  };
+  double missing=ungrounded(), global_missing=0;
+  status=reductions.checked_max({&missing,1},{&global_missing,1});if(!status)return status;
+  while(global_missing) {
+    clear_ghosts();
+    for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x)
+      scratch.unchecked({x,y,z},0)=grounded.data[root(flat({x,y,z}))];
+    status=exchange(scratch);status=reductions.consensus(status);if(!status)return status;
+    ++report.grounding_exchanges;
+    double changed=0;
+    for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+      const Int3 c{x,y,z};const auto i=flat(c),r=root(i);
+      if(grounded.data[r])continue;
+      for(unsigned f=0;f<6;++f)if(rows[i].neighbour[f]>0) {
+        Int3 nb=c;(f/2==0 ? nb.x : f/2==1 ? nb.y : nb.z)+=f%2 ? 1:-1;
+        if(scratch.unchecked(nb,0)==1) {grounded.data[r]=1;changed=1;break;}
+      }
+    }
+    double signals[]{ungrounded(),changed}, global[2]{};
+    status=reductions.checked_max({signals,2},{global,2});if(!status)return status;
+    global_missing=global[0];
+    if(global_missing && !global[1])return {StatusCode::invalid_plan,17872};
+    if(report.grounding_exchanges==std::numeric_limits<std::uint32_t>::max())
+      return {StatusCode::invalid_plan,17872};
+  }
+  report.spd=true;
+  return {};
+}
+
 // Block-local IC(0), matching cgsol's x/y/z triangular ordering. MPI and
 // periodic wraps remain in the operator; their ghost factors are zero in
 // the original routine. The backward sweep explicitly uses L transpose,
