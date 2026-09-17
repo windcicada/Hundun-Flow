@@ -17,7 +17,7 @@ struct Field {
 class Identity final : public LinearOperator {
  public:
   explicit Identity(LinearIdentity identity):identity_(identity) {}
-  LinearOperatorCertificate certificate() const noexcept override {return {identity_,11,{3,1,1},LinearOperatorClass::nonsymmetric};}
+  LinearOperatorCertificate certificate() const noexcept override {return {identity_,11,{3,1,1},LinearOperatorClass::spd};}
   Status apply(FieldView x,FieldView y) const noexcept override {
     for(int i=0;i<3;++i)y.unchecked({i,0,0},0)=x.unchecked({i,0,0},0);
     return {};
@@ -26,12 +26,28 @@ class Identity final : public LinearOperator {
 };
 class UnitPreconditioner final : public LinearPreconditioner {
  public:
-  explicit UnitPreconditioner(LinearIdentity id):id_(id) {}
-  LinearPreconditionerCertificate certificate() const noexcept override {return {id_,12,LinearPreconditionerClass::fixed_general};}
+  explicit UnitPreconditioner(LinearIdentity id, bool spd):id_(id),spd_(spd) {}
+  LinearPreconditionerCertificate certificate() const noexcept override {return {id_,12,spd_ ? LinearPreconditionerClass::fixed_spd : LinearPreconditionerClass::fixed_general};}
   Status apply(ConstFieldView x,FieldView y,std::uint32_t) noexcept override {
     for(int i=0;i<3;++i)y.unchecked({i,0,0},0)=x.unchecked({i,0,0},0);return {};
   }
- private:LinearIdentity id_;
+ private:LinearIdentity id_; bool spd_;
+};
+class RejectAudit final : public LinearConvergenceAudit {
+ public:
+  explicit RejectAudit(bool terminal = false, bool fail = false)
+      : terminal_(terminal), fail_(fail) {}
+  LinearConvergenceAuditCertificate certificate() const noexcept override {return {9123};}
+  Status evaluate(ConstFieldView, ConstFieldView, ReductionEngine&,
+                  LinearConvergenceAuditResult& out) noexcept override {
+    if (fail_) return {StatusCode::numerical_failure, 9991};
+    out.metric = out.unscaled_metric = 2;
+    out.limit = 1;
+    out.accepted = false;
+    out.terminal_rejection = terminal_;
+    return {};
+  }
+ private: bool terminal_, fail_;
 };
 bool run(LinearAlgorithm algorithm,int rank,int size) {
   const unsigned restart=algorithm==LinearAlgorithm::fgmres ? 8 : 0;
@@ -45,7 +61,7 @@ bool run(LinearAlgorithm algorithm,int rank,int size) {
   if(status)status=ReductionEngine::compile(MPI_COMM_WORLD,ReductionMode::mpi_allreduce,req.reduction_capacity,reductions);
   if(!status){std::cerr<<"audit_setup rank="<<rank<<" status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';return false;}
   LinearIdentity identity{11,12,13,workspace.fingerprint(),15};
-  Identity op(identity);UnitPreconditioner pc(identity);
+  Identity op(identity);UnitPreconditioner pc(identity,algorithm==LinearAlgorithm::pcg);
   for(auto& v:rho.data)v=1;
   const auto initialize=[&] {
     b.data[0]=x.data[0]=1e6;b.data[1]=1;x.data[1]=rank==size-1 ? 1.-1e-8 : 1.;
@@ -56,6 +72,7 @@ bool run(LinearAlgorithm algorithm,int rank,int size) {
   const auto solve=[&](LinearConvergenceAudit* audit) {
     LinearSolveInvocation call{as_const(b.view),x.view,identity,control,audit};
     return algorithm==LinearAlgorithm::fgmres ? solve_fgmres(op,pc,call,workspace,reductions)
+        : algorithm==LinearAlgorithm::pcg ? solve_pcg(op,pc,call,workspace,reductions)
         : solve_bicgstab(op,pc,call,workspace,reductions);
   };
   const auto baseline=solve(nullptr);
@@ -71,6 +88,31 @@ bool run(LinearAlgorithm algorithm,int rank,int size) {
   okay=okay && status && corrected.status && corrected.iterations>0 && corrected.convergence_rejections>=1 &&
       after.accepted && x.data==b.data && corrected.true_residual_limit==baseline.true_residual_limit &&
       corrected.relative_tolerance==control.relative_tolerance && corrected.absolute_tolerance==control.absolute_tolerance;
+  if (algorithm == LinearAlgorithm::pcg) {
+    RejectAudit reject, terminal(true), failed(false,true);
+    // Exact initial and zero-RHS shortcuts retain the same final gate.
+    for (auto mode : {0,1,2,3,4}) {
+      std::fill(rho.data.begin(),rho.data.end(),1.);
+      std::fill(b.data.begin(),b.data.end(),mode==1 ? 0. : 1.);
+      std::fill(x.data.begin(),x.data.end(),mode==0 ? 1. : mode==1 ? 9. : 0.);
+      const auto original=x.data;
+      auto* gate = mode==3 ? &terminal : mode==4 ? &failed : &reject;
+      const auto denied=solve(gate);
+      okay=okay && !denied.status && x.data==original &&
+          denied.termination==LinearTermination::convergence_audit_failure &&
+          (mode==4 ? denied.status.detail==9991 : denied.convergence_rejections==1) &&
+          (mode<2 ? denied.iterations==0 : denied.iterations>0);
+    }
+    std::fill(b.data.begin(),b.data.end(),0.);
+    std::fill(x.data.begin(),x.data.end(),9.);
+    const auto zero=solve(&audit);
+    okay=okay && zero.status && zero.termination==LinearTermination::zero_rhs &&
+        zero.convergence_audits==1 && x.data==b.data;
+    std::fill(b.data.begin(),b.data.end(),1.);
+    x.data=b.data;
+    const auto exact=solve(&audit);
+    okay=okay && exact.status && exact.iterations==0 && exact.convergence_audits==1;
+  }
   // Solid rows remain in the canonical linear solve; the fluid-scale audit
   // excludes their thermophysical state. Only the final rank carries a defect.
   std::array<std::uint8_t,3> active{1,0,1};
@@ -94,5 +136,6 @@ int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);int rank{},size{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);MPI_Comm_size(MPI_COMM_WORLD,&size);
   bool okay=run(LinearAlgorithm::fgmres,rank,size);
   okay=run(LinearAlgorithm::bicgstab,rank,size)&&okay;
+  okay=run(LinearAlgorithm::pcg,rank,size)&&okay;
   MPI_Finalize();return okay ? 0:1;
 }

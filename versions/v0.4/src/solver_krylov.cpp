@@ -949,10 +949,8 @@ Status validate_common(LinearAlgorithm algorithm,
       control.maximum_iterations == 0U ||
       control.true_residual_interval == 0U ||
       (invocation.convergence_audit != nullptr &&
-       ((algorithm != LinearAlgorithm::fgmres &&
-         algorithm != LinearAlgorithm::bicgstab) ||
-        invocation.convergence_audit->certificate().collective_fingerprint ==
-            0U))) {
+       invocation.convergence_audit->certificate().collective_fingerprint ==
+            0U)) {
     return {StatusCode::invalid_plan, kLinearSolvePlan};
   }
   if (algorithm == LinearAlgorithm::pcg) {
@@ -1325,6 +1323,20 @@ LinearSolveResult solve_pcg(const LinearOperator& linear_operator,
     fill_field(x, 0.0);
     status = revise(workspace, 0U, x);
     status = reductions.consensus(status);
+    if (status && invocation.convergence_audit != nullptr) {
+      fill_field(r, 0.0);
+      status = revise(workspace, 1U, r);
+      status = reductions.consensus(status);
+      bool accepted = false;
+      if (status)
+        status = audit_convergence(invocation, as_const(x), as_const(r),
+                                   reductions, result, accepted);
+      if (!status || !accepted)
+        return finish_failure(result,
+            status ? Status{StatusCode::rejected_step, kLinearSolveConvergenceAudit} : status,
+            LinearTermination::convergence_audit_failure, resources,
+            reductions, initial_calls);
+    }
     status = merge_status(
         status, collective_account(resources, 0U, reductions));
     if (!status) {
@@ -1366,8 +1378,21 @@ LinearSolveResult solve_pcg(const LinearOperator& linear_operator,
         LinearTermination::non_finite, resources, reductions, initial_calls);
   }
   if (result.initial_true_residual <= tolerance) {
-    return finish_success(result, as_const(x), invocation, resources,
-                          reductions, initial_calls);
+    bool accepted = false;
+    status = audit_convergence(invocation, as_const(x), as_const(r),
+                               reductions, result, accepted);
+    if (!status)
+      return finish_failure(result, status,
+          LinearTermination::convergence_audit_failure, resources,
+          reductions, initial_calls);
+    if (accepted)
+      return finish_success(result, as_const(x), invocation, resources,
+                            reductions, initial_calls);
+    if (result.initial_true_residual == 0.0)
+      return finish_failure(result,
+          {StatusCode::rejected_step, kLinearSolveConvergenceAudit},
+          LinearTermination::convergence_audit_failure, resources,
+          reductions, initial_calls);
   }
 
   status = apply_preconditioner(preconditioner, as_const(r), z, 2U, 0U,
@@ -1447,8 +1472,21 @@ LinearSolveResult solve_pcg(const LinearOperator& linear_operator,
       }
       result.recursive_residual = result.final_true_residual;
       if (result.final_true_residual <= tolerance) {
-        return finish_success(result, as_const(x), invocation, resources,
-                              reductions, initial_calls);
+        bool accepted = false;
+        status = audit_convergence(invocation, as_const(x), as_const(r),
+                                   reductions, result, accepted);
+        if (!status)
+          return finish_failure(result, status,
+              LinearTermination::convergence_audit_failure, resources,
+              reductions, initial_calls);
+        if (accepted)
+          return finish_success(result, as_const(x), invocation, resources,
+                                reductions, initial_calls);
+        if (result.final_true_residual == 0.0)
+          return finish_failure(result,
+              {StatusCode::rejected_step, kLinearSolveConvergenceAudit},
+              LinearTermination::convergence_audit_failure, resources,
+              reductions, initial_calls);
       }
       if (result.iterations == invocation.control.maximum_iterations) {
         return finish_failure(
