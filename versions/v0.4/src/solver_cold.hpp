@@ -417,11 +417,11 @@ class VolumeScaledPreconditioner final : public LinearPreconditioner {
 class ColdPressureOperator final : public LinearOperator {
  public:
   ColdPressureOperator(const std::vector<ColdPressureRow>& rows, Int3 cells,
-                       HaloEngine& halo, LinearIdentity identity)
-      : rows_(rows), cells_(cells), halo_(halo), identity_(identity) {}
+                       HaloEngine& halo, LinearIdentity identity,
+                       LinearOperatorClass kind = LinearOperatorClass::nonsymmetric)
+      : rows_(rows), cells_(cells), halo_(halo), identity_(identity), kind_(kind) {}
   LinearOperatorCertificate certificate() const noexcept override {
-    return {identity_, 0x434f4c44504f5031ULL, cells_,
-            LinearOperatorClass::nonsymmetric};
+    return {identity_, kind_ == LinearOperatorClass::spd ? UINT64_C(0x49434347504f5031) : UINT64_C(0x434f4c44504f5031), cells_, kind_};
   }
   LinearOperatorFailureProvenance failure_provenance() const noexcept override {
     return failure_;
@@ -474,6 +474,7 @@ class ColdPressureOperator final : public LinearOperator {
   Int3 cells_;
   HaloEngine& halo_;
   LinearIdentity identity_;
+  LinearOperatorClass kind_;
   mutable LinearOperatorFailureProvenance failure_{};
 };
 

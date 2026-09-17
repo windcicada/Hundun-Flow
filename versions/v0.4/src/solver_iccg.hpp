@@ -24,6 +24,86 @@ inline Status scale_iccg_row(const ColdPressureRow& row, double volume,
   return {};
 }
 
+// Stable global L2 in the original equation units. This retains the same
+// absolute/relative stopping scale when IC/CG operates on volume-scaled rows.
+inline Status iccg_original_l2(ConstFieldView values, ReductionEngine& reductions,
+                               double& norm) noexcept {
+  const auto n=values.interior;
+  Status local;
+  if(!valid_cell_view(values,n,0,1,0))local={StatusCode::invalid_plan,17873};
+  auto status=reductions.consensus(local);if(!status)return status;
+  double maximum=0, global_maximum=0;
+  for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+    const double value=values.unchecked({x,y,z},0);
+    if(!std::isfinite(value))local={StatusCode::numerical_failure,17873};
+    else maximum=std::max(maximum,std::abs(value));
+  }
+  status=reductions.checked_max({&maximum,1},{&global_maximum,1},local);
+  if(!status)return status;
+  if(global_maximum==0) {norm=0;return {};}
+  long double sum=0;
+  for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+    const double value=values.unchecked({x,y,z},0)/global_maximum;
+    sum+=value*value;
+  }
+  double partial=static_cast<double>(sum),global_sum=0;
+  status=reductions.checked_sum({&partial,1},{&global_sum,1});if(!status)return status;
+  const double result=global_maximum*std::sqrt(global_sum);
+  if(!std::isfinite(result))return {StatusCode::numerical_failure,17873};
+  norm=result;return {};
+}
+
+class IccgOriginalEquationAudit final : public LinearConvergenceAudit {
+ public:
+  IccgOriginalEquationAudit(LinearConvergenceAudit& physical, ConstFieldView volumes,
+      FieldView residual, double original_l2_limit, PlanFingerprint identity)
+      : physical_(physical), volumes_(volumes), residual_(residual),
+        limit_(original_l2_limit), identity_(identity) {}
+  LinearConvergenceAuditCertificate certificate() const noexcept override {
+    return {identity_};
+  }
+  double last_original_l2() const noexcept {return last_norm_;}
+  double original_l2_limit() const noexcept {return limit_;}
+  Status evaluate(ConstFieldView solution,ConstFieldView scaled_residual,
+      ReductionEngine& reductions,LinearConvergenceAuditResult& out) noexcept override {
+    const auto n=volumes_.interior;
+    Status local;
+    if(!(limit_>0) || !std::isfinite(limit_) || !identity_ ||
+        !valid_cell_view(volumes_,n,0,1,0) ||
+        !valid_cell_view(scaled_residual,n,0,1,0) ||
+        !valid_cell_view(as_const(residual_),n,0,1,0))
+      local={StatusCode::invalid_plan,17873};
+    auto status=reductions.consensus(local);if(!status)return status;
+    for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+      const Int3 c{x,y,z};const double volume=volumes_.unchecked(c,0);
+      if(!(volume>0) || !std::isfinite(volume))local={StatusCode::invalid_plan,17873};
+      else residual_.unchecked(c,0)=scaled_residual.unchecked(c,0)/volume;
+    }
+    status=reductions.consensus(local);if(!status)return status;
+    double norm=0;
+    status=iccg_original_l2(as_const(residual_),reductions,norm);if(!status)return status;
+    LinearConvergenceAuditResult physical;
+    status=physical_.evaluate(solution,as_const(residual_),reductions,physical);
+    if(!status)return status;
+    if(!(physical.limit>0) || !std::isfinite(physical.limit) ||
+        physical.metric<0 || !std::isfinite(physical.metric) ||
+        physical.accepted!=(physical.metric<=physical.limit))
+      return {StatusCode::invalid_plan,17873};
+    auto result=physical;
+    result.metric=std::max(physical.metric/physical.limit,norm/limit_);
+    if(!std::isfinite(result.metric))return {StatusCode::numerical_failure,17873};
+    result.unscaled_metric=result.metric;
+    result.limit=1.;result.accepted=physical.accepted && norm<=limit_;
+    last_norm_=norm;out=result;return {};
+  }
+ private:
+  LinearConvergenceAudit& physical_;
+  ConstFieldView volumes_;
+  FieldView residual_;
+  double limit_,last_norm_{};
+  PlanFingerprint identity_;
+};
+
 struct IccgMatrixAdmissionReport {
   std::uint32_t grounding_exchanges{};
   bool spd{};
@@ -146,6 +226,7 @@ class ColdPressureIccg final : public LinearPreconditioner {
   ColdPressureIccg(const std::vector<ColdPressureRow>& rows, Int3 cells,
                    LinearIdentity identity)
       : rows_(rows), cells_(cells), identity_(identity), inverse_(rows.size()) {}
+  void reset_identity(LinearIdentity identity) noexcept {identity_=identity;prepared_=false;}
   Status prepare() noexcept {
     prepared_ = false;
     if (cells_.x <= 0 || cells_.y <= 0 || cells_.z <= 0 ||

@@ -2747,3 +2747,8 @@ foreach(rank_count IN ITEMS 1 2 4)
   set_tests_properties(v04_iccg_matrix_mpi_${rank_count}
     PROPERTIES PROCESSORS ${rank_count} TIMEOUT 60 LABELS v04_focused)
 endforeach()
+add_test(NAME v04_gas_iccg_cli
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_iccg_cli_test.py"
+    "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
+set_tests_properties(v04_gas_iccg_cli PROPERTIES PROCESSORS 4 TIMEOUT 240 RUN_SERIAL TRUE)

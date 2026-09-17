@@ -165,7 +165,7 @@ std::int32_t axis_value(Int3 value, CartesianAxis axis) noexcept {
 
 bool valid_pressure_algorithm(LinearAlgorithm algorithm) noexcept {
   return algorithm == LinearAlgorithm::fgmres ||
-         algorithm == LinearAlgorithm::bicgstab;
+         algorithm == LinearAlgorithm::bicgstab || algorithm == LinearAlgorithm::pcg;
 }
 
 bool valid_control(LinearAlgorithm algorithm, MgCorrectionScaling scaling,
@@ -177,7 +177,7 @@ bool valid_control(LinearAlgorithm algorithm, MgCorrectionScaling scaling,
   const bool valid_pair =
       (algorithm == LinearAlgorithm::fgmres &&
        scaling == MgCorrectionScaling::residual_minimizing) ||
-      (algorithm == LinearAlgorithm::bicgstab &&
+      ((algorithm == LinearAlgorithm::bicgstab || algorithm == LinearAlgorithm::pcg) &&
        scaling == MgCorrectionScaling::unit_linear);
   return finite_positive(control.absolute_tolerance) &&
          finite_positive(control.relative_tolerance) &&
@@ -1673,8 +1673,9 @@ Status PisoPlan::compile(MPI_Comm communicator,
       equations.thermophysical_predictor().fingerprint() == 0U ||
       equations.pressure_reference().fingerprint() == 0U || cells.x <= 0 ||
       cells.y <= 0 || cells.z <= 0 ||
-      (spec.coupling != CouplingKind::piso &&
-       spec.coupling != CouplingKind::simple) ||
+      (spec.pressure_algorithm == LinearAlgorithm::pcg
+           ? spec.coupling != CouplingKind::outer_corrected
+           : (spec.coupling != CouplingKind::piso && spec.coupling != CouplingKind::simple)) ||
       spec.pressure_correctors != 2U ||
       spec.pressure_stage == 0U ||
       !valid_pressure_algorithm(spec.pressure_algorithm) ||

@@ -1093,6 +1093,11 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         "final_pressure", "final_enthalpy"), prefix)
     if cold.get("enthalpy_scheme", "BE") not in ("CN", "BE"):
         raise EvidenceError(f"{prefix} has an unknown enthalpy time policy")
+    if require_boolean(cold.get("pressure_iccg", False), prefix+".pressure_iccg"):
+        original = require_nonnegative_finite_number(cold.get("pressure_original_l2"), prefix)
+        limit = require_finite_number(cold.get("pressure_original_l2_limit"), prefix)
+        if limit <= 0 or original > limit:
+            raise EvidenceError(f"{prefix} violates the original ICCG row residual gate")
     outer = require_integer(cold["outer_iterations"], prefix, 1, 64)
     reference_outer = require_integer(cold.get("reference_outer_iterations", 0), prefix, 0, 64)
     if reference_outer and reference_outer != outer:

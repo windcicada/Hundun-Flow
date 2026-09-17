@@ -579,6 +579,8 @@ bool parse_linear_algorithm(std::string_view value,
                             LinearAlgorithm &out) noexcept {
   if (value == "fgmres") {
     out = LinearAlgorithm::fgmres;
+  } else if (value == "pcg") {
+    out = LinearAlgorithm::pcg;
   } else if (value == "bicgstab") {
     out = LinearAlgorithm::bicgstab;
   } else {
@@ -796,7 +798,7 @@ bool parse_solver_controls(yyjson_val* value, SolverSpec& out) noexcept {
     return false;
   }
   out.pressure.mg_correction_scaling =
-      out.pressure.algorithm == LinearAlgorithm::bicgstab
+      out.pressure.algorithm != LinearAlgorithm::fgmres
           ? MgCorrectionScaling::unit_linear
           : MgCorrectionScaling::residual_minimizing;
   return finite_real(yyjson_obj_get(pressure, "absolute_tolerance"),
@@ -1447,7 +1449,8 @@ bool valid_solver(const SolverSpec& solver) noexcept {
                       std::isfinite(terminal.closed_mass) &&
                       std::isfinite(terminal.gauge);
   const bool valid_algorithm = pressure.algorithm == LinearAlgorithm::fgmres ||
-                               pressure.algorithm == LinearAlgorithm::bicgstab;
+                               pressure.algorithm == LinearAlgorithm::bicgstab ||
+                               pressure.algorithm == LinearAlgorithm::pcg;
   const bool valid_scaling =
       pressure.mg_correction_scaling ==
           MgCorrectionScaling::residual_minimizing ||
@@ -1456,7 +1459,7 @@ bool valid_solver(const SolverSpec& solver) noexcept {
       (pressure.algorithm == LinearAlgorithm::fgmres &&
        pressure.mg_correction_scaling ==
            MgCorrectionScaling::residual_minimizing) ||
-      (pressure.algorithm == LinearAlgorithm::bicgstab &&
+      ((pressure.algorithm == LinearAlgorithm::bicgstab || pressure.algorithm == LinearAlgorithm::pcg) &&
        pressure.mg_correction_scaling == MgCorrectionScaling::unit_linear);
   const bool valid_restart =
       pressure.algorithm == LinearAlgorithm::fgmres

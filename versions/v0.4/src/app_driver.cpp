@@ -881,6 +881,7 @@ static Status run_application(MPI_Comm communicator,
                 << " outer=" << step.piso.cold.outer_iterations
                 << " pressure_iterations=" << step.piso.cold.pressure_iterations
                 << " enthalpy_scheme=" << (step.piso.cold.midpoint_enthalpy ? "CN" : "BE")
+                << " pressure_iccg=" << int(step.piso.cold.pressure_iccg)
                 << " attempts=" << step.attempts
                 << " continuity=" << step.piso.continuity_residual
                 << " energy=" << step.piso.energy_residual
@@ -937,6 +938,9 @@ static Status run_application(MPI_Comm communicator,
             << ",\"committed_convective_cfl_directional\":"
             << step.piso.committed_convective_cfl.directional_max
             << ",\"enthalpy_scheme\":\"" << (step.piso.cold.midpoint_enthalpy ? "CN" : "BE") << '"'
+            << ",\"pressure_iccg\":" << (step.piso.cold.pressure_iccg ? "true" : "false")
+            << ",\"pressure_original_l2\":" << step.piso.cold.pressure_original_l2
+            << ",\"pressure_original_l2_limit\":" << step.piso.cold.pressure_original_l2_limit
             << ",\"outer_iterations\":" << step.piso.cold.outer_iterations
             << ",\"momentum_iterations\":" << step.piso.cold.momentum_iterations
             << ",\"pressure_iterations\":" << step.piso.cold.pressure_iterations

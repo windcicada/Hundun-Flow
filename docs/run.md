@@ -87,3 +87,16 @@ CFL 数值及定义、方程残差、迭代次数和最大进程推进壁钟时�
 旧版普通焓检查点可通过显式 `--restart-method-recovery` 重建方法
 历史；迁移运行另保存新输出目录及来源说明。新版本原生续算沿用
 检查点所登记的方法身份。
+
+
+压力参考后端可在 `solver.pressure_linear` 中设置 `"algorithm":"pcg"`
+及 `"krylov_restart":0`，配合 `cn_be`／`outer_corrected`。程序使用
+体积缩放、不完全 Cholesky 和 PCG，实际矩阵在每次求解前通过面系数
+精确对称、弱对角占优及全域连通分量约束检查。该充分条件保留原矩阵
+系数；一般压力系统使用 `fgmres` 或 `bicgstab`。
+
+ICCG 的缩放行 L2 阈值由原始配置与最小单元体积换算，候选解同时
+通过原单位 L2 和连续性审核。监看及证据中的 `pressure_iccg` 表示
+实际后端组合，`pressure_original_l2` 与 `pressure_original_l2_limit`
+保留原方程残差及门槛。`hundun check` 报告后端与预分配工作区字节数。
+相同配置可使用原生 Restart 在不同进程数之间续算。

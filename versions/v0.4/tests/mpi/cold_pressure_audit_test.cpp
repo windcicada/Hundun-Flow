@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Year.M: 2026.09
-#include "../../src/solver_cold.hpp"
+#include "../../src/solver_iccg.hpp"
 #include <array>
 #include <iostream>
 #include <vector>
@@ -131,11 +131,47 @@ bool run(LinearAlgorithm algorithm,int rank,int size) {
       <<" final_metric="<<after.metric<<" passed="<<all<<'\n';
   return all;
 }
+bool scaled_audit(int rank,int size) {
+  ReductionEngine reductions;
+  auto status=ReductionEngine::compile(MPI_COMM_WORLD,ReductionMode::mpi_allreduce,4,reductions);
+  if(!status)return false;
+  Field rho(20,3),p(21,3),x(22,3),volume(23,3),scaled(24,3),original(25,3);
+  volume.data={1e-12,1.,16.};
+  std::fill(rho.data.begin(),rho.data.end(),1e10);
+  if(rank==size-1)scaled.data[0]=1e-20;
+  detail::ColdPressureContinuityAudit physical(as_const(rho.view),as_const(p.view),1e5,1.,{},8126,true);
+  detail::IccgOriginalEquationAudit linear_gate(physical,as_const(volume.view),original.view,1e-10,8127);
+  LinearConvergenceAuditResult result;
+  status=linear_gate.evaluate(as_const(x.view),as_const(scaled.view),reductions,result);
+  bool okay=status && !result.accepted && std::abs(linear_gate.last_original_l2()-1e-8)<1e-23 &&
+      result.metric>99 && result.metric<101;
+  // The original L2 gate passes, while low-density continuity needs refinement.
+  std::fill(rho.data.begin(),rho.data.end(),1e-3);
+  detail::IccgOriginalEquationAudit physical_gate(physical,as_const(volume.view),original.view,1.,8128);
+  status=physical_gate.evaluate(as_const(x.view),as_const(scaled.view),reductions,result);
+  okay=okay && status && !result.accepted && result.metric>1e8;
+  if(rank==size-1)scaled.data[0]=1e-32;
+  status=physical_gate.evaluate(as_const(x.view),as_const(scaled.view),reductions,result);
+  okay=okay && status && result.accepted;
+  if(rank==size-1)volume.data[0]=0;
+  result.metric=123;
+  status=physical_gate.evaluate(as_const(x.view),as_const(scaled.view),reductions,result);
+  okay=okay && !status && status.detail==17873 && result.metric==123;
+  for(double magnitude:{1e200,1e-200}) {
+    original.data={magnitude,0.,0.};double norm=0;
+    status=detail::iccg_original_l2(as_const(original.view),reductions,norm);
+    okay=okay && status && std::abs(norm/(magnitude*std::sqrt(double(size)))-1.)<1e-15;
+  }
+  int all=okay;MPI_Allreduce(MPI_IN_PLACE,&all,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
+  if(rank==0)std::cout<<"ICCG original L2 / physical residual scaling passed="<<all<<'\n';
+  return all;
+}
 }
 int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);int rank{},size{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);MPI_Comm_size(MPI_COMM_WORLD,&size);
   bool okay=run(LinearAlgorithm::fgmres,rank,size);
   okay=run(LinearAlgorithm::bicgstab,rank,size)&&okay;
   okay=run(LinearAlgorithm::pcg,rank,size)&&okay;
+  okay=scaled_audit(rank,size)&&okay;
   MPI_Finalize();return okay ? 0:1;
 }

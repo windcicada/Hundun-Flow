@@ -285,6 +285,9 @@ Status validate_record(const IoServicePlan& services,
   const bool valid_cold =
       cold.active && cold.outer_iterations > 0U &&
       (!cold.midpoint_enthalpy || cold.independent_species_count == 0U) &&
+      (!cold.pressure_iccg || (std::isfinite(cold.pressure_original_l2_limit) &&
+       cold.pressure_original_l2_limit > 0 &&
+       accepted_terminal_metric(cold.pressure_original_l2,cold.pressure_original_l2_limit))) &&
       (cold.reference_outer_iterations == 0U ||
        cold.reference_outer_iterations == cold.outer_iterations) &&
       cold.outer_iterations <= ColdCouplingReport::maximum_outer_iterations &&
@@ -1203,6 +1206,9 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
     json << ",\"cold\":{\"outer_iterations\":" << cold.outer_iterations
          << ",\"reference_outer_iterations\":" << cold.reference_outer_iterations
          << ",\"enthalpy_scheme\":\"" << (cold.midpoint_enthalpy ? "CN" : "BE") << "\""
+         << ",\"pressure_iccg\":" << (cold.pressure_iccg ? "true" : "false")
+         << ",\"pressure_original_l2\":" << cold.pressure_original_l2
+         << ",\"pressure_original_l2_limit\":" << cold.pressure_original_l2_limit
          << ",\"momentum_solve_calls\":" << cold.momentum_solve_calls
          << ",\"pressure_solve_calls\":" << cold.pressure_solve_calls
          << ",\"enthalpy_solve_calls\":" << cold.enthalpy_solve_calls

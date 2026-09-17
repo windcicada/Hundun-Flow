@@ -263,8 +263,11 @@ int main(int argc, char* argv[]) {
                 << (report.summary.time_scheme == hundun::v04::TimeScheme::cn_be
                         ? "cn_be" : "backward_euler")
                 << " enthalpy_scheme=" << (report.summary.midpoint_enthalpy ? "CN" : "BE")
+                << " pressure_algorithm=" << (report.summary.pressure_algorithm == hundun::v04::LinearAlgorithm::pcg
+                        ? "pcg_iccg_spd" : report.summary.pressure_algorithm == hundun::v04::LinearAlgorithm::fgmres ? "fgmres" : "bicgstab")
                 << " cfl_definition="
                 << hundun::v04::cfl_definition_name(report.summary.convective_cfl_definition)
+                << " iccg_workspace_bytes=" << report.summary.iccg_workspace_bytes
                 << " reference_outer_iterations=" << report.summary.reference_outer_iterations
                 << " coupling="
                 << (report.summary.coupling == hundun::v04::CouplingKind::outer_corrected

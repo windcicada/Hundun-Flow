@@ -23,6 +23,7 @@
 #include "local_timing_detail.hpp"
 #include "solver_cartesian_detail.hpp"
 #include "solver_cold.hpp"
+#include "solver_iccg.hpp"
 #include "solver_mixture_step_detail.hpp"
 #include "solver_statistical_detail.hpp"
 #include <cstdio>
@@ -3127,6 +3128,10 @@ struct ProductDriver::Impl {
   MPI_Comm communicator{MPI_COMM_NULL};
   std::vector<SnapshotFieldView> output_fields;
   std::vector<double> output_sgs;
+  std::vector<detail::ColdPressureRow> iccg_scaled_rows;
+  std::vector<std::size_t> iccg_component_parent;
+  std::vector<std::uint8_t> iccg_component_grounded;
+  std::optional<detail::ColdPressureIccg> iccg_factor;
   std::vector<RestartFieldView> restart_fields;
   std::vector<RestartFieldView> restart_previous_fields;
   std::vector<RestartFieldView> restart_rate_fields;
@@ -3735,7 +3740,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
        model.pressure_reference != PressureReferenceKind::boundary_absolute ||
        schedule != CouplingKind::outer_corrected ||
        (model.solver.pressure.algorithm != LinearAlgorithm::fgmres &&
-        model.solver.pressure.algorithm != LinearAlgorithm::bicgstab) ||
+        model.solver.pressure.algorithm != LinearAlgorithm::bicgstab &&
+        model.solver.pressure.algorithm != LinearAlgorithm::pcg) ||
        std::any_of(model.transported_scalars.begin(), model.transported_scalars.end(),
            [](const TransportedScalarSpec& scalar) {
              return scalar.role != TransportedScalarRole::species;
@@ -3745,7 +3751,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   Status status = product_collective_status(
       communicator, model.fingerprint == 0U || out.implementation_ != nullptr ||
                         model.time.scheme == TimeScheme::variable_bdf2 ||
-                        (!cold_model && schedule == CouplingKind::outer_corrected) ||
+                        (!cold_model && (schedule == CouplingKind::outer_corrected ||
+                                        model.solver.pressure.algorithm == LinearAlgorithm::pcg)) ||
                         unsupported_cold || incompatible_lewis ||
                         (fixed_pressure && (!cold_model ||
                          model.pressure_reference != PressureReferenceKind::boundary_absolute)) ||
@@ -3987,8 +3994,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   PisoPlanSpec piso_spec;
   // The pressure kernel is shared by the external correction schedule. Its
   // historical identity remains stable for an equivalent native Restart.
-  piso_spec.coupling = schedule == CouplingKind::outer_corrected
-                          ? CouplingKind::piso : schedule;
+  piso_spec.coupling = schedule == CouplingKind::outer_corrected &&
+      model.solver.pressure.algorithm != LinearAlgorithm::pcg ? CouplingKind::piso : schedule;
   piso_spec.pressure_correctors = 2U;
   piso_spec.pressure_stage = 50U;
   piso_spec.final_flux_slot = 0U;
@@ -4441,8 +4448,13 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         candidate->esf.implicit_transport())
       status = FaceFluxStorage::workspace_bytes(candidate->patch.cells, 5U,
           candidate->summary.esf_energy_workspace_bytes);
+    if (status && model.solver.pressure.algorithm == LinearAlgorithm::pcg &&
+        !detail::product_checked_multiply(local_cells,
+            sizeof(detail::ColdPressureRow)+sizeof(std::size_t)+sizeof(std::uint8_t)+sizeof(double),
+            candidate->summary.iccg_workspace_bytes))
+      return Status{StatusCode::allocation_failure,kProductAllocation};
     if (status && (candidate->spray.enabled() || candidate->esf.enabled() ||
-                   candidate->summary.derived_output_bytes != 0U)) {
+                   candidate->summary.derived_output_bytes != 0U || candidate->summary.iccg_workspace_bytes != 0U)) {
       const auto limit = model.mesh.limits.max_memory_bytes_per_rank;
       std::size_t model_bytes = 0U;
       if (!detail::product_checked_add(candidate->spray.owned_bytes(),
@@ -4450,7 +4462,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
           !detail::product_checked_add(model_bytes,
               candidate->summary.derived_output_bytes, model_bytes) ||
           !detail::product_checked_add(model_bytes,
-              candidate->summary.esf_energy_workspace_bytes, model_bytes))
+              candidate->summary.esf_energy_workspace_bytes, model_bytes) ||
+          !detail::product_checked_add(model_bytes,candidate->summary.iccg_workspace_bytes,model_bytes))
         return Status{StatusCode::allocation_failure, kProductAllocation};
       if (model_bytes > limit || candidate->layout.total_doubles() >
               (limit - model_bytes) / sizeof(double))
@@ -4915,6 +4928,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
               candidate->esf.owned_bytes(),bytes) ||
           !detail::product_checked_add(bytes,candidate->summary.derived_output_bytes,bytes) ||
           !detail::product_checked_add(bytes,candidate->summary.esf_energy_workspace_bytes,bytes) ||
+          !detail::product_checked_add(bytes,candidate->summary.iccg_workspace_bytes,bytes) ||
           bytes>limit || doubles>(limit-bytes)/sizeof(double))
         return Status{StatusCode::allocation_failure,kProductAllocation};
       return Status{};
@@ -5774,6 +5788,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   candidate->phases[9U] = ProductFreezePhase::sealed;
   candidate->summary.unity_lewis_enthalpy = candidate->unity_lewis_enthalpy;
   candidate->summary.midpoint_enthalpy = candidate->midpoint_enthalpy;
+  candidate->summary.pressure_algorithm = model.solver.pressure.algorithm;
   candidate->summary.conservative_total_energy = candidate->equations.enthalpy().conservative_total_energy();
   candidate->summary.turbulence = model.turbulence;
   candidate->summary.smagorinsky_coefficient = model.turbulence == TurbulenceKind::smagorinsky
@@ -5909,6 +5924,14 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
     if (status)
       status = TimeControllerState::start(product.time, 0.0, candidate->time);
     if (status) {
+      if(product.piso.pressure_algorithm()==LinearAlgorithm::pcg) {
+        const auto n=product.patch.cells;
+        const auto count=std::size_t(n.x)*n.y*n.z;
+        candidate->iccg_scaled_rows.resize(count);
+        candidate->iccg_component_parent.resize(count);
+        candidate->iccg_component_grounded.resize(count);
+        candidate->iccg_factor.emplace(candidate->iccg_scaled_rows,n,LinearIdentity{});
+      }
       candidate->output_fields.resize(product.io.snapshot_fields().size);
       candidate->output_sgs.resize(product.summary.derived_output_bytes / sizeof(double));
       const auto primary_count = 3U + product.fields.scalars.size() +
@@ -12472,6 +12495,7 @@ Status ProductDriver::Impl::execute_attempt(
       report.cold.stopping = product.cold_stopping;
       report.cold.reference_outer_iterations = product.reference_outer_iterations;
       report.cold.midpoint_enthalpy = product.midpoint_enthalpy;
+      report.cold.pressure_iccg = product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
       // Prerequisite failure can leave the equation histories unbound. Keep
       // its original cause and let the shared finish path prepare rollback.
       if (!status) return status;
@@ -13766,7 +13790,16 @@ Status ProductDriver::Impl::execute_attempt(
               product.piso.fingerprint(), matrix_revision,
               product.geometry.fingerprint(),
               product.krylov_workspace.fingerprint(), matrix_revision};
-          detail::ColdPressureOperator op(rows, cells, product.krylov_halo, identity);
+          const bool use_iccg = product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
+          auto& scaled_rows=iccg_scaled_rows;
+          auto& iccg_parent=iccg_component_parent;
+          auto& iccg_grounded=iccg_component_grounded;
+          auto& iccg=iccg_factor;
+          detail::IccgMatrixAdmissionReport iccg_admission;
+          auto pressure_control = product.piso.pressure_solve();
+          double original_l2_limit = 1.;
+          detail::ColdPressureOperator op(use_iccg ? scaled_rows : rows, cells,
+              product.krylov_halo, identity, use_iccg ? LinearOperatorClass::spd : LinearOperatorClass::nonsymmetric);
           detail::ColdPressureDilu dilu(rows, cells, identity);
           detail::VolumeScaledPreconditioner mg(pressure_mg,
               product.equations.kernels(), pressure_energy_e_p);
@@ -13777,12 +13810,62 @@ Status ProductDriver::Impl::execute_attempt(
             local_ratio = std::max(local_ratio, sum / row.diagonal);
           }
           double global_ratio{};
+          probe_status = product.reductions.consensus(probe_status);
           if (probe_status) probe_status = product.reductions.checked_max(
               {&local_ratio, 1U}, {&global_ratio, 1U});
-          const bool use_mg = global_ratio > 0.5;
+          const bool use_mg = !use_iccg && global_ratio > 0.5;
           phase_timer.phase(6);
           const double setup_begin = MPI_Wtime();
-          if (probe_status && use_mg) {
+          if (probe_status && use_iccg) {
+            probe_status=product.reductions.consensus(iccg && scaled_rows.size()==rows.size() &&
+                iccg_parent.size()==rows.size() && iccg_grounded.size()==rows.size()
+                    ? Status{} : Status{StatusCode::invalid_plan,kProductCapacity});
+            if(probe_status)iccg->reset_identity(identity);
+            double inverse_volume_max = 0., global_inverse_volume_max = 0.;
+            if (probe_status) {
+              std::size_t i=0;
+              for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)
+                for(int x=0;x<cells.x;++x,++i) {
+                  const Int3 c{x,y,z};
+                  const double volume=detail::cell_volume(product.equations.kernels(),c);
+                  const auto scaled=detail::scale_iccg_row(rows[i],volume,scaled_rows[i]);
+                  if(!scaled)probe_status=scaled;
+                  pressure_diagonal.unchecked(c,0)=volume;
+                  pressure_rhs.unchecked(c,0)=rows[i].rhs;
+                  inverse_volume_max=std::max(inverse_volume_max,1/volume);
+                }
+            }
+            probe_status=product.reductions.checked_max({&inverse_volume_max,1},
+                {&global_inverse_volume_max,1},probe_status);
+            std::array<bool,3> periodic{};
+            for(unsigned a=0;a<3;++a)
+              periodic[a]=product.boundary_specs[2*a].flow_kind==BoundaryKind::periodic;
+            FieldView scratch=pressure_correction;scratch.field=product.fields.krylov_vectors;
+            const auto exchange = [&](FieldView field) -> Status {
+              HaloTicket ticket;
+              auto result=product.krylov_halo.begin(140U,{&field,1U},ticket);
+              if(result)result=product.krylov_halo.finish(ticket,{&field,1U});
+              return result;
+            };
+            if(probe_status)probe_status=detail::admit_iccg_matrix(scaled_rows,
+                product.patch,product.geometry.global_cells(),periodic,scratch,
+                {iccg_parent.data(),iccg_parent.size()},
+                {iccg_grounded.data(),iccg_grounded.size()},exchange,product.reductions,iccg_admission);
+            double rhs_norm=0;
+            if(probe_status)probe_status=detail::iccg_original_l2(as_const(pressure_rhs),product.reductions,rhs_norm);
+            if(probe_status) {
+              original_l2_limit=std::max(pressure_control.absolute_tolerance,
+                  pressure_control.relative_tolerance*rhs_norm);
+              // min(V)*original_limit is a sufficient scaled L2 gate;
+              // the supplementary audit also checks original L2/continuity.
+              pressure_control.absolute_tolerance=original_l2_limit/global_inverse_volume_max;
+              pressure_control.relative_tolerance=0.;
+              if(!(pressure_control.absolute_tolerance>0) ||
+                  !std::isfinite(pressure_control.absolute_tolerance))
+                probe_status={StatusCode::invalid_plan,17873};
+              else probe_status=iccg->prepare();
+            }
+          } else if (probe_status && use_mg) {
             probe_status = make_pressure_face_views(product.pressure_face_storage,
                 cells, x_coefficient, y_coefficient, z_coefficient);
             if (probe_status) {
@@ -13853,8 +13936,6 @@ Status ProductDriver::Impl::execute_attempt(
                   coefficients, &pressure_mg_counters);
             }
           } else if (probe_status) probe_status = dilu.prepare();
-          LinearPreconditioner& pc = use_mg ? static_cast<LinearPreconditioner&>(mg)
-                                           : static_cast<LinearPreconditioner&>(dilu);
           const double setup = MPI_Wtime() - setup_begin;
           probe_status = product.reductions.consensus(probe_status);
           int rank{};
@@ -13865,8 +13946,11 @@ Status ProductDriver::Impl::execute_attempt(
                            unsigned(probe_status.code), probe_status.detail);
             return probe_status;
           }
-          if (rank == 0) std::fprintf(stdout, "cn_pressure_preconditioner kind=%s face_diagonal_ratio=%.17g\n",
-              use_mg ? "multigrid" : "dilu", global_ratio);
+          LinearPreconditioner& pc = use_iccg ? static_cast<LinearPreconditioner&>(*iccg)
+              : use_mg ? static_cast<LinearPreconditioner&>(mg) : static_cast<LinearPreconditioner&>(dilu);
+          if (rank == 0) std::fprintf(stdout, "cn_pressure_preconditioner kind=%s face_diagonal_ratio=%.17g spd_admitted=%d grounding_exchanges=%u\n",
+              use_iccg ? "iccg" : use_mg ? "multigrid" : "dilu", global_ratio,
+              int(iccg_admission.spd),iccg_admission.grounding_exchanges);
           if (pressure_mg_profiling) {
             // Diagnostic identity of the actual distributed matrix and RHS.
             // Rank and row order bind the decomposition; solver identities
@@ -13887,13 +13971,13 @@ Status ProductDriver::Impl::execute_attempt(
                 "cold_matrix outer=%u matrix=%016llx rhs=%016llx algorithm=%s\n",
                 cold_outer,static_cast<unsigned long long>(global[0]),
                 static_cast<unsigned long long>(global[1]),
-                product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab");
+                product.piso.pressure_algorithm() == LinearAlgorithm::pcg ? "iccg" : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab");
           }
           std::size_t ordinal{};
           for (int z = 0; z < cells.z; ++z)
             for (int y = 0; y < cells.y; ++y)
               for (int x = 0; x < cells.x; ++x, ++ordinal) {
-                pressure_rhs.unchecked({x, y, z}, 0) = rows[ordinal].rhs;
+                pressure_rhs.unchecked({x, y, z}, 0) = use_iccg ? scaled_rows[ordinal].rhs : rows[ordinal].rhs;
                 pressure_correction.unchecked({x, y, z}, 0) = 0;
               }
           phase_timer.phase(7);
@@ -13902,17 +13986,24 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(trial_density),as_const(trial_pressure),attempt_pressure_reference,step.dt,
               product.topology ? product.topology->region() : Span<const std::uint8_t>{},
               detail::product_mix(product.piso.fingerprint(),UINT64_C(0x434f4c4441554431)),fixed_eos);
+          detail::IccgOriginalEquationAudit iccg_audit(continuity_audit,
+              as_const(pressure_diagonal),pressure_energy_e_p,original_l2_limit,
+              detail::product_mix(product.piso.fingerprint(),UINT64_C(0x4943434752415544)));
           const LinearSolveInvocation pressure_call{
               as_const(pressure_rhs), pressure_correction, identity,
-              product.piso.pressure_solve(),&continuity_audit};
-          const auto solved = product.piso.pressure_algorithm() == LinearAlgorithm::fgmres
-              ? solve_fgmres(op, pc, pressure_call, product.krylov_workspace, product.reductions)
-              : solve_bicgstab(op, pc, pressure_call, product.krylov_workspace, product.reductions);
+              pressure_control,use_iccg ? static_cast<LinearConvergenceAudit*>(&iccg_audit) : &continuity_audit};
+          const auto solved = use_iccg
+              ? solve_pcg(op,pc,pressure_call,product.krylov_workspace,product.reductions)
+              : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres
+                  ? solve_fgmres(op, pc, pressure_call, product.krylov_workspace, product.reductions)
+                  : solve_bicgstab(op, pc, pressure_call, product.krylov_workspace, product.reductions);
           const double solve_time = MPI_Wtime() - solve_begin;
           phase_timer.phase(8);
           ++report.cold.pressure_solve_calls;
           report.cold.pressure_iterations += solved.iterations;
           report.cold.final_pressure = solved;
+          report.cold.pressure_original_l2 = use_iccg ? iccg_audit.last_original_l2() : solved.final_true_residual;
+          report.cold.pressure_original_l2_limit = use_iccg ? original_l2_limit : solved.true_residual_limit;
           if(rank==0)std::fprintf(stdout,
               "cold_pressure_continuity_audit calls=%llu rejected=%llu metric=%.17g limit=%.17g true_residual_limit=%.17g step_committed=0\n",
               static_cast<unsigned long long>(solved.convergence_audits),
@@ -14053,7 +14144,7 @@ Status ProductDriver::Impl::execute_attempt(
                 max_times[0], max_times[1], max_times[2], max_times[3],
                 global_audit[0], global_audit[1], global_audit[2],
                 global_audit[3], global_audit[4], global_audit[5], step.dt,
-                product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab",
+                product.piso.pressure_algorithm() == LinearAlgorithm::pcg ? "iccg" : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab",
                 max_times[4], max_times[5], max_times[6], max_times[7], max_times[8],
                 static_cast<unsigned long long>(solved.operator_applies),
                 static_cast<unsigned long long>(solved.preconditioner_applies),

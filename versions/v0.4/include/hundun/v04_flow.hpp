@@ -2610,6 +2610,9 @@ struct ColdCouplingReport {
   std::uint32_t outer_iterations{};
   std::uint32_t reference_outer_iterations{};
   bool midpoint_enthalpy{};
+  bool pressure_iccg{};
+  double pressure_original_l2{};
+  double pressure_original_l2_limit{};
   std::uint32_t momentum_solve_calls{};
   std::uint32_t pressure_solve_calls{};
   std::uint32_t enthalpy_solve_calls{};
