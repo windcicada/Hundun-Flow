@@ -522,6 +522,8 @@ struct DriverCompositionBalance {
   double transport_outflow{}, pressure_outflow{};
   double noise_source{}, mixing_source{}, chemistry_source{};
   double defect{}, relative_defect{};
+  double storage_roundoff_bound{}; // Same rate units as defect.
+  bool roundoff_applied{};
 };
 
 struct DriverConservationReport {

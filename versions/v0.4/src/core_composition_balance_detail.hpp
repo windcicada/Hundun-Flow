@@ -5,6 +5,7 @@
 #include "hundun/v04_portable.hpp"
 #include "solver_equation_detail.hpp"
 #include "solver_scalar_boundary_detail.hpp"
+#include <limits>
 
 namespace hundun::v04::detail {
 
@@ -38,6 +39,7 @@ class CompositionBalanceLedger {
       if (!(mw > 0) || !std::isfinite(mw)) return invalid();
     try {
       rows_.assign(ns + 1, {});
+      storage_bounds_.assign(ns + 1, 0);
       mapping_.assign(mapping.data, mapping.data + mapping.size);
       transport_counts_.assign(ns, 0);
       pressure_counts_.assign(ns, 0);
@@ -51,6 +53,22 @@ class CompositionBalanceLedger {
     rows_[mapping_[independent]][term] += value;
   }
   void add_total(Term term, long double value) noexcept { rows_.back()[term] += value; }
+  // Each local storage product carries the resolution of its FP64 inputs.
+  // eps*abs(x)+denorm_min encloses one representable spacing, including zero.
+  // The ensemble mean has the mean input uncertainty; physical Y >= 0 makes
+  // that envelope eps*mean(Y)+denorm_min. Rate uncertainty divides by this dt.
+  void add_storage(std::size_t independent,double volume,double before_rho,double after_rho,
+      long double before_y,long double after_y) noexcept {
+    storage(mapping_[independent],volume,before_rho,after_rho,before_y,after_y,true);
+  }
+  void add_total_storage(double volume,double before_rho,double after_rho) noexcept {
+    storage(rows_.size()-1,volume,before_rho,after_rho,1,1,false);
+  }
+  static bool admissible(const DriverCompositionBalance& row) noexcept {
+    return std::isfinite(row.defect) && std::isfinite(row.relative_defect) &&
+        std::isfinite(row.storage_roundoff_bound) && row.storage_roundoff_bound>=0 &&
+        (row.relative_defect<1e-6 || std::abs(row.defect)<=row.storage_roundoff_bound);
+  }
   void freeze_transport(std::size_t independent, long double value) noexcept {
     add(independent, transport, value / fields_);
     ++transport_counts_[mapping_[independent]];
@@ -107,35 +125,50 @@ class CompositionBalanceLedger {
       if (transport_counts_[s]!=fields_ || pressure_counts_[s]!=fields_) local=invalid();
     for (const auto& row : rows_) for (const auto value : row)
       if (!std::isfinite(value)) local={StatusCode::numerical_failure,17861};
+    for(const auto value:storage_bounds_)
+      if(!std::isfinite(value) || value<0)local={StatusCode::numerical_failure,17861};
     auto status=reductions.consensus(local); if (!status) return status;
     auto& dependent=rows_[dependent_]; dependent=rows_.back();
+    storage_bounds_[dependent_]=storage_bounds_.back();
     for (const auto s : mapping_) for (unsigned t=0;t<term_count;++t) dependent[t]-=rows_[s][t];
+    for(const auto s:mapping_)storage_bounds_[dependent_]+=storage_bounds_[s];
     const auto ns=identity_->species_names.size(), ne=identity_->element_names.size();
     std::vector<Row> global;
     std::vector<DriverCompositionBalance> species, elements;
+    std::vector<double> bounds;
     try {
       global.resize(ns);species.resize(ns);elements.resize(ne);
+      bounds.resize(ns);
       for(std::size_t s=0;s<ns;++s)species[s].name=identity_->species_names[s];
       for(std::size_t e=0;e<ne;++e)elements[e].name=identity_->element_names[e];
     }
     catch (...) {local={StatusCode::allocation_failure,17861};}
     status=reductions.consensus(local); if (!status) return status;
+    for(std::size_t first=0;first<ns;first+=8) {
+      std::array<double,8> input{};
+      const auto count=std::min<std::size_t>(8,ns-first);
+      for(std::size_t j=0;j<count;++j)input[j]=static_cast<double>(storage_bounds_[first+j]);
+      status=reductions.checked_sum({input.data(),count},{bounds.data()+first,count},{});
+      if(!status)return status;
+    }
     for (std::size_t s=0;s<ns;++s) {
       std::array<double,term_count> input{}, result{};
       for (unsigned t=0;t<term_count;++t) input[t]=static_cast<double>(rows_[s][t]);
       status=reductions.checked_sum({input.data(),term_count},{result.data(),term_count},{});
       if (!status) return status;
       for (unsigned t=0;t<term_count;++t) global[s][t]=result[t];
-      report(species[s],global[s]);
+      report(species[s],global[s],bounds[s]);
     }
     for (std::size_t e=0;e<ne;++e) {
       Row element{};
+      long double bound{};
       for (std::size_t s=0;s<ns;++s) {
         const long double weight=static_cast<long double>(identity_->element_counts[s*ne+e])/
             identity_->molecular_weights_kg_per_kmol[s];
         for (unsigned t=0;t<term_count;++t) element[t]+=weight*global[s][t];
+        bound+=std::abs(weight)*bounds[s];
       }
-      report(elements[e],element);
+      report(elements[e],element,bound);
     }
     out.composition_valid=true;out.composition_revision=generation_;
     out.composition_duration=dt_;out.composition_after_parcel_exchange=after_parcels_;
@@ -144,7 +177,7 @@ class CompositionBalanceLedger {
   }
  private:
   static Status invalid() noexcept { return {StatusCode::invalid_plan,17861}; }
-  static void report(DriverCompositionBalance& out,const Row& row) noexcept {
+  static void report(DriverCompositionBalance& out,const Row& row,long double bound) noexcept {
     const long double defect=row[temporal]+row[transport]+row[pressure]-row[noise]-row[mixing]-row[chemistry];
     long double scale=1e-30L;
     for (unsigned t=temporal;t<term_count;++t) scale=std::max(scale,std::abs(row[t]));
@@ -158,9 +191,34 @@ class CompositionBalanceLedger {
     out.chemistry_source=static_cast<double>(row[chemistry]);
     out.defect=static_cast<double>(defect);
     out.relative_defect=static_cast<double>(std::abs(defect)/scale);
+    out.storage_roundoff_bound=static_cast<double>(bound);
+    out.roundoff_applied=out.relative_defect>=1e-6 && admissible(out);
+  }
+  void storage(std::size_t index,double volume,double before_rho,double after_rho,
+      long double before_y,long double after_y,bool uncertain_y) noexcept {
+    if(!std::isfinite(volume) || volume<=0 || !std::isfinite(before_rho) || before_rho<=0 ||
+        !std::isfinite(after_rho) || after_rho<=0 || !std::isfinite(before_y) || before_y<0 ||
+        !std::isfinite(after_y) || after_y<0) {
+      storage_bounds_[index]=std::numeric_limits<long double>::quiet_NaN();return;
+    }
+    const auto spacing=[](long double value) {
+      return std::numeric_limits<double>::epsilon()*std::abs(value)+
+          std::numeric_limits<double>::denorm_min();
+    };
+    const auto bound=[&](long double rho,long double y) {
+      const long double dv=spacing(volume),dr=spacing(rho),dy=uncertain_y ? spacing(y) : 0;
+      return dv*(rho*y+rho*dy+dr*y+dr*dy)+
+          static_cast<long double>(volume)*(rho*dy+dr*y+dr*dy);
+    };
+    const long double before=static_cast<long double>(volume)*before_rho*before_y;
+    const long double after=static_cast<long double>(volume)*after_rho*after_y;
+    auto& row=rows_[index];
+    row[accepted]+=before;row[current]+=after;row[temporal]+=(after-before)/dt_;
+    storage_bounds_[index]+=(bound(before_rho,before_y)+bound(after_rho,after_y))/dt_;
   }
   const portable::GasIdentity* identity_{};
   std::vector<Row> rows_;
+  std::vector<long double> storage_bounds_;
   std::vector<std::size_t> mapping_,transport_counts_,pressure_counts_;
   std::size_t dependent_{},fields_{};
   RevisionToken generation_{}; double dt_{}; bool after_parcels_{};

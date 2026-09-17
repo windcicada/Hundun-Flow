@@ -835,6 +835,60 @@ bool test_production_enthalpy_assembly_oracle(bool unity_lewis = false,
   certificate=assemble_and_check(increment_oracle,"one ULP enthalpy storage assembles");
   passed &= expect(std::abs(residual.view.unchecked(oracle_cell,0)-increment_oracle)<=
       2e-13*std::abs(increment_oracle),"BE enthalpy storage retains the represented increment");
+  {
+    auto kinetic=make_field(90U,cells,1U,2U,2011U);
+    auto scratch=make_field(91U,cells,1U,2U,2012U);
+    ReductionEngine reductions;
+    auto ledger_status=ReductionEngine::compile(MPI_COMM_SELF,
+        ReductionMode::mpi_allreduce,12U,reductions);
+    DriverConservationReport balance;
+    detail::ProductBoundaryBalanceHistory pending;
+    if(ledger_status)ledger_status=detail::collect_boundary_balance(
+        fixture.equations.enthalpy(),fixture.equations.kernels(),fixture.schemes,
+        fixture.boundary,state,material,as_const(gradients.view),context.bdf,
+        context.mass_flux,{},kinetic.view,scratch.view,1U,{},reductions,balance,pending);
+    const double rate_oracle=increment_oracle*cells.x*cells.y*cells.z;
+    passed &= expect(ledger_status && std::abs(balance.total_energy_bdf_rate-rate_oracle)<=
+        2e-13*std::abs(rate_oracle),
+        "physical energy ledger retains a one-ULP BE enthalpy increment before reduction");
+    if(!ledger_status || std::abs(balance.total_energy_bdf_rate-rate_oracle)>
+        2e-13*std::abs(rate_oracle))std::cerr << "energy increment ledger=" <<
+        balance.total_energy_bdf_rate << " oracle=" << rate_oracle << '\n';
+    const auto check_rates=[&](long double mass_rate,long double energy_rate) {
+      const auto status=detail::collect_boundary_balance(
+          fixture.equations.enthalpy(),fixture.equations.kernels(),fixture.schemes,
+          fixture.boundary,state,material,as_const(gradients.view),context.bdf,
+          context.mass_flux,{},kinetic.view,scratch.view,1U,{},reductions,balance,pending);
+      const long double total_volume=static_cast<long double>(volume)*cells.x*cells.y*cells.z;
+      return status && std::abs(balance.mass_bdf_rate-mass_rate*total_volume)<=
+          2e-13L*std::abs(mass_rate*total_volume) &&
+          std::abs(balance.total_energy_bdf_rate-energy_rate*total_volume)<=
+          2e-13L*std::abs(energy_rate*total_volume);
+    };
+    std::fill(h_trial.bytes.begin(),h_trial.bytes.end(),300000.);
+    const double changed_rho=std::nextafter(.213389,1.);
+    std::fill(rho_trial.bytes.begin(),rho_trial.bytes.end(),changed_rho);
+    const long double mass_rate=(static_cast<long double>(changed_rho)-.213389)*context.bdf.a0;
+    passed &= expect(check_rates(mass_rate,300000.L*mass_rate),
+        "physical ledger retains one-ULP density storage and its enthalpy");
+    std::fill(rho_trial.bytes.begin(),rho_trial.bytes.end(),.213389);
+    state.pressure_reference=std::nextafter(100.,200.);
+    passed &= expect(check_rates(0,-(static_cast<long double>(state.pressure_reference)-100)*context.bdf.a0),
+        "physical ledger retains one-ULP pressure work");
+    state.pressure_reference=100.;
+    auto higher_velocity=make_field(1U,cells,3U,2U,2013U);
+    const double changed_u=std::nextafter(1.,2.);
+    for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x) {
+      velocity.view.unchecked({x,y,z},0)=1.;
+      higher_velocity.view.unchecked({x,y,z},0)=changed_u;
+    }
+    state.velocity.trial=as_const(higher_velocity.view);
+    const long double kinetic_rate=.5L*(static_cast<long double>(changed_u)-1)*
+        (static_cast<long double>(changed_u)+1)*.213389*context.bdf.a0;
+    passed &= expect(check_rates(0,kinetic_rate),
+        "physical ledger retains one-ULP kinetic storage");
+    state.velocity.trial=as_const(velocity.view);
+  }
   context.dt=.1; context.bdf={10.,-10.,0.,1U};
 
   // div(mdot*h): Ux=4 m/s and dh/dx=3 J/(kg m), giving +12 W/m^3.

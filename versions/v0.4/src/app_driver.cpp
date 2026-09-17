@@ -1053,24 +1053,26 @@ static Status run_application(MPI_Comm communicator,
                   << "\"composition\":\"physical_ensemble_mean\",\"revision\":" << balance.composition_revision
                   << ",\"duration_s\":" << balance.composition_duration
                   << ",\"after_parcel_exchange\":" << (balance.composition_after_parcel_exchange ? "true" : "false")
-                  << ",\"species_units\":\"kg,kg/s\",\"element_units\":\"kmol(atoms),kmol(atoms)/s\"";
+                  << ",\"species_units\":\"kg,kg/s\",\"element_units\":\"kmol(atoms),kmol(atoms)/s\""
+                  << ",\"roundoff_rule\":\"fp64-local-storage-v1\"";
           for(unsigned group=0;group<2;++group) {
             payload << (group ? ",\"elements\":[" : ",\"species\":[");
             bool first=true;
             for(const auto& row:(group ? balance.element_balance : balance.species_balance)) {
               if(!first)payload << ',';first=false;
               payload << "{\"name\":\"" << detail::output_json_escape(row.name) << '"';
-              const std::array<std::pair<const char*,double>,10> entries{{
+              const std::array<std::pair<const char*,double>,11> entries{{
                   {"accepted_inventory",row.accepted_inventory},{"current_inventory",row.current_inventory},
                   {"temporal_rate",row.temporal_rate},{"transport_outflow",row.transport_outflow},
                   {"pressure_outflow",row.pressure_outflow},{"noise_source",row.noise_source},
                   {"mixing_source",row.mixing_source},{"chemistry_source",row.chemistry_source},
-                  {"defect",row.defect},{"relative_defect",row.relative_defect}}};
+                  {"defect",row.defect},{"relative_defect",row.relative_defect},
+                  {"storage_roundoff_bound",row.storage_roundoff_bound}}};
               for(const auto& entry:entries) {
                 if(!std::isfinite(entry.second))return Status{StatusCode::invalid_plan,kApplicationDiagnostics};
                 payload << ",\"" << entry.first << "\":" << entry.second;
               }
-              payload << '}';
+              payload << ",\"roundoff_applied\":" << (row.roundoff_applied ? "true" : "false") << '}';
             }
             payload << ']';
           }

@@ -10,7 +10,9 @@ import sys
 
 binary, fixture, mpi, work, validator, compare = map(Path, sys.argv[1:7])
 fields = int(sys.argv[7])
-cold = len(sys.argv)>8 and sys.argv[8]=="cold"
+cold = len(sys.argv)>8 and sys.argv[8] in ("cold","cold300","quiet300")
+uniform=cold and sys.argv[8]=="quiet300"
+temperature=300 if cold and sys.argv[8]!="cold" else 1100
 if work.exists():
     shutil.rmtree(work)
 shutil.copytree(fixture, work)
@@ -18,12 +20,12 @@ model = json.loads((work/'case.json').read_text())
 if cold:
     # An O2/N2 stream has exactly zero chemical heat. Its nonzero
     # oxygen variance exercises the source's zero-heat remix branch directly.
-    model['boundaries']['x_min'].update(temperature=1100,flow_kind='velocity_inlet',
+    model['boundaries']['x_min'].update(temperature=temperature,flow_kind='velocity_inlet',
         velocity=[1,0,0],mass_flow_rate=0)
-    model['boundaries']['x_max']['backflow_temperature']=1100
+    model['boundaries']['x_max']['backflow_temperature']=temperature
     for side in ('x_min','x_max'):
         for scalar in model['boundaries'][side]['scalars']:
-            value=(.23 if side=='x_min' else .232) if scalar['stable_name']=='O2' else 0.
+            value=(.23 if side=='x_min' and not uniform else .232) if scalar['stable_name']=='O2' else 0.
             scalar['value']=value if side=='x_min' else 0.
             scalar['backflow_value']=value
 ensemble = model['reaction']['ensemble']
@@ -40,7 +42,7 @@ ensemble['tcr'] = dict(model='dyn711_v1', mode='experimental', fuel='CH4',
 model['transported_scalars'].append(dict(stable_name='Z', role='passive_scalar',
     molecular_schmidt=.7, turbulent_schmidt=.7))
 for side in ('x_min', 'x_max'):
-    boundary_z=(2*(oxygen-.23)/31.998)/(4/16.043+2*oxygen/31.998) if cold and side=='x_min' else z
+    boundary_z=(2*(oxygen-.23)/31.998)/(4/16.043+2*oxygen/31.998) if cold and not uniform and side=='x_min' else z
     model['boundaries'][side]['scalars'].append(dict(stable_name='Z',
         kind='dirichlet' if side == 'x_min' else 'zero_gradient',
         value=boundary_z if side == 'x_min' else 0, backflow_kind='dirichlet', backflow_value=z))
@@ -55,9 +57,10 @@ call([binary, 'check', work], work/'check.log')
 check = (work/'check.log').read_text()
 assert 'tcr_model=dyn711_v1 tcr_mode=experimental' in check and 'passive_scheme=CN' in check
 max_mass = max_energy = max_element = 0.
+roundoff_applications=0
 
 def run(label, ranks, steps, restart=None):
-    global max_mass, max_energy, max_element
+    global max_mass, max_energy, max_element, roundoff_applications
     output = work.with_name(work.name+label)
     if output.exists():
         shutil.rmtree(output)
@@ -67,7 +70,7 @@ def run(label, ranks, steps, restart=None):
     if restart:
         args += ['--restart', restart/'Restart']
     else:
-        initial='100000,1100,1,0,0,0,0.232,0,0,0,0,0' if cold else \
+        initial=f'100000,{temperature},1,0,0,0,0.232,0,0,0,0,0' if cold else \
             '100000,1100,10,0,0,0.05,0.2,0.01,0.005,0.05,0.001,'+str(z)
         args += ['--initial-state', initial]
     call(args, work/(label+'.log'))
@@ -81,7 +84,17 @@ def run(label, ranks, steps, restart=None):
         mass = abs(p['mass_balance_defect_kg_s']*p['dt'])/p['mass_kg']
         energy = abs(p['total_energy_balance_defect_W']*p['dt'])/max(1.,abs(p['internal_energy_J'])+p['kinetic_energy_J'])
         element = max(v['relative_defect'] for v in p['composition_balance']['elements'])
-        assert mass < 1e-12 and energy < 1e-12 and element < 1e-6, (mass,energy,element)
+        assert mass < 1e-12 and energy < 1e-12, (mass,energy)
+        budget=p['composition_balance']
+        assert budget['roundoff_rule']=='fp64-local-storage-v1'
+        for group in ('species','elements'):
+            for entry in budget[group]:
+                if entry['relative_defect']>=1e-6:
+                    assert uniform and entry['roundoff_applied'] and \
+                        abs(entry['defect'])<=entry['storage_roundoff_bound'],entry
+                    roundoff_applications+=1
+                else:
+                    assert not entry['roundoff_applied'],entry
         max_mass=max(max_mass,mass);max_energy=max(max_energy,energy);max_element=max(max_element,element)
     return output
 
@@ -100,8 +113,11 @@ if cold:
 call(args, work/'compare.log')
 comparison = (work/'compare.log').read_text()
 assert 'dyn711_history clocks=restored' in comparison and 'passed=1' in comparison
+assert not uniform or roundoff_applications>0
 report = dict(fields=fields, steps=1 if cold else 9, source_ranks=2,
     restart_ranks=None if cold else 4, reader_ranks=4, cold_remix=cold,
+    temperature_K=temperature,
+    uniform=uniform, roundoff_applications=roundoff_applications,
     mass_defect=max_mass, energy_defect=max_energy, element_defect=max_element,
     binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
     comparison=comparison, passed=True)

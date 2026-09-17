@@ -121,3 +121,25 @@ CN 接线使用独立的 Restart 方法标记。此前 BE 被动标量检查点�
 归一化缺陷。两者提交门槛均为 128 倍 FP64 epsilon。
 `hundun check` 的 `passive_workspace_bytes` 报告各标量复用的预分配
 校正工作区，输运耗时计入 CN 的 scalar 阶段。
+
+
+### 近零物种／元素收支
+
+`diagnostics.jsonl` 的 `composition_balance.roundoff_rule` 为
+`fp64-local-storage-v1`。每项收支保留原 `defect` 与 `relative_defect`，
+另给出同速率单位的 `storage_roundoff_bound` 和 `roundoff_applied`。
+审核使用 `relative_defect < 1e-6`，或在原相对门槛之外满足
+`abs(defect) <= storage_roundoff_bound`；后者将 `roundoff_applied` 设为 true。
+
+2026-09-17 用户批准此近零收支定义。每个流体单元按实际 V、ρ、
+随机场平均 Y 传播输入分辨率 `u(x)=epsilon_FP64*abs(x)+denorm_min`。
+VρY 的包络用乘积展开计算，避免大数相减；前后两层包络相加后除以
+本步 dt，再按 MPI 求和。随机场物理 Y 为非负值，其平均输入包络
+同样为 `epsilon_FP64*mean(Y)+denorm_min`。总质量的组成 1 作为精确
+常数；余组分采用总质量和独立组分包络之和；元素按原子数／分子量
+加权传播。界限仅用于物种／元素的存储分辨率审核。
+
+质量与总能量时间项在单元内形成增量后汇总，保留原始物理存量的
+输出格式。小变化率使用 `mass_bdf_rate_kg_s` 和
+`total_energy_bdf_rate_W`；直接相减已输出的绝对存量会再次引入
+FP64 抵消误差。

@@ -12891,8 +12891,16 @@ Status ProductDriver::Impl::execute_attempt(
         }
       }
       double cold_E{}, cold_Y{}, cold_reference_E{};
-      double cold_energy_tolerance = reference_stopping
+      const double cold_energy_audit_tolerance = reference_stopping
           ? product.cold_stopping->enthalpy : 1e-10;
+      double cold_energy_tolerance = cold_energy_audit_tolerance;
+      const auto energy_audit_target = [&] {
+        // Retain useful oversolving for partition agreement, while allowing
+        // an actual global-balance recheck at FP64-scale local residuals.
+        // The configured equation tolerance remains the upper bound.
+        return std::min(cold_energy_audit_tolerance,std::max(cold_energy_tolerance,
+            std::numeric_limits<double>::epsilon()));
+      };
       std::vector<double> species_residual_limits;
       bool conservative_energy_requested{};
       // Physical composition follows the complete random-field transport
@@ -14565,7 +14573,7 @@ Status ProductDriver::Impl::execute_attempt(
         // Fixed reference scheduling always audits the requested endpoint.
         // Earlier audits retain endpoint closures required by reacting fields.
         if ((product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) ||
-            product.reaction.interval_enabled() || predicted_energy < cold_energy_tolerance) {
+            product.reaction.interval_enabled() || predicted_energy < energy_audit_target()) {
           if (outer_rank == 0)
             std::fprintf(
                 stdout,
@@ -15160,9 +15168,9 @@ Status ProductDriver::Impl::execute_attempt(
           }
           const bool equations_converged = reference_stopping
               ? report.cold.reference_residual[0] < product.cold_stopping->momentum &&
-                report.cold.reference_residual[1] < cold_energy_tolerance &&
+                report.cold.reference_residual[1] < energy_audit_target() &&
                 report.cold.reference_residual[2] < product.cold_stopping->species
-              : final_global[0] < 1e-10 && final_global[1] < cold_energy_tolerance &&
+              : final_global[0] < 1e-10 && final_global[1] < energy_audit_target() &&
                 final_global[2] < 128 * std::numeric_limits<double>::epsilon();
           if ((reference_stopping ? report.cold.reference_residual[1] : final_global[1]) >=
               cold_energy_tolerance)
@@ -15231,7 +15239,10 @@ Status ProductDriver::Impl::execute_attempt(
 
           // A reaction can drive a small energy flux relative to rho*cp*T/dt.
           // Audit its physical balance before staging any final flux. Tighten
-          // the local energy budget only when that global balance requires it.
+          // the solve target when needed, while retaining the configured
+          // equation gate and this global balance as the acceptance criteria.
+          // Every eligible outer state is audited: a previous solve target
+          // can be stricter than needed for its new, actual global balance.
           if (product.reaction.enabled() &&
               product.equations.enthalpy().conservative_total_energy()) {
             DriverConservationReport candidate_balance;
@@ -15556,12 +15567,9 @@ Status ProductDriver::Impl::execute_attempt(
             for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
               if(pressure_energy_activity.cells.size && !pressure_energy_activity.cells.data[i])continue;
               const Int3 cell{x,y,z};
-              const long double volume=detail::cell_volume(product.equations.kernels(),cell);
-              const long double initial=volume*initial_density.unchecked(cell,0);
-              const long double current=volume*trial_density.unchecked(cell,0);
-              esf_composition_ledger.add_total(Ledger::accepted,initial);
-              esf_composition_ledger.add_total(Ledger::current,current);
-              esf_composition_ledger.add_total(Ledger::temporal,(current-initial)/step.dt);
+              const double volume=detail::cell_volume(product.equations.kernels(),cell);
+              const double initial=initial_density.unchecked(cell,0),current=trial_density.unchecked(cell,0);
+              esf_composition_ledger.add_total_storage(volume,initial,current);
               for(std::size_t c=0;c<species_trial.size();++c) {
                 // Physical composition is the ensemble, rather than the
                 // separately rounded cache used by material queries. Average
@@ -15571,28 +15579,27 @@ Status ProductDriver::Impl::execute_attempt(
                   initial_mean+=esf_ledger_initial_fields[f].unchecked(cell,mapping.data[c]);
                   current_mean+=esf_trial[f].unchecked(cell,mapping.data[c]);
                 }
-                const auto before=initial*(initial_mean/fields);
-                const auto after=current*(current_mean/fields);
-                esf_composition_ledger.add(c,Ledger::accepted,before);
-                esf_composition_ledger.add(c,Ledger::current,after);
-                esf_composition_ledger.add(c,Ledger::temporal,(after-before)/step.dt);
+                esf_composition_ledger.add_storage(c,volume,initial,current,
+                    initial_mean/fields,current_mean/fields);
               }
             }
             status=esf_composition_ledger.finish(product.reductions,conservation);
             if(status)for(const auto& species:conservation.species_balance) {
               if(outer_rank==0)std::fprintf(stdout,
-                  "esf_species_balance species=%s defect_kg_s=%.17g relative=%.17g limit=1e-6 revision=%llu step_committed=0\n",
+                  "esf_species_balance species=%s defect_kg_s=%.17g relative=%.17g limit=1e-6 storage_roundoff_bound=%.17g roundoff_applied=%d revision=%llu step_committed=0\n",
                   species.name.c_str(),species.defect,species.relative_defect,
+                  species.storage_roundoff_bound,int(species.roundoff_applied),
                   static_cast<unsigned long long>(conservation.composition_revision));
-              if(!std::isfinite(species.relative_defect) || species.relative_defect>=1e-6)
+              if(!Ledger::admissible(species))
                 status={StatusCode::numerical_failure,17861};
             }
             if(status)for(const auto& element:conservation.element_balance) {
               if(outer_rank==0)std::fprintf(stdout,
-                  "esf_element_balance element=%s defect_kmol_s=%.17g relative=%.17g limit=1e-6 revision=%llu step_committed=0\n",
+                  "esf_element_balance element=%s defect_kmol_s=%.17g relative=%.17g limit=1e-6 storage_roundoff_bound=%.17g roundoff_applied=%d revision=%llu step_committed=0\n",
                   element.name.c_str(),element.defect,element.relative_defect,
+                  element.storage_roundoff_bound,int(element.roundoff_applied),
                   static_cast<unsigned long long>(conservation.composition_revision));
-              if(!std::isfinite(element.relative_defect) || element.relative_defect>=1e-6)
+              if(!Ledger::admissible(element))
                 status={StatusCode::numerical_failure,17861};
             }
             status=product.reductions.consensus(status);if(!status)return status;

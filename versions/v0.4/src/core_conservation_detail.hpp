@@ -225,7 +225,10 @@ inline Status collect_boundary_balance(
         }
         kinetic.unchecked(cell, 0U) = value;
       }
-  std::array<long double, 15U> sum{};
+  // Temporal rates are reduced independently of the absolute inventories.
+  // Subtracting rounded global energies would erase small resolved changes
+  // before the stiff inverse timestep amplifies the cancellation error.
+  std::array<long double, 17U> sum{};
   sum[12U] = phase.mass_kg_s;
   sum[13U] = phase.energy_w;
   if (!std::isfinite(sum[12U]) || !std::isfinite(sum[13U]))
@@ -283,18 +286,36 @@ inline Status collect_boundary_balance(
           const Int3 cell{x, y, z};
           if (!fluid(cell)) continue;
           const double volume = cell_volume(kernels, cell);
+          std::array<long double,3> r{},h{},p{},k{};
           for (std::size_t layer = 0U; layer < 3U; ++layer) {
             const std::size_t i = layer == 2U && bdf.order == 1U ? 1U : layer;
             const double rho = density[i].unchecked(cell, 0U);
-            double k = 0.0;
+            double kinetic_value = 0.0;
             for (std::uint8_t c = 0U; c < 3U; ++c) {
               const double u = velocity[i].unchecked(cell, c);
-              k += 0.5 * u * u;
+              kinetic_value += 0.5 * u * u;
+              k[layer] += .5L * u * u;
             }
+            r[layer]=rho;h[layer]=enthalpy[i].unchecked(cell,0U);
+            p[layer]=state.eos_pressure(reference[i],pressure[i].unchecked(cell,0U));
             sum[layer] += volume * rho;
             sum[layer + 3U] += volume *
-                (rho * (enthalpy[i].unchecked(cell, 0U) + k) -
+                (rho * (enthalpy[i].unchecked(cell, 0U) + kinetic_value) -
                  state.eos_pressure(reference[i], pressure[i].unchecked(cell, 0U)));
+          }
+          if(bdf.a2==0 && bdf.a1==-bdf.a0) {
+            const long double mass_delta=r[0]-r[1];
+            const long double energy_delta=mass_delta*(h[0]+k[0])+
+                r[1]*((h[0]-h[1])+(k[0]-k[1]))-(p[0]-p[1]);
+            sum[15]+=static_cast<long double>(volume)*bdf.a0*mass_delta;
+            sum[16]+=static_cast<long double>(volume)*bdf.a0*energy_delta;
+          } else {
+            const double coefficient[]{bdf.a0,bdf.a1,bdf.a2};
+            for(unsigned layer=0;layer<3;++layer) {
+              sum[15]+=static_cast<long double>(volume)*coefficient[layer]*r[layer];
+              sum[16]+=static_cast<long double>(volume)*coefficient[layer]*
+                  (r[layer]*(h[layer]+k[layer])-p[layer]);
+            }
           }
           sum[6U] += flux.x.unchecked({x + 1, y, z}) - flux.x.unchecked(cell) +
                      flux.y.unchecked({x, y + 1, z}) - flux.y.unchecked(cell) +
@@ -385,7 +406,7 @@ inline Status collect_boundary_balance(
           }
     }
   }
-  std::array<double, 15U> values{}, global{};
+  std::array<double, 17U> values{}, global{};
   for (std::size_t i = 0U; i < sum.size(); ++i)
     values[i] = static_cast<double>(sum[i]);
   Status status = reductions.checked_sum(
@@ -393,6 +414,9 @@ inline Status collect_boundary_balance(
   if (status)
     status = reductions.checked_sum(
         {values.data() + 8U, 7U}, {global.data() + 8U, 7U}, {});
+  if (status)
+    status = reductions.checked_sum(
+        {values.data() + 15U, 2U}, {global.data() + 15U, 2U}, {});
   if (!status) return status;
   double statistical_global[2]{};
   if(statistical) {
@@ -443,14 +467,8 @@ inline Status collect_boundary_balance(
   report.statistical_enthalpy_source=statistical_global[1];
   report.phase_mass_input = global[12U];
   report.phase_energy_input = global[13U];
-  report.mass_bdf_rate = static_cast<double>(
-      static_cast<long double>(bdf.a0) * global[0U] +
-      static_cast<long double>(bdf.a1) * global[1U] +
-      static_cast<long double>(bdf.a2) * global[2U]);
-  report.total_energy_bdf_rate = static_cast<double>(
-      static_cast<long double>(bdf.a0) * global[3U] +
-      static_cast<long double>(bdf.a1) * global[4U] +
-      static_cast<long double>(bdf.a2) * global[5U]);
+  report.mass_bdf_rate = global[15U];
+  report.total_energy_bdf_rate = global[16U];
   report.mass_balance_defect = report.mass_bdf_rate + global[6U] - global[12U];
   report.total_energy_balance_defect =
       report.total_energy_bdf_rate + static_cast<double>(energy_out);

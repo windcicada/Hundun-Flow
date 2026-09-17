@@ -62,6 +62,33 @@ int main(int argc,char** argv) {
     if(rank==0)ledger.add(0,Ledger::noise,std::numeric_limits<double>::quiet_NaN());
     HUNDUN_CHECK(ledger.finish(reductions,report).code==StatusCode::numerical_failure);
     HUNDUN_CHECK(report.composition_revision==17 && report.species_balance[0].current_inventory==9.75);
+    // Near-zero net flux retains its raw relative defect, with a separately
+    // propagated FP64 storage envelope. A missing physical source remains red.
+    Ledger quiet;
+    constexpr double dt=6.5569904281136158e-7,rho=1.1567;
+    HUNDUN_CHECK(quiet.initialize(identity,{mapping.data(),2},1,2,18,dt,false));
+    quiet.add_total_storage(1./ranks,rho,rho);
+    quiet.add_storage(0,1./ranks,rho,rho,.232,.232);
+    quiet.add_storage(1,1./ranks,rho,rho,0,0);
+    for(unsigned f=0;f<2;++f) {
+      quiet.freeze_transport(0,2e-16/ranks);quiet.freeze_transport(1,0);
+      quiet.add_pressure(0,0);quiet.add_pressure(1,0);
+    }
+    HUNDUN_CHECK(quiet.finish(reductions,report));
+    const auto& small=report.species_balance[0];
+    const double expected_bound=6*std::numeric_limits<double>::epsilon()*rho*.232/dt;
+    HUNDUN_CHECK(small.relative_defect==1 && small.roundoff_applied && Ledger::admissible(small));
+    HUNDUN_CHECK(std::abs(small.storage_roundoff_bound/expected_bound-1)<2e-15);
+    for(const auto& element:report.element_balance)HUNDUN_CHECK(Ledger::admissible(element));
+    quiet.add(0,Ledger::chemistry,1e-3/ranks);
+    quiet.add(1,Ledger::chemistry,1e-20/ranks);
+    HUNDUN_CHECK(quiet.finish(reductions,report));
+    HUNDUN_CHECK(!Ledger::admissible(report.species_balance[0]) &&
+        !report.species_balance[0].roundoff_applied);
+    HUNDUN_CHECK(!Ledger::admissible(report.species_balance[2]) &&
+        !report.species_balance[2].roundoff_applied);
+    if(rank==0)quiet.add_storage(0,-1,rho,rho,.232,.232);
+    HUNDUN_CHECK(quiet.finish(reductions,report).code==StatusCode::numerical_failure);
     if(!rank)std::cout << "composition_balance ranks=" << ranks << " species=3 elements=2 closure=passed candidate_replace=passed rejection=atomic\n";
   });
   MPI_Finalize();return result;
