@@ -116,13 +116,32 @@ call(args, work/'compare.log')
 comparison = (work/'compare.log').read_text()
 assert 'dyn711_history clocks=restored' in comparison and 'passed=1' in comparison
 assert not uniform or roundoff_applications>0
+current_history=None
+if not cold and len(sys.argv)>8:
+    migrated=work.with_name(work.name+'m')
+    if migrated.exists():shutil.rmtree(migrated)
+    call([mpi,'--oversubscribe','--bind-to','none','-n',2,sys.argv[8],
+          work,seed/'Restart',migrated/'Restart'],work/'current-history.log')
+    assert 'model_records=exact' in (work/'current-history.log').read_text()
+    resumed=run('mr',4,1,migrated)
+    evidence=[json.loads(line) for line in (resumed/'evidence.jsonl').read_text().splitlines()]
+    for row in evidence:
+        if 'run_start' in row:
+            row['run_start']['history']['source_signature']=1
+    tampered=work/'current-bad.jsonl'
+    tampered.write_text(''.join(json.dumps(row)+'\n' for row in evidence))
+    denied=subprocess.run([sys.executable,str(validator),'runtime',str(tampered)],
+                          stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    assert denied.returncode!=0,'V6 fabricated time signature was accepted'
+    current_history=dict(version=6,source_ranks=2,restart_ranks=4,model_records='exact',
+                         time_history='rebuild',resumed=str(resumed))
 report = dict(fields=fields, steps=1 if cold else 9, source_ranks=2,
     restart_ranks=None if cold else 4, reader_ranks=4, cold_remix=cold,
     temperature_K=temperature,
     uniform=uniform, roundoff_applications=roundoff_applications,
     mass_defect=max_mass, energy_defect=max_energy, element_defect=max_element,
     binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
-    comparison=comparison, passed=True)
+    comparison=comparison, current_history=current_history, passed=True)
 (work/'result.json').write_text(json.dumps(report,indent=2)+'\n')
 print('dyn711 fields=%d cold_remix=%s mass=%.5g energy=%.5g elements=%.5g passed=1' %
       (fields,cold,max_mass,max_energy,max_element))

@@ -239,6 +239,16 @@ int main() {
   // complete per-cell records through this same typed restore operation.
   ok &= bool(receiver.stage_restore_records(owner.snapshot().values,20));receiver.commit();
   ok &= image(*receiver.dyn711())==before;
+  native.source_format_version=6;
+  native.backward_euler_recovery=true;
+  ok &= bool(receiver.stage_restore(native));receiver.commit();
+  ok &= image(*receiver.dyn711())==before && receiver.dyn711()->statistics_calls()==20;
+  native.backward_euler_recovery=false;
+  ok &= !receiver.stage_restore(native) && image(*receiver.dyn711())==before;
+  native.backward_euler_recovery=true;
+  native.step=21;
+  ok &= !receiver.stage_restore(native) && image(*receiver.dyn711())==before;
+  native.step=20;
   stage(*owner.dyn711(),20,.0005,false);
   ok &= bool(owner.seal());
   owner.commit();

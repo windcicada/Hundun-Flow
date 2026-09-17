@@ -139,6 +139,7 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
   const bool refinement = anchor.history_policy == RestartHistoryPolicy::refine_chemistry;
   if (anchor.transport_source_case != 0U &&
       (anchor.kind != RuntimeRunStartKind::restart || anchor.source_format_version < 3U ||
+       anchor.source_format_version > 5U ||
        (!refinement && (anchor.history_policy != RestartHistoryPolicy::rebuild_method_history ||
                        record.coupling != RuntimeCouplingKind::cn_be)))) return false;
   if (refinement && anchor.transport_source_case == 0U) return false;
@@ -175,10 +176,11 @@ bool valid_runtime_run_start(const RuntimeEvidenceRecord& record) noexcept {
       return false;
     if (anchor.source_format_version != 0U) {
       const bool rebuild = anchor.history_policy == RestartHistoryPolicy::rebuild_method_history;
-      const bool missing = anchor.source_format_version == 1U;
-      if (anchor.source_format_version > 5U ||
+      const bool missing = anchor.source_format_version == 1U || anchor.source_format_version == 6U;
+      if (anchor.source_format_version > 6U ||
+          (refinement && anchor.source_format_version == 6U) ||
           anchor.target_history_signature == 0U ||
-          (anchor.source_format_version < 3U
+          (anchor.source_format_version < 3U || missing
                ? anchor.source_history_signature != 0U
                : anchor.source_history_signature == 0U) ||
           (!rebuild &&

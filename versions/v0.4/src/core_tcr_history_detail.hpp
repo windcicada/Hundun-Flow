@@ -128,11 +128,13 @@ public:
         image.cell_record_bytes != snapshot().record_bytes ||
         image.cell_records.size() != snapshot().values.size)
       return invalid();
-    if ((image.source_format_version == 4) != enabled())
+    const bool model_records=image.source_format_version==4 || image.source_format_version==6;
+    if (model_records != enabled())
       return invalid();
     if (!enabled())
       return {};
-    if (image.source_format_version != 4 || image.backward_euler_recovery)
+    if ((image.source_format_version==4 && image.backward_euler_recovery) ||
+        (image.source_format_version==6 && !image.backward_euler_recovery))
       return invalid();
     return stage_restore_records(
         {image.cell_records.data(), image.cell_records.size()}, image.step);

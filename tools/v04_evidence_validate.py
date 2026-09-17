@@ -947,17 +947,17 @@ def validate_v6_run_start(record: Dict[str, Any],
         refinement = history["policy"] == "refine_chemistry"
         if refinement or "chemistry_source_case" in history:
             require_integer(history.get("chemistry_source_case"), f"{prefix}.chemistry_source_case", 1)
-            if not refinement or version < 3:
+            if not refinement or version not in (3, 4, 5):
                 raise EvidenceError(f"{prefix} has incompatible chemistry refinement")
         if "transport_source_case" in history:
             require_integer(history["transport_source_case"], f"{prefix}.transport_source_case", 1)
-            if not rebuild or version < 3 or record.get("coupling") != "CN_BE":
+            if not rebuild or version not in (3, 4, 5) or record.get("coupling") != "CN_BE":
                 raise EvidenceError(f"{prefix} has incompatible transport recovery")
-        if (kind != "restart" or version not in (1, 2, 3, 4, 5) or
-                (version < 3 and source != 0) or (version >= 3 and source == 0) or
+        if (kind != "restart" or version not in (1, 2, 3, 4, 5, 6) or
+                (version in (1, 2, 6) and source != 0) or (version in (3, 4, 5) and source == 0) or
                 history["policy"] not in ("require_compatible", "rebuild_method_history", "refine_chemistry") or
-                (not rebuild and version != 1 and source != target) or
-                (first and record.get("restart_recovery") is not (version == 1 or rebuild))):
+                (not rebuild and version not in (1, 6) and source != target) or
+                (first and record.get("restart_recovery") is not (version in (1, 6) or rebuild))):
             raise EvidenceError(f"{prefix} has incompatible method/history policy")
     if first and not _v6_close(record["previous_committed_time"],
                                previous_time):
@@ -1005,16 +1005,16 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
             method_history_signature = struct.unpack_from("<Q", data, cursor)[0]
             valid_exact = valid_exact and method_history_signature != 0
         cursor += 8
-    if version in (4, 5):
+    if version in (4, 5, 6):
         if len(data) < cursor + 12:
             valid_exact = False
         else:
             model_identity, cell_record_bytes = struct.unpack_from("<QI", data, cursor)
             valid_exact = valid_exact and model_identity != 0 and (
-                cell_record_bytes != 0 if version == 4 else cell_record_bytes == 0)
+                cell_record_bytes != 0 if version in (4, 6) else cell_record_bytes == 0)
         cursor += 12
     expected_size = cursor + 40 * rank_count + 8
-    if (magic != b"H4MANI01" or version not in (1, 2, 3, 4, 5) or
+    if (magic != b"H4MANI01" or version not in (1, 2, 3, 4, 5, 6) or
             rank_count == 0 or
             min(cells_x, cells_y, cells_z) <= 0 or
             min(plan, schema, geometry) == 0 or
@@ -1037,7 +1037,7 @@ def load_v04_restart_manifest(path: Path) -> Dict[str, Any]:
         "sha256": hashlib.sha256(data).hexdigest(),
         "step": step,
         "time": time,
-        "backward_euler_recovery": version == 1,
+        "backward_euler_recovery": version in (1, 6),
         "source_format_version": version,
         "method_history_signature": method_history_signature,
     }

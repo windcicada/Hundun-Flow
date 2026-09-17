@@ -874,7 +874,7 @@ bool spray_history_repartition(MPI_Comm world, int writers, int readers,
 
 bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
                         const fs::path &directory, bool variable = false,
-                        bool empty = false) {
+                        bool empty = false, bool current_state = false) {
   int rank = 0;
   MPI_Comm_rank(world, &rank);
   MPI_Comm writer = MPI_COMM_NULL, reader = MPI_COMM_NULL;
@@ -892,6 +892,15 @@ bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
     snapshot.method_history_signature = UINT64_C(0x391003);
     snapshot.cell_records = {
         identity, variable ? 0U : 8U, {records.data(), records.size()}};
+    if(current_state) {
+      snapshot.previous_fields={};
+      snapshot.accepted_rate_fields={};
+      snapshot.previous_rate_fields={};
+      snapshot.previous_mass_flux={};
+      snapshot.previous_pressure_reference=0;
+      snapshot.closed_mass_target=0;
+      snapshot.method_history_signature=0;
+    }
     if (variable)
       snapshot.cell_records.variable_cell_bytes = {lengths.data(),
                                                    lengths.size()};
@@ -942,11 +951,16 @@ bool record_repartition(MPI_Comm world, int writer_size, int reader_size,
         image.cell_record_identity == identity &&
         image.cell_record_bytes == (variable ? 0U : 8U) &&
         image.history_compatibility(UINT64_C(0x391003)) ==
-            RestartHistoryCompatibility::compatible;
+            (current_state ? RestartHistoryCompatibility::missing : RestartHistoryCompatibility::compatible);
+    if(current_state)
+      passed &= image.source_format_version==6 && image.backward_euler_recovery &&
+                image.previous_fields.empty() && image.accepted_rate_fields.empty() &&
+                image.previous_rate_fields.empty() && image.previous_mass_flux[0].empty() &&
+                image.method_history_signature==0;
     if (variable)
       passed &= image.cell_record_lengths == lengths &&
                 image.source_format_version == 5U;
-    if (variable && writer_size == reader_size)
+    if ((variable || current_state) && writer_size == reader_size)
       passed &= read_budget_boundaries(reader, directory, expected, image);
     const auto saved = image.cell_records;
     for (int mismatch = 0; mismatch < 2; ++mismatch) {
@@ -1480,6 +1494,9 @@ int main(int argc, char** argv) {
       record_repartition(MPI_COMM_WORLD, 1, 4, base / "records-one-to-four");
   passed &=
       record_repartition(MPI_COMM_WORLD, 4, 1, base / "records-four-to-one");
+  passed &= record_repartition(MPI_COMM_WORLD,1,4,base/"current-one-to-four",false,false,true);
+  passed &= record_repartition(MPI_COMM_WORLD,4,1,base/"current-four-to-one",false,false,true);
+  passed &= record_repartition(MPI_COMM_WORLD,4,4,base/"current-four-to-four",false,false,true);
   passed &= record_repartition(MPI_COMM_WORLD, 1, 4,
                                base / "variable-one-to-four", true);
   passed &= record_repartition(MPI_COMM_WORLD, 4, 1,

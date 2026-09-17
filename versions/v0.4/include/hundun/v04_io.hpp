@@ -289,9 +289,10 @@ struct RestartImage {
   RuntimeSha256Digest source_manifest_sha256{};
   std::vector<RestartImageField> fields;
   std::array<std::vector<double>, 3U> final_mass_flux;
-  // True only for a legacy version-one image whose absent t_{n-1} state is
+  // True for V1 or V6 current-state images whose absent t_{n-1} state is
   // synthesized from t_n.  Callers must insert one backward-Euler recovery
-  // step in that case. False denotes complete V2/V3 source history, not proof
+  // step in that case. V6 preserves fixed model records independently.
+  // False denotes complete V2-V5 source history, not proof
   // of same-method compatibility; use history_compatibility and a separate
   // RestartHistoryPolicy. Callers must not repurpose this file-format fact.
   bool backward_euler_recovery{true};

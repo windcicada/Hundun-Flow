@@ -8121,11 +8121,11 @@ Status ProductDriver::initialize_restart(
       history_compatibility != RestartHistoryCompatibility::compatible)
     status = {StatusCode::invalid_plan, kProductHistoryIncompatible};
   if (status &&
-      ((image.source_format_version == 1U) != image.backward_euler_recovery ||
-       image.source_format_version < 1U || image.source_format_version > 5U ||
-       (image.source_format_version < 3U &&
+      (((image.source_format_version == 1U || image.source_format_version == 6U) != image.backward_euler_recovery) ||
+       image.source_format_version < 1U || image.source_format_version > 6U ||
+       ((image.source_format_version < 3U || image.source_format_version == 6U) &&
         image.method_history_signature != 0U) ||
-       (image.source_format_version >= 3U &&
+       (image.source_format_version >= 3U && image.source_format_version <= 5U &&
         image.method_history_signature == 0U)))
     status = {StatusCode::invalid_plan, kProductInput};
   const auto same_patch = [&](MeshPatch left, MeshPatch right) noexcept {
