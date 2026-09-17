@@ -14,7 +14,8 @@ namespace hundun::v04::detail {
 class DynamicTcrHistory {
 public:
   void configure(PlanFingerprint model, std::size_t cells, std::size_t species,
-                 double initial_cd) {
+                 double initial_cd, std::uint64_t initial_step = 0) {
+    step_=initial_step; discard();
     ns_ = species;
     stride_ = 5 * ns_ + 3;
     width_ = static_cast<std::uint32_t>(24 + 8 * stride_);
@@ -29,7 +30,7 @@ public:
       for (std::size_t s = 0; s < ns_; ++s) p[5*s+2] = p[5*s+3] = 1.;
       std::fill(p + 5*ns_, p + stride_, initial_cd);
     }
-    encode(accepted_, 0, bytes_);
+    encode(accepted_, step_, bytes_);
   }
   std::uint64_t owned_bytes() const noexcept {
     return sizeof(*this) + 8 * (accepted_.capacity() + trial_.capacity()) +

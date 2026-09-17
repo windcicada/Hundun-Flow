@@ -16,12 +16,12 @@ public:
   using Rate = tcr::detail::Dyn711RateState;
   using Clock = tcr::detail::Dyn711Clock;
   void configure(PlanFingerprint model, std::size_t cells, std::size_t species,
-                 double initial_cphi) {
+                 double initial_cphi, std::uint64_t initial_step = 0) {
     ns_ = species;
     width_ = static_cast<std::uint32_t>(40 + 40 * ns_);
     identity_ = (model ^ UINT64_C(0x5443523731310001) ^ ns_) * UINT64_C(1099511628211);
     if (!identity_) identity_ = 1;
-    step_ = calls_ = 0;
+    step_ = initial_step; calls_ = 0;
     discard();
     accepted_.assign(cells * ns_, Rate{});
     trial_ = accepted_;
@@ -32,7 +32,7 @@ public:
     inactive_.resize(cells);
     bytes_.resize(cells * width_);
     trial_bytes_.resize(bytes_.size());
-    encode(accepted_, cphi_, 0, 0, bytes_);
+    encode(accepted_, cphi_, step_, 0, bytes_);
   }
   std::uint64_t owned_bytes() const noexcept {
     return sizeof(*this) + sizeof(Rate) * (accepted_.capacity() + trial_.capacity()) +

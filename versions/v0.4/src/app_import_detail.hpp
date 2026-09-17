@@ -7,5 +7,6 @@ namespace hundun::v04::detail {
 // directory. The compatibility executable retains its historical report path.
 int import_pdf_transfer(const char* case_root, const char* transfer,
                         const char* output, bool legacy_report = false,
-                        unsigned expected_version = 0);
+                        unsigned expected_version = 0,
+                        bool initialize_model_history = false);
 }

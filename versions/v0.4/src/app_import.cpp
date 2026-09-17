@@ -3,6 +3,8 @@
 // Current-state PDF bridge. Missing temporal histories are explicitly rebuilt.
 #include "hundun/v04_app.hpp"
 #include "app_import_detail.hpp"
+#include "core_tcr_dyn711_history_detail.hpp"
+#include "core_tcr_dynamic_history_detail.hpp"
 #include "esf_count_detail.hpp"
 #include "hundun/v04_io.hpp"
 #include "hundun/v04_mesh.hpp"
@@ -471,7 +473,7 @@ Status exact_physical_fields(const RestartImage &image,
   return {};
 }
 int run(const char *case_root, const char *transfer, const char *output,
-        int rank, bool legacy_report, unsigned expected_version) {
+        int rank, bool legacy_report, unsigned expected_version, bool initialize_model_history) {
   const auto comm = MPI_COMM_WORLD;
   auto stage = [&](const char *name, Status s) {
     s = consensus(comm, s);
@@ -532,6 +534,9 @@ int run(const char *case_root, const char *transfer, const char *output,
     if(h.independent.size()!=h.ns-1 || h.passive_mapping.size()!=h.passive_names.size()) return invalid(24110);
     return {};
   });
+  if(s && initialize_model_history &&
+      (!model.reaction.esf || model.reaction.esf->tcr.mode==TcrMode::off ||
+       !dynamic_tcr_model(model.reaction.esf->tcr.model))) s=invalid(24114);
   if (!stage("case", s))
     return 4;
   ThermodynamicsPlan thermo;
@@ -617,7 +622,19 @@ int run(const char *case_root, const char *transfer, const char *output,
          << ",\"source_step\":" << h.step << ",\"source_time_s\":" << h.time
          << ",\"source_dt_s\":" << h.dt
          << ",\"auxiliary\":\"physical_mean_reconstruction\""
-         << ",\"history\":\"current_state_v1_rebuild\",\"species_order\":[";
+         << ",\"history\":\"" << (initialize_model_history ? "current_state_v6_model_initialization" : "current_state_v1_rebuild")
+         << "\",\"model_history_policy\":\"" << (initialize_model_history ? "initialize_target_model" : "source_current_state_only")
+         << "\",\"model_initialization\":";
+    if(initialize_model_history) {
+      const bool dyn=model.reaction.esf->tcr.model==TcrModel::dyn711_v1;
+      file << "{\"model\":\"" << (dyn ? "dyn711_v1" : "cdphyso_dynamic_v1")
+           << "\",\"flow_step\":" << h.step << ",\"initial_kappa\":" << (dyn ? .2 : 1.)
+           << ",\"initial_mixing_coefficient\":" << 2/model.reaction.mixing_c_z
+           << ",\"statistics_calls\":";
+      if(dyn)file << 0;else file << "null";
+      file << ",\"flow_step_mod4\":" << h.step%4 << '}';
+    } else file << "null";
+    file << ",\"species_order\":[";
     for (std::size_t i=0; i<h.names.size(); ++i)
       file << (i ? "," : "") << std::quoted(h.names[i]);
     file << "],\"independent_species_order\":[";
@@ -649,6 +666,27 @@ int run(const char *case_root, const char *transfer, const char *output,
   if (s)
     s = local_stage(comm,
                     [&] { return fill(h, expected, geometry, b, image); });
+  if(s && initialize_model_history) s=local_stage(comm,[&]() -> Status {
+    std::size_t cells=0;
+    if(!checked_product(image.patch.cells,cells) || !expected.cell_record_identity) return invalid(24114);
+    detail::Dyn711History dyn711;
+    detail::DynamicTcrHistory dynamic;
+    RestartCellRecordsView records;
+    const double initial_coefficient=2/model.reaction.mixing_c_z;
+    // The target compiler owns the identity; these typed constructors supply
+    // its documented fresh statistics at the imported global flow step.
+    if(model.reaction.esf->tcr.model==TcrModel::dyn711_v1) {
+      dyn711.configure(0,cells,h.ns,initial_coefficient,h.step);records=dyn711.snapshot();
+    } else {
+      dynamic.configure(0,cells,h.ns,initial_coefficient,h.step);records=dynamic.snapshot();
+    }
+    if(records.record_bytes!=expected.cell_record_bytes) return invalid(24114);
+    image.cell_record_identity=expected.cell_record_identity;
+    image.cell_record_bytes=records.record_bytes;
+    image.cell_records.assign(records.values.data,records.values.data+records.values.size);
+    image.source_format_version=6;
+    return {};
+  });
   if (!stage("image", s))
     return 6;
   b = Block{};
@@ -678,10 +716,12 @@ int run(const char *case_root, const char *transfer, const char *output,
   RestartImage back;
   RestartReadReport report;
   s = RestartReader::load(comm, output, expected, back, &report);
-  if (s && (back.source_format_version != 1 || !back.backward_euler_recovery ||
+  if (s && (back.source_format_version != (initialize_model_history ? 6U : 1U) || !back.backward_euler_recovery ||
             back.step != h.step || back.time != h.time || back.dt != h.dt))
     s = invalid(24109);
   if (s && back.fields.size() != image.fields.size())
+    s = invalid(24109);
+  if (s && initialize_model_history && back.cell_records!=image.cell_records)
     s = invalid(24109);
   for (std::size_t f = 0; s && f < image.fields.size(); ++f) {
     if (image.fields[f].role != RestartFieldRole::stochastic_transport &&
@@ -717,18 +757,18 @@ int run(const char *case_root, const char *transfer, const char *output,
   if (rank == 0)
     std::cout << "PDF_IMPORT_OK step=" << h.step << " fields=" << h.nf
               << " species=" << h.ns
-              << " physical_readback=exact auxiliary=physical_mean_reconstruction history=V1_recovery" << std::endl;
+              << " physical_readback=exact auxiliary=physical_mean_reconstruction history=" << (initialize_model_history ? "V6_model_initialization" : "V1_recovery") << std::endl;
   return 0;
 }
 } // namespace
 
 namespace hundun::v04::detail {
 int import_pdf_transfer(const char* case_root, const char* transfer,
-                        const char* output, bool legacy_report, unsigned expected_version) {
+                        const char* output, bool legacy_report, unsigned expected_version, bool initialize_model_history) {
   int rank=0;
   if (MPI_Comm_rank(MPI_COMM_WORLD,&rank)!=MPI_SUCCESS) return 2;
   try {
-    return run(case_root,transfer,output,rank,legacy_report,expected_version);
+    return run(case_root,transfer,output,rank,legacy_report,expected_version,initialize_model_history);
   } catch (const std::exception& error) {
     std::cerr << "rank=" << rank << " exception=" << error.what() << std::endl;
     MPI_Abort(MPI_COMM_WORLD,11);

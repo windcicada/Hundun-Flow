@@ -847,3 +847,31 @@ check/gas-history-native-test.log（2/2）及外部校验器自检。
 新格式的伪造时间签名由外部校验器拒绝；现有模型记录与原检查点
 均保持各自来源。首步物理推进通过后曾定位到内外证据校验器的
 旧版本范围判断，最终闭环已同时覆盖这些报告路径。
+
+### I4：源历史覆盖与显式模型初始化（2026-09-17）
+
+逐项核对原始 dyn711 的 finish/start_pdf/config_boffin：PDF 文件
+保存随机场焓与组分；普通统计文件保存 atime、fstat、ftau、fschem
+和 phase_average。累计反应率 sum_w/sum_w0、dstep_ww0、init_ww0
+及 dyn_C_count 属于另行分配的模型状态，配置阶段将计数置零。
+运行版 finish 与 GTMC／624CF 冻结副本的 SHA-256 一致，另调用
+TCR_ROOT_STATE_V2 写入器保存共享 s_kappa 根输运状态。该状态
+与 dyn711 的逐物种累计统计分别对应不同模型；两份冻结输入的
+root_transport 均为 off。来源与哈希登记在 gas-history-source.json。
+
+正式 PDF 导入增加显式 `--model-history initialize`，支持
+dyn711_v1 和 cdphyso_dynamic_v1。类型化构造器在源流动步号建立
+目标初始统计，导入器采用目标编译器的模型身份并核对记录宽度，
+V6 写入／读回逐字节检查这些记录。dyn711 使用零次统计、κ=0.2；
+cdphyso_dynamic 使用 κ=1 和流动步号的更新相位；两者采用
+配置的 2/c_z 作为初始混合系数。JSON 报告逐项记录这些定义。
+
+省略显式选项时，动态模型继续要求完整历史来源；原生 V6 路径
+保留已有统计。当前态导入、模型初始化与原生历史恢复分别保持
+清楚身份。完整实场输入、守恒映射及实际续算按后续入口接续。
+
+定向检查涵盖两种动态模型的全部 512 格初始记录、两种名称顺序
+的被动标量、2 进程导入与 4 进程第 17→18 步推进。省略初始化
+选项、格式不匹配及非有限标量保持严格准入。证据为
+gas-history-init.json 与 check/gas-history-init-test.log（1/1）；
+原生历史保留继续使用上一节点 gas-history.json 的独立证据。

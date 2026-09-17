@@ -100,7 +100,7 @@ void usage(int rank) {
               << "  hundun status <run-dir>\n"
               << "  hundun restart-info <restart-dir> [--metadata-only]\n"
               << "  hundun import <transfer-dir> --format pdf-transfer-v1|pdf-transfer-v2"
-                 " --case <native-case-dir> --output <fresh-restart-dir>\n"
+                 " --case <native-case-dir> --output <fresh-restart-dir> [--model-history initialize]\n"
               << "  hundun validate <case-dir> [--dry-plan]\n"
               << "  hundun check <case-dir> [--dry-plan]\n"
               << "  hundun run <case-dir> --output <run-dir> --steps <N>"
@@ -241,20 +241,23 @@ int main(int argc, char* argv[]) {
     const char* format=nullptr;
     const char* case_root=nullptr;
     const char* output=nullptr;
+    const char* model_history=nullptr;
     bool parsed=true;
     for (int index=3; index<argc && parsed; index+=2) {
       if (index+1>=argc) { parsed=false; break; }
       const std::string_view flag{argv[index]};
       const char** target=flag=="--format" ? &format :
                           flag=="--case" ? &case_root :
-                          flag=="--output" ? &output : nullptr;
+                          flag=="--output" ? &output :
+                          flag=="--model-history" ? &model_history : nullptr;
       if (!target || *target) { parsed=false; break; }
       *target=argv[index+1];
     }
     if (parsed && format && case_root && output &&
+        (!model_history || std::string_view{model_history}=="initialize") &&
         (std::string_view{format}=="pdf-transfer-v1" || std::string_view{format}=="pdf-transfer-v2"))
       result=hundun::v04::detail::import_pdf_transfer(case_root,argv[2],output,false,
-          std::string_view{format}=="pdf-transfer-v1" ? 1U : 2U);
+          std::string_view{format}=="pdf-transfer-v1" ? 1U : 2U,model_history!=nullptr);
     else usage(rank);
   } else if ((argc==3 || argc==4) && std::string_view{argv[1]}=="restart-info" &&
              (argc==3 || std::string_view{argv[3]}=="--metadata-only")) {
