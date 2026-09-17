@@ -106,6 +106,7 @@ struct Header {
   double time{}, dt{}, pressure{};
   std::size_t nf{}, ns{};
   std::vector<std::string> names;
+  std::vector<std::size_t> independent;
 };
 Status invalid(unsigned detail = 24104) {
   return {StatusCode::invalid_case, detail};
@@ -207,16 +208,19 @@ Status reconstruct(const Header &h, const ThermodynamicsPlan &thermo,
   std::vector<double> solid(h.ns, 0);
   const auto oxygen = std::find(h.names.begin(), h.names.end(), "O2");
   const auto nitrogen = std::find(h.names.begin(), h.names.end(), "N2");
-  if (oxygen == h.names.end() || nitrogen != h.names.end() - 1)
+  if (oxygen == h.names.end() || nitrogen == h.names.end())
     return invalid();
   // Match the native material's air definition; solid rows carry a valid 295 K
   // state.
   solid[oxygen - h.names.begin()] =
       .21 * 31.998 / (.21 * 31.998 + .79 * 28.014);
-  solid.back() = 1 - solid[oxygen - h.names.begin()];
+  solid[nitrogen - h.names.begin()] = 1 - solid[oxygen - h.names.begin()];
+  std::vector<double> independent(h.independent.size());
+  for (std::size_t s = 0; s < independent.size(); ++s)
+    independent[s] = solid[h.independent[s]];
   double sh = 0, cp = 0, r = 0;
   auto status =
-      thermo.mixture_enthalpy(295, {solid.data(), h.ns - 1}, sh, cp, r);
+      thermo.mixture_enthalpy(295, {independent.data(), independent.size()}, sh, cp, r);
   if (!status)
     return status;
   for (std::size_t i = 0; i < count; ++i) {
@@ -231,7 +235,7 @@ Status reconstruct(const Header &h, const ThermodynamicsPlan &thermo,
     for (unsigned c = 0; c < 4; ++c)
       if (!std::isfinite(b.flow[4 * i + c]))
         return invalid(24106);
-    if (p <= 0 || !std::isfinite(b.reference_density[i]) ||
+    if (thermo.eos_pressure(p) <= 0 || !std::isfinite(b.reference_density[i]) ||
         b.reference_density[i] <= 0)
       return invalid(24106);
     for (auto &pdf : b.pdf) {
@@ -252,13 +256,15 @@ Status reconstruct(const Header &h, const ThermodynamicsPlan &thermo,
         b.mean[i * stride + c] += row[c] / h.nf;
     }
     const double *row = b.mean.data() + i * stride;
+    for (std::size_t s = 0; s < independent.size(); ++s)
+      independent[s] = row[h.independent[s]];
     ThermoState state;
-    status = thermo.evaluate(p, row[h.ns], {row, h.ns - 1}, {}, state);
+    status = thermo.evaluate(p, row[h.ns], {independent.data(), independent.size()}, {}, state);
     if (!status)
       return status;
     b.density[i] = state.rho;
     MolecularTransportState molecular;
-    status = transport.evaluate(state.temperature, {row, h.ns - 1}, molecular);
+    status = transport.evaluate(state.temperature, {independent.data(), independent.size()}, molecular);
     if (!status)
       return status;
     double conductivity = 0, gamma = 0;
@@ -367,7 +373,7 @@ Status fill(const Header &h, const RestartExpected &e,
           case RestartFieldRole::independent_species:
             if (d.components != 1 || scalar >= h.ns - 1)
               return invalid();
-            *v = b.mean[i * (h.ns + 1) + scalar];
+            *v = b.mean[i * (h.ns + 1) + h.independent[scalar]];
             break;
           case RestartFieldRole::stochastic_field:
             if (d.components != h.ns + 1 || stochastic >= h.nf)
@@ -467,9 +473,17 @@ int run(const char *case_root, const char *transfer, const char *output,
   for (std::size_t i = 0; s && i < h.ns; ++i) {
     if (model.thermophysics.species[i].stable_name != h.names[i])
       s = invalid(24110);
-    if (i < h.ns - 1 && model.transported_scalars[i].stable_name != h.names[i])
-      s = invalid(24110);
   }
+  s = local_stage(comm, [&]() -> Status {
+    if (!s) return s;
+    for (const auto& scalar : model.transported_scalars) {
+      const auto found = std::find(h.names.begin(), h.names.end(), scalar.stable_name);
+      if (scalar.role != TransportedScalarRole::species || found == h.names.end())
+        return invalid(24110);
+      h.independent.push_back(static_cast<std::size_t>(found-h.names.begin()));
+    }
+    return {};
+  });
   if (!stage("case", s))
     return 4;
   ThermodynamicsPlan thermo;
@@ -515,12 +529,13 @@ int run(const char *case_root, const char *transfer, const char *output,
                                 b.flow[4 * i + 1] * b.flow[4 * i + 1] +
                                 b.flow[4 * i + 2] * b.flow[4 * i + 2]);
         const double eh = b.mean[i * (h.ns + 1) + h.ns] + ke;
+        const double eos_pressure = thermo.eos_pressure(b.flow[4 * i + 3]);
         audit[0] += b.reference_density[i] * v;
         audit[1] += b.density[i] * v;
-        audit[2] += (b.reference_density[i] * eh - b.flow[4 * i + 3]) * v;
-        audit[3] += (b.density[i] * eh - b.flow[4 * i + 3]) * v;
+        audit[2] += (b.reference_density[i] * eh - eos_pressure) * v;
+        audit[3] += (b.density[i] * eh - eos_pressure) * v;
         audit[4] +=
-            std::abs(b.reference_density[i] * eh - b.flow[4 * i + 3]) * v;
+            std::abs(b.reference_density[i] * eh - eos_pressure) * v;
         audit[5] += 1;
       }
   MPI_Allreduce(MPI_IN_PLACE, audit.data(), 6, MPI_DOUBLE, MPI_SUM, comm);
@@ -533,6 +548,24 @@ int run(const char *case_root, const char *transfer, const char *output,
          << ",\"native_energy_J\":" << audit[3]
          << ",\"relative_energy_change\":" << (audit[3] - audit[2]) / audit[4]
          << ",\"fluid_cells\":" << audit[5]
+         << ",\"pressure_model\":\""
+         << (thermo.fixed_pressure_pa()>0 ? "fixed_thermodynamic" : "coupled_eos")
+         << "\",\"mechanical_pressure_reference_pa\":" << h.pressure
+         << ",\"thermodynamic_pressure_pa\":";
+    if (thermo.fixed_pressure_pa()>0) file << thermo.fixed_pressure_pa();
+    else file << "null";
+    file << ",\"mechanical_pressure\":\"flow.f64 component 3 = reference + pi\""
+         << ",\"energy_definition\":\"rho*(mean_h+kinetic)-p_eos\""
+         << ",\"source_step\":" << h.step << ",\"source_time_s\":" << h.time
+         << ",\"source_dt_s\":" << h.dt
+         << ",\"auxiliary\":\"physical_mean_reconstruction\""
+         << ",\"history\":\"current_state_v1_rebuild\",\"species_order\":[";
+    for (std::size_t i=0; i<h.names.size(); ++i)
+      file << (i ? "," : "") << std::quoted(h.names[i]);
+    file << "],\"independent_species_order\":[";
+    for (std::size_t i=0; i<h.independent.size(); ++i)
+      file << (i ? "," : "") << std::quoted(h.names[h.independent[i]]);
+    file << ']'
          << ",\"scope\":\"fixed PDF p/h/Y, canonical native mean EOS versus "
             "COAST startup harmonic PDF EOS\"}\n";
     if (!file)

@@ -109,6 +109,32 @@ field0 正权 EOS 查询采用 `M=sum(max(Y0,0))`、`Y+=max(Y0,0)/M`
 工作缓冲区为 64 KiB；`--metadata-only` 读取并核对清单。
 具体算例的模型兼容性由原生恢复入口结合 case.json 检查。
 
+PDF 当前态迁移提供独立转换入口：
+
+```sh
+mpirun -np 4 ./v04_pdf_import CASE TRANSFER SEED
+mpirun -np 4 ./hundun run CASE --restart SEED --output RUN --steps 1
+```
+
+TRANSFER 使用 `state.txt` 的 `HUNDUN_PDF_TRANSFER 1` 头，依次记录
+`nx ny nz step time dt pressure_reference field_count species_count`，
+再列出完整物种名称。物种顺序对应算例热物性资产；独立组分通过名称
+映射，余组分使用算例定义。
+`flow.f64` 每格保存 `u v w p_mechanical`，`rho_ref.f64` 保存参考
+密度；`pdf0.f64` 等文件每格保存完整 Y 和 h；`fluid.u8` 使用
+0／1 固体／流体标记。浮点载荷为小端 FP64，单元按 x 最快排列。
+
+机械压力定义为 `pressure_reference+pi`。固定热力学压力配置下，
+机械压力按源值保存，EOS 和 `rho*(h+K)-p_eos` 迁移账本共同使用
+p0；耦合 EOS 配置使用正的绝对压力。固体格重建静止 295 K 空气
+占位状态，转换器要求物种目录包含 O2 和 N2。
+
+转换报告 `TRANSFER/native.json` 记录压力分工、完整／独立物种顺序、
+源步号及时间、物性重建前后库存。该入口从随机场物理均值重建 field0，
+以 V1 当前态检查点登记方法历史恢复；原版完整统计历史、守恒网格
+映射和统一 `hundun import` 入口按专项后续条目接续。首步推进还需
+源场与目标边界、时间步及物理模型匹配。
+
 气相时间配置支持 `time.convective_cfl_definition`：`outgoing_sum` 为
 单元向外面质量通量之和，`directional_max` 为六个面质量通量绝对值
 的最大值；两者均乘以 `dt/(rho*V)`。原版气相对齐输入显式选用

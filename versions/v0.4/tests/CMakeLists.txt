@@ -1349,6 +1349,13 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
   set_tests_properties(v04_kerosene_flow PROPERTIES PROCESSORS 4 TIMEOUT 120)
   add_executable(v04_kerosene_esf_test integration/kerosene_esf_test.cpp)
   target_link_libraries(v04_kerosene_esf_test PRIVATE hundun_v04_core MPI::MPI_C)
+  add_test(NAME v04_pdf_pressure_import_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/pdf_pressure_test.py"
+      "$<TARGET_FILE:v04_pdf_import>" "$<TARGET_FILE:hundun>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ker-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/ip")
+  set_tests_properties(v04_pdf_pressure_import_cli PROPERTIES TIMEOUT 120 PROCESSORS 4 RUN_SERIAL TRUE)
   add_executable(v04_esf_output_test integration/esf_output_test.cpp)
   target_link_libraries(v04_esf_output_test PRIVATE hundun_v04_core MPI::MPI_C)
   add_test(NAME v04_esf_output_cli
