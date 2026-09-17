@@ -25,6 +25,10 @@ struct Dyn711FlowTimes {
 };
 Dyn711FlowTimes dyn711_flow_times(double k, double epsilon, double density,
                                 double molecular_viscosity) noexcept;
+// Use the local k=0 limit when the SGS dynamic viscosity leaves the FP64
+// equation coefficient unchanged. The SGS state itself remains intact.
+Dyn711FlowTimes dyn711_resolved_flow_times(double k, double epsilon, double density,
+    double molecular_viscosity, double kinematic_sgs_viscosity) noexcept;
 
 struct Dyn711Control {
   bool available{}, upper_branch{}, linear_endpoint{};

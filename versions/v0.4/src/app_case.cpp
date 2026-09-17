@@ -913,12 +913,20 @@ bool parse_esf(yyjson_val* value, EsfSpec& out) {
   else if (*mode == "validated") out.tcr.mode = TcrMode::validated;
   else return false;
   if (yyjson_obj_get(tcr, "model")) {
-    if (!object_has_exact_keys(tcr, {"mode", "model", "fuel", "weak_rate_threshold"})) return false;
     const auto model = string_value(tcr, "model"), fuel = string_value(tcr, "fuel");
-    if (model != "cdphyso_dynamic_v1" || !fuel ||
+    const bool dyn711=model=="dyn711_v1";
+    if (!(dyn711 ? object_has_exact_keys(tcr, {"mode", "model", "fuel", "weak_rate_threshold", "mixture_fraction", "oxidizer_oxygen_mass_fraction"})
+                  : object_has_exact_keys(tcr, {"mode", "model", "fuel", "weak_rate_threshold"}))) return false;
+    if ((!dyn711 && model != "cdphyso_dynamic_v1") || !fuel ||
         !finite_real(yyjson_obj_get(tcr, "weak_rate_threshold"), out.tcr.weak_rate_threshold)) return false;
-    out.tcr.model = TcrModel::cdphyso_dynamic_v1;
+    out.tcr.model = dyn711 ? TcrModel::dyn711_v1 : TcrModel::cdphyso_dynamic_v1;
     out.tcr.fuel = std::string(*fuel);
+    if(dyn711) {
+      const auto mixture=string_value(tcr,"mixture_fraction");
+      if(!mixture || !finite_real(yyjson_obj_get(tcr,"oxidizer_oxygen_mass_fraction"),
+          out.tcr.oxidizer_oxygen_mass_fraction))return false;
+      out.tcr.mixture_fraction=std::string(*mixture);
+    }
     return detail::valid_esf_spec(out);
   }
   if (!object_has_exact_keys(tcr, {"mode", "reactants", "progress_weights", "initialization_sign", "weak_rate_threshold"})) return false;
@@ -2560,7 +2568,8 @@ Status serialize_model(const ValidatedModel& model,
         writer.u32(static_cast<std::uint32_t>(e.initial_species_offsets.size()));
         for (double v : e.initial_species_offsets) writer.real(v);
         writer.byte(static_cast<std::uint8_t>(e.tcr.mode) |
-                    (e.tcr.model == TcrModel::cdphyso_dynamic_v1 ? 0x10 : 0));
+                    (e.tcr.model == TcrModel::cdphyso_dynamic_v1 ? 0x10 :
+                     e.tcr.model == TcrModel::dyn711_v1 ? 0x20 : 0));
         writer.u32(static_cast<std::uint32_t>(e.tcr.reactants.size()));
         for (const auto& name : e.tcr.reactants)
           if (!writer.text(name)) return invalid_case(detail_wire);
@@ -2568,8 +2577,12 @@ Status serialize_model(const ValidatedModel& model,
         for (double v : e.tcr.progress_weights) writer.real(v);
         writer.u32(static_cast<std::uint32_t>(e.tcr.initialization_sign + 1));
         writer.real(e.tcr.weak_rate_threshold);
-        if (e.tcr.model == TcrModel::cdphyso_dynamic_v1 && !writer.text(e.tcr.fuel))
+        if (dynamic_tcr_model(e.tcr.model) && !writer.text(e.tcr.fuel))
           return invalid_case(detail_wire);
+        if (e.tcr.model == TcrModel::dyn711_v1) {
+          if(!writer.text(e.tcr.mixture_fraction))return invalid_case(detail_wire);
+          writer.real(e.tcr.oxidizer_oxygen_mass_fraction);
+        }
       }
     }
     if (model.spray && !detail::write_spray(writer, *model.spray))
@@ -2858,8 +2871,10 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         e.initial_species_offsets.resize(count);
         for (double& v : e.initial_species_offsets) if (!reader.real(v)) return invalid_case(detail_wire);
         if (!reader.byte(tcr_mode) || !reader.u32(count) || count > 255) return invalid_case(detail_wire);
-        e.tcr.model = (tcr_mode & 0x10) ? TcrModel::cdphyso_dynamic_v1 : TcrModel::reactant_root_v1;
-        e.tcr.mode = static_cast<TcrMode>(tcr_mode & ~0x10);
+        if((tcr_mode & 0x30)==0x30)return invalid_case(detail_wire);
+        e.tcr.model = (tcr_mode & 0x20) ? TcrModel::dyn711_v1 :
+            (tcr_mode & 0x10) ? TcrModel::cdphyso_dynamic_v1 : TcrModel::reactant_root_v1;
+        e.tcr.mode = static_cast<TcrMode>(tcr_mode & ~0x30);
         e.tcr.reactants.resize(count);
         for (auto& name : e.tcr.reactants) if (!reader.text(name)) return invalid_case(detail_wire);
         if (!reader.u32(count) || count > 255) return invalid_case(detail_wire);
@@ -2867,7 +2882,10 @@ Status deserialize_model(const std::vector<std::uint8_t>& bytes,
         for (double& v : e.tcr.progress_weights) if (!reader.real(v)) return invalid_case(detail_wire);
         if (!reader.u32(sign) || sign > 2 || !reader.real(e.tcr.weak_rate_threshold)) return invalid_case(detail_wire);
         e.tcr.initialization_sign = int(sign) - 1;
-        if (e.tcr.model == TcrModel::cdphyso_dynamic_v1 && !reader.text(e.tcr.fuel))
+        if (dynamic_tcr_model(e.tcr.model) && !reader.text(e.tcr.fuel))
+          return invalid_case(detail_wire);
+        if (e.tcr.model == TcrModel::dyn711_v1 &&
+            (!reader.text(e.tcr.mixture_fraction) || !reader.real(e.tcr.oxidizer_oxygen_mass_fraction)))
           return invalid_case(detail_wire);
       }
       if (r.mode == ReactionMode::none || !detail::valid_reaction_spec(r) ||
@@ -3573,9 +3591,12 @@ Status compile_on_root(const fs::path& case_root, int rank,
         hash.integer(e.initial_species_offsets.size());
         for (double v : e.initial_species_offsets) hash.real(v);
         hash.integer(static_cast<std::uint8_t>(e.tcr.mode));
-        if (e.tcr.model == TcrModel::cdphyso_dynamic_v1) {
-          hash.text("cdphyso_dynamic_v1");
+        if (dynamic_tcr_model(e.tcr.model)) {
+          hash.text(e.tcr.model==TcrModel::dyn711_v1 ? "dyn711_v1" : "cdphyso_dynamic_v1");
           hash.text(e.tcr.fuel);
+          if(e.tcr.model==TcrModel::dyn711_v1) {
+            hash.text(e.tcr.mixture_fraction);hash.real(e.tcr.oxidizer_oxygen_mass_fraction);
+          }
         }
         hash.integer(e.tcr.reactants.size());
         for (const auto& name : e.tcr.reactants) hash.text(name);

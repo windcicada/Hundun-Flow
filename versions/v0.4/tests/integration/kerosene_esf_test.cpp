@@ -2,6 +2,7 @@
 // Small native 624CF gas fixture: full histories and absolute face-flux audit.
 #include "hundun/v04_app.hpp"
 #include "../../src/models_tcr_dynamic_detail.hpp"
+#include "../../src/core_tcr_dyn711_history_detail.hpp"
 #include <mpi.h>
 #include <algorithm>
 #include <cmath>
@@ -13,8 +14,9 @@ using namespace hundun::v04;
 int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);struct End{~End(){MPI_Finalize();}} end;int rank{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);
   const auto all=[&](bool value){int ok=value;MPI_Allreduce(MPI_IN_PLACE,&ok,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);return bool(ok);};
-  if(argc!=4 && (argc!=5 || (std::string_view(argv[4])!="--wall" && std::string_view(argv[4])!="--evaporated")))return 2;
-  const bool wall=argc==5;
+  if(argc!=4 && (argc!=5 || (std::string_view(argv[4])!="--wall" && std::string_view(argv[4])!="--evaporated" && std::string_view(argv[4])!="--collapsed")))return 2;
+  const bool collapsed=argc==5 && std::string_view(argv[4])=="--collapsed";
+  const bool wall=argc==5 && !collapsed;
   const bool evaporated=wall && std::string_view(argv[4])=="--evaporated";
   ValidatedModel model;auto s=CaseCompiler::load_and_compile(MPI_COMM_WORLD,argv[1],model);
   CompiledCasePlan plan;if(s)s=ProductCompiler::compile(MPI_COMM_WORLD,model,argv[1],plan);
@@ -89,9 +91,46 @@ int main(int argc,char** argv) {
     }
     records_equal &= offset==a.cell_records.size();
   }
+  if(model.reaction.esf && model.reaction.esf->tcr.model==TcrModel::dyn711_v1 &&
+      a.cell_record_bytes==b.cell_record_bytes && a.cell_records.size()==b.cell_records.size()) {
+    const auto ns=model.thermophysics.species.size(),width=40+40*ns;
+    const auto real=[](const std::uint8_t *p) {
+      std::uint64_t bits{};for(unsigned j=0;j<8;++j)bits|=std::uint64_t(p[j])<<(8*j);
+      double value;std::memcpy(&value,&bits,8);return value;
+    };
+    records_equal=!model.spray && a.cell_record_bytes==width && a.cell_records.size()%width==0;
+    if(records_equal) {
+      detail::Dyn711History left,right;
+      const auto count=a.cell_records.size()/width;
+      left.configure(1,count,ns,2);right.configure(1,count,ns,2);
+      records_equal=bool(left.restore({a.cell_records.data(),a.cell_records.size()},a.step)) &&
+          bool(right.restore({b.cell_records.data(),b.cell_records.size()},b.step));
+      left.commit();right.commit();
+      records_equal &= left.statistics_calls()==a.step && right.statistics_calls()==b.step;
+      for(std::size_t i=0;i<count;++i) {
+        const auto *x=a.cell_records.data()+i*width,*y=b.cell_records.data()+i*width;
+        records_equal &= std::equal(x,x+32,y);
+        for(std::size_t j=32;j<width;j+=8) {
+          if(j>=40 && (j-40)%40==32)records_equal &= std::equal(x+j,x+j+8,y+j);
+          else {
+            const double av=real(x+j),bv=real(y+j);
+            const double error=std::abs(av-bv)/std::max({1.,std::abs(av),std::abs(bv)});
+            records_equal &= std::isfinite(av) && std::isfinite(bv) && error<1e-11;
+            if(error>1e-11 && error>history_error)
+              std::printf("dyn711_history_difference rank=%d cell=%zu byte=%zu left=%.17g right=%.17g relative=%.17g global=%zu,%zu,%zu\n",
+                  rank,i,j,av,bv,error,i%a.patch.cells.x+a.patch.begin.x,
+                  (i/a.patch.cells.x)%a.patch.cells.y+a.patch.begin.y,
+                  i/(a.patch.cells.x*a.patch.cells.y)+a.patch.begin.z);
+            history_error=std::max(history_error,error);
+          }
+        }
+      }
+    }
+    if(!rank)std::printf("dyn711_history clocks=restored rates_roots_cphi_limit=1e-11 valid=%d\n",int(records_equal));
+  }
   MPI_Allreduce(MPI_IN_PLACE,&history_error,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE,&kappa_roundoff_bound,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
-  if(!rank && model.reaction.esf && model.reaction.esf->tcr.model==TcrModel::cdphyso_dynamic_v1)
+  if(!rank && model.reaction.esf && dynamic_tcr_model(model.reaction.esf->tcr.model))
     std::printf("dynamic_tcr_compare discrete=exact parcels=exact history_relative=%.17g rate_cd_limit=1e-11 kappa_roundoff_bound=%.17g\n",history_error,kappa_roundoff_bound);
   const bool metadata=a.step==b.step && a.time==b.time && a.dt==b.dt && a.method_history_signature==b.method_history_signature && a.plan==b.plan && a.schema==b.schema && a.geometry==b.geometry && a.source_format_version==b.source_format_version && !a.backward_euler_recovery && !b.backward_euler_recovery && a.controller_state==b.controller_state && a.pressure_reference==b.pressure_reference && a.previous_pressure_reference==b.previous_pressure_reference && a.closed_mass_target==b.closed_mass_target && records_equal &&
       a.cell_record_lengths==b.cell_record_lengths &&
@@ -197,6 +236,24 @@ int main(int argc,char** argv) {
   };
   if(!all(role_count(RestartFieldRole::stochastic_field)==model.reaction.esf->fields &&
           role_count(RestartFieldRole::stochastic_auxiliary)==1))return 8;
+  if(collapsed) {
+    const RestartImageField *first=nullptr;
+    bool same=true;double spread{};
+    for(const auto &field:a.fields)if(field.role==RestartFieldRole::stochastic_field) {
+      if(!first) {first=&field;continue;}
+      if(field.values.size()!=first->values.size()) {same=false;continue;}
+      for(std::size_t i=0;i<field.values.size();++i) {
+        const double x=field.values[i],y=first->values[i];
+        const double error=std::abs(x-y)/std::max({1.,std::abs(x),std::abs(y)});
+        same &= std::isfinite(x) && std::isfinite(y) && error<1e-13;
+        spread=std::max(spread,error);
+      }
+    }
+    const bool valid=all(same && first && model.reaction.esf->tcr.model==TcrModel::dyn711_v1);
+    MPI_Allreduce(MPI_IN_PLACE,&spread,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+    if(!rank)std::printf("dyn711_remix physical_fields_collapsed=%d relative_spread=%.17g\n",int(valid),spread);
+    if(!valid)return 10;
+  }
   double maximum_flux_difference{};unsigned long long total{};
   const auto fields=[&](const char* level,const std::vector<RestartImageField>& x,const std::vector<RestartImageField>& y) {
     if(!all(x.size()==y.size()))return false;

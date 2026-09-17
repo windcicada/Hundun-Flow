@@ -23,6 +23,17 @@ Dyn711FlowTimes dyn711_flow_times(double k, double epsilon, double density,
           static_cast<double>(flow)};
 }
 
+Dyn711FlowTimes dyn711_resolved_flow_times(double k, double epsilon, double density,
+    double molecular_viscosity, double kinematic_sgs_viscosity) noexcept {
+  const auto raw = dyn711_flow_times(k, epsilon, density, molecular_viscosity);
+  if (!raw.available || !std::isfinite(kinematic_sgs_viscosity) ||
+      kinematic_sgs_viscosity < 0) return {};
+  const double effective_viscosity = molecular_viscosity + density * kinematic_sgs_viscosity;
+  if (!std::isfinite(effective_viscosity)) return {};
+  return effective_viscosity == molecular_viscosity ?
+      dyn711_flow_times(0, epsilon, density, molecular_viscosity) : raw;
+}
+
 Dyn711Tick dyn711_tick(Dyn711Clock c) noexcept {
   if (c.rate_intervals > 8 || c.cphi_count > 12 ||
       (c.cphi_count > 0 && c.cphi_count < 6)) return {};

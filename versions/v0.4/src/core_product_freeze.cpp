@@ -3734,7 +3734,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   const bool implicit_esf = model.reaction.mode == ReactionMode::esf_tpdf &&
       model.reaction.esf && (model.reaction.esf->tcr.mode == TcrMode::off ||
                             model.reaction.esf->tcr.mode == TcrMode::shadow ||
-                            model.reaction.esf->tcr.model == TcrModel::cdphyso_dynamic_v1);
+                            dynamic_tcr_model(model.reaction.esf->tcr.model));
   const bool unsupported_cold = cold_model &&
       ((model.reaction.mode != ReactionMode::none &&
         model.reaction.mode != ReactionMode::finite_rate_mean &&
@@ -5809,6 +5809,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     const auto &tcr=model.reaction.esf->tcr;
     candidate->summary.tcr_mode=tcr.mode;
     if(tcr.mode!=TcrMode::off)candidate->summary.tcr_model=
+        tcr.model==TcrModel::dyn711_v1 ? "dyn711_v1" :
         tcr.model==TcrModel::cdphyso_dynamic_v1 ? "cdphyso_dynamic_v1" : "reactant_root_v1";
   }
   candidate->summary.evaporation_model = !model.spray ? "none" :
@@ -15755,7 +15756,11 @@ Status ProductDriver::Impl::execute_attempt(
           // Terminal energy accounting consumes its equation scratch first.
           // Passive transport then reuses that storage with the same flux.
           phase_timer.phase(1);
-          status=solve_cold_passives(cold_final_flux);
+          status=product.esf.seed_dyn711_mixture(
+              {esf_trial.data(),product.fields.esf_fields.size()},
+              {passive_trial.data(),passive_trial.size()});
+          status=product.reductions.consensus(status);
+          if(status)status=solve_cold_passives(cold_final_flux);
           status=product.reductions.consensus(status);
           if(!status)return status;
           phase_timer.phase(9);
@@ -16208,6 +16213,16 @@ Status ProductDriver::Impl::execute_attempt(
           if (product.spray.enabled()) {
             status = product.spray.preflight_commit();
             if (status) pending_closed_mass_target = attempt_closed_mass_target;
+          }
+          if(product.esf.dyn711()) {
+            // Terminal statistics contain collectives: agree local participant
+            // preflight before every rank enters the statistics branch.
+            status=product.reductions.consensus(status);
+            if(status)status=product.esf.finish_dyn711(
+                product.reaction,product.turbulence,{esf_trial.data(),product.fields.esf_fields.size()},
+                as_const(esf_auxiliary),{passive_trial.data(),passive_trial.size()},
+                as_const(trial_density),as_const(molecular_viscosity),as_const(velocity_gradient));
+            status=product.reductions.consensus(status);
           }
           const auto prepare_status =
               transaction.collective_prepare(communicator, status, prepared);

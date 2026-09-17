@@ -1,0 +1,167 @@
+{
+  "scope": "dyn711 native CN/BE wiring and approved equation-resolved SGS limit; gas G0-G4/I1-I4 remains in progress",
+  "date": "2026-09-17",
+  "base_commit": "c66f5c6",
+  "reference_statistics_sha256": "31208e34befcabdf9fdfcfb744cb8f53b25b4d5db94b329082b6f49acf9d24a3",
+  "method": "dyn711-v1;mass-filter;local-sgs-times-v1;resolved-sgs-k-limit-v1;physical-mean-psr-ph;single-interval-conservative-remix;terminal-statistics-v1;bilger-cn-v1",
+  "rule": "FP64 mu+rho*nu_t == mu uses k=0 for TCR times only; zero dissipation retains infinite time",
+  "original_failure": {
+    "cell": [
+      6,
+      3,
+      0
+    ],
+    "step": 9,
+    "ranks": [
+      2,
+      4
+    ],
+    "selected_kappa": [
+      0.9999982573017666,
+      0.37094456555844474
+    ],
+    "nu_t_m2_s": [
+      4.332264381968902e-22,
+      4.972176509199209e-22
+    ],
+    "k_m2_s2": [
+      6.030383578352085e-16,
+      6.610474907196156e-16
+    ],
+    "flow_s": [
+      5.367514137905589e-06,
+      5.619750812945664e-06
+    ],
+    "chemical_s": 0.0005588998884404509,
+    "seed": "check/o8s/Restart",
+    "case": "check/o8",
+    "failed_restarts": [
+      "check/o8r/Restart",
+      "check/o8x/Restart"
+    ],
+    "minor_arithmetic_check": "check/gas-dyn-minors.json"
+  },
+  "original_checkpoint_replay": {
+    "method_identity": "existing pre-release identity retained for same-checkpoint replay before adding final marker",
+    "outputs": [
+      "check/dk2/Restart",
+      "check/dk4/Restart"
+    ],
+    "comparison": [
+      "dyn711_history clocks=restored rates_roots_cphi_limit=1e-11 valid=1",
+      "dynamic_tcr_compare discrete=exact parcels=exact history_relative=0 rate_cd_limit=1e-11 kappa_roundoff_bound=0",
+      "kerosene_esf_compare step=9 dt=6.5569904281136158e-07 metadata=exact field_worst=1.3939256094592985e-14 field_limit=1e-11 flux_abs_max_kg_s=6.9388939039072284e-18 flux_abs_limit_kg_s=1e-11 values=102016 passed=1"
+    ],
+    "passed": true
+  },
+  "native_runs": [
+    {
+      "fields": 4,
+      "steps": 9,
+      "source_ranks": 2,
+      "restart_ranks": 4,
+      "cold_remix": false,
+      "mass_defect": 1.7231093837497386e-16,
+      "energy_defect": 2.3390653940225536e-14,
+      "element_defect": 3.5410161399276885e-10,
+      "binary_sha256": "5cbdda6c6be89a4beb98193963c7e5e3c6ec6c22ab84fd7e182431a950db8c02",
+      "passed": true,
+      "comparison_summary": [
+        "dyn711_history clocks=restored rates_roots_cphi_limit=1e-11 valid=1",
+        "dynamic_tcr_compare discrete=exact parcels=exact history_relative=0 rate_cd_limit=1e-11 kappa_roundoff_bound=0",
+        "kerosene_esf_compare step=9 dt=6.5569904281136158e-07 metadata=exact field_worst=1.4694769998755496e-15 field_limit=1e-11 flux_abs_max_kg_s=6.9388939039072284e-18 flux_abs_limit_kg_s=1e-11 values=69248 passed=1"
+      ],
+      "case_sha256": "c94da0ceb57c7541201a1ed0b0c1d36d1a5e2be07fcaf02a182e0128cf5bbb69",
+      "fixture": "versions/v0.4/tests/fixtures/jl4-flow",
+      "result": "b3/versions/v0.4/tests/d4/result.json",
+      "reader_ranks": 4
+    },
+    {
+      "fields": 8,
+      "steps": 9,
+      "source_ranks": 2,
+      "restart_ranks": 4,
+      "reader_ranks": 4,
+      "cold_remix": false,
+      "mass_defect": 1.5989587429649865e-16,
+      "energy_defect": 2.3307639433208608e-14,
+      "element_defect": 3.5410161399276885e-10,
+      "binary_sha256": "3403d90604fb4f6cff951d3a71f2ab54d6dee4e69700db669721e1783712090d",
+      "passed": true,
+      "comparison_summary": [
+        "dyn711_history clocks=restored rates_roots_cphi_limit=1e-11 valid=1",
+        "dynamic_tcr_compare discrete=exact parcels=exact history_relative=0 rate_cd_limit=1e-11 kappa_roundoff_bound=0",
+        "kerosene_esf_compare step=9 dt=6.5569904281136158e-07 metadata=exact field_worst=1.3939256094592985e-14 field_limit=1e-11 flux_abs_max_kg_s=6.9388939039072284e-18 flux_abs_limit_kg_s=1e-11 values=102016 passed=1"
+      ],
+      "case_sha256": "85df1e0a7baebe37db031d295904ca20af4a3b878be42599e2ab9f7f21438872",
+      "fixture": "versions/v0.4/tests/fixtures/jl4-flow",
+      "result": "b3/versions/v0.4/tests/d8/result.json"
+    },
+    {
+      "fields": 16,
+      "steps": 9,
+      "source_ranks": 2,
+      "restart_ranks": 4,
+      "cold_remix": false,
+      "mass_defect": 1.4485515289599113e-16,
+      "energy_defect": 2.3491612142517857e-14,
+      "element_defect": 3.54219754436498e-10,
+      "binary_sha256": "5cbdda6c6be89a4beb98193963c7e5e3c6ec6c22ab84fd7e182431a950db8c02",
+      "passed": true,
+      "comparison_summary": [
+        "dyn711_history clocks=restored rates_roots_cphi_limit=1e-11 valid=1",
+        "dynamic_tcr_compare discrete=exact parcels=exact history_relative=0 rate_cd_limit=1e-11 kappa_roundoff_bound=0",
+        "kerosene_esf_compare step=9 dt=6.5569904281136158e-07 metadata=exact field_worst=1.3939256094591819e-14 field_limit=1e-11 flux_abs_max_kg_s=6.9388939039072284e-18 flux_abs_limit_kg_s=1e-11 values=167552 passed=1"
+      ],
+      "case_sha256": "69cedf349276ffe735af499396b00ee0e5ce02c16e47b7aae8eca55b8bfd23a6",
+      "fixture": "versions/v0.4/tests/fixtures/jl4-flow",
+      "result": "b3/versions/v0.4/tests/d16/result.json",
+      "reader_ranks": 4
+    },
+    {
+      "fields": 4,
+      "steps": 1,
+      "source_ranks": 2,
+      "restart_ranks": null,
+      "reader_ranks": 4,
+      "cold_remix": true,
+      "mass_defect": 2.7838930787223854e-17,
+      "energy_defect": 5.386334317935045e-17,
+      "element_defect": 3.7147846405263746e-09,
+      "binary_sha256": "3403d90604fb4f6cff951d3a71f2ab54d6dee4e69700db669721e1783712090d",
+      "passed": true,
+      "comparison_summary": [
+        "dyn711_history clocks=restored rates_roots_cphi_limit=1e-11 valid=1",
+        "dynamic_tcr_compare discrete=exact parcels=exact history_relative=0 rate_cd_limit=1e-11 kappa_roundoff_bound=0",
+        "dyn711_remix physical_fields_collapsed=1 relative_spread=0",
+        "kerosene_esf_compare step=1 dt=6.5569904281136158e-07 metadata=exact field_worst=0 field_limit=1e-11 flux_abs_max_kg_s=0 flux_abs_limit_kg_s=1e-11 values=69248 passed=1"
+      ],
+      "case_sha256": "0c9606dff13598b6b376c93589b8dcb68d49c7d15f29e0a2369d73e06dcef108",
+      "fixture": "versions/v0.4/tests/fixtures/jl4-flow",
+      "result": "b3/versions/v0.4/tests/dc/result.json"
+    }
+  ],
+  "tests": {
+    "unit_mpi": "check/gas-resolved-unit-test.log: first four tests pass; 300 K remix failure tracked below",
+    "native": "check/gas-native-final-test.log: app_case, 4/8/16, existing JL4 pass; 300 K remix failure tracked below",
+    "remix_1100": "check/gas-native-remix-1100-test.log",
+    "final_collective_preflight": "check/gas-native-commit-test.log: 8-field and remix pass"
+  },
+  "final_binary_sha256": "3403d90604fb4f6cff951d3a71f2ab54d6dee4e69700db669721e1783712090d",
+  "followup": [
+    {
+      "scope": "300 K uniform O2/N2",
+      "symptom": "net-balance denominator reports relative defect 1 for absolute species defect about 2e-16 to 7e-16 kg/s",
+      "evidence": "check/gas-resolved-unit-test.log"
+    },
+    {
+      "scope": "300 K O2/N2 with inlet composition contrast",
+      "symptom": "terminal equation residual remains around 1e-16 and outer iteration cap rejects",
+      "evidence": "check/gas-native-final-test.log"
+    },
+    {
+      "scope": "full G3",
+      "work": "finite heat-release remix trajectory, real GTMC dynamic run, complete time-order and BE scheduling"
+    }
+  ]
+}

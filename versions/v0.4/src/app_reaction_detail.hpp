@@ -15,11 +15,19 @@ inline bool valid_esf_spec(const EsfSpec& e) {
   const auto& t = e.tcr;
   if (!std::isfinite(t.weak_rate_threshold) || t.weak_rate_threshold <= 0 ||
       t.initialization_sign < -1 || t.initialization_sign > 1) return false;
-  if (t.model == TcrModel::cdphyso_dynamic_v1)
+  const auto valid_name=[](const std::string &name) {
+    return !name.empty() && name.size()<=255 && name.find('\0')==std::string::npos;
+  };
+  if (dynamic_tcr_model(t.model))
     return (t.mode == TcrMode::experimental || t.mode == TcrMode::shadow) &&
-        !t.fuel.empty() && t.fuel.size() <= 255 && t.fuel.find('\0') == std::string::npos &&
+        valid_name(t.fuel) &&
+        (t.model==TcrModel::dyn711_v1 ? valid_name(t.mixture_fraction) &&
+            std::isfinite(t.oxidizer_oxygen_mass_fraction) &&
+            t.oxidizer_oxygen_mass_fraction>0 && t.oxidizer_oxygen_mass_fraction<=1
+            : t.mixture_fraction.empty() && t.oxidizer_oxygen_mass_fraction==0) &&
         t.reactants.empty() && t.progress_weights.empty() && t.initialization_sign == 0;
-  if (t.model != TcrModel::reactant_root_v1 || !t.fuel.empty()) return false;
+  if (t.model != TcrModel::reactant_root_v1 || !t.fuel.empty() || !t.mixture_fraction.empty() ||
+      t.oxidizer_oxygen_mass_fraction!=0) return false;
   if (t.mode == TcrMode::off)
     return t.reactants.empty() && t.progress_weights.empty() && t.initialization_sign == 0;
   if ((t.mode != TcrMode::shadow && t.mode != TcrMode::experimental && t.mode != TcrMode::validated) ||

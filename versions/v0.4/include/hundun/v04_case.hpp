@@ -131,7 +131,10 @@ enum class ReactionMode : std::uint8_t {
 };
 
 enum class TcrMode : std::uint8_t { off, shadow, experimental, validated };
-enum class TcrModel : std::uint8_t { reactant_root_v1, cdphyso_dynamic_v1 };
+enum class TcrModel : std::uint8_t { reactant_root_v1, cdphyso_dynamic_v1, dyn711_v1 };
+constexpr bool dynamic_tcr_model(TcrModel model) noexcept {
+  return model == TcrModel::cdphyso_dynamic_v1 || model == TcrModel::dyn711_v1;
+}
 struct TcrSpec {
   TcrMode mode{TcrMode::off};
   std::vector<std::string> reactants;
@@ -140,6 +143,8 @@ struct TcrSpec {
   double weak_rate_threshold{1e-12};
   TcrModel model{TcrModel::reactant_root_v1};
   std::string fuel;
+  std::string mixture_fraction; // Name of the conservative CN passive scalar.
+  double oxidizer_oxygen_mass_fraction{}; // Bilger reference for dyn711.
 };
 struct EsfSpec {
   std::uint32_t fields{2};

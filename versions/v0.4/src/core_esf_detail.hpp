@@ -51,8 +51,9 @@ public:
         (model.time.scheme != TimeScheme::backward_euler &&
          !(model.time.scheme == TimeScheme::cn_be &&
            (spec_.tcr.mode == TcrMode::off || spec_.tcr.mode == TcrMode::shadow ||
-            spec_.tcr.model == TcrModel::cdphyso_dynamic_v1))) ||
-        spec_.tcr.mode == TcrMode::validated)
+            dynamic_tcr_model(spec_.tcr.model)))) ||
+        spec_.tcr.mode == TcrMode::validated ||
+        (dyn711() && model.time.scheme!=TimeScheme::cn_be))
       return invalid();
     if (!spec_.initial_species_offsets.empty() &&
         spec_.initial_species_offsets.size() != spec_.fields * (ns_ - 1))
@@ -83,7 +84,8 @@ public:
     const std::size_t per_cell =
         sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5) +
         (spec_.tcr.mode!=TcrMode::experimental || dynamic_tcr() ? sizeof(ColdPressureRow)+sizeof(double) : 0) +
-        (dynamic_tcr() ? 32 * (5*ns_+3) + 48 :
+        (dyn711() ? 2*(sizeof(tcr::detail::Dyn711RateState)*ns_+40+40*ns_)+
+             8*(2*ns_+3)+ns_+2 : dynamic_tcr() ? 32 * (5*ns_+3) + 48 :
          tcr ? 2 * (sizeof(tcr::detail::History) +
                     ProductTcrHistory::record_bytes)
              : 0);
@@ -96,7 +98,8 @@ public:
         std::size_t(cells.z + 1) * cells.x * cells.y : 0;
     const auto extra_bytes = (thermal_count + face_count +
         2*spec_.fields*stride_ + 6*spec_.fields + 1 + stride_) * sizeof(double) +
-        (common_transport_ ? (ns_ - 1) * sizeof(ConstFieldView) : 0);
+        (common_transport_ ? (ns_ - 1) * sizeof(ConstFieldView) : 0) +
+        (dyn711() ? ns_*(sizeof(double)+sizeof(std::uint8_t)) : 0);
     const auto maximum_bytes = model.mesh.limits.max_memory_bytes_per_rank;
     if (count_ > SIZE_MAX / per_cell || extra_bytes > maximum_bytes ||
         count_ * per_cell > maximum_bytes - extra_bytes)
@@ -124,7 +127,35 @@ public:
         else if(names[s]=="O2" || s==fuel_)mixing_groups_[s]=tcr::detail::MixingGroup::reactant;
       }
       mixing_groups_[ns_]=tcr::detail::MixingGroup::product;
-      tcr_history.configure_dynamic(gas.fingerprint(),count_,ns_,2/c_z_);
+      if(dyn711()) {
+        const auto &identity=gas.gas_identity();
+        const auto ne=identity.element_names.size();
+        mixture_weights_.assign(ns_,0.);noble_.assign(ns_,0);
+        for(std::size_t q=0;q<ns_;++q) {
+          for(std::size_t e=0;e<ne;++e) {
+            const auto &element=identity.element_names[e];
+            const double factor=element=="C" ? 2 : element=="H" ? .5 : element=="O" ? -1 : 0;
+            mixture_weights_[q]+=factor*identity.element_counts[q*ne+e]/
+                identity.molecular_weights_kg_per_kmol[q];
+          }
+          noble_[q]=names[q]=="N2" || names[q]=="H2O" || names[q]=="CO2";
+        }
+        mixture_offset_=2*spec_.tcr.oxidizer_oxygen_mass_fraction/
+            identity.molecular_weights_kg_per_kmol[dynamic_groups_[1]];
+        const double scale=mixture_weights_[fuel_]+mixture_offset_;
+        if(!std::isfinite(scale) || scale<=0)return invalid();
+        for(double &v:mixture_weights_)v/=scale;
+        mixture_offset_/=scale;
+        mixture_scalar_=SIZE_MAX;std::size_t passive{};
+        for(const auto &scalar:model.transported_scalars)
+          if(scalar.role==TransportedScalarRole::passive_scalar) {
+            if(scalar.stable_name==spec_.tcr.mixture_fraction)mixture_scalar_=passive;
+            ++passive;
+          }
+        if(mixture_scalar_==SIZE_MAX)return invalid();
+        dyn_rates_.resize(count_*(2*ns_+1));
+        tcr_history.configure_dyn711(gas.fingerprint(),count_,ns_,2/c_z_);
+      } else tcr_history.configure_dynamic(gas.fingerprint(),count_,ns_,2/c_z_);
     } else if (tcr)
       tcr_history.configure(gas.fingerprint(), count_,
                             spec_.tcr.initialization_sign);
@@ -274,7 +305,7 @@ public:
         tcr_history.owned_bytes() +
         (dynamic_plan_ ? dynamic_plan_->owned_bytes() : 0) +
         mixing_groups_.capacity()*sizeof(tcr::detail::MixingGroup) +
-        spec_.tcr.fuel.capacity() + 1 +
+        spec_.tcr.fuel.capacity() + spec_.tcr.mixture_fraction.capacity() + noble_.capacity() + 2 +
         transport_rows_.capacity()*sizeof(ColdPressureRow) +
         (transport_pc_ ? sizeof(ColdPressureDilu)+transport_pc_->owned_payload_bytes() : 0) +
         reactants_.capacity() * sizeof(std::size_t) +
@@ -289,23 +320,26 @@ public:
          {&rates_, &gradients_, &scratch_, &mass_divergence_, &tuple_, &means_,
           &noise_bounds_, &noise_, &reactor_density_, &transport_carrier_density_,
           &independent_, &diffusion_, &enthalpies_, &query_rates_, &thermal_coordinate_,
-          &field_rates_, &field_pressures_, &field_densities_})
+          &field_rates_, &field_pressures_, &field_densities_, &dyn_rates_, &mixture_weights_})
       bytes += v->capacity() * sizeof(double);
     return bytes + wiener_.capacity()*sizeof(std::array<double,3>);
   }
   bool enabled() const noexcept { return bool(workspace_); }
-  bool dynamic_tcr() const noexcept { return spec_.tcr.model==TcrModel::cdphyso_dynamic_v1; }
+  bool dyn711() const noexcept { return spec_.tcr.model==TcrModel::dyn711_v1; }
+  bool dynamic_tcr() const noexcept { return dynamic_tcr_model(spec_.tcr.model); }
   bool implicit_transport() const noexcept { return enabled() && (spec_.tcr.mode!=TcrMode::experimental || dynamic_tcr()); }
   std::vector<ColdPressureRow>& transport_rows() noexcept { return transport_rows_; }
   ColdPressureDilu& transport_preconditioner() noexcept { return *transport_pc_; }
   double mixing_cd() const noexcept { return 2/c_z_; }
   double mixing_cd(std::size_t cell,std::size_t component) const noexcept {
     if(!dynamic_tcr() || spec_.tcr.mode==TcrMode::shadow)return mixing_cd();
+    if(dyn711())return tcr_history.dyn711()->cphi(cell);
     const auto *p=tcr_history.dynamic()->accepted(cell)+5*ns_;
     return tcr::detail::dynamic_group_cd({p[0],p[1],p[2]},mixing_groups_[component]);
   }
   double mixing_control(std::size_t cell,std::size_t component) const noexcept {
     if(!dynamic_tcr() || spec_.tcr.mode==TcrMode::shadow)return 1.;
+    if(dyn711())return tcr_history.dyn711()->accepted(cell,component==ns_ ? fuel_ : component).effective;
     const auto species=component==ns_ ? product_species_ : component;
     return tcr_history.dynamic()->accepted(cell)[5*species+3];
   }
@@ -319,10 +353,77 @@ public:
   }
   Status finish_dynamic(Span<const FieldView> fields,ConstFieldView auxiliary,
       ConstFieldView density,std::uint64_t step) noexcept {
+    if(dyn711())return {}; // Terminal pressure/transport state owns this model's statistics.
     return dynamic_tcr() && dynamic_plan_ ? dynamic_plan_->finish(
         *tcr_history.dynamic(),fields,auxiliary,density,
         immersed_ ? immersed_->cell_activity() : Span<const std::uint8_t>{},step) :
         dynamic_tcr() ? invalid() : Status{};
+  }
+  Status seed_dyn711_mixture(Span<const FieldView> fields,Span<FieldView> passives) noexcept {
+    if(!dyn711())return {};
+    if(fields.size!=spec_.fields || !fields.data || !passives.data || mixture_scalar_>=passives.size)
+      return invalid();
+    auto &mixture=passives.data[mixture_scalar_];
+    if(!valid_cell_view(as_const(mixture),cells_,0,1,0))return invalid();
+    std::size_t i{};
+    for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x,++i) {
+      if(!active(i))continue;
+      long double value=mixture_offset_;
+      for(std::size_t q=0;q<ns_;++q)for(std::size_t f=0;f<spec_.fields;++f)
+        value+=mixture_weights_[q]*static_cast<long double>(fields.data[f].unchecked({x,y,z},q))/spec_.fields;
+      if(!std::isfinite(value))return numerical();
+      mixture.unchecked({x,y,z},0)=static_cast<double>(value);
+    }
+    return {};
+  }
+  Status finish_dyn711(const ProductReactionSources &gas,const TurbulencePlan &turbulence,
+      Span<const FieldView> fields,ConstFieldView auxiliary,Span<const FieldView> passives,
+      ConstFieldView density,ConstFieldView viscosity,ConstFieldView velocity_gradient) noexcept {
+    if(!dyn711())return {};
+    if(!dynamic_plan_ || fields.size!=spec_.fields || !fields.data ||
+        !passives.data || mixture_scalar_>=passives.size)return invalid();
+    // All pressure corrections have finished. Reuse their immutable seed arena
+    // for terminal physical means; no persistent per-cell mean copy is needed.
+    correction_seed_ready_=false;
+    const auto view=[&](double *data,std::uint8_t components) {
+      FieldView v;
+      v.base=data;v.interior=cells_;v.components=components;
+      v.stride_y=cells_.x;v.stride_z=std::size_t(cells_.x)*cells_.y;v.component_stride=count_;
+      v.field=1;v.revision=transport_revision_.input_revision;
+      v.storage_identity=reinterpret_cast<StorageIdentity>(data);
+      v.revision_domain=reinterpret_cast<RevisionDomainIdentity>(this);
+      return v;
+    };
+    auto physical=view(gradients_.data(),static_cast<std::uint8_t>(ns_));
+    std::size_t i{};
+    for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x,++i) {
+      for(std::size_t q=0;q<ns_;++q) {
+        long double mean{};
+        for(std::size_t f=0;f<spec_.fields;++f)mean+=
+            fields.data[f].unchecked({x,y,z},q)/static_cast<long double>(spec_.fields);
+        physical.unchecked({x,y,z},q)=static_cast<double>(mean);
+      }
+      gradients_[ns_*count_+i]=0.; // Explicit absent-OH coordinate for reduced mechanisms.
+    }
+    const auto activity=immersed_ ? immersed_->cell_activity() : Span<const std::uint8_t>{};
+    const auto &mw=gas.gas_identity().molecular_weights_kg_per_kmol;
+    const Dyn711StatisticsInput input{as_const(physical),as_const(view(dyn_rates_.data(),ns_)),
+        as_const(view(dyn_rates_.data()+ns_*count_,ns_)),
+        as_const(view(dyn_rates_.data()+2*ns_*count_,1)),density,viscosity,velocity_gradient,
+        {mw.data(),mw.size()},activity,transport_dt_,spec_.tcr.weak_rate_threshold};
+    auto status=dynamic_plan_->stage_rates(*tcr_history.dyn711(),turbulence,input);
+    if(!status)return status;
+    const auto component=[](ConstFieldView v,std::size_t q) {
+      v.base+=q*v.component_stride;v.components=1;return v;
+    };
+    const auto zero=as_const(view(gradients_.data()+ns_*count_,1));
+    const auto mixture=as_const(passives.data[mixture_scalar_]);
+    const auto oh=dynamic_groups_[2];
+    const std::array<ConstFieldView,3> means{mixture,component(as_const(physical),fuel_),
+        oh<ns_ ? component(as_const(physical),oh) : zero};
+    const std::array<ConstFieldView,3> coordinates{mixture,component(auxiliary,fuel_),
+        oh<ns_ ? component(auxiliary,oh) : zero};
+    return dynamic_plan_->finish(*tcr_history.dyn711(),means,coordinates,density,activity);
   }
   double frozen_noise_source(std::size_t cell,std::size_t field,std::size_t component) const noexcept {
     return rates_[slot(cell,field,component)];
@@ -676,7 +777,7 @@ public:
                      communicator)!=MPI_SUCCESS) return {StatusCode::mpi_failure,10215};
     if(invalid_input) return invalid();
     if(dynamic_tcr()) {
-      const auto begun=tcr_history.dynamic()->begin(step);
+      const auto begun=dyn711() ? tcr_history.dyn711()->begin(step) : tcr_history.dynamic()->begin(step);
       if(!begun)return begun;
     }
     // Freeze the transport's extensive carrier before any chemistry. It is
@@ -695,6 +796,26 @@ public:
     if(MPI_Allreduce(MPI_IN_PLACE,&invalid_input,1,MPI_UNSIGNED,MPI_MAX,communicator)!=MPI_SUCCESS)
       return {StatusCode::mpi_failure,10215};
     if(invalid_input)return numerical();
+    if(dyn711()) {
+      std::size_t i{};
+      for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x,++i) {
+        if(!active(i))continue;
+        long double all{},reactive{};
+        for(std::size_t q=0;q<ns_;++q) {
+          long double mean{};
+          for(std::size_t f=0;f<spec_.fields;++f)
+            mean+=accepted.data[f].unchecked({x,y,z},q)/static_cast<long double>(spec_.fields);
+          const long double n=mean/gas.gas_identity().molecular_weights_kg_per_kmol[q];
+          all+=n;if(!noble_[q])reactive+=n;
+        }
+        const double eta=static_cast<double>(reactive/all);
+        if(!std::isfinite(eta) || eta<0 || eta>1)invalid_input=1;
+        dyn_rates_[2*ns_*count_+i]=eta;
+      }
+      if(MPI_Allreduce(MPI_IN_PLACE,&invalid_input,1,MPI_UNSIGNED,MPI_MAX,communicator)!=MPI_SUCCESS)
+        return {StatusCode::mpi_failure,10215};
+      if(invalid_input)return numerical();
+    }
     transport_density_authority_=rho;
     // One frozen global envelope per field/component for this attempt.
     // Signed maxima share the minimum reduction with the lower bounds.
@@ -1066,14 +1187,30 @@ public:
           if (reacted.status != portable::Status::success || !(rho>0) || !std::isfinite(rho) ||
               !reacted.mean_integrated_mass_fraction_delta)
             return numerical();
+          std::array<double,UINT8_MAX> chemical_delta{},remix_y{};
+          for(std::size_t q=0;q<ns_;++q)chemical_delta[q]=reacted.mean_integrated_mass_fraction_delta[q];
+          bool remixed=false;double remix_h{};
           if(dynamic_tcr()) {
             std::array<double,UINT8_MAX> raw{},normalized{},final_y{},delta{};
             for(std::size_t c=0;c<stride_;++c)raw[c]=auxiliary.unchecked(cell,c);
-            const auto coordinates=esf::detail::auxiliary_eos_coordinates(
-                {revision,gas.chemistry_identity().fingerprint,1,ns_,raw.data()},
-                revision,normalized.data(),ns_);
-            if(coordinates.status!=portable::Status::success)return {StatusCode::numerical_failure,10238};
-            normalized[ns_]=coordinates.query_enthalpy_j_per_kg;
+            double positive_weight=1;
+            if(dyn711()) {
+              // A well-mixed reference reactor starts at the physical ensemble
+              // mean. Its one PH interval preserves the same mean enthalpy
+              // that a conservative collapse will carry into every field.
+              for(std::size_t q=0;q<stride_;++q) {
+                long double mean{};
+                for(std::size_t f=0;f<spec_.fields;++f)mean+=tuple_[f*stride_+q]/static_cast<long double>(spec_.fields);
+                normalized[q]=static_cast<double>(mean);
+              }
+            } else {
+              const auto coordinates=esf::detail::auxiliary_eos_coordinates(
+                  {revision,gas.chemistry_identity().fingerprint,1,ns_,raw.data()},
+                  revision,normalized.data(),ns_);
+              if(coordinates.status!=portable::Status::success)return {StatusCode::numerical_failure,10238};
+              normalized[ns_]=coordinates.query_enthalpy_j_per_kg;
+              positive_weight=coordinates.positive_weight_sum;
+            }
             portable::GasSample psr;
             auto s=query(gas,thermo,normalized.data(),pressures[0],revision,psr);
             if(!s)return s;
@@ -1095,15 +1232,39 @@ public:
                 std::abs(output.final_sample.pressure_pa-input.pressure_pa)>
                     32*std::numeric_limits<double>::epsilon()*input.pressure_pa)
               return {StatusCode::numerical_failure,10239};
-            double sum{};auto *history=tcr_history.dynamic()->candidate(i);
+            double sum{};
+            if(dyn711()) {
+              const long double eta=dyn_rates_[2*ns_*count_+i];
+              const long double pdf_heat=reacted.ensemble_heat_release_j_per_m3;
+              const long double psr_heat=output.integrated_heat_release_j_per_m3;
+              if(!std::isfinite(pdf_heat) || !std::isfinite(psr_heat))return numerical();
+              const long double limit=eta>0 && eta<1 ? 1/(4*eta*(1-eta))+.3L :
+                  std::numeric_limits<long double>::infinity();
+              // Both heat releases belong to the same single interval. Source
+              // heat rates use the same ratio after dividing both by dt.
+              remixed=spec_.tcr.mode!=TcrMode::shadow && (pdf_heat*psr_heat<=0 ||
+                  std::abs(pdf_heat/(psr_heat+1e-27L*dt))>limit);
+              if(remixed) {
+                remix_h=normalized[ns_];
+                for(std::size_t q=0;q<ns_;++q) {
+                  remix_y[q]=final_y[q];chemical_delta[q]=final_y[q]-normalized[q];
+                }
+              }
+            }
+            auto *history=dyn711() ? nullptr : tcr_history.dynamic()->candidate(i);
             for(std::size_t q=0;q<ns_;++q) {
               if(!std::isfinite(final_y[q]) || final_y[q]<0 || final_y[q]>1)return numerical();
               sum+=final_y[q];
               // Source rates are specific mole-number rates. Convert both
               // intervals by the same species molecular weight and time.
               const double mw=gas.gas_identity().molecular_weights_kg_per_kmol[q];
-              const double pdf=reacted.mean_integrated_mass_fraction_delta[q]/(dt*mw);
-              const double rate=coordinates.positive_weight_sum*(final_y[q]-normalized[q])/(dt*mw);
+              const double pdf=chemical_delta[q]/(dt*mw);
+              const double rate=positive_weight*(final_y[q]-normalized[q])/(dt*mw);
+              if(dyn711()) {
+                if(!std::isfinite(pdf) || !std::isfinite(rate))return numerical();
+                dyn_rates_[q*count_+i]=pdf;dyn_rates_[(ns_+q)*count_+i]=rate;
+                continue;
+              }
               const auto control=tcr::detail::cdphyso_species_control(.3,pdf,rate,spec_.tcr.weak_rate_threshold);
               if(!control.available)return {StatusCode::numerical_failure,10240};
               history[5*q]=pdf;history[5*q+1]=rate;history[5*q+2]=control.selected;
@@ -1113,13 +1274,13 @@ public:
           }
           for (std::size_t s = 0; s < mapping.size; ++s)
             sources.data[s].unchecked(cell, 0) =
-                rho * reacted.mean_integrated_mass_fraction_delta[mapping.data[s]] / dt;
+                rho * chemical_delta[mapping.data[s]] / dt;
           std::array<double,UINT8_MAX> auxiliary_row{};
           for(std::size_t s=0;s<ns_;++s)
-            auxiliary_row[s]=auxiliary.unchecked(cell,s)+reacted.mean_integrated_mass_fraction_delta[s];
+            auxiliary_row[s]=auxiliary.unchecked(cell,s)+chemical_delta[s];
           long double delta_h=0;
           for(std::size_t f=0;f<spec_.fields;++f)
-            delta_h+=(static_cast<long double>(reacted.candidate.values[f*stride_+ns_])-tuple_[f*stride_+ns_])/spec_.fields;
+            delta_h+=(static_cast<long double>(remixed ? remix_h : reacted.candidate.values[f*stride_+ns_])-tuple_[f*stride_+ns_])/spec_.fields;
           auxiliary_row[ns_]=auxiliary.unchecked(cell,ns_)+static_cast<double>(delta_h);
           const auto auxiliary_status=query_auxiliary(gas,thermo,auxiliary_row.data(),
               pressure_reference+pi.unchecked(cell,0),revision);
@@ -1127,7 +1288,8 @@ public:
           for(std::size_t c=0;c<stride_;++c)auxiliary.unchecked(cell,c)=auxiliary_row[c];
           for (std::size_t f = 0; f < spec_.fields; ++f)
             for (std::size_t c = 0; c < stride_; ++c)
-              trial.data[f].unchecked(cell, c) = reacted.candidate.values[f * stride_ + c];
+              trial.data[f].unchecked(cell, c) = remixed ? (c==ns_ ? remix_h : remix_y[c]) :
+                  reacted.candidate.values[f * stride_ + c];
         }
     // Spatial gradients have completed their only use in this proposal.
     // Reuse their owned payload for immutable post-reactor tuples, in native
@@ -1487,7 +1649,10 @@ private:
   std::optional<DynamicTcrPlan> dynamic_plan_;
   std::array<std::size_t,3> dynamic_groups_{};
   std::vector<tcr::detail::MixingGroup> mixing_groups_;
-  std::size_t fuel_{}, product_species_{};
+  std::size_t fuel_{}, product_species_{}, mixture_scalar_{SIZE_MAX};
+  std::vector<double> dyn_rates_, mixture_weights_;
+  std::vector<std::uint8_t> noble_;
+  double mixture_offset_{};
   EsfSpec spec_;
   Int3 cells_{}, begin_{}, global_cells_{};
   std::size_t ns_{}, stride_{}, count_{};

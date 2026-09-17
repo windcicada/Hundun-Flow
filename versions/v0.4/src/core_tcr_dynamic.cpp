@@ -143,7 +143,8 @@ Status DynamicTcrPlan::stage_rates(Dyn711History &history,
     const double rho=input.density.unchecked(cell,0),mu=input.molecular_viscosity.unchecked(cell,0);
     const auto evaluated=turbulence.evaluate_sgs_cell(cell,gradient,rho,mu,sgs);
     if(!evaluated) {status=evaluated;continue;}
-    const auto times=dyn711_flow_times(sgs.kinetic_energy_m2_s2,sgs.dissipation_w_m3,rho,mu);
+    const auto times=dyn711_resolved_flow_times(sgs.kinetic_energy_m2_s2,
+        sgs.dissipation_w_m3,rho,mu,sgs.kinematic_viscosity_m2_s);
     if(!times.available) {status=invalid();continue;}
     view_.unchecked(cell,0)=times.flow;
     double sum{};

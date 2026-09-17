@@ -2430,6 +2430,24 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "${hundun_repository_root}/tools/v04_evidence_validate.py" fixed_tcr
       "$<TARGET_FILE:v04_kerosene_esf_test>")
   set_tests_properties(v04_spray_fixed_tcr_cli PROPERTIES TIMEOUT 240 PROCESSORS 4 RUN_SERIAL TRUE)
+  foreach(dyn_fields 4 8 16)
+    add_test(NAME v04_dyn711_${dyn_fields}_cli
+      COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_dyn711_test.py"
+        "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-flow"
+        "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/d${dyn_fields}"
+        "${hundun_repository_root}/tools/v04_evidence_validate.py"
+        "$<TARGET_FILE:v04_kerosene_esf_test>" "${dyn_fields}")
+    set_tests_properties(v04_dyn711_${dyn_fields}_cli PROPERTIES TIMEOUT 300 PROCESSORS 4 RUN_SERIAL TRUE)
+  endforeach()
+  add_test(NAME v04_dyn711_remix_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_dyn711_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/dc"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py"
+      "$<TARGET_FILE:v04_kerosene_esf_test>" 4 cold)
+  set_tests_properties(v04_dyn711_remix_cli PROPERTIES TIMEOUT 120 PROCESSORS 4 RUN_SERIAL TRUE)
   add_test(NAME v04_jl4_tcr_cli
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/tcr_gas_test.py"

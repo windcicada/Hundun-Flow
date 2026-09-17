@@ -76,6 +76,36 @@ int main() {
   ok &= wide.available && near(wide.integral/1e300,1) &&
       near(wide.flow/1e150,1);
 
+  // Same step-eight checkpoint, two/four ranks: roundoff-sized transverse
+  // gradients straddle the raw clock's ninth-call branch threshold while
+  // both momentum coefficients equal the molecular viscosity in FP64.
+  constexpr double rho=.29187575647980235, mu=.000042722622661398233;
+  constexpr double eps=.000011682891580905665, chemical=.00055889988844045094;
+  const double energies[]{6.0303835783520853e-16,6.610474907196156e-16};
+  const double viscosities[]{4.3322643819689027e-22,4.972176509199209e-22};
+  for(unsigned partition=0;partition<2;++partition) {
+    const auto raw=dyn711_flow_times(energies[partition],eps,rho,mu);
+    const auto resolved=dyn711_resolved_flow_times(energies[partition],eps,rho,mu,
+        viscosities[partition]);
+    const auto select=[&](double flow) {
+      return dyn711_species_control(.27057497707038558,-5.6204569200725123,
+          -5.6204403098872344,chemical,flow,1e-30);
+    };
+    const auto before=select(raw.flow),after=select(resolved.flow);
+    ok &= raw.available && before.available && before.upper_branch==(partition==0) &&
+        mu+rho*viscosities[partition]==mu && resolved.available && resolved.flow==0 &&
+        after.available && after.upper_branch && near(after.selected,.99999825730176661);
+  }
+  const auto resolved=dyn711_resolved_flow_times(2,8,4,.02,.001);
+  const auto quiet=dyn711_resolved_flow_times(0,0,1,1e-5,0);
+  ok &= resolved.available && resolved.flow==times.flow &&
+      quiet.available && std::isinf(quiet.flow) &&
+      !dyn711_resolved_flow_times(-1,1,1,1,0).available &&
+      !dyn711_resolved_flow_times(1,1,1,1,-1).available &&
+      !dyn711_resolved_flow_times(1,1,1,1,NAN).available &&
+      !dyn711_resolved_flow_times(1,1,1,1,INFINITY).available &&
+      !dyn711_resolved_flow_times(1,1,1e300,1,1e300).available;
+
   Dyn711Clock clock;
   Dyn711RateState accepted;
   for(unsigned call=1;call<=27;++call) {

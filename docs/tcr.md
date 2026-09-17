@@ -1,6 +1,6 @@
 # 动态 TCR 生产模型
 
-模型身份为 `cdphyso_dynamic_v1`，运行模式为 `experimental` 或
+624CF 对应模型身份为 `cdphyso_dynamic_v1`，运行模式为 `experimental` 或
 `shadow`。两种模式均计算和保存动态历史；`experimental` 将已接受的
 逐组分 κ 和动态 Cd 用于下一步隐式 IEM，`shadow` 使用基础 IEM 系数。
 
@@ -65,25 +65,59 @@ SGS 破碎组合及 1/2/4 进程恢复。详细数据见
 该检查保持逐格选根关系、离散状态和率／Cd 的原比较标准。
 
 
-原始 dyn711 接入进展：独立的累计率／C_phi 时钟与候选历史已进入
-`ProductTcrHistory` 的通用提交、回退和恢复接口。空间滤波计划采用
-统一质量坐标，提供混合分数／燃料／OH 的双重滤波、优先选择及
-邻点平滑，并按已接受模型时钟更新。1／2／4 进程覆盖周期面、奇数
-分区、单格分区和固体掩码；完整 ESF 调度、流动／化学时间尺度及
-混合分数来源继续按 gas.md G3 接线。现有生产配置身份仍为前述
-逐步 CD-PhySO 模型；dyn711 的原生运行入口随完整调度节点交付。
+## dyn711 原生模型
 
+`dyn711_v1` 使用 CN/BE、`outer_corrected`、真实化学后端和 Vreman。
+`experimental` 应用已接受的 κ／Cφ；`shadow` 保存模型历史并采用
+基础 IEM 系数。输入指定燃料、混合分数被动标量及氧化剂氧质量分数：
 
-2026-09-17 用户确认 dyn711 采用局部 SGS 流动时间尺度。
-`tau_I=rho*k/epsilon`，`tau_K=sqrt(mu/epsilon)`，
-`tau_flow=sqrt(tau_I*tau_K)`；epsilon 为 Vreman 体积耗散率 W/m³。
-公共统计计划使用终态候选密度、动力黏度和九分量速度梯度逐格查询
-SGS 状态，并将流动时间与逐组分化学时间共同用于 κ 选根。
-化学率输入保持各自 PDF／PSR 的单次区间来源，单位 kmol/(kg·s)。
+```json
+"tcr": {
+  "model": "dyn711_v1",
+  "mode": "experimental",
+  "fuel": "CH4",
+  "weak_rate_threshold": 1e-30,
+  "mixture_fraction": "Z",
+  "oxidizer_oxygen_mass_fraction": 0.232
+}
+```
 
-源规则中的化学时间取值为：消耗组分用 n/abs(rate)，生成组分用
-0.5*global_max(n)/rate，弱反应用 min(1,global_max(valid_time))；
-两类全域极值以 1e-12 初始化。全域弱反应组分因此使用 1e-12 s。
-八次累计和第九次选根分别使用已接受时钟，空间滤波随后封装候选
-历史，再参与共同提交／回退。统计模块的 18 次调用覆盖两个完整
-窗口；完整原生 ESF 入口随化学与混合分数调度节点交付。
+`transported_scalars` 中的 `Z` 使用 `passive_scalar`，入口和回流同时
+给出其状态。采用 Bilger 元素坐标
+`beta=sum((2*C+H/2-O)*Y/W)`，
+`Z=(beta+2*Y_O2,ox/W_O2)/(beta_fuel+2*Y_O2,ox/W_O2)`。
+终态物理组成提供元素重建初值，公共被动标量 CN/VLS 方程完成本步
+输运；已接受历史保持本步起点。此归一化的燃料参考为指定纯燃料，
+氧化剂参考由输入指定。源 GTMC 的 Z 归一化按源输入单独登记；整体
+常数缩放在动态滤波的乘积比中相消。
+
+每步执行输运、隐式混合及一个化学区间。PDF 和 PSR 的比摩尔反应率
+统一采用 kmol/(kg·s)。PSR 初态使用输运后的物理随机场平均组成与焓，
+以 PH 约束推进相同 dt。源版采用 field0 焓；本实现使用共同守恒账本
+定义的物理平均焓。η 取本步起点全部随机场平均比摩尔数中活跃物种的
+比例，N2、H2O 和 CO2 归入稳定物种。
+
+热释放判据沿源版采用 PDF／PSR 乘积和比值，阈值为
+`1/(4*eta*(1-eta))+0.3`。触发重新混合时，各随机场使用单次 PSR
+区间终态组成和共同焓；field0 承接实际物理平均化学增量。质量、元素、
+能量及 PDF 统计使用同一已选择的区间增量。焓的混合控制使用燃料 κ。
+
+最终压力校正和 Z 输运完成后计算动态统计。物种滤波统一使用已批准
+的质量分数坐标，物理均值与 field0 梯度按双状态分工提供。Cφ 在调用
+1、2、9、16……更新；反应率累计八次，第九次根据已接受窗口选根。
+全体候选重算使用同一已接受历史，统计历史参与流场共同提交和回退。
+
+局部 SGS 时间为 `tau_I=rho*k/epsilon`、`tau_K=sqrt(mu/epsilon)`、
+`tau_flow=sqrt(tau_I*tau_K)`；epsilon 为体积耗散率 W/m³。
+2026-09-17 用户批准方程分辨率一致的局部极限：当 FP64 中
+`mu+rho*nu_t == mu` 时，TCR 时间计算使用 k=0，SGS 原始状态继续由
+Vreman 提供。正耗散对应零积分／流动时间，零耗散对应无限时间。
+该规则登记为 `resolved-sgs-k-limit-v1`，随方法身份进入原生 Restart。
+
+化学时间沿用源规则：消耗组分用 `n/abs(rate)`，生成组分用
+`0.5*global_max(n)/rate`，弱反应用 `min(1,global_max(valid_time))`；
+全域极值初值为 1e-12，全域弱反应对应 1e-12 s。
+
+原生定向入口为 `v04_dyn711_4_cli`、`v04_dyn711_8_cli`、
+`v04_dyn711_16_cli` 和 `v04_dyn711_remix_cli`。运行证据与适用范围
+见 [专项工作记录](gas-work.md)，完整 gas.md 专项继续按阶段推进。

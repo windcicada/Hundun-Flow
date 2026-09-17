@@ -205,7 +205,7 @@ public:
       const auto &spec = *model.reaction.esf;
       string("esf-mu-mut-iem-v1;transport-full-reactor-v1");
       string("esf-molecular-stochastic-tuple-bounds-v1");
-      const bool dual_pressure = (spec.tcr.mode!=TcrMode::experimental || spec.tcr.model==TcrModel::cdphyso_dynamic_v1) &&
+      const bool dual_pressure = (spec.tcr.mode!=TcrMode::experimental || dynamic_tcr_model(spec.tcr.model)) &&
           effective_coupling(model.time.scheme,model.solver.coupling)==CouplingKind::outer_corrected;
       string(dual_pressure ? "esf-dual-physical-mean-field0-pressure-v1;whole-tuple-flux-correction-v1;realized-statistical-transport-ledger-v1;statistical-face-energy-ledger-v1;thermal-frozen-transport-v1"
                            : "esf-bounded-mean-recenter-v1");
@@ -213,9 +213,16 @@ public:
         string("cdphyso-dynamic-v1;species-interval-rates;eta-0.3;cd-cadence-4;fluid-filter;favre-volume-power-v2");
         string(spec.tcr.fuel);
       }
+      if(spec.tcr.model==TcrModel::dyn711_v1) {
+        string("dyn711-v1;rate-window-8-evaluate-9;cphi-1-2-9;mass-filter;local-sgs-times-v1");
+        string("resolved-sgs-k-limit-v1");
+        string("physical-mean-psr-ph;single-interval-conservative-remix;terminal-statistics-v1;bilger-cn-v1");
+        string(spec.tcr.fuel);string(spec.tcr.mixture_fraction);
+        std::uint64_t bits;std::memcpy(&bits,&spec.tcr.oxidizer_oxygen_mass_fraction,8);integer(bits);
+      }
       string("esf-global-transport-then-chemistry-v1");
       string("esf-ibm-complete-scalar-flux-v1");
-      if ((spec.tcr.mode!=TcrMode::experimental || spec.tcr.model==TcrModel::cdphyso_dynamic_v1)) {
+      if ((spec.tcr.mode!=TcrMode::experimental || dynamic_tcr_model(spec.tcr.model))) {
         string("esf-mean-first-joint-implicit-iem-pressure-v2");
         string("esf-frozen-transport-mass-chemical-increment-v1");
       }
