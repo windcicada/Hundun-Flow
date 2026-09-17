@@ -346,3 +346,8 @@ G3 混合分数来源复核：`fieldpdf.F90:421–479` 先由统计组分的比�
 及校正回退。外部证据校验器 self-test 成功。正式构建记录为
 `check/gas-passive-final-build.log`。本节点覆盖普通外边界及密闭
 IBM 壁面；切面注入口的独立标量状态沿现有显式准入合同接续扩展。
+
+监看收尾：`monitor.jsonl` 的 `payload` 显式输出五个 passive 指标，
+接受步屏幕摘要输出实际被动标量迭代数。`check/gas-passive-monitor.log`
+通过原生 2→4 恢复与 IBM 组合，逐接受步核对监看与证据的五项值完全
+一致；监看条目直接复用本步报告。

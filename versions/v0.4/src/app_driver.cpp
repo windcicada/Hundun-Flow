@@ -880,6 +880,7 @@ static Status run_application(MPI_Comm communicator,
                 << " seconds=" << maximum_nanoseconds*1e-9
                 << " outer=" << step.piso.cold.outer_iterations
                 << " pressure_iterations=" << step.piso.cold.pressure_iterations
+                << " passive_iterations=" << step.piso.cold.passive_iterations
                 << " enthalpy_scheme=" << (step.piso.cold.midpoint_enthalpy ? "CN" : "BE")
                 << " pressure_iccg=" << int(step.piso.cold.pressure_iccg)
                 << " attempts=" << step.attempts
@@ -946,6 +947,11 @@ static Status run_application(MPI_Comm communicator,
             << ",\"pressure_iterations\":" << step.piso.cold.pressure_iterations
             << ",\"enthalpy_iterations\":" << step.piso.cold.enthalpy_iterations
             << ",\"species_iterations\":" << step.piso.cold.species_iterations
+            << ",\"passive_scalar_count\":" << step.piso.cold.passive_scalar_count
+            << ",\"passive_solve_calls\":" << step.piso.cold.passive_solve_calls
+            << ",\"passive_iterations\":" << step.piso.cold.passive_iterations
+            << ",\"passive_residual\":" << step.piso.cold.passive_residual
+            << ",\"passive_balance_defect\":" << step.piso.cold.passive_balance_defect
             << ",\"attempts\":" << step.attempts
             << ",\"candidate_baseline_evaluations\":"
             << step.pressure_energy_globalization.work.baseline_evaluations

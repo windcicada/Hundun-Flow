@@ -107,8 +107,9 @@ ICCG 的缩放行 L2 阈值由原始配置与最小单元体积换算，候选�
 校正矩阵以迎风部分预处理限幅重构；每次候选共享已接受的标量历史。
 有符号示踪量和多个被动标量沿用同一接口。
 
-运行证据与监看中的 `cold.passive_scalar_count`、`passive_solve_calls`、
-`passive_iterations` 记录实际工作量；`passive_residual` 为局部时间尺度
+运行证据的 `cold` 与监看的 `payload` 中，`passive_scalar_count`、
+`passive_solve_calls`、`passive_iterations` 记录实际工作量；
+`passive_residual` 为局部时间尺度
 归一化的最大原方程残差，`passive_balance_defect` 为体积积分收支的
 归一化缺陷。两者提交门槛均为 128 倍 FP64 epsilon。
 `hundun check` 的 `passive_workspace_bytes` 报告各标量复用的预分配

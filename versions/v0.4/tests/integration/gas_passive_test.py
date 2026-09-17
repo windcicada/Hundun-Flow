@@ -81,12 +81,17 @@ with tempfile.TemporaryDirectory(prefix='hf-passive-') as tmp:
         args+=['--restart',restart] if restart else ['--initial-state',initial]
         text=call(n,args)
         rows=[json.loads(line) for line in (root/name/'evidence.jsonl').read_text().splitlines()]
+        monitors={json.loads(line)['step']:json.loads(line)['payload']
+            for line in (root/name/'monitor.jsonl').read_text().splitlines()}
         for row in rows:
             validator.validate_v6_v8_runtime_record(row,1,8)
             cold=row['cold']
             assert cold['passive_scalar_count']==2 and cold['passive_iterations']>0
             assert cold['passive_residual']<128*sys.float_info.epsilon
             assert cold['passive_balance_defect']<128*sys.float_info.epsilon
+            for key in ('passive_scalar_count','passive_solve_calls','passive_iterations',
+                        'passive_residual','passive_balance_defect'):
+                assert monitors[row['step']][key]==cold[key],key
         return rows[-1]
     last=run('all',2,2)
     run('first',2,1)
