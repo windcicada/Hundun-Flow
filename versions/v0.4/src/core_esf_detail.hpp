@@ -10,6 +10,7 @@
 #include "solver_ibm_scalar_transport_detail.hpp"
 #include "solver_cold.hpp"
 #include "solver_mass_source_detail.hpp"
+#include "solver_mixture_bound_detail.hpp"
 #include "field_view_interval_detail.hpp"
 
 namespace hundun::v04::detail {
@@ -96,7 +97,7 @@ public:
         std::size_t(cells.x + 1) * cells.y * cells.z +
         std::size_t(cells.y + 1) * cells.x * cells.z +
         std::size_t(cells.z + 1) * cells.x * cells.y : 0;
-    const auto extra_bytes = (thermal_count + face_count +
+    const auto extra_bytes = (2*thermal_count + face_count +
         2*spec_.fields*stride_ + 6*spec_.fields + 1 + stride_) * sizeof(double) +
         (common_transport_ ? (ns_ - 1) * sizeof(ConstFieldView) : 0) +
         (dyn711() ? ns_*(sizeof(double)+sizeof(std::uint8_t)) : 0);
@@ -108,6 +109,7 @@ public:
       const auto allocated = FaceFluxStorage::allocate_workspace(cells, 1, mixture_storage_);
       if (!allocated) return allocated;
       thermal_coordinate_.resize(thermal_count);
+      transport_bound_cells_.resize(thermal_count);
       mixture_species_.resize(ns_ - 1);
     }
     if (dynamic_tcr()) {
@@ -319,7 +321,7 @@ public:
     for (const auto *v :
          {&rates_, &gradients_, &scratch_, &mass_divergence_, &tuple_, &means_,
           &noise_bounds_, &noise_, &reactor_density_, &transport_carrier_density_,
-          &independent_, &diffusion_, &enthalpies_, &query_rates_, &thermal_coordinate_,
+          &independent_, &diffusion_, &enthalpies_, &query_rates_, &thermal_coordinate_, &transport_bound_cells_,
           &field_rates_, &field_pressures_, &field_densities_, &dyn_rates_, &mixture_weights_})
       bytes += v->capacity() * sizeof(double);
     return bytes + wiener_.capacity()*sizeof(std::array<double,3>);
@@ -459,6 +461,21 @@ public:
     return {};
   }
   bool common_transport() const noexcept { return enabled() && common_transport_; }
+  void reset_transport_bounds() noexcept {
+    std::fill(transport_bound_cells_.begin(),transport_bound_cells_.end(),0.);
+    transport_bounds_active_=false;
+  }
+  FieldView transport_bound_view(ConstFieldView reference) noexcept {
+    auto result=scratch_view(reference,1);
+    if(transport_bound_cells_.empty())return {};
+    const auto nx=std::size_t(cells_.x)+4,ny=std::size_t(cells_.y)+4;
+    result.base=transport_bound_cells_.data()+2+2*nx+2*nx*ny;
+    result.ghosts={2,2,2};result.stride_y=nx;result.stride_z=nx*ny;
+    result.component_stride=transport_bound_cells_.size();
+    result.storage_identity=reinterpret_cast<std::uintptr_t>(transport_bound_cells_.data());
+    return result;
+  }
+  void activate_transport_bounds() noexcept { transport_bounds_active_=true; }
   Status prepare_mixture_faces(const CartesianKernelPlan &kernels,
                                const ThermodynamicsPlan &thermo,
                                Span<const ConstFieldView> species,
@@ -496,6 +513,9 @@ public:
         species, as_const(thermal), gamma, flux, workspace, generation,
         mixture, immersed_, implicit_transport() ? MixtureFlatStencilPolicy::upwind_constraint
                                                 : MixtureFlatStencilPolicy::ignore_roundoff);
+    if(status && transport_bounds_active_)
+      status=constrain_mixture_bounds(kernels,as_const(transport_bound_view(enthalpy)),
+          gamma,flux,workspace,immersed_);
     return status;
   }
   ProductTcrHistory tcr_history;
@@ -1672,6 +1692,8 @@ private:
   double transport_time_{}, transport_dt_{};
   std::array<bool,6> physical_boundary_{};
   FaceFluxStorage mixture_storage_;
+  std::vector<double> transport_bound_cells_;
+  bool transport_bounds_active_{};
   std::vector<ConstFieldView> mixture_species_;
   std::vector<double> thermal_coordinate_;
   std::vector<std::array<double, 3>> wiener_;

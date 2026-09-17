@@ -687,6 +687,12 @@ foreach(rank_count IN ITEMS 1 2 4)
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 30 RUN_SERIAL TRUE)
 endforeach()
 foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_mixture_bound_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_solver_species_conservation_test>"
+      --bound ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_mixture_bound_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 60 RUN_SERIAL TRUE)
   add_test(NAME v04_iem_transport_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
             ${MPIEXEC_PREFLAGS}

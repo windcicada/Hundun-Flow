@@ -98,5 +98,9 @@
     "Implement conservative shared-face admissibility correction, retaining accepted history, thermal closure and the existing FP64 budget.",
     "Check operator conservation and resume the same native GTMC checkpoint."
   ],
-  "status": "root_cause_confirmed_correction_pending"
+  "status": "root_cause_confirmed_correction_pending",
+  "resolution": {
+    "evidence": "gas-positive.json",
+    "scope": "GTMC first-step recovery and focused operator/parallel checks passed"
+  }
 }

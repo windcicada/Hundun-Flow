@@ -6,6 +6,7 @@
 #include "../../src/solver_ibm_scalar_transport_detail.hpp"
 #include "../../src/solver_cold.hpp"
 #include "../../src/solver_mixture_rows_detail.hpp"
+#include "../../src/solver_mixture_bound_detail.hpp"
 #include "../../src/solver_mixture_step_detail.hpp"
 #include "../../src/solver_statistical_detail.hpp"
 #include "../../src/models_esf_detail.hpp"
@@ -720,6 +721,109 @@ bool mixture_face_probe(bool implicit=false) {
     std::cout<<std::setprecision(17)<<face.diffusion<<'\n';
   }
   return std::cin.eof();
+}
+
+bool test_mixture_bound_repair(MPI_Comm comm=MPI_COMM_SELF) {
+  ProductionFixture fixture;
+  if(!make_production_fixture(8,fixture,false,-1,true,0,comm))return false;
+  const auto cells=fixture.patch.cells;
+  // Two-dimensional periodic trace front. Frozen VLS permits the updated
+  // transverse neighbour to drain a nearly empty cell through a central face.
+  const std::array<double,16> initial{.2,.2,0,.1,0,1e-10,.01,1e-12,
+      1e-10,1e-10,1e-8,0,0,1e-8,1e-13,1e-10};
+  auto q=make_field(kSpecies,cells,1,2,8901);
+  auto gamma=make_field(90,cells,1,2,8902);
+  auto mask=make_field(91,cells,1,2,8903);
+  fill_field(gamma,8e-6);fill_field(mask,0);
+  const auto tile=[](int x,int y){return std::size_t((x+8)%4+4*((y+8)%4));};
+  for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)for(int x=-2;x<cells.x+2;++x)
+    q.view.unchecked({x,y,z},0)=initial[tile(x+fixture.patch.begin.x,y+fixture.patch.begin.y)];
+  FaceFluxStorage mass_storage,extra_storage;FaceFluxView mass,extra;
+  auto status=FaceFluxStorage::allocate_workspace(cells,1,mass_storage);
+  if(status)status=FaceFluxStorage::allocate_workspace(cells,1,extra_storage);
+  if(status)status=mass_storage.workspace_view(0,8904,mass);
+  if(status)status=extra_storage.workspace_view(0,8905,extra);
+  for(auto face:{mass.x,mass.y,mass.z})
+    for(int z=0;z<face.extents.z;++z)for(int y=0;y<face.extents.y;++y)for(int x=0;x<face.extents.x;++x)
+      face.unchecked({x,y,z})=face.axis==CartesianAxis::z ? 0. : 1.;
+  const auto species=as_const(q.view);MixtureTransportFaces mixture;
+  if(status)status=prepare_cartesian_mixture_transport(fixture.equations.kernels(),
+      {&species,1},{},as_const(gamma.view),as_const(mass),extra,8905,mixture,nullptr,
+      MixtureFlatStencilPolicy::upwind_constraint);
+  if(!expect(bool(status),"periodic trace-front common faces prepare"))return false;
+  std::array<double,64> conductance{};
+  const auto gather=[&]() {
+    std::array<double,64> local{};
+    for(int y=0;y<4;++y)for(int x=0;x<4;++x) {
+      const Int3 c{x-fixture.patch.begin.x,y-fixture.patch.begin.y,2-fixture.patch.begin.z};
+      if(c.x<0 || c.y<0 || c.z<0 || c.x>=cells.x || c.y>=cells.y || c.z>=cells.z)continue;
+      for(unsigned axis=0;axis<2;++axis) {
+        auto face=c;const auto values=axis==0 ? extra.x : extra.y;
+        local[4*tile(x,y)+2*axis]=1e-6+values.unchecked(face);
+        (axis==0 ? face.x : face.y)++;
+        local[4*tile(x,y)+2*axis+1]=1e-6+values.unchecked(face);
+      }
+    }
+    return MPI_Allreduce(local.data(),conductance.data(),64,MPI_DOUBLE,MPI_SUM,comm)==MPI_SUCCESS;
+  };
+  if(!gather())return false;
+  const auto original_conductance=conductance;
+  const auto solve=[&](double shift,double scale) {
+    std::array<std::array<long double,17>,16> a{};
+    for(int y=0;y<4;++y)for(int x=0;x<4;++x) {
+      const auto i=tile(x,y);a[i][i]=10;a[i][16]=10*(shift+scale*initial[i]);
+      for(unsigned axis=0;axis<2;++axis) {
+        const auto left=tile(x-(axis==0),y-(axis==1));
+        const auto right=tile(x+(axis==0),y+(axis==1));
+        const double dl=conductance[4*i+2*axis];
+        const double dr=conductance[4*i+2*axis+1];
+        a[i][i]+=dl+dr;a[i][left]-=.5+dl;a[i][right]+=.5-dr;
+      }
+    }
+    for(unsigned i=0;i<16;++i) {
+      unsigned pivot=i;
+      for(unsigned j=i+1;j<16;++j)if(std::abs(a[j][i])>std::abs(a[pivot][i]))pivot=j;
+      std::swap(a[i],a[pivot]);
+      for(unsigned j=i+1;j<16;++j) {
+        const auto r=a[j][i]/a[i][i];
+        for(unsigned k=i;k<=16;++k)a[j][k]-=r*a[i][k];
+      }
+    }
+    std::array<long double,16> result{};
+    for(int i=15;i>=0;--i) {
+      auto rhs=a[i][16];for(int j=i+1;j<16;++j)rhs-=a[i][j]*result[j];
+      result[i]=rhs/a[i][i];
+    }
+    return result;
+  };
+  const auto raw=solve(0,1);
+  bool passed=expect(*std::min_element(raw.begin(),raw.end()) < -6e-4,
+      "frozen VLS reproduces the GTMC trace-species loss of positivity");
+  for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+    mask.view.unchecked({x,y,z},0)=raw[tile(x+fixture.patch.begin.x,y+fixture.patch.begin.y)]<0 ? 1 : 0;
+  HaloEngine halo;const HaloFieldSpec mask_spec{mask.view.field,1,1};HaloTicket ticket;
+  status=halo.reserve(comm,fixture.patch,{&mask_spec,1},fixture.boundary.halo_topology());
+  if(status)status=halo.begin(140,{&mask.view,1},ticket);
+  if(status)status=halo.finish(ticket,{&mask.view,1});
+  if(!expect(bool(status),"periodic bound decision mask exchanges"))return false;
+  status=detail::constrain_mixture_bounds(fixture.equations.kernels(),as_const(mask.view),
+      as_const(gamma.view),as_const(mass),extra,nullptr);
+  if(!gather())return false;
+  const auto repaired=solve(0,1),dependent=solve(1,-1),enthalpy=solve(300,10);
+  long double mass_error{};double affine_error{};
+  for(unsigned i=0;i<16;++i) {
+    mass_error+=repaired[i]-initial[i];
+    affine_error=std::max(affine_error,double(std::abs(repaired[i]+dependent[i]-1)));
+    affine_error=std::max(affine_error,double(std::abs(enthalpy[i]-(300+10*repaired[i]))));
+  }
+  passed &= expect(bool(status) && *std::min_element(repaired.begin(),repaired.end())>0 &&
+      *std::max_element(repaired.begin(),repaired.end())<1 && std::abs(mass_error)<1e-14 &&
+      affine_error<1e-12 && conductance[4*tile(1,1)]==original_conductance[4*tile(1,1)],
+      "local common-face repair preserves bounds, periodic mass, composition and affine enthalpy");
+  std::cout<<"mixture_bound initial_min="<<double(*std::min_element(raw.begin(),raw.end()))
+      <<" repaired_min="<<double(*std::min_element(repaired.begin(),repaired.end()))
+      <<" mass_error="<<double(mass_error)<<" affine_error="<<affine_error<<'\n';
+  return passed;
 }
 
 bool test_mixture_face_closure() {
@@ -2852,6 +2956,9 @@ int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     return 2;
   }
+  if (argc==2 && std::string_view(argv[1])=="--bound") {
+    const bool passed=test_mixture_bound_repair(MPI_COMM_WORLD);MPI_Finalize();return passed ? 0 : 1;
+  }
   if (argc==2 && (std::string_view(argv[1])=="--face" || std::string_view(argv[1])=="--flat-face")) {
     const bool passed=mixture_face_probe(std::string_view(argv[1])=="--flat-face");
     MPI_Finalize();
@@ -2882,7 +2989,8 @@ int main(int argc, char** argv) {
     MPI_Finalize();
     return passed ? 0 : 1;
   }
-  bool passed = test_independent_species_closure();
+  bool passed = test_mixture_bound_repair();
+  passed &= test_independent_species_closure();
   passed &= test_implicit_mixing_rows();
   passed &= test_species_search_quantization();
   passed &= test_cold_row_residual_precision();

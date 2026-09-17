@@ -10042,131 +10042,177 @@ Status ProductDriver::Impl::execute_attempt(
       closing_field=field;closing_sweep=0;
       auto current=field==0 ? mean : iterate;
       const auto accepted=field==0 ? as_const(old) : accepted_fields[field-1];
-      if(field) {
-        s=runtime_write_view(fields.esf_iter,current);
-        s=product.reductions.consensus(s);if(!s)return s;
-        copy_tuple(accepted,current);
-      }
-      s=close_frame(current);if(!s)return s;
-      for(unsigned sweep=0;sweep<2;++sweep) {
-        closing_sweep=sweep+1;
-        MixtureTransportFaces mixture;
-        EquationAssemblyContext context;
-        context.dt=step.dt;context.bdf={1/step.dt,-1/step.dt,0,1};context.time=step.generation;
-        context.geometry=product.geometry.topology_revision();context.boundary=product.boundary.revision();
-        context.thermo=product.thermodynamics.fingerprint();context.transport=product.transport.fingerprint();
-        context.contribution_stage=detail::ProductEsf::transport_source_stage;
-        context.scope=EquationAssemblyScope::final_conservative;context.mass_flux=accepted_flux;
-        context.face_flux=accepted_flux.revision;context.face_flux_authority=accepted_flux.certificate.authority();
-        context.face_flux_storage=accepted_flux.certificate.storage();
-        context.face_flux_revision_domain=accepted_flux.certificate.revision_domain();
-        context.immersed_interface=product.ibm_equations ? &*product.ibm_equations : nullptr;
-        if(product.esf.common_transport()) {
-          for(std::size_t a=0;a<ns;++a)query_species[a]=as_const(alias(current,mapping.data[a],fields.reaction_conserved[a]));
-          s=product.esf.prepare_mixture_faces(product.equations.kernels(),product.thermodynamics,
-              {query_species.data(),ns},as_const(alias(current,ns+1,fields.enthalpy)),gamma,accepted_flux,
-              step.generation,mixture);
-          context.mixture_transport=&mixture;
+      product.esf.reset_transport_bounds();
+      for(unsigned bound_round=0;;++bound_round) {
+        if(bound_round==32)return Status{StatusCode::rejected_step,10233};
+        bool repeat_transport=false;
+        if(field) {
+          s=runtime_write_view(fields.esf_iter,current);
+          s=product.reductions.consensus(s);if(!s)return s;
+          copy_tuple(accepted,current);
         }
-        s=product.reductions.consensus(s);if(!s)return s;
-        for(std::size_t c=0;c<=ns;++c) {
-          const bool heat=c==ns;
-          if(heat) {s=close_frame(current);if(!s)return s;}
-          const FieldId quantity=heat ? fields.enthalpy : fields.reaction_conserved[c];
-          const std::size_t component=heat ? ns+1 : mapping.data[c];
-          auto q=alias(current,component,quantity);
-          std::array<PrimitiveHistory,UINT8_MAX> histories{};
-          std::array<ConstFieldView,UINT8_MAX> diffusivities{};
-          for(std::size_t a=0;a<ns;++a) {
-            const auto old_q=read_alias(accepted,mapping.data[a],fields.reaction_conserved[a]);
-            histories[a]={as_const(alias(current,mapping.data[a],fields.reaction_conserved[a])),old_q,old_q};
-            diffusivities[a]=gamma;
-          }
-          const auto old_h=read_alias(accepted,ns+1,fields.enthalpy);
-          EquationStateView state; state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();state.density={density,density,density};
-          state.velocity={velocity_history.accepted,velocity_history.accepted,velocity_history.accepted};
-          state.independent_species={histories.data(),ns};state.enthalpy={as_const(alias(current,ns+1,fields.enthalpy)),old_h,old_h};
-          auto& scalar=heat ? state.enthalpy : histories[c];
-          EquationMaterialView material;material.scalar_mass_diffusivity={diffusivities.data(),ns};material.enthalpy_diffusivity=gamma;
-          FieldView source,sink;
-          s=runtime_write_view(fields.esf_transport_sources[c],source);
-          if(s)s=runtime_write_view(fields.esf_transport_sinks[c],sink);
-          std::size_t i{};
-          if(s)for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
-            const Int3 cell{x,y,z};esf::detail::IemSource mixing;
-            if(field && fluid(i) && esf::detail::iem_source(
-                detail::cell_volume(product.equations.kernels(),cell),cache.unchecked(cell,2),
-                cache.unchecked(cell,3),product.esf.mixing_cd(i,component),
-                product.esf.mixing_control(i,component),mean.unchecked(cell,component),mixing)
-                    !=portable::Status::success) {s={StatusCode::numerical_failure,10232};break;}
-            source.unchecked(cell,0)=mixing.explicit_source_density+
-                (field && fluid(i) ? product.esf.frozen_noise_source(i,field-1,component) : 0.)+
-                (heat && fluid(i) ? product.esf.pressure_source(i) : 0.);
-            sink.unchecked(cell,0)=mixing.implicit_sink_density;
+        if(!field)copy_tuple(accepted,current);
+        s=close_frame(current);if(!s)return s;
+        for(unsigned sweep=0;sweep<2;++sweep) {
+          closing_sweep=sweep+1;
+          MixtureTransportFaces mixture;
+          EquationAssemblyContext context;
+          context.dt=step.dt;context.bdf={1/step.dt,-1/step.dt,0,1};context.time=step.generation;
+          context.geometry=product.geometry.topology_revision();context.boundary=product.boundary.revision();
+          context.thermo=product.thermodynamics.fingerprint();context.transport=product.transport.fingerprint();
+          context.contribution_stage=detail::ProductEsf::transport_source_stage;
+          context.scope=EquationAssemblyScope::final_conservative;context.mass_flux=accepted_flux;
+          context.face_flux=accepted_flux.revision;context.face_flux_authority=accepted_flux.certificate.authority();
+          context.face_flux_storage=accepted_flux.certificate.storage();
+          context.face_flux_revision_domain=accepted_flux.certificate.revision_domain();
+          context.immersed_interface=product.ibm_equations ? &*product.ibm_equations : nullptr;
+          if(product.esf.common_transport()) {
+            for(std::size_t a=0;a<ns;++a)query_species[a]=as_const(alias(current,mapping.data[a],fields.reaction_conserved[a]));
+            s=product.esf.prepare_mixture_faces(product.equations.kernels(),product.thermodynamics,
+                {query_species.data(),ns},as_const(alias(current,ns+1,fields.enthalpy)),gamma,accepted_flux,
+                step.generation,mixture);
+            context.mixture_transport=&mixture;
           }
           s=product.reductions.consensus(s);if(!s)return s;
-          EquationContributionView contribution;
-          contribution.explicit_source_density=as_const(source);
-          contribution.implicit_sink_density=as_const(sink);contribution.has_implicit_sink=true;
-          contribution.conserved_quantity=quantity;
-          contribution.units.si_exponents=heat ? std::array<std::int8_t,7>{1,-1,-3,0,0,0,0}
-                                               : std::array<std::int8_t,7>{1,-3,-1,0,0,0,0};
-          contribution.stage=detail::ProductEsf::transport_source_stage;
-          contribution.explicit_source_field=source.field;contribution.implicit_sink_field=sink.field;
-          contribution.capability=ContributionCapability::reacting;
-          contribution.source_identity=product.reaction.fingerprint();
-          const auto assemble=[&](EquationAssemblyCertificate& certificate) {
-            return heat ? detail::StatisticalEnthalpy::assemble(product.equations.enthalpy(),state,
-                gamma,{&contribution,1},context,equation,certificate)
-              : detail::StatisticalSpecies::assemble(product.equations.species(),c,state,material,
-                {&contribution,1},context,equation,certificate);
-          };
-          const auto refresh=[&](FieldView& updated) {
-            auto closed=runtime_write_view(current.field,current);
-            if(closed)closed=boundary_aliases_for(current);
-            updated=alias(current,component,quantity);
-            if(closed && physical)closed=heat
-                ? apply_boundary_ghosts(BoundaryStage::enthalpy,product.boundary,{&updated,1},boundary_values)
-                : apply_boundary_ghosts(BoundaryStage::scalar,product.boundary,
-                    {boundary_aliases.data(),fields.scalars.size()},boundary_values);
-            return exchange_frame(current,closed);
-          };
-          const LinearIdentity identity{
-              detail::product_mix(product.equations.species().fingerprint(),UINT64_C(0x5354494d504c01)+field*(ns+1)+c),
-              step.generation,product.geometry.fingerprint(),workspace.fingerprint(),
-              detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep)};
-          pc.reset_identity(identity);
-          detail::ScalarCorrectionRuntime runtime{rows,pc,product.krylov_halo,workspace,product.reductions,
-              identity,{heat ? 1e-8 : 1e-12,1e-11,400,1,workspace.requirements().maximum_restart}};
-          detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,
-              heat ? BoundaryStage::enthalpy : BoundaryStage::scalar,
-              heat ? product.schemes.enthalpy() : product.schemes.species(),
-              velocity_history.accepted,context,state.density,scalar,q};
-          const auto solved=detail::correct_frozen_scalar(problem,storage,runtime,assemble,refresh);
-          s=solved.status;if(!s)return s;
-
-        }
-        s=close_frame(current);if(!s)return s;
-        if(dual_esf && field>0 && sweep==1) {
-          if(esf_composition_ledger.active()) {
-            for(std::size_t c=0;c<ns && s;++c) {
-              s=form_cartesian_mixture_transport_flux(product.equations.kernels(),
-                  *context.mixture_transport,gamma,accepted_flux,
-                  as_const(alias(current,mapping.data[c],fields.reaction_conserved[c])),{ax,ay,az});
-              if(s && product.ibm_equations)
-                s=detail::IbmScalarTransport::constrain_flux(*product.ibm_equations,
-                    {detail::IbmScalarTransport::Quantity::independent_species,c},accepted_flux,{ax,ay,az});
-              if(s)esf_composition_ledger.freeze_transport(c,
-                  detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),
-                      {as_const(ax),as_const(ay),as_const(az),accepted_flux.revision},active));
+          for(std::size_t c=0;c<=ns;++c) {
+            const bool heat=c==ns;
+            if(heat) {
+              if(product.esf.common_transport()) {
+                auto mask=product.esf.transport_bound_view(as_const(variation));
+                mask.field=fields.krylov_vectors;
+                double local_bad[2]{};std::size_t flat{};
+                for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++flat) {
+                  if(!fluid(flat))continue;
+                  const Int3 cell{x,y,z};std::array<double,UINT8_MAX> tuple{};
+                  for(std::size_t a=0;a<=ns;++a)tuple[a]=current.unchecked(cell,a);
+                  if(!detail::close_statistical_composition({tuple.data(),ns+1},product.reaction.dependent_index())) {
+                    for(std::size_t a=0;a<=ns;++a)
+                      if(!std::isfinite(tuple[a]))s={StatusCode::numerical_failure,10230};
+                    ++local_bad[0];
+                    if(mask.unchecked(cell,0)==0)++local_bad[1];
+                    mask.unchecked(cell,0)=1;
+                  }
+                }
+                double global_bad[2]{};
+                s=product.reductions.checked_sum({local_bad,2},{global_bad,2},s);if(!s)return s;
+                if(global_bad[0]>0) {
+                  // The candidate and every equation source retain the same
+                  // accepted history. Exchange only a decision mask; both MPI
+                  // owners subsequently raise the same shared face coefficient.
+                  if(global_bad[1]==0)return Status{StatusCode::rejected_step,10233};
+                  mask.revision=detail::product_mix(step.generation,1+field*64+bound_round);
+                  HaloTicket mask_ticket;
+                  s=product.krylov_halo.begin(140,{&mask,1},mask_ticket);
+                  if(s)s=product.krylov_halo.finish(mask_ticket,{&mask,1});
+                  if(!s)return s;
+                  product.esf.activate_transport_bounds();
+                  int rank{};MPI_Comm_rank(communicator,&rank);
+                  if(rank==0)std::fprintf(stdout,"esf_transport_bound field=%zu round=%u sweep=%u cells=%.0f added=%.0f step_committed=0\n",
+                      field,bound_round+1,sweep+1,global_bad[0],global_bad[1]);
+                  repeat_transport=true;break;
+                }
+              }
+              s=close_frame(current);if(!s)return s;
+            }
+            const FieldId quantity=heat ? fields.enthalpy : fields.reaction_conserved[c];
+            const std::size_t component=heat ? ns+1 : mapping.data[c];
+            auto q=alias(current,component,quantity);
+            std::array<PrimitiveHistory,UINT8_MAX> histories{};
+            std::array<ConstFieldView,UINT8_MAX> diffusivities{};
+            for(std::size_t a=0;a<ns;++a) {
+              const auto old_q=read_alias(accepted,mapping.data[a],fields.reaction_conserved[a]);
+              histories[a]={as_const(alias(current,mapping.data[a],fields.reaction_conserved[a])),old_q,old_q};
+              diffusivities[a]=gamma;
+            }
+            const auto old_h=read_alias(accepted,ns+1,fields.enthalpy);
+            EquationStateView state; state.fixed_thermodynamic_pressure=product.thermodynamics.fixed_pressure_pa();state.density={density,density,density};
+            state.velocity={velocity_history.accepted,velocity_history.accepted,velocity_history.accepted};
+            state.independent_species={histories.data(),ns};state.enthalpy={as_const(alias(current,ns+1,fields.enthalpy)),old_h,old_h};
+            auto& scalar=heat ? state.enthalpy : histories[c];
+            EquationMaterialView material;material.scalar_mass_diffusivity={diffusivities.data(),ns};material.enthalpy_diffusivity=gamma;
+            FieldView source,sink;
+            s=runtime_write_view(fields.esf_transport_sources[c],source);
+            if(s)s=runtime_write_view(fields.esf_transport_sinks[c],sink);
+            std::size_t i{};
+            if(s)for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+              const Int3 cell{x,y,z};esf::detail::IemSource mixing;
+              if(field && fluid(i) && esf::detail::iem_source(
+                  detail::cell_volume(product.equations.kernels(),cell),cache.unchecked(cell,2),
+                  cache.unchecked(cell,3),product.esf.mixing_cd(i,component),
+                  product.esf.mixing_control(i,component),mean.unchecked(cell,component),mixing)
+                      !=portable::Status::success) {s={StatusCode::numerical_failure,10232};break;}
+              source.unchecked(cell,0)=mixing.explicit_source_density+
+                  (field && fluid(i) ? product.esf.frozen_noise_source(i,field-1,component) : 0.)+
+                  (heat && fluid(i) ? product.esf.pressure_source(i) : 0.);
+              sink.unchecked(cell,0)=mixing.implicit_sink_density;
             }
             s=product.reductions.consensus(s);if(!s)return s;
+            EquationContributionView contribution;
+            contribution.explicit_source_density=as_const(source);
+            contribution.implicit_sink_density=as_const(sink);contribution.has_implicit_sink=true;
+            contribution.conserved_quantity=quantity;
+            contribution.units.si_exponents=heat ? std::array<std::int8_t,7>{1,-1,-3,0,0,0,0}
+                                                 : std::array<std::int8_t,7>{1,-3,-1,0,0,0,0};
+            contribution.stage=detail::ProductEsf::transport_source_stage;
+            contribution.explicit_source_field=source.field;contribution.implicit_sink_field=sink.field;
+            contribution.capability=ContributionCapability::reacting;
+            contribution.source_identity=product.reaction.fingerprint();
+            const auto assemble=[&](EquationAssemblyCertificate& certificate) {
+              return heat ? detail::StatisticalEnthalpy::assemble(product.equations.enthalpy(),state,
+                  gamma,{&contribution,1},context,equation,certificate)
+                : detail::StatisticalSpecies::assemble(product.equations.species(),c,state,material,
+                  {&contribution,1},context,equation,certificate);
+            };
+            const auto refresh=[&](FieldView& updated) {
+              auto closed=runtime_write_view(current.field,current);
+              if(closed)closed=boundary_aliases_for(current);
+              updated=alias(current,component,quantity);
+              if(closed && physical)closed=heat
+                  ? apply_boundary_ghosts(BoundaryStage::enthalpy,product.boundary,{&updated,1},boundary_values)
+                  : apply_boundary_ghosts(BoundaryStage::scalar,product.boundary,
+                      {boundary_aliases.data(),fields.scalars.size()},boundary_values);
+              return exchange_frame(current,closed);
+            };
+            const LinearIdentity identity{
+                detail::product_mix(product.equations.species().fingerprint(),UINT64_C(0x5354494d504c01)+field*(ns+1)+c),
+                step.generation,product.geometry.fingerprint(),workspace.fingerprint(),
+                detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep+2*bound_round)};
+            pc.reset_identity(identity);
+            detail::ScalarCorrectionRuntime runtime{rows,pc,product.krylov_halo,workspace,product.reductions,
+                identity,{heat ? 1e-8 : bound_round ? 1e-14 : 1e-12,
+                    bound_round ? 1e-14 : 1e-11,400,1,workspace.requirements().maximum_restart}};
+            detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,
+                heat ? BoundaryStage::enthalpy : BoundaryStage::scalar,
+                heat ? product.schemes.enthalpy() : product.schemes.species(),
+                velocity_history.accepted,context,state.density,scalar,q};
+            const auto solved=detail::correct_frozen_scalar(problem,storage,runtime,assemble,refresh);
+            s=solved.status;if(!s)return s;
           }
-          s=esf_energy_ledger.freeze(product.equations.kernels(),
-              as_const(alias(current,ns+1,fields.enthalpy)),gamma,accepted_flux,
-              context.mixture_transport,product.ibm_equations ? &*product.ibm_equations : nullptr);
-          s=product.reductions.consensus(s);if(!s)return s;
+          if(repeat_transport)break;
+          s=close_frame(current);if(!s)return s;
+          if(dual_esf && field>0 && sweep==1) {
+            if(esf_composition_ledger.active()) {
+              for(std::size_t c=0;c<ns && s;++c) {
+                s=form_cartesian_mixture_transport_flux(product.equations.kernels(),
+                    *context.mixture_transport,gamma,accepted_flux,
+                    as_const(alias(current,mapping.data[c],fields.reaction_conserved[c])),{ax,ay,az});
+                if(s && product.ibm_equations)
+                  s=detail::IbmScalarTransport::constrain_flux(*product.ibm_equations,
+                      {detail::IbmScalarTransport::Quantity::independent_species,c},accepted_flux,{ax,ay,az});
+                if(s)esf_composition_ledger.freeze_transport(c,
+                    detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),
+                        {as_const(ax),as_const(ay),as_const(az),accepted_flux.revision},active));
+              }
+              s=product.reductions.consensus(s);if(!s)return s;
+            }
+            s=esf_energy_ledger.freeze(product.equations.kernels(),
+                as_const(alias(current,ns+1,fields.enthalpy)),gamma,accepted_flux,
+                context.mixture_transport,product.ibm_equations ? &*product.ibm_equations : nullptr);
+            s=product.reductions.consensus(s);if(!s)return s;
+          }
         }
+        if(repeat_transport)continue;
+        break;
       }
       if(field==0) {
         mean=current;
