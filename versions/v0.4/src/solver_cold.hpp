@@ -20,7 +20,7 @@
 namespace hundun::v04::detail {
 
 // COAST cold-flow row operators, adapted to Hundun field views and linear
-// interfaces. Momentum uses CN midpoint storage; mass/energy/species use BE.
+// interfaces. Momentum and ordinary h use CN; mass and PDF scalars use BE.
 // Spatial and temporal identities are verified separately against the COAST
 // condif, gvctr, cmod and step routines. IBM solids receive isolated unit rows.
 

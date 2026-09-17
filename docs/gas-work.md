@@ -6,7 +6,7 @@
 |---|---|---|
 | G0 | gas-ref.json：131 文件哈希、关键调用表；gas-cfl.json：完整 courant 例程的 259 输入对照 | 实际参考构建、算例后端与端到端计时窗口 |
 | G1 | CFL 定义贯通配置、准入、自适应 dt、运行证据与 Restart 方法身份；固定外迭代参考模式贯通末次完整审计、方法身份和证据；定向检查见文末 | 普通焓 CN 已接线；完整 jstep 调度及非均匀场自适应重试 |
-| G2 | Vreman 无散度反例定向回归 | ICCG、矩阵／通量、壁函数、精度及同场性能 |
+| G2 | Vreman 无散度反例定向回归 | ICCG 分布式准入／生产接线、矩阵／通量、壁函数、精度及同场性能 |
 | G3 | 继承 S28–S29 动态 TCR 与恢复证据 | 原始 dyn711 八步统计与分支／重新混合对齐，8/16 场动态模型组合（TCR off 复用 S24） |
 | G4 | 继承 JL4 原时间步组合检查 | 化学筛选／任务均衡、热源／边界及实场轨迹 |
 | I1 | 独立监看、CN 十阶段计时、接受点 stop/output、请求回执、状态查询；2→4 进程恢复通过 | 化学细分和通信包含关系，重试阶段状态通知 |
@@ -133,3 +133,37 @@ G2 ICCG 前置：PCG 增加与 FGMRES／BiCGStab 共用的原方程收敛审核�
 进程 Krylov 合同检查。覆盖零 RHS、精确初值、迭代后审核拒绝、终止
 拒绝、审核错误及失败时解数组保持。ICCG 的矩阵缩放、对称正定准入、
 不完全 Cholesky 和生产入口仍属于接续工作。
+
+
+G0/G2 ICCG 参考组件：`solver_iccg.hpp` 增加逐行体积缩放和块局部
+不完全 Cholesky。分解使用三个低向系数的平方；回代显式取下三角的
+转置，正枢轴形成 SPD 预条件器。矩阵 SPD 仍由独立准入负责。
+原始 `cgsol.F90` 保持字节一致，外围程序提供单进程 MPI、周期 halo
+及工作区，运行其全部分解、CG 与原残差停止循环。
+
+[gas-iccg.json](gas-iccg.json) 记录 19 个确定性输入和程序／源码哈希。
+覆盖三个方向周期、非周期、变体积、单格方向、弱对角占优连通域及
+隔离固体单位行。二进制可精确表示的系数使矩阵体积缩放差异为零。
+原版明确声明 REAL(kind=4) 工作指针；单精度解最大归一化误差为
+1.85e-5，FP64 为 4.94e-13，不完全分解逆枢轴最大相对差异为 3.07e-7。
+原版 `coef(bpc)` 保留原 RHS，体积缩放进入随后被更新的 CG 残差。
+两种 RHS 存储约定分别核对，解另与同一制造解比较。
+
+本组采用原版原行最大残差阈值 2e-6、Hundun 缩放行 L2 阈值
+atol=1e-12／rtol=1e-13，服务于正确性对照；迭代数按各自停止标准
+记录，效率比较接续使用共同标准。原生探针在全部矩阵上检查精确
+对称、M 矩阵行及每个连通分量的约束后才声明 SPD。
+
+`check/gas-iccg-unit.log` 通过预条件器双线性对称、正二次型、独立
+稠密 L D L^T 作用、失败枢轴、失效后调用及体积缩放失效保持检查。
+此节点交付参考组件；MPI 全局矩阵准入、原行残差反缩放和配置入口
+继续按 G2 完成，当前生产后端选择沿用既有行为。
+
+```sh
+mkdir -p check/gi
+cp /home/wyf/code_dev/src.TCR.dyn711/cgsol.F90 check/gi/cgsol.F90
+mpifort -O2 -cpp -Jcheck/gi tools/gas_iccg.f90 check/gi/cgsol.F90 -o check/gi/ref
+python3 tools/gas_iccg.py --reference check/gi/ref \
+  --hundun b3/versions/v0.4/tests/v04_gas_iccg_probe --runner 'bash check/jam.sh' \
+  --source check/gi/cgsol.F90 --output docs/gas-iccg.json
+```

@@ -2731,3 +2731,10 @@ set_tests_properties(v04_gas_outer_cli PROPERTIES PROCESSORS 4 TIMEOUT 180 RUN_S
 
 add_executable(v04_gas_time_probe integration/gas_time_probe.cpp)
 target_link_libraries(v04_gas_time_probe PRIVATE hundun_v04_core)
+
+add_executable(v04_gas_iccg_probe integration/gas_iccg_probe.cpp)
+target_link_libraries(v04_gas_iccg_probe PRIVATE hundun_v04_core)
+add_executable(v04_gas_iccg_test integration/gas_iccg_test.cpp)
+target_link_libraries(v04_gas_iccg_test PRIVATE hundun_v04_core)
+add_test(NAME v04_gas_iccg COMMAND v04_gas_iccg_test)
+set_tests_properties(v04_gas_iccg PROPERTIES TIMEOUT 30 LABELS v04_focused)

@@ -52,7 +52,7 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 
 ### 流动、燃烧与喷雾耦合
 
-默认瞬态计算采用 CN/BE：动量使用 CN，守恒标量使用 BE，`outer_corrected` 外迭代按原方程残差收敛。`backward_euler` 配合 PISO 或 SIMPLE 调度。平均反应与代数 PaSR 通过公共组分源进入 CN/BE；ESF 使用其显式配置的化学、输运与混合顺序。
+默认瞬态计算采用 CN/BE：动量与普通单流体焓使用 CN，组分、反应、ESF 和喷雾路径的焓与组分共同使用 BE，`outer_corrected` 外迭代按原方程残差收敛。`backward_euler` 配合 PISO 或 SIMPLE 调度。平均反应与代数 PaSR 通过公共组分源进入 CN/BE；ESF 使用其显式配置的化学、输运与混合顺序。
 
 Smagorinsky 通过 `"turbulence": {"model": "smagorinsky", "coefficient": 0.12}` 配置，系数默认值为 0.17。模型使用完整对称应变率和单元体积的立方根作为滤波尺度；`hundun check` 显示实际 SGS 模型与系数。
 
