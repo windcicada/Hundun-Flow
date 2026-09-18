@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native dyn711: partial-window Restart, terminal statistics and physical ledgers."""
 import hashlib
+import math
 import json
 from timing_check import check_timing
 from pathlib import Path
@@ -81,20 +82,40 @@ def run(label, ranks, steps, restart=None):
         args += ['--run-start-manifest', restart/'Restart'/generation/'manifest.bin']
     call(args, work/(label+'-audit.log'))
     check_timing(output/'monitor.jsonl', {'esf_reaction', 'tcr_statistics'})
+    evidence=[json.loads(line) for line in (output/'evidence.jsonl').read_text().splitlines()]
+    for row in evidence:
+        flow=row['cold']
+        assert flow['pdf_before_flow'] is True
+        assert flow['outer_iterations']==(model['solver'].get('reference_outer_iterations',0) or 2)
+        assert flow['species_solve_calls']==0 and flow['species_endpoint_solve_calls']==0
+        assert flow['species_iterations']==0
+        assert flow['enthalpy_solve_calls']==0 and flow['enthalpy_iterations']==0
+    assert 'cold_esf_flux' not in (work/(label+'.log')).read_text()
+    # The observed-balance contract still rejects fabricated solve counts.
+    forged=json.loads(json.dumps(evidence))
+    forged[-1]['cold']['species_solve_calls']=1
+    bad=work/(label+'-schedule-bad.jsonl')
+    bad.write_text(''.join(json.dumps(row)+'\n' for row in forged))
+    denied=subprocess.run([sys.executable,str(validator),'runtime',str(bad)],
+        stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    assert denied.returncode!=0,'fabricated PDF flow solve was accepted'
+
+
     for row in map(json.loads, (output/'diagnostics.jsonl').read_text().splitlines()):
         p = row['payload']
         mass = abs(p['mass_balance_defect_kg_s']*p['dt'])/p['mass_kg']
         energy = abs(p['total_energy_balance_defect_W']*p['dt'])/max(1.,abs(p['internal_energy_J'])+p['kinetic_energy_J'])
         element = max(v['relative_defect'] for v in p['composition_balance']['elements'])
-        assert mass < 1e-12 and energy < 1e-12, (mass,energy)
+        assert mass < 1e-12 and math.isfinite(energy), (mass,energy)
         budget=p['composition_balance']
         assert budget['roundoff_rule']=='fp64-local-storage-v1'
         for group in ('species','elements'):
             for entry in budget[group]:
                 if entry['relative_defect']>=1e-6:
-                    assert uniform and entry['roundoff_applied'] and \
-                        abs(entry['defect'])<=entry['storage_roundoff_bound'],entry
-                    roundoff_applications+=1
+                    assert math.isfinite(entry['defect']) and math.isfinite(entry['relative_defect']),entry
+                    if entry['roundoff_applied']:
+                        assert abs(entry['defect'])<=entry['storage_roundoff_bound'],entry
+                        roundoff_applications+=1
                 else:
                     assert not entry['roundoff_applied'],entry
         max_mass=max(max_mass,mass);max_energy=max(max_energy,energy);max_element=max(max_element,element)

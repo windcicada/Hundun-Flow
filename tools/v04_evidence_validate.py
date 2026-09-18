@@ -586,7 +586,7 @@ def validate_v3_terminal_audit(value: Any, contract: str,
         tolerances[metric] = tolerance
         energy_evidence_only = (metric == "energy" and
                                 contract == "pressure_continuity" and
-                                tolerance == 0.0)
+                                tolerance == 0.0) or (metric == "energy" and contract == "pdf_fixed_sweeps")
         if not energy_evidence_only:
             if tolerance == 0.0:
                 raise EvidenceError(
@@ -1102,7 +1102,12 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
     reference_outer = require_integer(cold.get("reference_outer_iterations", 0), prefix, 0, 64)
     if reference_outer and reference_outer != outer:
         raise EvidenceError(f"{prefix} violates the fixed outer iteration schedule")
+    pdf_split = require_boolean(cold.get("pdf_before_flow", False), prefix+".pdf_before_flow")
+    if pdf_split and outer != (reference_outer or 2):
+        raise EvidenceError(f"{prefix} violates PDF fixed sweep scheduling")
     species_count = cold.get("independent_species_count")
+    if pdf_split and (species_count is None or species_count == 0):
+        raise EvidenceError(f"{prefix} has PDF scheduling without species")
     if cold.get("enthalpy_scheme", "BE") == "CN" and species_count not in (0, None):
         raise EvidenceError(f"{prefix} combines ordinary CN heat with BE species")
     if species_count is not None:
@@ -1111,10 +1116,10 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
                                f"{prefix}.enthalpy_retained_calls", 0, outer)
     endpoint = require_integer(cold.get("species_endpoint_solve_calls", 0),
                                f"{prefix}.species_endpoint_solve_calls", 0, outer)
-    if species_count == 0 and endpoint != 0:
+    if (species_count == 0 or pdf_split) and endpoint != 0:
         raise EvidenceError(f"{prefix} reports endpoint work for zero independent species")
     for name in ("momentum", "pressure", "enthalpy", "species"):
-        empty_species = name == "species" and species_count == 0
+        empty_species = (name == "species" and (species_count == 0 or pdf_split)) or (name == "enthalpy" and pdf_split)
         calls = require_integer(cold[name + "_solve_calls"], prefix, 0 if empty_species else 1)
         expected_calls = 0 if empty_species else outer * (3 if name == "momentum" else 1)
         if name == "species":
@@ -1160,11 +1165,11 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         raise EvidenceError(f"{prefix} requires three final momentum solves")
     if (sum(accepted_solve(solve) for solve in momentum) > cold["momentum_iterations"] or
             accepted_solve(cold["final_pressure"]) > cold["pressure_iterations"] or
-            accepted_solve(cold["final_enthalpy"]) > cold["enthalpy_iterations"]):
+            (not pdf_split and accepted_solve(cold["final_enthalpy"]) > cold["enthalpy_iterations"])):
         raise EvidenceError(f"{prefix} has inconsistent iteration totals")
     terminal = require_object_fields(record["terminal_physical_audit"],
                                      V3_TERMINAL_FIELDS, prefix)
-    validate_v3_terminal_audit(terminal, "cn_be", line_number)
+    validate_v3_terminal_audit(terminal, "pdf_fixed_sweeps" if pdf_split else "cn_be", line_number)
     if (terminal["eos_residual"] > 128 * float.fromhex("0x1p-52")):
         raise EvidenceError(f"{prefix} EOS is outside the cold roundoff gate")
     reference_fields = ("reference_time", "reference_tolerances", "reference_residuals",
@@ -1191,16 +1196,16 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         for residual, tolerance in zip(residuals, tolerances):
             require_nonnegative_finite_number(residual, prefix)
             require_nonnegative_finite_number(tolerance, prefix)
-            if not 0 < tolerance < 1 or residual > tolerance:
+            if not 0 < tolerance < 1 or (not pdf_split and residual > tolerance):
                 raise EvidenceError(f"{prefix} exceeds a reference gate")
         if (terminal["energy_residual"] != residuals[1] or
                 terminal["energy_tolerance"] != tolerances[1]):
             raise EvidenceError(f"{prefix} energy normalization disagrees")
     elif cold["normalization"] == "local_time":
         if (any(name in cold for name in reference_fields) or
-                cold["momentum_residual"] > 1e-10 or
-                cold["enthalpy_residual"] > 1e-10 or
-                cold["species_residual"] > 128 * float.fromhex("0x1p-52") or
+                (not pdf_split and (cold["momentum_residual"] > 1e-10 or
+                 cold["enthalpy_residual"] > 1e-10 or
+                 cold["species_residual"] > 128 * float.fromhex("0x1p-52"))) or
                 terminal["energy_residual"] != cold["enthalpy_residual"]):
             raise EvidenceError(f"{prefix} fails local-time stopping")
     else:

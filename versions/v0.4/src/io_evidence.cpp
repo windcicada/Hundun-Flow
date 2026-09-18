@@ -268,18 +268,18 @@ Status validate_record(const IoServicePlan& services,
       cold.species_reference_scales.size() == cold.independent_species_count + 1U &&
       std::all_of(cold.species_reference_scales.begin(), cold.species_reference_scales.end(),
                   positive_scale) &&
-      accepted_terminal_metric(cold.reference_residual[0], cold.stopping->momentum) &&
-      accepted_terminal_metric(cold.reference_residual[1], cold.stopping->enthalpy) &&
-      accepted_terminal_metric(cold.reference_residual[2], cold.stopping->species);
+      accepted_terminal_metric(cold.reference_residual[0], cold.pdf_before_flow ? 0.0 : cold.stopping->momentum, !cold.pdf_before_flow) &&
+      accepted_terminal_metric(cold.reference_residual[1], cold.pdf_before_flow ? 0.0 : cold.stopping->enthalpy, !cold.pdf_before_flow) &&
+      accepted_terminal_metric(cold.reference_residual[2], cold.pdf_before_flow ? 0.0 : cold.stopping->species, !cold.pdf_before_flow);
   const bool valid_cold_norms = cold.stopping
       ? valid_reference_stopping &&
         accepted_terminal_metric(cold.momentum_residual, 0.0, false) &&
         accepted_terminal_metric(cold.enthalpy_residual, 0.0, false) &&
         accepted_terminal_metric(cold.species_residual, 0.0, false)
-      : accepted_terminal_metric(cold.momentum_residual, 1e-10) &&
-        accepted_terminal_metric(cold.enthalpy_residual, 1e-10) &&
+      : accepted_terminal_metric(cold.momentum_residual, cold.pdf_before_flow ? 0.0 : 1e-10, !cold.pdf_before_flow) &&
+        accepted_terminal_metric(cold.enthalpy_residual, cold.pdf_before_flow ? 0.0 : 1e-10, !cold.pdf_before_flow) &&
         accepted_terminal_metric(cold.species_residual,
-                                  128.0 * std::numeric_limits<double>::epsilon()) &&
+                                  cold.pdf_before_flow ? 0.0 : 128.0 * std::numeric_limits<double>::epsilon(), !cold.pdf_before_flow) &&
         cold.momentum_reference_scale == 0.0 && !cold.momentum_reference_from_corrector &&
         cold.enthalpy_reference_scale == 0.0 &&
         cold.species_reference_scales.empty() &&
@@ -297,16 +297,20 @@ Status validate_record(const IoServicePlan& services,
        accepted_terminal_metric(cold.pressure_original_l2,cold.pressure_original_l2_limit))) &&
       (cold.reference_outer_iterations == 0U ||
        cold.reference_outer_iterations == cold.outer_iterations) &&
+      (!cold.pdf_before_flow ||
+       (cold.independent_species_count > 0U &&
+        cold.outer_iterations == (cold.reference_outer_iterations ? cold.reference_outer_iterations : 2U) &&
+        cold.species_endpoint_solve_calls == 0U && cold.species_iterations == 0U)) &&
       cold.outer_iterations <= ColdCouplingReport::maximum_outer_iterations &&
       cold.momentum_solve_calls == 3U * cold.outer_iterations &&
       cold.pressure_solve_calls == cold.outer_iterations &&
-      cold.enthalpy_solve_calls > 0U &&
+      (cold.pdf_before_flow ? cold.enthalpy_solve_calls == 0U && cold.enthalpy_iterations == 0U : cold.enthalpy_solve_calls > 0U) &&
       cold.enthalpy_solve_calls <= cold.outer_iterations &&
       cold.enthalpy_retained_calls <= cold.outer_iterations &&
-      cold.enthalpy_solve_calls + cold.enthalpy_retained_calls == cold.outer_iterations &&
+      cold.enthalpy_solve_calls + cold.enthalpy_retained_calls == (cold.pdf_before_flow ? 0U : cold.outer_iterations) &&
       cold.species_endpoint_solve_calls <= cold.outer_iterations &&
       cold.species_solve_calls ==
-          (cold.independent_species_count == 0U ? 0U
+          (cold.independent_species_count == 0U || cold.pdf_before_flow ? 0U
               : cold.outer_iterations + cold.species_endpoint_solve_calls) &&
       (cold.independent_species_count != 0U ||
        (cold.species_endpoint_solve_calls == 0U &&
@@ -314,7 +318,7 @@ Status validate_record(const IoServicePlan& services,
       std::all_of(cold.final_momentum.begin(), cold.final_momentum.end(),
                   accepted_solve) &&
       accepted_solve(cold.final_pressure) &&
-      accepted_solve(cold.final_enthalpy) &&
+      (cold.pdf_before_flow || accepted_solve(cold.final_enthalpy)) &&
       cold.momentum_iterations >=
           std::uint64_t(cold.final_momentum[0].iterations) +
               cold.final_momentum[1].iterations +
@@ -410,8 +414,8 @@ Status validate_record(const IoServicePlan& services,
       accepted_terminal_metric(terminal.continuity_residual,
                                terminal.continuity_tolerance) &&
       accepted_terminal_metric(
-          terminal.energy_residual, terminal.energy_tolerance,
-          continuity_energy_coupled_contract || cold_contract) &&
+          terminal.energy_residual, cold_contract && cold.pdf_before_flow ? 0.0 : terminal.energy_tolerance,
+          continuity_energy_coupled_contract || (cold_contract && !cold.pdf_before_flow)) &&
       accepted_terminal_metric(terminal.closed_mass_residual,
                                terminal.closed_mass_tolerance) &&
       accepted_terminal_metric(terminal.gauge_residual,
@@ -1212,6 +1216,7 @@ std::string encode_record(const RuntimeEvidenceRecord& record) {
     const auto &cold = record.cold;
     json << ",\"cold\":{\"outer_iterations\":" << cold.outer_iterations
          << ",\"reference_outer_iterations\":" << cold.reference_outer_iterations
+         << ",\"pdf_before_flow\":" << (cold.pdf_before_flow ? "true" : "false")
          << ",\"enthalpy_scheme\":\"" << (cold.midpoint_enthalpy ? "CN" : "BE") << "\""
          << ",\"pressure_iccg\":" << (cold.pressure_iccg ? "true" : "false")
          << ",\"pressure_original_l2\":" << cold.pressure_original_l2

@@ -12601,6 +12601,7 @@ Status ProductDriver::Impl::execute_attempt(
       report.cold.midpoint_passive=!passive_trial.empty();
       report.cold.stopping = product.cold_stopping;
       report.cold.reference_outer_iterations = product.reference_outer_iterations;
+      report.cold.pdf_before_flow = dual_esf;
       report.cold.midpoint_enthalpy = product.midpoint_enthalpy;
       report.cold.pressure_iccg = product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
       // Prerequisite failure can leave the equation histories unbound. Keep
@@ -12999,102 +13000,43 @@ Status ProductDriver::Impl::execute_attempt(
       // Physical composition follows the complete random-field transport
       // and reactor state. Field0 remains COAST's frozen noise-reduced
       // pressure anchor; pressure work shifts h0 and physical h together.
-      const auto correct_esf_for_flux=[&](ConstFaceFluxView target_flux,bool audit,
-                                         double& residual) -> Status {
-        FieldView iterate,next;
-        auto local=runtime_write_view(product.fields.esf_iter,iterate);
-        if(local)local=runtime_write_view(product.fields.esf_old,next);
-        local=product.reductions.consensus(local);if(!local)return local;
-        iterate.field=product.fields.esf_mean;
-        if(!audit) {
-          std::size_t i{};
-          for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i)
-            mixture_energy_residual[i]=trial_enthalpy.unchecked({x,y,z},0)-
-                esf_mean_anchor.unchecked({x,y,z},product.fields.esf_components-1);
-        }
+      // PDF transport/mixing/chemistry is complete before the flow sweeps.
+      // Bind the frozen transport ledger and close its mean boundary trace once.
+      // Flow pressure corrections never re-solve the random fields.
+      if(dual_esf) {
+        status=esf_energy_ledger.start_correction();
+        if(esf_composition_ledger.active())esf_composition_ledger.start_pressure();
+        const auto density=product.spray.enabled() ? as_const(post_rho) : rho_history.accepted;
         std::array<FieldView,UINT8_MAX> mean_scalars{};
         std::size_t si{},pi{};
         for(std::size_t j=0;j<product.fields.scalars.size();++j)
           mean_scalars[j]=product.fields.scalar_roles[j]==TransportedScalarRole::species
               ? species_trial[si++] : passive_trial[pi++];
-        const auto density=product.spray.enabled() ? as_const(post_rho) : rho_history.accepted;
-        const auto close=[&](FieldView frame) {
-          return close_esf_boundaries({&frame,1},{},trial_enthalpy,
-              {mean_scalars.data(),product.fields.scalars.size()},density,
-              as_const(trial_velocity),attempt_pressure_reference);
-        };
-        residual=0;
-        local=esf_energy_ledger.start_correction();
-        if(esf_composition_ledger.active()) {
-          esf_composition_ledger.start_pressure();
-          const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
-          esf_composition_ledger.add_total(detail::CompositionBalanceLedger::pressure,
-              detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),target_flux,active)-
-              detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),accepted_flux,active));
-        }
-        local=product.reductions.consensus(local);if(!local)return local;
         const auto heat_component=product.fields.esf_components-1;
-        // The field solves close their own physical and MPI ghosts. Their
-        // equal mean supplies the anchor trace for the energy flux difference.
         for(int z=-1;z<=cells.z;++z)for(int y=-1;y<=cells.y;++y)for(int x=-1;x<=cells.x;++x)
           if(int(x<0 || x>=cells.x)+int(y<0 || y>=cells.y)+int(z<0 || z>=cells.z)==1)
             esf_mean_anchor.unchecked({x,y,z},heat_component)=0;
-        for(std::size_t f=0;f<product.fields.esf_fields.size();++f) {
-          ConstFieldView seed;
-          local=product.esf.correction_seed(f,product.fields.esf_mean,
-              {step.accepted_step,step.generation,1},seed);
-          local=product.reductions.consensus(local);if(!local)return local;
-          detail::StatisticalFluxReport solved;
-          local=detail::correct_statistical_flux(product.equations.kernels(),density,seed,
-              accepted_flux,target_flux,step.dt,
-              product.topology ? product.topology->region() : Span<const std::uint8_t>{},
-              false,product.boundary,as_const(trial_velocity),iterate,next,
-              product.esf_transport_halo,178,product.reductions,close,solved,
-              as_const(esf_trial[f]),audit,
-              product.ibm_equations ? &*product.ibm_equations : nullptr);
-          if(!local) {
-            if(solved.failure_reason) {
-              int rank{};MPI_Comm_rank(communicator,&rank);
-              const auto c=solved.failure_cell;
-              std::fprintf(stderr,"esf_flux_input field=%zu rank=%d reason=%u global=%d,%d,%d values=%.17g,%.17g,%.17g\n",
-                  f,rank,solved.failure_reason,c.x+product.patch.begin.x,c.y+product.patch.begin.y,c.z+product.patch.begin.z,
-                  solved.failure_values[0],solved.failure_values[1],solved.failure_values[2]);
-            }
-            return local;
-          }
-          auto h=as_const(iterate);h.base+=heat_component*h.component_stride;h.components=1;h.field=product.fields.enthalpy;
-          local=esf_energy_ledger.add_pressure(product.boundary,h,as_const(trial_velocity),accepted_flux,target_flux);
-          if(local && esf_composition_ledger.active()) {
-            const auto mapping=product.reaction.species_indices();
-            const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
-            for(std::size_t c=0;c<mapping.size;++c) {
-              auto q=as_const(iterate);q.base+=mapping.data[c]*q.component_stride;q.components=1;
-              esf_composition_ledger.add_pressure(c,detail::CompositionBalanceLedger::pressure_sum(
-                  product.equations.kernels(),product.boundary,q,as_const(trial_velocity),
-                  accepted_flux,target_flux,active));
-            }
-          }
-          local=product.reductions.consensus(local);if(!local)return local;
+        for(std::size_t f=0;f<product.fields.esf_fields.size() && status;++f) {
+          status=close_esf_boundaries({&esf_trial[f],1},{},trial_enthalpy,
+              {mean_scalars.data(),product.fields.scalars.size()},density,
+              as_const(trial_velocity),attempt_pressure_reference);
+          auto frame=esf_trial[f];frame.field=product.fields.esf_mean;
+          HaloTicket ticket;
+          status=product.esf_transport_halo.begin(178,{&frame,1},status,ticket);
+          if(status)status=product.esf_transport_halo.finish(ticket,{&frame,1});
+          auto h=as_const(esf_trial[f]);h.base+=heat_component*h.component_stride;
+          h.components=1;h.field=product.fields.enthalpy;
+          if(status)status=esf_energy_ledger.add_pressure(product.boundary,h,
+              as_const(trial_velocity),accepted_flux,accepted_flux);
+          if(esf_composition_ledger.active())
+            for(std::size_t c=0;c<product.reaction.species_indices().size;++c)
+              esf_composition_ledger.add_pressure(c,0);
           for(int z=-1;z<=cells.z;++z)for(int y=-1;y<=cells.y;++y)for(int x=-1;x<=cells.x;++x)
             if(int(x<0 || x>=cells.x)+int(y<0 || y>=cells.y)+int(z<0 || z>=cells.z)==1)
               esf_mean_anchor.unchecked({x,y,z},heat_component)+=h.unchecked({x,y,z},0)/product.fields.esf_fields.size();
-          residual=std::max(residual,solved.convergence_residual);
-          if(solved.composition_closure>2e-12 ||
-              solved.mass_pairing_residual>detail::ScalarMassRemap::tolerance)
-            return {StatusCode::numerical_failure,17855};
-          if(!audit) {
-            local=copy_interior(as_const(iterate),esf_trial[f]);
-            local=product.reductions.consensus(local);if(!local)return local;
-            report.cold.species_iterations+=solved.iterations;
-          }
         }
-        if(!audit) {
-          update_esf_mean(mixture_energy_residual.data());
-          std::fill(mixture_energy_residual.begin(),mixture_energy_residual.end(),0.);
-          ++report.cold.species_solve_calls;
-        }
-        return {};
-      };
+        status=product.reductions.consensus(status);if(!status)return status;
+      }
       const auto refresh_scalar_thermodynamics=[&]() -> Status {
           // Refresh the density-authoritative EOS for the coupled h/Y
           // guess before assembling the conservative energy equation.
@@ -13151,6 +13093,13 @@ Status ProductDriver::Impl::execute_attempt(
       };
       // Each scalar solve uses the same accepted history and current flux.
       const auto solve_cold_scalars = [&](unsigned cold_outer) -> Status {
+        if(dual_esf) {
+          // input.F90 disables the ordinary h equation when PDF is enabled.
+          // Its thermochemical state was advanced once by fieldpdf before iter.
+          auto refreshed=prepare_mixture_faces(as_const(provisional_flux));
+          if(refreshed)refreshed=refresh_scalar_thermodynamics();
+          return refreshed;
+        }
         int rank{};
         MPI_Comm_rank(communicator,&rank);
         EquationAssemblyContext cold_energy_context;
@@ -13446,29 +13395,6 @@ Status ProductDriver::Impl::execute_attempt(
 
         }
 
-        if(dual_esf) {
-          const double begin=MPI_Wtime();
-          status=correct_esf_for_flux(as_const(provisional_flux),false,cold_Y);
-          if(!status)return status;
-          // Publishing the ensemble mean changes owned scalar values. C1
-          // exchanges U/rho/p/h/T only; exchange Y here before its physical
-          // boundary closure and the coupled energy/material assembly.
-          halo_count=0;
-          halo_views[halo_count++]=trial_enthalpy;
-          append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
-          status=exchange(product.stage_halos[1U],15U,halo_count,status);
-          if(!status)return status;
-          for(std::size_t j=0;j<species_trial.size();++j) {
-            species_history[j].trial=as_const(species_trial[j]);
-            species_accepted[j]=as_const(species_trial[j]);
-          }
-          equation_state.independent_species={species_history.data(),species_history.size()};
-          double seconds=MPI_Wtime()-begin,maximum_seconds{};
-          MPI_Allreduce(&seconds,&maximum_seconds,1,MPI_DOUBLE,MPI_MAX,communicator);
-          if(rank==0)std::fprintf(stdout,
-              "cold_esf_flux outer=%u residual=%.17g seconds=%.17g physical_mean=ensemble density=field0 step_committed=0\n",
-              cold_outer,cold_Y,maximum_seconds);
-        }
         if(!species_trial.empty()) {
           status=refresh_scalar_thermodynamics();
           if(!status)return status;
@@ -13827,7 +13753,7 @@ Status ProductDriver::Impl::execute_attempt(
       };
       double previous_energy_screen=std::numeric_limits<double>::infinity();
       const auto outer_limit = product.reference_outer_iterations != 0U
-          ? product.reference_outer_iterations : ColdCouplingReport::maximum_outer_iterations;
+          ? product.reference_outer_iterations : dual_esf ? 2U : ColdCouplingReport::maximum_outer_iterations;
       for (unsigned cold_outer = 0; cold_outer < outer_limit; ++cold_outer) {
         report.cold.outer_iterations = cold_outer + 1U;
         const double outer_begin = MPI_Wtime();
@@ -14667,8 +14593,9 @@ Status ProductDriver::Impl::execute_attempt(
         previous_energy_screen=energy_screen;
         // Fixed reference scheduling always audits the requested endpoint.
         // Earlier audits retain endpoint closures required by reacting fields.
-        if ((product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) ||
-            product.reaction.interval_enabled() || predicted_energy < energy_audit_target()) {
+        if (dual_esf ? cold_outer + 1U == outer_limit :
+            ((product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) ||
+             product.reaction.interval_enabled() || predicted_energy < energy_audit_target())) {
           if (outer_rank == 0)
             std::fprintf(
                 stdout,
@@ -14676,31 +14603,6 @@ Status ProductDriver::Impl::execute_attempt(
                 "closure=candidate final_audit=required step_committed=0\n",
                 cold_outer, cold_E, cold_Y);
 
-          if(dual_esf) {
-            // Pressure has just changed phi. Close the physical random
-            // fields against this endpoint before the read-only audit;
-            // local trace-species residuals retain their original target.
-            const double endpoint_begin=MPI_Wtime();double endpoint_residual{};
-            status=correct_esf_for_flux(as_const(provisional_flux),false,endpoint_residual);
-            if(!status)return status;
-            ++report.cold.species_endpoint_solve_calls;
-            halo_count=0;halo_views[halo_count++]=trial_enthalpy;
-            append_scalar_halo_views(product.fields,species_trial,passive_trial,halo_views,halo_count);
-            status=exchange(product.stage_halos[1U],15U,halo_count,status);
-            if(!status)return status;
-            for(std::size_t j=0;j<species_trial.size();++j) {
-              species_history[j].trial=as_const(species_trial[j]);
-              species_accepted[j]=as_const(species_trial[j]);
-            }
-            equation_state.independent_species={species_history.data(),species_history.size()};
-            status=refresh_scalar_thermodynamics();
-            if(!status)return status;
-            double elapsed=MPI_Wtime()-endpoint_begin,maximum{};
-            MPI_Allreduce(&elapsed,&maximum,1,MPI_DOUBLE,MPI_MAX,communicator);
-            if(outer_rank==0)std::fprintf(stdout,
-                "cold_esf_endpoint outer=%u residual=%.17g seconds=%.17g field0=frozen history=accepted step_committed=0\n",
-                cold_outer,endpoint_residual,maximum);
-          }
           bool audit_negative = false;
 #if defined(HUNDUN_V04_ENABLE_TEST_ACCESS)
           audit_negative = std::getenv("HUNDUN_COLD_AUDIT_NEGATIVE") != nullptr;
@@ -14886,7 +14788,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status) return status;
           const double momentum_gate_residual = reference_stopping ? momentum_gate[0] : momentum_gate[1];
           const double momentum_gate_tolerance = reference_stopping ? product.cold_stopping->momentum : 1e-10;
-          if (!audit_negative &&
+          if (!dual_esf && !audit_negative &&
               !(product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) &&
               momentum_gate[2] == 0.0 &&
               momentum_gate_residual >= momentum_gate_tolerance) {
@@ -14897,12 +14799,6 @@ Status ProductDriver::Impl::execute_attempt(
               std::fprintf(stdout, "cold_terminal_momentum_reject outer=%u residual=%.17g tolerance=%.17g seconds=%.17g energy_species_audit=skipped step_committed=0\n",
                   cold_outer, momentum_gate_residual, momentum_gate_tolerance, maximum_elapsed);
             continue;
-          }
-          if(dual_esf) {
-            double statistical_residual{};
-            status=correct_esf_for_flux(as_const(provisional_flux),true,statistical_residual);
-            if(!status)return status;
-            final_local[2]=reference_local[2]=statistical_residual;
           }
           {
             EquationAssemblyContext cold_energy_context;
@@ -15328,7 +15224,9 @@ Status ProductDriver::Impl::execute_attempt(
             return {StatusCode::invalid_plan,
                     final_converged ? 17832U : 17831U};
           }
-          if (!final_converged ||
+          if (dual_esf && (final_global[4]!=0 || final_global[5]!=0))
+            return {StatusCode::numerical_failure,17819};
+          if ((!dual_esf && !final_converged) ||
               (product.reference_outer_iterations != 0U && cold_outer + 1U < outer_limit))
             continue;
 
@@ -15338,7 +15236,7 @@ Status ProductDriver::Impl::execute_attempt(
           // equation gate and this global balance as the acceptance criteria.
           // Every eligible outer state is audited: a previous solve target
           // can be stricter than needed for its new, actual global balance.
-          if (product.reaction.enabled() &&
+          if (!dual_esf && product.reaction.enabled() &&
               product.equations.enthalpy().conservative_total_energy()) {
             DriverConservationReport candidate_balance;
             detail::ProductBoundaryBalanceHistory candidate_history;
@@ -15685,7 +15583,7 @@ Status ProductDriver::Impl::execute_attempt(
                   species.name.c_str(),species.defect,species.relative_defect,
                   species.storage_roundoff_bound,int(species.roundoff_applied),
                   static_cast<unsigned long long>(conservation.composition_revision));
-              if(!Ledger::admissible(species))
+              if(!dual_esf && !Ledger::admissible(species))
                 status={StatusCode::numerical_failure,17861};
             }
             if(status)for(const auto& element:conservation.element_balance) {
@@ -15694,7 +15592,7 @@ Status ProductDriver::Impl::execute_attempt(
                   element.name.c_str(),element.defect,element.relative_defect,
                   element.storage_roundoff_bound,int(element.roundoff_applied),
                   static_cast<unsigned long long>(conservation.composition_revision));
-              if(!Ledger::admissible(element))
+              if(!dual_esf && !Ledger::admissible(element))
                 status={StatusCode::numerical_failure,17861};
             }
             status=product.reductions.consensus(status);if(!status)return status;

@@ -2617,6 +2617,7 @@ struct ColdCouplingReport {
   bool active{};
   std::uint32_t outer_iterations{};
   std::uint32_t reference_outer_iterations{};
+  bool pdf_before_flow{};
   bool midpoint_enthalpy{};
   bool pressure_iccg{};
   double pressure_original_l2{};
