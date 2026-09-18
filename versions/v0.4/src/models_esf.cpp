@@ -675,10 +675,11 @@ Report Workspace::react(const ReactionRequest &q,
       }
       for (std::size_t e = 0; e < id.element_count; ++e) {
         double delta = 0;
-        for (std::size_t s = 0; s < ns; ++s)
+        for (std::size_t s = 0; s < ns; ++s) {
           delta += species_delta_[s] * double(id.species[s].element_counts[e]) /
                    id.species[s].molecular_weight_kg_per_kmol;
-        if (!near(delta, 0)) {
+        }
+        if (!std::isfinite(delta) || (!q.observe_element_balance && !near(delta, 0))) {
           r.status = portable::Status::conservation_failure;
           return r;
         }

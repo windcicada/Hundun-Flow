@@ -1201,7 +1201,7 @@ public:
           const esf::detail::ReactionRequest reaction{transported, revision,
               &gas.chemistry_identity(), &gas.gas_identity(), pressures.data(),
               reactor_density_.data() + i * spec_.fields, time, dt,
-              esf::detail::ReactionIntervals::full};
+              esf::detail::ReactionIntervals::full,true};
           const auto reacted = workspace_->react(reaction, *gas.gas_advance());
           const double rho=transport_carrier_density_[i];
           if (reacted.status != portable::Status::success || !(rho>0) || !std::isfinite(rho) ||

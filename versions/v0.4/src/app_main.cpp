@@ -282,6 +282,12 @@ int main(int argc, char* argv[]) {
     const Status status =
         ApplicationService::validate(MPI_COMM_WORLD, argv[2], report);
     if (status && rank == 0) {
+      const bool reference_pdf=report.summary.reaction_mode==hundun::v04::ReactionMode::esf_tpdf &&
+          report.summary.time_scheme==hundun::v04::TimeScheme::cn_be;
+      if(reference_pdf)std::cout << "SOLVE_CONTROL actual=bicgstab_dilu norm=max_residual_density/rnorm "
+          "momentum=50,1e-4 pressure=500,1e-4 passive=20,1e-3 pdf=10,1e-4 "
+          "pdf_sweeps=2 cap=publish_candidate chemistry_rtol=0 chemistry_atol_kmol_kg=1e-10 "
+          "balance=observe configured_pressure_options=inactive_in_pdf_flow\n";
       std::cout << "VALID case=" << report.case_model
                 << " product=" << report.product
                 << " time_scheme="

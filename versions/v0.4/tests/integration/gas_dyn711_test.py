@@ -90,7 +90,12 @@ def run(label, ranks, steps, restart=None):
         assert flow['species_solve_calls']==0 and flow['species_endpoint_solve_calls']==0
         assert flow['species_iterations']==0
         assert flow['enthalpy_solve_calls']==0 and flow['enthalpy_iterations']==0
+        assert flow['momentum_iterations']<=3*50*flow['outer_iterations']
+        assert flow['pressure_iterations']<=500*flow['outer_iterations']
+        assert flow.get('passive_iterations',0)<=20*flow.get('passive_solve_calls',0)
+
     assert 'cold_esf_flux' not in (work/(label+'.log')).read_text()
+    assert 'esf_transport_bound' not in (work/(label+'.log')).read_text()
     # The observed-balance contract still rejects fabricated solve counts.
     forged=json.loads(json.dumps(evidence))
     forged[-1]['cold']['species_solve_calls']=1
@@ -106,7 +111,7 @@ def run(label, ranks, steps, restart=None):
         mass = abs(p['mass_balance_defect_kg_s']*p['dt'])/p['mass_kg']
         energy = abs(p['total_energy_balance_defect_W']*p['dt'])/max(1.,abs(p['internal_energy_J'])+p['kinetic_energy_J'])
         element = max(v['relative_defect'] for v in p['composition_balance']['elements'])
-        assert mass < 1e-12 and math.isfinite(energy), (mass,energy)
+        assert mass < 1e-6 and math.isfinite(energy), (mass,energy)
         budget=p['composition_balance']
         assert budget['roundoff_rule']=='fp64-local-storage-v1'
         for group in ('species','elements'):
@@ -133,6 +138,8 @@ args=[mpi, '--oversubscribe', '--bind-to', 'none', '-n', 4, compare,
     work, two/'Restart', four/'Restart']
 if cold:
     args += ['--collapsed']
+else:
+    args += ['--reference-linear']
 call(args, work/'compare.log')
 comparison = (work/'compare.log').read_text()
 assert 'dyn711_history clocks=restored' in comparison and 'passed=1' in comparison

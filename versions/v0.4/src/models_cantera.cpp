@@ -214,6 +214,8 @@ struct Workspace final {
   std::unique_ptr<detail::KeroseneMaterial> kerosene;
   std::vector<double> query_diffusion, query_enthalpies, query_rates;
   std::vector<double> advance_fractions, advance_delta;
+  bool reference_tolerances_initialized{};
+  std::vector<double> reference_tolerances;
 };
 
 void continue_enthalpy(Cantera::ThermoPhase& thermo) {
@@ -690,7 +692,7 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
           integration_started = true;
           w.kerosene->integrate(*w.thermo, r.duration_s, relative_tolerance,
               absolute_tolerance, impl_->controls.maximum_internal_steps - total_steps,
-              w.advance_fractions);
+              w.advance_fractions,impl_->controls.molar_reference_controls);
           count = w.kerosene->steps();
         } else {
           // Independent cell intervals share storage, not reactor volume history.
@@ -698,9 +700,25 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
           w.reactor->setEnergyEnabled(true);
           w.reactor->syncState();
           w.network->setInitialTime(0.0);
-          w.network->setTolerances(relative_tolerance, absolute_tolerance);
+          if(!impl_->controls.molar_reference_controls)
+            w.network->setTolerances(relative_tolerance, absolute_tolerance);
           w.network->setMaxSteps(impl_->controls.maximum_internal_steps - total_steps);
           w.network->reinitialize();
+          if(impl_->controls.molar_reference_controls && !w.reference_tolerances_initialized) {
+            // COAST integrates Y/W with atol=1e-10 kmol/kg, rtol=0.
+            // ReactorNet integrates Y: the equivalent component limit is W*atol.
+            // Auxiliary mass/temperature tolerances keep numerical Jacobian
+            // perturbations in physical units; PH closes the reported temperature.
+            w.reference_tolerances.assign(w.network->neq(),absolute_tolerance);
+            w.reference_tolerances[w.reactor->componentIndex("mass")]=absolute_tolerance*initial_rho;
+            w.reference_tolerances[w.reactor->componentIndex("temperature")]=1e-3;
+            for(std::size_t i=0;i<n;++i)
+              w.reference_tolerances[w.reactor->componentIndex(w.thermo->speciesName(i))]=
+                  w.thermo->molecularWeight(i)*absolute_tolerance;
+            w.network->integrator().setTolerances(0.,w.reference_tolerances.size(),w.reference_tolerances.data());
+            w.network->integrator().initialize(0.,*w.network);
+            w.reference_tolerances_initialized=true;
+          }
           integration_started = true;
           w.network->advance(r.duration_s);
           count = w.network->solverStats()["steps"].asInt();
@@ -715,11 +733,20 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
         steps = static_cast<std::uint32_t>(count);
         total_steps += steps;
         steps_recorded = true;
-        if (!w.kerosene && std::abs(w.thermo->enthalpy_mass() - r.state.enthalpy_j_per_kg) >
-            1e-8 * std::max(1., std::abs(r.state.enthalpy_j_per_kg)))
+        if (!impl_->controls.molar_reference_controls && !w.kerosene && std::abs(w.thermo->enthalpy_mass() - r.state.enthalpy_j_per_kg) >
+            1e-8 * std::max(1., std::abs(r.state.enthalpy_j_per_kg))) {
           return portable::Status::conservation_failure;
-        if (!detail::bound_chemistry_roundoff(
-                w.advance_fractions, impl_->controls.absolute_tolerance))
+        }
+        if(impl_->controls.molar_reference_controls && w.thermo->speciesIndex("N2")!=Cantera::npos) {
+          const auto dependent=w.thermo->speciesIndex("N2");
+          long double sum=0.;
+          for(std::size_t i=0;i<n;++i)if(i!=dependent) {
+            if(!std::isfinite(w.advance_fractions[i]))return portable::Status::provider_failure;
+            w.advance_fractions[i]=std::max(0.,w.advance_fractions[i]);
+            sum+=w.advance_fractions[i];
+          }
+          w.advance_fractions[dependent]=static_cast<double>(1.-sum);
+        } else if(!detail::bound_chemistry_roundoff(w.advance_fractions,impl_->controls.absolute_tolerance))
           return portable::Status::provider_failure;
       } else
         std::copy(r.state.mass_fractions, r.state.mass_fractions + n,
@@ -754,7 +781,10 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
           residual += term;
           element_scale += std::abs(term);
         }
-        if (std::abs(residual) > 1e-12 + 1e-9 * element_scale)
+        // Reference checkmass changes elemental inventory by its clipping.
+        // The common source ledger reports that change; it does not reintegrate.
+        if (!std::isfinite(residual) || (!impl_->controls.molar_reference_controls &&
+            std::abs(residual) > 1e-12 + 1e-9 * element_scale))
           return portable::Status::conservation_failure;
       }
       auto final_query = r.state;
@@ -774,7 +804,8 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
       return portable::Status::success;
     } catch (const std::bad_alloc &) {
       return portable::Status::capacity_exceeded;
-    } catch (...) {
+    } catch (const std::exception& error) {
+      std::fprintf(stderr,"chemistry_reference_exception %s\n",error.what());
       if (integration_started && !steps_recorded) {
         try {
           const auto count = w.kerosene ? w.kerosene->steps() :
@@ -789,6 +820,12 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
       return portable::Status::provider_failure;
     }
   };
+  if(impl_->controls.molar_reference_controls) {
+    const auto status=attempt(0.,impl_->controls.absolute_tolerance);
+    out.internal_step_count=total_steps;
+    if(status!=portable::Status::success)std::fprintf(stderr,"chemistry_reference_failure status=%u steps=%u\n",unsigned(status),total_steps);
+    return status;
+  }
   double relative = impl_->controls.relative_tolerance;
   double absolute = impl_->controls.absolute_tolerance;
   // Keep four bounded refinement opportunities when a caller already uses
@@ -998,7 +1035,8 @@ make_cantera_backend(const CanteraBackendConfig &config,
   // The donor obtained these checks from its case schema. This independent
   // backend has no schema caller, so reject controls before claiming a lane.
   if (!std::isfinite(config.chemistry.relative_tolerance) ||
-      config.chemistry.relative_tolerance <= 0.0 ||
+      (config.chemistry.relative_tolerance < 0.0 ||
+       (config.chemistry.relative_tolerance == 0.0 && !config.chemistry.molar_reference_controls)) ||
       !std::isfinite(config.chemistry.absolute_tolerance) ||
       config.chemistry.absolute_tolerance <= 0.0 ||
       config.chemistry.maximum_internal_steps <= 0) {

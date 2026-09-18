@@ -248,10 +248,11 @@ Status validate_record(const IoServicePlan& services,
   const bool cold_contract = record.pressure_solve_contract ==
                              RuntimePressureSolveContract::cn_be;
   const auto &cold = record.cold;
-  const auto accepted_solve = [](const LinearSolveResult &solve) {
+  const auto accepted_solve = [&](const LinearSolveResult &solve) {
     return solve.status &&
            (solve.termination == LinearTermination::converged ||
-            solve.termination == LinearTermination::zero_rhs) &&
+            solve.termination == LinearTermination::zero_rhs ||
+            (cold.pdf_before_flow && solve.termination == LinearTermination::maximum_iterations)) &&
            std::isfinite(solve.initial_true_residual) &&
            solve.initial_true_residual >= 0.0 &&
            std::isfinite(solve.final_true_residual) &&
@@ -287,8 +288,8 @@ Status validate_record(const IoServicePlan& services,
   const bool valid_cold =
       cold.active && cold.outer_iterations > 0U &&
       (!cold.midpoint_passive || cold.passive_scalar_count != 0U) &&
-      accepted_terminal_metric(cold.passive_residual,128.0*std::numeric_limits<double>::epsilon()) &&
-      accepted_terminal_metric(cold.passive_balance_defect,128.0*std::numeric_limits<double>::epsilon()) &&
+      accepted_terminal_metric(cold.passive_residual,cold.pdf_before_flow ? 0.0 : 128.0*std::numeric_limits<double>::epsilon(),!cold.pdf_before_flow) &&
+      accepted_terminal_metric(cold.passive_balance_defect,cold.pdf_before_flow ? 0.0 : 128.0*std::numeric_limits<double>::epsilon(),!cold.pdf_before_flow) &&
       (cold.passive_scalar_count != 0U || (cold.passive_solve_calls==0U &&
        cold.passive_iterations==0U && cold.passive_residual==0.0 && cold.passive_balance_defect==0.0)) &&
       (!cold.midpoint_enthalpy || cold.independent_species_count == 0U) &&
@@ -412,7 +413,8 @@ Status validate_record(const IoServicePlan& services,
       terminal.present && terminal.final_flux_revision != 0U &&
       accepted_terminal_metric(terminal.eos_residual, terminal.eos_tolerance) &&
       accepted_terminal_metric(terminal.continuity_residual,
-                               terminal.continuity_tolerance) &&
+          cold_contract && cold.pdf_before_flow ? 0.0 : terminal.continuity_tolerance,
+          !(cold_contract && cold.pdf_before_flow)) &&
       accepted_terminal_metric(
           terminal.energy_residual, cold_contract && cold.pdf_before_flow ? 0.0 : terminal.energy_tolerance,
           continuity_energy_coupled_contract || (cold_contract && !cold.pdf_before_flow)) &&

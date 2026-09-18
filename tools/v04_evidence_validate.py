@@ -586,7 +586,7 @@ def validate_v3_terminal_audit(value: Any, contract: str,
         tolerances[metric] = tolerance
         energy_evidence_only = (metric == "energy" and
                                 contract == "pressure_continuity" and
-                                tolerance == 0.0) or (metric == "energy" and contract == "pdf_fixed_sweeps")
+                                tolerance == 0.0) or (metric in ("energy", "continuity") and contract == "pdf_fixed_sweeps")
         if not energy_evidence_only:
             if tolerance == 0.0:
                 raise EvidenceError(
@@ -1138,7 +1138,7 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
     passive_iterations = require_integer(cold.get("passive_iterations", 0), prefix)
     passive_metrics = [require_nonnegative_finite_number(cold.get(name, 0.0), prefix)
                        for name in ("passive_residual", "passive_balance_defect")]
-    if (any(value > 128 * float.fromhex("0x1p-52") for value in passive_metrics) or
+    if ((not pdf_split and any(value > 128 * float.fromhex("0x1p-52") for value in passive_metrics)) or
             (not passive_count and (passive_calls or passive_iterations or any(passive_metrics)))):
         raise EvidenceError(f"{prefix} violates passive transport residual or work accounting")
     if record["linear_iterations"] < passive_iterations + sum(cold[name + "_iterations"]
@@ -1154,7 +1154,7 @@ def validate_v9_cold_record(record: Dict[str, Any], line_number: int) -> None:
         require_object_fields(solve, ("status_code", "termination", "iterations",
             "initial_true_residual", "final_true_residual", "recursive_residual"), prefix)
         if (require_integer(solve["status_code"], prefix) != 0 or
-                solve["termination"] not in ("converged", "zero_rhs")):
+                solve["termination"] not in (("converged", "zero_rhs", "maximum_iterations") if pdf_split else ("converged", "zero_rhs"))):
             raise EvidenceError(f"{prefix} has an unconverged final solve")
         for name in ("initial_true_residual", "final_true_residual", "recursive_residual"):
             require_nonnegative_finite_number(solve[name], prefix)

@@ -57,13 +57,13 @@ public:
 
   void integrate(const Cantera::ThermoPhase& phase, double duration,
                  double relative, double absolute, int max_steps,
-                 std::vector<double>& output) {
+                 std::vector<double>& output, bool molar_reference=false) {
     steps_ = 0;
     if (output.size() != 7) throw std::invalid_argument("kerosene output capacity");
     initial_ = prepare_kernel(phase, kernel_);
     density_ = phase.density();
     std::array<double, 7> tolerances;
-    for (unsigned i = 0; i < 7; ++i) tolerances[i] = absolute / weights_[i];
+    for (unsigned i = 0; i < 7; ++i) tolerances[i] = molar_reference ? absolute : absolute / weights_[i];
     integrator_->setTolerances(relative, 7, tolerances.data());
     integrator_->setMaxSteps(max_steps);
     if (initialized_) integrator_->reinitialize(0., *this);

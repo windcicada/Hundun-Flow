@@ -168,6 +168,7 @@ struct ReactionRequest {
   const double *initial_densities_kg_per_m3{};
   double start_time_s{}, duration_s{};
   ReactionIntervals intervals{ReactionIntervals::full};
+  bool observe_element_balance{}; // reference checkmass; common ledger records clipping
 };
 class Workspace {
 public:

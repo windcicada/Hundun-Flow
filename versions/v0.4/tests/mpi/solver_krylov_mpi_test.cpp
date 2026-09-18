@@ -1486,6 +1486,27 @@ bool test_breakdown_maxiter_and_stale_identity(MPI_Comm communicator,
                        finite_solution(fixture),
                    rank, "iteration cap cannot masquerade as convergence");
 
+  auto bounded_control=control(1U);
+  bounded_control.maximum_norm=true;
+  bounded_control.accept_iteration_limit=true;
+  const auto bounded=solve_bicgstab(regular,fixed,invocation(fixture,bounded_control),
+      fixture.workspace,fixture.reductions);
+  passed &= expect(bool(bounded.status) &&
+      bounded.termination==LinearTermination::maximum_iterations &&
+      bounded.iterations==1 && !same_solution(fixture.solution.view,before_maximum) &&
+      finite_solution(fixture),rank,"bounded reference solve publishes capped candidate honestly");
+  fill_system(fixture,0.,1.,0.,0.);
+  for(int cell=0;cell<fixture.local.cells;++cell)
+    fixture.rhs.view.unchecked({cell,0,0},0)=0.75;
+  TridiagonalOperator identity_op(communicator,fixture.local,fixture.expected,0.,1.,0.,false);
+  auto max_control=control();max_control.absolute_tolerance=1.;
+  max_control.relative_tolerance=0.;max_control.maximum_norm=true;
+  const auto below=solve_bicgstab(identity_op,fixed,invocation(fixture,max_control),
+      fixture.workspace,fixture.reductions);
+  passed &= expect(bool(below.status) && below.iterations==0 &&
+      std::abs(below.final_true_residual-.75)<1e-14,rank,
+      "reference maximum norm is independent of global cell count");
+
   const LinearIdentity live = fixture.expected;
   fixture.expected.fingerprint += 1U;
   const std::uint32_t calls_before_stale = regular.calls();

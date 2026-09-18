@@ -135,6 +135,8 @@ PlanFingerprint solve_contract_fingerprint(
   hash = mix_contract(hash, invocation.control.maximum_iterations);
   hash = mix_contract(hash, invocation.control.true_residual_interval);
   hash = mix_contract(hash, invocation.control.restart);
+  hash = mix_contract(hash, invocation.control.maximum_norm);
+  hash = mix_contract(hash, invocation.control.accept_iteration_limit);
   hash = mix_contract(
       hash, invocation.convergence_audit == nullptr
                 ? 0U
@@ -645,7 +647,7 @@ Status global_dot(ReductionEngine& reductions, ConstFieldView left,
 }
 
 Status global_norm(ReductionEngine& reductions, ConstFieldView field,
-                   Status pending, double& norm) noexcept {
+                   Status pending, double& norm, bool maximum_norm=false) noexcept {
   double local_scale = 0.0;
   Status arithmetic{};
   for (std::int32_t z = 0; z < field.interior.z; ++z) {
@@ -668,8 +670,8 @@ Status global_norm(ReductionEngine& reductions, ConstFieldView field,
   if (!status) {
     return status;
   }
-  if (global_scale == 0.0) {
-    norm = 0.0;
+  if (maximum_norm || global_scale == 0.0) {
+    norm = global_scale;
     return {};
   }
   double local_scaled_squares = 0.0;
@@ -937,6 +939,8 @@ Status validate_common(LinearAlgorithm algorithm,
        pc.status_scope != LinearPreconditionerStatusScope::collective) ||
       !same_shape(op.local_shape, invocation.rhs.interior) ||
       requirements.algorithm != algorithm ||
+      ((control.maximum_norm || control.accept_iteration_limit) &&
+       (algorithm != LinearAlgorithm::bicgstab || invocation.convergence_audit != nullptr)) ||
       !shape_contains(requirements.maximum_shape, invocation.rhs.interior) ||
       workspace.fingerprint() == 0U || reductions.capacity() == 0U ||
       reductions.capacity() < requirements.reduction_capacity ||
@@ -1070,7 +1074,7 @@ Status compute_true_residual(const LinearOperator& linear_operator,
                              SolverWorkspace& workspace,
                              ReductionEngine& reductions,
                              LinearSolveResult& result,
-                             double& norm) noexcept {
+                             double& norm, bool maximum_norm=false) noexcept {
   const OperatorApplyStatus applied = apply_operator(
       linear_operator, solution, operator_output, operator_slot, workspace,
       result);
@@ -1082,7 +1086,7 @@ Status compute_true_residual(const LinearOperator& linear_operator,
                               as_const(operator_output));
   pending = revise(workspace, residual_slot, residual,
                    merge_status(pending, formed));
-  return global_norm(reductions, as_const(residual), pending, norm);
+  return global_norm(reductions, as_const(residual), pending, norm, maximum_norm);
 }
 
 Status compute_true_residual_norm_in_place(
@@ -2679,7 +2683,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
   FieldView ax = workspace.vector(9U, shape);
 
   double rhs_norm = 0.0;
-  Status status = global_norm(reductions, invocation.rhs, {}, rhs_norm);
+  Status status = global_norm(reductions, invocation.rhs, {}, rhs_norm, invocation.control.maximum_norm);
   if (!status) {
     return finish_failure(result, status, LinearTermination::non_finite,
                           resources, reductions, initial_calls);
@@ -2731,7 +2735,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
   }
   status = compute_true_residual(linear_operator, invocation.rhs, x, r, 1U,
                                  ax, 9U, workspace, reductions, result,
-                                 result.initial_true_residual);
+                                 result.initial_true_residual, invocation.control.maximum_norm);
   if (!status) {
     return finish_failure(result, status, LinearTermination::operator_failure,
                           resources, reductions, initial_calls);
@@ -2770,6 +2774,29 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
                           resources, reductions, initial_calls);
   }
 
+  FieldView best=workspace.vector(10U,shape);
+  double best_norm=result.initial_true_residual;
+  if(invocation.control.accept_iteration_limit)copy_field(as_const(x),best);
+  const auto retain_best=[&](double norm) {
+    if(invocation.control.accept_iteration_limit && norm<best_norm) {
+      best_norm=norm;copy_field(as_const(x),best);
+    }
+  };
+  const auto capped_result = [&]() {
+    if(invocation.control.accept_iteration_limit) {
+      // cgstab retains the iterate with the smallest residual at the cap.
+      auto checked=compute_true_residual(linear_operator,invocation.rhs,best,r,1U,
+          ax,9U,workspace,reductions,result,result.final_true_residual,invocation.control.maximum_norm);
+      if(!checked)return finish_failure(result,checked,LinearTermination::operator_failure,
+          resources,reductions,initial_calls);
+      result.recursive_residual=result.final_true_residual;
+      auto capped=finish_success(result,as_const(best),invocation,resources,reductions,initial_calls);
+      if(capped.status)capped.termination=LinearTermination::maximum_iterations;
+      return capped;
+    }
+    return finish_failure(result,{StatusCode::rejected_step,kLinearSolveBreakdown},
+        LinearTermination::maximum_iterations,resources,reductions,initial_calls);
+  };
   double rho_previous = 1.0;
   double alpha = 1.0;
   double omega = 1.0;
@@ -2861,7 +2888,9 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
         form_bicgstab_intermediate(s, as_const(r), as_const(v), alpha,
                                    s_local_scale));
     double s_norm = 0.0;
-    status = status
+    status = invocation.control.maximum_norm
+                 ? global_norm(reductions, as_const(s), status, s_norm, true)
+                 : status
                  ? global_norm_from_local_scale(reductions, as_const(s),
                                                 s_local_scale, {}, s_norm)
                  : global_norm(reductions, as_const(s), status, s_norm);
@@ -2875,12 +2904,13 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
       ++result.iterations;
       status = compute_true_residual(
           linear_operator, invocation.rhs, x, r, 1U, ax, 9U, workspace,
-          reductions, result, result.final_true_residual);
+          reductions, result, result.final_true_residual, invocation.control.maximum_norm);
       if (!status) {
         return finish_failure(result, status,
                               LinearTermination::operator_failure, resources,
                               reductions, initial_calls);
       }
+      retain_best(result.final_true_residual);
       result.recursive_residual = result.final_true_residual;
       if (result.final_true_residual <= tolerance) {
         bool audit_accepted = false;
@@ -2903,10 +2933,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
         }
       }
       if (result.iterations == invocation.control.maximum_iterations) {
-        return finish_failure(
-            result, {StatusCode::rejected_step, kLinearSolveBreakdown},
-            LinearTermination::maximum_iterations, resources, reductions,
-            initial_calls);
+        return capped_result();
       }
       status = revise(workspace, 2U, r_hat,
                       copy_field(as_const(r), r_hat));
@@ -2976,7 +3003,9 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
     status = revise(workspace, 1U, r, status);
     ++result.iterations;
     double recursive = 0.0;
-    status = status
+    status = invocation.control.maximum_norm
+                 ? global_norm(reductions, as_const(r), status, recursive, true)
+                 : status
                  ? global_norm_from_local_scale(reductions, as_const(r),
                                                 r_local_scale, {}, recursive)
                  : global_norm(reductions, as_const(r), status, recursive);
@@ -2984,6 +3013,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
       return finish_failure(result, status, LinearTermination::non_finite,
                             resources, reductions, initial_calls);
     }
+    retain_best(recursive);
     result.recursive_residual = recursive;
     const bool verify = recursive <= tolerance ||
                         result.iterations %
@@ -2995,12 +3025,13 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
       cached_rho_available = false;
       status = compute_true_residual(
           linear_operator, invocation.rhs, x, r, 1U, ax, 9U, workspace,
-          reductions, result, result.final_true_residual);
+          reductions, result, result.final_true_residual, invocation.control.maximum_norm);
       if (!status) {
         return finish_failure(result, status,
                               LinearTermination::operator_failure, resources,
                               reductions, initial_calls);
       }
+      retain_best(result.final_true_residual);
       result.recursive_residual = result.final_true_residual;
       if (result.final_true_residual <= tolerance) {
         bool audit_accepted = false;
@@ -3023,10 +3054,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
         }
       }
       if (result.iterations == invocation.control.maximum_iterations) {
-        return finish_failure(
-            result, {StatusCode::rejected_step, kLinearSolveBreakdown},
-            LinearTermination::maximum_iterations, resources, reductions,
-            initial_calls);
+        return capped_result();
       }
       status = revise(workspace, 2U, r_hat,
                       copy_field(as_const(r), r_hat));
@@ -3046,10 +3074,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
     rho_previous = rho;
     fresh = false;
   }
-  return finish_failure(result,
-                        {StatusCode::rejected_step, kLinearSolveBreakdown},
-                        LinearTermination::maximum_iterations, resources,
-                        reductions, initial_calls);
+  return capped_result();
 }
 
 }  // namespace hundun::v04

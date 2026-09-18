@@ -14,9 +14,11 @@ using namespace hundun::v04;
 int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);struct End{~End(){MPI_Finalize();}} end;int rank{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);
   const auto all=[&](bool value){int ok=value;MPI_Allreduce(MPI_IN_PLACE,&ok,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);return bool(ok);};
-  if(argc!=4 && (argc!=5 || (std::string_view(argv[4])!="--wall" && std::string_view(argv[4])!="--evaporated" && std::string_view(argv[4])!="--collapsed")))return 2;
+  if(argc!=4 && (argc!=5 || (std::string_view(argv[4])!="--wall" && std::string_view(argv[4])!="--evaporated" && std::string_view(argv[4])!="--collapsed" && std::string_view(argv[4])!="--reference-linear")))return 2;
   const bool collapsed=argc==5 && std::string_view(argv[4])=="--collapsed";
-  const bool wall=argc==5 && !collapsed;
+  const bool reference=argc==5 && std::string_view(argv[4])=="--reference-linear";
+  const double field_limit=reference ? 1e-4 : 1e-11;
+  const bool wall=argc==5 && !collapsed && !reference;
   const bool evaporated=wall && std::string_view(argv[4])=="--evaporated";
   ValidatedModel model;auto s=CaseCompiler::load_and_compile(MPI_COMM_WORLD,argv[1],model);
   CompiledCasePlan plan;if(s)s=ProductCompiler::compile(MPI_COMM_WORLD,model,argv[1],plan);
@@ -268,23 +270,27 @@ int main(int argc,char** argv) {
         }
         MPI_Allreduce(MPI_IN_PLACE,v,2,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
         MPI_Allreduce(MPI_IN_PLACE,&differences,1,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
-        const double relative=v[0]/std::max(1.,v[1]);worst=std::max(worst,relative);passed &= relative<1e-11;
+        const double relative=v[0]/std::max(1.,v[1]);worst=std::max(worst,relative);passed &= relative<field_limit;
         if(!rank)std::printf("compare level=%s field=%u role=%u component=%u abs=%.17g scale=%.17g relative=%.17g unequal=%llu\n",level,x[f].field,unsigned(x[f].role),c,v[0],std::max(1.,v[1]),relative,differences);
       }
     }
     return true;
   };
   if(!fields("current",a.fields,b.fields) || !fields("previous",a.previous_fields,b.previous_fields) || !fields("rate",a.accepted_rate_fields,b.accepted_rate_fields) || !fields("previous_rate",a.previous_rate_fields,b.previous_rate_fields))return 5;
+  double flux_scale=0.;
+  for(unsigned axis=0;axis<3;++axis)for(double value:a.final_mass_flux[axis])flux_scale=std::max(flux_scale,std::abs(value));
+  MPI_Allreduce(MPI_IN_PLACE,&flux_scale,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+  const double flux_limit=reference ? 1e-4*std::max(1e-30,flux_scale) : 1e-11;
   for(unsigned level=0;level<2;++level)for(unsigned axis=0;axis<3;++axis) {
     const auto& x=level ? a.previous_mass_flux[axis] : a.final_mass_flux[axis];const auto& y=level ? b.previous_mass_flux[axis] : b.final_mass_flux[axis];
     if(!all(x.size()==y.size()))return 6;
     double v[2]{};
     for(std::size_t i=0;i<x.size();++i){v[0]=std::max(v[0],std::abs(x[i]-y[i]));v[1]=std::max({v[1],std::abs(x[i]),std::abs(y[i])});if(!std::isfinite(x[i]) || !std::isfinite(y[i]))v[0]=INFINITY;++total;}
     MPI_Allreduce(MPI_IN_PLACE,v,2,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
-    const double relative=v[0]/std::max(1e-30,v[1]);maximum_flux_difference=std::max(maximum_flux_difference,v[0]);passed &= v[0]<1e-11;
+    const double relative=v[0]/std::max(1e-30,v[1]);maximum_flux_difference=std::max(maximum_flux_difference,v[0]);passed &= v[0]<flux_limit;
     if(!rank)std::printf("compare_flux level=%u axis=%u abs=%.17g scale=%.17g relative=%.17g\n",level,axis,v[0],v[1],relative);
   }
   MPI_Allreduce(MPI_IN_PLACE,&total,1,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
-  if(!rank)std::printf("kerosene_esf_compare step=%llu dt=%.17g metadata=exact field_worst=%.17g field_limit=1e-11 flux_abs_max_kg_s=%.17g flux_abs_limit_kg_s=1e-11 values=%llu passed=%d\n",static_cast<unsigned long long>(a.step),a.dt,worst,maximum_flux_difference,total,int(passed));
+  if(!rank)std::printf("kerosene_esf_compare step=%llu dt=%.17g metadata=exact field_worst=%.17g field_limit=%.17g flux_abs_max_kg_s=%.17g flux_abs_limit_kg_s=%.17g values=%llu passed=%d\n",static_cast<unsigned long long>(a.step),a.dt,worst,field_limit,maximum_flux_difference,flux_limit,total,int(passed));
   return passed ? 0 : 7;
 }

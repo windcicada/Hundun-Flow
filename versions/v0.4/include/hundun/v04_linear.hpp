@@ -457,6 +457,10 @@ struct LinearSolveControl {
   std::uint32_t maximum_iterations{};
   std::uint32_t true_residual_interval{};
   std::uint32_t restart{};
+  // Volume-normalized finite-volume rows may use the reference maximum norm.
+  bool maximum_norm{};
+  // Publish the finite candidate at the cap, retaining maximum_iterations.
+  bool accept_iteration_limit{};
 };
 
 struct LinearConvergenceAuditCertificate {

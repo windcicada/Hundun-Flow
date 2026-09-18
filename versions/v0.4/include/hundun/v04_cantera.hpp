@@ -24,6 +24,7 @@ struct ChemistrySolverConfig final {
   double relative_tolerance{};
   double absolute_tolerance{};
   int maximum_internal_steps{};
+  bool molar_reference_controls{};
 };
 struct CanteraBackendConfig final {
   CanteraMechanismConfig mechanism;

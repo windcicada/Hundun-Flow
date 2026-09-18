@@ -976,8 +976,9 @@ Status assemble_scalar_impl(
       context.boundary != plan.boundary_revision_ ||
       context.thermo != plan.thermodynamics_fingerprint_ ||
       context.transport != plan.transport_fingerprint_ ||
-      context.scope != EquationAssemblyScope::final_conservative ||
-      context.provisional_mass_flux ||
+      (context.provisional_mass_flux
+          ? (context.scope != EquationAssemblyScope::momentum_predictor || context.mass_flux.certificate.valid())
+          : context.scope != EquationAssemblyScope::final_conservative) ||
       state.passive_scalars.size != plan.specs_.size() ||
       scalar >= plan.specs_.size() ||
       scalar >= plan.contribution_counts_.size() ||

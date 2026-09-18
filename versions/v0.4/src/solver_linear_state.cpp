@@ -521,7 +521,7 @@ Status make_linear_workspace_requirements(
     return {StatusCode::invalid_plan, kLinearWorkspace};
   }
   std::size_t vector_slots =
-      algorithm == LinearAlgorithm::pcg ? 5U : 10U;
+      algorithm == LinearAlgorithm::pcg ? 5U : 11U;
   std::size_t scalar_doubles =
       algorithm == LinearAlgorithm::pcg ? 16U : 32U;
   std::size_t reduction_capacity = 2U;

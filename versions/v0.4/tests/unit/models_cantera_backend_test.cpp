@@ -269,9 +269,10 @@ void test_neutral_gas_query_and_closure_bridge() {
   HUNDUN_CHECK(film_result.film.vapor_diffusivity_m2_per_s > 0);
 }
 
-void test_interval_call_order() {
+void test_interval_call_order(bool reference=false) {
   using namespace hundun::v04;
   auto c = config();
+  if(reference)c.chemistry={0.,1e-10,5000,true};
   auto runtime = std::make_shared<chemistry::CanteraBackendRuntime>(c);
   chemistry::CanteraWorkspacePool pool(runtime, 1);
   auto gas = chemistry::make_cantera_backend(c, pool);
@@ -559,6 +560,7 @@ int main(int argc, char **argv) {
     HUNDUN_CHECK(argc == 3);
     mechanism_path = argv[1];
     test_interval_call_order();
+    test_interval_call_order(true);
     test_autonomous_interval_epoch();
     test_interval_budget_preserves_output();
     test_continuous_nasa_and_identity(argv[2]);

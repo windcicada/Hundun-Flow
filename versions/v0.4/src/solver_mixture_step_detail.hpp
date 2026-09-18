@@ -113,6 +113,7 @@ LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
     rollback();result.status=status;result.termination=LinearTermination::operator_failure;
     result.lowest_failing_rank=runtime.reductions.lowest_failing_rank();return result;
   }
+  // Row closure already divides the integrated equation by cell volume.
   status=runtime.preconditioner.prepare();
   status=runtime.reductions.consensus(status);
   if(!status) {
@@ -125,9 +126,11 @@ LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
     storage.increment.unchecked({x,y,z},0)=0;
   }
   ColdPressureOperator op(runtime.rows,cells,runtime.halo,runtime.identity);
-  result=solve_fgmres(op,runtime.preconditioner,
-      {as_const(storage.rhs),storage.increment,runtime.identity,runtime.control},
-      runtime.workspace,runtime.reductions);
+  const LinearSolveInvocation invocation{as_const(storage.rhs),storage.increment,
+      runtime.identity,runtime.control};
+  result=runtime.control.maximum_norm
+      ? solve_bicgstab(op,runtime.preconditioner,invocation,runtime.workspace,runtime.reductions)
+      : solve_fgmres(op,runtime.preconditioner,invocation,runtime.workspace,runtime.reductions);
   status=runtime.reductions.consensus(result.status);
   if(!status) {
     rollback();result.status=status;

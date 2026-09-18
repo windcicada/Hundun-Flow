@@ -63,7 +63,11 @@ public:
         config.mechanism = {case_root / r.mechanism_file, r.mechanism_sha256,
                             r.phase};
         config.chemistry = {r.relative_tolerance, r.absolute_tolerance,
-                            int(r.maximum_internal_steps)};
+                            int(r.maximum_internal_steps),r.mode==ReactionMode::esf_tpdf};
+        if(config.chemistry.molar_reference_controls) {
+          config.chemistry.relative_tolerance=0.;
+          config.chemistry.absolute_tolerance=1e-10;
+        }
         for (const auto &species : model.thermophysics.species)
           config.species_names.push_back(species.stable_name);
         cantera_runtime_ =

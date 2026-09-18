@@ -105,7 +105,7 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
       hash *= UINT64_C(1099511628211);
     }
   if (esf && scheme == TimeScheme::cn_be)
-    for (char byte : std::string_view(";pdf-before-flow-fixed-sweeps-observed-balance-v1")) {
+    for (char byte : std::string_view(";pdf-before-flow-bounded-maxnorm-molar-controls-v2")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }

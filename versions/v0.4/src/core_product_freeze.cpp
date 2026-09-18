@@ -3031,6 +3031,7 @@ struct CompiledCasePlan::Impl {
   MgWorkspaceRequirements mg_requirements{};
   SolverWorkspace krylov_workspace;
   SolverWorkspace auxiliary_krylov_workspace;
+  SolverWorkspace transport_krylov_workspace;
   MgWorkspace mg_workspace;
   std::array<HaloEngine, 6U> stage_halos;
   HaloEngine predictor_donor_halo;
@@ -4028,7 +4029,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       piso_spec.pressure_solve.restart, ReductionMode::mpi_allreduce, 1U,
       candidate->krylov_requirements);
   if (status) {
-    if (piso_spec.pressure_algorithm == LinearAlgorithm::fgmres) {
+    if (piso_spec.pressure_algorithm == LinearAlgorithm::fgmres &&
+        (model.reaction.mode!=ReactionMode::esf_tpdf || candidate->krylov_requirements.vector_slots>=11)) {
       // Preserve the accepted default identity and layout.  Momentum and the
       // enthalpy endpoint have always shared this storage sequentially with
       // pressure and use at most twelve configured FGMRES directions.
@@ -5031,6 +5033,14 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = SolverWorkspace::bind(candidate->auxiliary_krylov_requirements,
                                    krylov_vectors, krylov_scalars,
                                    candidate->auxiliary_krylov_workspace);
+  if (status && model.reaction.mode==ReactionMode::esf_tpdf) {
+    LinearWorkspaceRequirements transport_requirements;
+    status=make_linear_workspace_requirements(LinearAlgorithm::bicgstab,
+        candidate->patch.cells,krylov_ghosts,0,ReductionMode::mpi_allreduce,1U,
+        transport_requirements);
+    if(status)status=SolverWorkspace::bind(transport_requirements,krylov_vectors,
+        krylov_scalars,candidate->transport_krylov_workspace);
+  }
   if (status)
     status = MgWorkspace::bind(candidate->mg_requirements, mg_arena,
                                candidate->mg_workspace);
@@ -9925,8 +9935,10 @@ Status ProductDriver::Impl::execute_attempt(
     s=product.reductions.consensus(s);if(!s)return s;
     const EquationSystemView equation{diagonal,rhs,residual,ax,ay,az};
     const detail::ScalarCorrectionStorage storage{equation,variation,linear_rhs,increment,backup};
-    auto& workspace=product.piso.pressure_algorithm()==LinearAlgorithm::fgmres
-        ? product.krylov_workspace : product.auxiliary_krylov_workspace;
+    auto& workspace=product.transport_krylov_workspace;
+    const double pdf_solve_begin=MPI_Wtime();
+    unsigned pdf_calls=0,pdf_iterations=0,pdf_caps=0;
+    double pdf_maximum=0.;
     auto& pc=product.esf.transport_preconditioner();
     auto& rows=product.esf.transport_rows();
     const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
@@ -9963,6 +9975,13 @@ Status ProductDriver::Impl::execute_attempt(
         if (!fluid(i)) continue;
         std::array<double, UINT8_MAX> tuple{};
         for (std::size_t c=0;c<ns+1;++c) tuple[c]=frame.unchecked(cell,c);
+        // checkmass: clip independent transported coordinates, then close N2.
+        long double independent_sum=0.;
+        for(std::size_t c=0;c<ns+1;++c)if(c!=product.reaction.dependent_index()) {
+          if(!std::isfinite(tuple[c]))return Status{StatusCode::numerical_failure,10230};
+          tuple[c]=std::max(0.,tuple[c]);independent_sum+=tuple[c];
+        }
+        tuple[product.reaction.dependent_index()]=static_cast<double>(1.-independent_sum);
         if (!detail::close_statistical_composition({tuple.data(),ns+1},
                                                   product.reaction.dependent_index())) {
           int rank{};MPI_Comm_rank(communicator,&rank);
@@ -10042,10 +10061,20 @@ Status ProductDriver::Impl::execute_attempt(
       closing_field=field;closing_sweep=0;
       auto current=field==0 ? mean : iterate;
       const auto accepted=field==0 ? as_const(old) : accepted_fields[field-1];
+      std::array<double,UINT8_MAX> local_scale{},reference_scale{};
+      for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+        const Int3 cell{x,y,z};
+        for(std::size_t c=0;c<=ns;++c) {
+          const auto component=c==ns ? ns+1 : mapping.data[c];
+          local_scale[c]=std::max(local_scale[c],std::abs(density.unchecked(cell,0)*accepted.unchecked(cell,component)));
+        }
+      }
+      s=product.reductions.checked_max({local_scale.data(),ns+1},{reference_scale.data(),ns+1});
+      if(!s)return s;
+      const double reference_time=product.cold_stopping ? product.cold_stopping->reference_time : step.dt;
+      for(std::size_t c=0;c<=ns;++c)reference_scale[c]=std::max(1e-15,reference_scale[c])/reference_time;
       product.esf.reset_transport_bounds();
-      for(unsigned bound_round=0;;++bound_round) {
-        if(bound_round==32)return Status{StatusCode::rejected_step,10233};
-        bool repeat_transport=false;
+      {
         if(field) {
           s=runtime_write_view(fields.esf_iter,current);
           s=product.reductions.consensus(s);if(!s)return s;
@@ -10077,44 +10106,6 @@ Status ProductDriver::Impl::execute_attempt(
           for(std::size_t c=0;c<=ns;++c) {
             const bool heat=c==ns;
             if(heat) {
-              if(product.esf.common_transport()) {
-                auto mask=product.esf.transport_bound_view(as_const(variation));
-                mask.field=fields.krylov_vectors;
-                double local_bad[2]{};std::size_t flat{};
-                for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++flat) {
-                  if(!fluid(flat))continue;
-                  const Int3 cell{x,y,z};std::array<double,UINT8_MAX> tuple{};
-                  for(std::size_t a=0;a<=ns;++a)tuple[a]=current.unchecked(cell,a);
-                  if(!detail::close_statistical_composition({tuple.data(),ns+1},product.reaction.dependent_index())) {
-                    for(std::size_t a=0;a<=ns;++a)
-                      if(!std::isfinite(tuple[a]))s={StatusCode::numerical_failure,10230};
-                    ++local_bad[0];
-                    if(mask.unchecked(cell,0)==0)++local_bad[1];
-                    mask.unchecked(cell,0)=1;
-                  }
-                }
-                double global_bad[2]{};
-                s=product.reductions.checked_sum({local_bad,2},{global_bad,2},s);if(!s)return s;
-                if(global_bad[0]>0) {
-                  // The candidate and every equation source retain the same
-                  // accepted history. Exchange only a decision mask; both MPI
-                  // owners subsequently raise the same shared face coefficient.
-                  if(global_bad[1]==0)return Status{StatusCode::rejected_step,10233};
-                  // Halo revision zero is reserved; equal hash inputs can
-                  // produce it on the first accepted-state generation.
-                  mask.revision=std::max<std::uint64_t>(1,
-                      detail::product_mix(step.generation,1+field*64+bound_round));
-                  HaloTicket mask_ticket;
-                  s=product.krylov_halo.begin(140,{&mask,1},mask_ticket);
-                  if(s)s=product.krylov_halo.finish(mask_ticket,{&mask,1});
-                  if(!s)return s;
-                  product.esf.activate_transport_bounds();
-                  int rank{};MPI_Comm_rank(communicator,&rank);
-                  if(rank==0)std::fprintf(stdout,"esf_transport_bound field=%zu round=%u sweep=%u cells=%.0f added=%.0f step_committed=0\n",
-                      field,bound_round+1,sweep+1,global_bad[0],global_bad[1]);
-                  repeat_transport=true;break;
-                }
-              }
               s=close_frame(current);if(!s)return s;
             }
             const FieldId quantity=heat ? fields.enthalpy : fields.reaction_conserved[c];
@@ -10179,19 +10170,20 @@ Status ProductDriver::Impl::execute_attempt(
             const LinearIdentity identity{
                 detail::product_mix(product.equations.species().fingerprint(),UINT64_C(0x5354494d504c01)+field*(ns+1)+c),
                 step.generation,product.geometry.fingerprint(),workspace.fingerprint(),
-                detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep+2*bound_round)};
+                detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep)};
             pc.reset_identity(identity);
             detail::ScalarCorrectionRuntime runtime{rows,pc,product.krylov_halo,workspace,product.reductions,
-                identity,{heat ? 1e-8 : bound_round ? 1e-14 : 1e-12,
-                    bound_round ? 1e-14 : 1e-11,400,1,workspace.requirements().maximum_restart}};
+                identity,{1e-4*reference_scale[c],0.,10,11,0,true,true}};
             detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,
                 heat ? BoundaryStage::enthalpy : BoundaryStage::scalar,
                 heat ? product.schemes.enthalpy() : product.schemes.species(),
                 velocity_history.accepted,context,state.density,scalar,q};
             const auto solved=detail::correct_frozen_scalar(problem,storage,runtime,assemble,refresh);
+            ++pdf_calls;pdf_iterations+=solved.iterations;
+            pdf_caps+=solved.termination==LinearTermination::maximum_iterations;
+            pdf_maximum=std::max(pdf_maximum,solved.final_true_residual/reference_scale[c]);
             s=solved.status;if(!s)return s;
           }
-          if(repeat_transport)break;
           s=close_frame(current);if(!s)return s;
           if(dual_esf && field>0 && sweep==1) {
             if(esf_composition_ledger.active()) {
@@ -10214,8 +10206,6 @@ Status ProductDriver::Impl::execute_attempt(
             s=product.reductions.consensus(s);if(!s)return s;
           }
         }
-        if(repeat_transport)continue;
-        break;
       }
       if(field==0) {
         mean=current;
@@ -10224,6 +10214,11 @@ Status ProductDriver::Impl::execute_attempt(
       else {iterate=current;s=copy_interior(as_const(current),esf_trial[field-1]);}
       s=product.reductions.consensus(s);if(!s)return s;
     }
+    double pdf_local[2]{MPI_Wtime()-pdf_solve_begin,pdf_maximum},pdf_global[2]{};
+    s=product.reductions.checked_max({pdf_local,2},{pdf_global,2});if(!s)return s;
+    int pdf_rank{};MPI_Comm_rank(communicator,&pdf_rank);
+    if(pdf_rank==0)std::fprintf(stdout,"esf_transport_control calls=%u iterations=%u capped=%u maximum_residual=%.17g seconds=%.17g solver=bicgstab_dilu maxit=10 tolerance=1e-4 sweeps=2\n",
+        pdf_calls,pdf_iterations,pdf_caps,pdf_global[1],pdf_global[0]);
     if(product.summary.coupling==CouplingKind::outer_corrected) {
       // Freeze the realized ensemble transport source before chemistry.
       // Its finite-field noise and IEM terms belong to the mean equation;
@@ -12603,11 +12598,12 @@ Status ProductDriver::Impl::execute_attempt(
       report.cold.reference_outer_iterations = product.reference_outer_iterations;
       report.cold.pdf_before_flow = dual_esf;
       report.cold.midpoint_enthalpy = product.midpoint_enthalpy;
-      report.cold.pressure_iccg = product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
+      report.cold.pressure_iccg = !dual_esf && product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
       // Prerequisite failure can leave the equation histories unbound. Keep
       // its original cause and let the shared finish path prepare rollback.
       if (!status) return status;
       const bool reference_stopping = product.cold_stopping.has_value();
+      double reference_momentum_scale=0.;
       // CN exits before PISO candidate evaluation. Its preallocated rho/T
       // buffers are dormant here; alias them as h_mid/T_mid without extending
       // persistent fields, Restart storage or the resource budget.
@@ -12680,6 +12676,10 @@ Status ProductDriver::Impl::execute_attempt(
         context.box=full_box;context.mass_flux=flux;context.face_flux=flux.revision;
         context.face_flux_authority=flux.certificate.authority();context.face_flux_storage=flux.certificate.storage();
         context.face_flux_revision_domain=flux.certificate.revision_domain();
+        if(dual_esf) {
+          context.scope=EquationAssemblyScope::momentum_predictor;
+          context.provisional_mass_flux=true;
+        }
         context.immersed_interface=product.ibm_equations ? &*product.ibm_equations : nullptr;
         context.wall_treatment=product.ibm_equations ? &product.turbulence : nullptr;
         auto spatial=pressure_energy_candidate_density;
@@ -12728,8 +12728,13 @@ Status ProductDriver::Impl::execute_attempt(
                 storage.equation,certificate);
           };
           const auto refresh=[&](FieldView &) {return refresh_all();};
+          double scalar_scale=0.,local_scale=0.;
+          for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
+            local_scale=std::max(local_scale,std::abs(state.density.accepted.unchecked({x,y,z},0)*scalar.accepted.unchecked({x,y,z},0)));
+          s=product.reductions.checked_max({&local_scale,1},{&scalar_scale,1});if(!s)return s;
+          scalar_scale=std::max(1e-15,scalar_scale)/(product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
           bool converged=false;
-          for(unsigned sweep=0;sweep<64;++sweep) {
+          for(unsigned sweep=0;sweep<(dual_esf ? 2U : 64U);++sweep) {
             EquationAssemblyCertificate certificate;
             s=assemble(certificate);
             double maximum[2]{},sums[2]{};
@@ -12744,7 +12749,7 @@ Status ProductDriver::Impl::execute_attempt(
                   std::max({1.,std::abs(old),std::abs(value)});
               if(!std::isfinite(value) || !std::isfinite(r) || !std::isfinite(scale) || scale<=0)
                 s={StatusCode::numerical_failure,17874};
-              maximum[0]=std::max(maximum[0],std::abs(r)/scale);
+              maximum[0]=std::max(maximum[0],std::abs(r)/(dual_esf ? scalar_scale : scale));
               maximum[1]=std::max(maximum[1],std::abs(r));
               sums[0]+=volume*r;sums[1]+=volume*scale;
             }
@@ -12752,7 +12757,8 @@ Status ProductDriver::Impl::execute_attempt(
             s=product.reductions.checked_max({maximum,2},{global,2},s);
             if(s)s=product.reductions.checked_sum({sums,2},{balance,2});
             if(!s)return s;
-            if(global[0]<128*std::numeric_limits<double>::epsilon()) {
+            if((dual_esf && (sweep==1 || global[0]<1e-3)) ||
+               (!dual_esf && global[0]<128*std::numeric_limits<double>::epsilon())) {
               report.cold.passive_residual=std::max(report.cold.passive_residual,global[0]);
               const double defect=std::abs(balance[0])/std::max(balance[1],1e-300);
               report.cold.passive_balance_defect=std::max(report.cold.passive_balance_defect,defect);
@@ -12761,12 +12767,14 @@ Status ProductDriver::Impl::execute_attempt(
                   unsigned(spec.field),sweep,global[0],global[1],defect);
               converged=true;break;
             }
+            auto& scalar_workspace=dual_esf ? product.transport_krylov_workspace : equation_workspace;
             const LinearIdentity identity{detail::product_mix(product.equations.scalars().fingerprint(),q+1),
-                step.generation,product.geometry.fingerprint(),equation_workspace.fingerprint(),
+                step.generation,product.geometry.fingerprint(),scalar_workspace.fingerprint(),
                 detail::product_mix(step.generation,UINT64_C(0x50415353495645)+sweep)};
             passive_factor->reset_identity(identity);
             detail::ScalarCorrectionRuntime runtime{passive_rows,*passive_factor,product.krylov_halo,
-                equation_workspace,product.reductions,identity,equation_solve};
+                scalar_workspace,product.reductions,identity,dual_esf
+                    ? LinearSolveControl{1e-3*scalar_scale,0.,20,21,0,true,true} : equation_solve};
             detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,BoundaryStage::scalar,
                 product.schemes.passive_scalar(),as_const(trial_velocity),context,state.density,scalar,trial,false};
             const auto solved=detail::correct_scalar(problem,storage,runtime,assemble,refresh);
@@ -12876,7 +12884,7 @@ Status ProductDriver::Impl::execute_attempt(
                 local.back() = 1.0;
               else
                 local[reference_count] = std::max(local[reference_count], mach);
-              if (!reference_stopping) continue;
+              if (!reference_stopping && !dual_esf) continue;
               for (unsigned k = 0; k < 3; ++k)
                 local[k] = std::max(local[k], std::abs(rho *
                     equation_state.velocity.accepted.unchecked(c, k)));
@@ -12959,6 +12967,8 @@ Status ProductDriver::Impl::execute_attempt(
               "cold_momentum_policy accepted_isothermal_Mach_max=%.17g "
               "tvd=%d threshold=0.60 base=central2 scope=global_step\n",
               global[reference_count], int(coast_momentum_tvd));
+        reference_momentum_scale=std::max(1e-15,std::hypot(global[0],global[1],global[2]))/
+            (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
         if (reference_stopping) {
           const double reference_time = product.cold_stopping->reference_time;
           report.cold.momentum_reference_scale =
@@ -13759,6 +13769,7 @@ Status ProductDriver::Impl::execute_attempt(
         const double outer_begin = MPI_Wtime();
         phase_timer.phase(1);
         status=solve_cold_scalars(cold_outer);
+        if(status && dual_esf)status=solve_cold_passives(as_const(provisional_flux));
         if (!status) return status;
         if (status) {
           phase_timer.phase(2);
@@ -13841,11 +13852,12 @@ Status ProductDriver::Impl::execute_attempt(
           }
           phase_timer.phase(4);
           double total_solve{}, max_delta{}, max_velocity{};
+          auto& momentum_workspace=dual_esf ? product.transport_krylov_workspace : equation_workspace;
           for (unsigned component = 0; component < 3; ++component) {
             LinearIdentity identity{product.piso.fingerprint(),
                                     0x434f4c444d4f4d00ULL + component,
                                     product.geometry.fingerprint(),
-                                    equation_workspace.fingerprint(),
+                                    momentum_workspace.fingerprint(),
                                     0x434f4c444d4f4d31ULL + component};
             detail::ColdPressureOperator op(rows[component], cells,
                                             product.krylov_halo, identity);
@@ -13864,13 +13876,16 @@ Status ProductDriver::Impl::execute_attempt(
                   pressure_correction.unchecked({x, y, z}, 0) =
                       trial_velocity.unchecked({x, y, z}, component);
                 }
-            // FGMRES owns the initial and final true-residual evaluations.
+            // The selected Krylov solver owns its true-residual evaluations.
             // The independent terminal audit checks the final coupled state.
-            auto solved =
-                solve_fgmres(op, pc,
-                             {as_const(pressure_rhs), pressure_correction,
-                              identity, equation_solve},
-                             equation_workspace, product.reductions);
+            const auto momentum_control=dual_esf
+                ? LinearSolveControl{1e-4*reference_momentum_scale,0.,50,51,0,true,true}
+                : equation_solve;
+            const LinearSolveInvocation momentum_call{as_const(pressure_rhs),pressure_correction,
+                identity,momentum_control};
+            auto solved=dual_esf
+                ? solve_bicgstab(op,pc,momentum_call,momentum_workspace,product.reductions)
+                : solve_fgmres(op,pc,momentum_call,momentum_workspace,product.reductions);
             ++report.cold.momentum_solve_calls;
             report.cold.momentum_iterations += solved.iterations;
             report.cold.final_momentum[component] = solved;
@@ -13966,17 +13981,30 @@ Status ProductDriver::Impl::execute_attempt(
           const auto matrix_revision = detail::product_mix(
               detail::product_mix(UINT64_C(1469598103934665603),
                                   step.generation), cold_outer + 1U) | 1U;
+          auto& pressure_workspace=dual_esf ? product.transport_krylov_workspace : product.krylov_workspace;
           LinearIdentity identity{
               product.piso.fingerprint(), matrix_revision,
               product.geometry.fingerprint(),
-              product.krylov_workspace.fingerprint(), matrix_revision};
-          const bool use_iccg = product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
+              pressure_workspace.fingerprint(), matrix_revision};
+          const bool use_iccg = !dual_esf && product.piso.pressure_algorithm() == LinearAlgorithm::pcg;
           auto& scaled_rows=iccg_scaled_rows;
           auto& iccg_parent=iccg_component_parent;
           auto& iccg_grounded=iccg_component_grounded;
           auto& iccg=iccg_factor;
           detail::IccgMatrixAdmissionReport iccg_admission;
           auto pressure_control = product.piso.pressure_solve();
+          if(dual_esf) {
+            double local[2]{},global[2]{};
+            for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+              const double rho=equation_state.density.accepted.unchecked({x,y,z},0);
+              local[0]+=rho*rho;local[1]+=1.;
+            }
+            probe_status=product.reductions.checked_sum({local,2},{global,2},probe_status);
+            if(!probe_status)return probe_status;
+            const double scale=std::sqrt(global[0]/global[1])/
+                (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
+            pressure_control={1e-4*scale,0.,500,501,0,true,true};
+          }
           double original_l2_limit = 1.;
           detail::ColdPressureOperator op(use_iccg ? scaled_rows : rows, cells,
               product.krylov_halo, identity, use_iccg ? LinearOperatorClass::spd : LinearOperatorClass::nonsymmetric);
@@ -13993,7 +14021,7 @@ Status ProductDriver::Impl::execute_attempt(
           probe_status = product.reductions.consensus(probe_status);
           if (probe_status) probe_status = product.reductions.checked_max(
               {&local_ratio, 1U}, {&global_ratio, 1U});
-          const bool use_mg = !use_iccg && global_ratio > 0.5;
+          const bool use_mg = !dual_esf && !use_iccg && global_ratio > 0.5;
           phase_timer.phase(6);
           const double setup_begin = MPI_Wtime();
           if (probe_status && use_iccg) {
@@ -14151,7 +14179,7 @@ Status ProductDriver::Impl::execute_attempt(
                 "cold_matrix outer=%u matrix=%016llx rhs=%016llx algorithm=%s\n",
                 cold_outer,static_cast<unsigned long long>(global[0]),
                 static_cast<unsigned long long>(global[1]),
-                product.piso.pressure_algorithm() == LinearAlgorithm::pcg ? "iccg" : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab");
+                dual_esf ? "bicgstab" : product.piso.pressure_algorithm() == LinearAlgorithm::pcg ? "iccg" : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab");
           }
           std::size_t ordinal{};
           for (int z = 0; z < cells.z; ++z)
@@ -14171,8 +14199,10 @@ Status ProductDriver::Impl::execute_attempt(
               detail::product_mix(product.piso.fingerprint(),UINT64_C(0x4943434752415544)));
           const LinearSolveInvocation pressure_call{
               as_const(pressure_rhs), pressure_correction, identity,
-              pressure_control,use_iccg ? static_cast<LinearConvergenceAudit*>(&iccg_audit) : &continuity_audit};
-          const auto solved = use_iccg
+              pressure_control,dual_esf ? nullptr : use_iccg ? static_cast<LinearConvergenceAudit*>(&iccg_audit) : &continuity_audit};
+          const auto solved = dual_esf
+              ? solve_bicgstab(op,pc,pressure_call,pressure_workspace,product.reductions)
+              : use_iccg
               ? solve_pcg(op,pc,pressure_call,product.krylov_workspace,product.reductions)
               : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres
                   ? solve_fgmres(op, pc, pressure_call, product.krylov_workspace, product.reductions)
@@ -14324,7 +14354,7 @@ Status ProductDriver::Impl::execute_attempt(
                 max_times[0], max_times[1], max_times[2], max_times[3],
                 global_audit[0], global_audit[1], global_audit[2],
                 global_audit[3], global_audit[4], global_audit[5], step.dt,
-                product.piso.pressure_algorithm() == LinearAlgorithm::pcg ? "iccg" : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab",
+                dual_esf ? "bicgstab" : product.piso.pressure_algorithm() == LinearAlgorithm::pcg ? "iccg" : product.piso.pressure_algorithm() == LinearAlgorithm::fgmres ? "fgmres" : "bicgstab",
                 max_times[4], max_times[5], max_times[6], max_times[7], max_times[8],
                 static_cast<unsigned long long>(solved.operator_applies),
                 static_cast<unsigned long long>(solved.preconditioner_applies),
@@ -14501,7 +14531,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (!probe_status)
             return probe_status;
           if (global_u[6] != 0 ||
-              global_u[5] > 64 * std::numeric_limits<double>::epsilon())
+              (!dual_esf && global_u[5] > 64 * std::numeric_limits<double>::epsilon()))
             return {StatusCode::invalid_plan, 17807};
           status = refresh_coupled_state(
               kCoupledStateC1Stage,
@@ -15760,7 +15790,7 @@ Status ProductDriver::Impl::execute_attempt(
               {esf_trial.data(),product.fields.esf_fields.size()},
               {passive_trial.data(),passive_trial.size()});
           status=product.reductions.consensus(status);
-          if(status)status=solve_cold_passives(cold_final_flux);
+          if(status && !dual_esf)status=solve_cold_passives(cold_final_flux);
           status=product.reductions.consensus(status);
           if(!status)return status;
           phase_timer.phase(9);

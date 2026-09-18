@@ -173,7 +173,7 @@ bool test_workspace_requirement_contracts() {
                        0U, ReductionMode::reproducible_tree,
                        kExecutionRevision, bicgstab)),
                    "BiCGSTAB workspace requirements compile");
-  passed &= expect(bicgstab.vector_slots == 10U &&
+  passed &= expect(bicgstab.vector_slots == 11U &&
                        bicgstab.reduction_capacity >= 2U &&
                        bicgstab.maximum_restart == 0U,
                    "BiCGSTAB reserves exactly ten persistent vectors");
