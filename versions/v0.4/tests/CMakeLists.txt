@@ -101,6 +101,26 @@ foreach(rank_count IN ITEMS 1 2)
     LABELS "gtmc-transfer")
 endforeach()
 
+foreach(rank_count IN ITEMS 1 2)
+  add_test(NAME v04_pdf_import_fixed_pressure_mpi_${rank_count}
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/pdf_import_fixed_pressure_test.py"
+      --binary "$<TARGET_FILE:v04_pdf_import>"
+      --product "$<TARGET_FILE:hundun>"
+      --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}"
+      --fixture "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-esf")
+  set_tests_properties(v04_pdf_import_fixed_pressure_mpi_${rank_count}
+    PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180 RUN_SERIAL TRUE
+    LABELS "624cf-transfer")
+endforeach()
+
+add_test(NAME v04_aecsc_pdf_transfer
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/aecsc_pdf_transfer_test.py"
+    "$<TARGET_FILE:v04_aecsc_pdf_transfer>")
+set_tests_properties(v04_aecsc_pdf_transfer PROPERTIES TIMEOUT 30
+  LABELS "624cf-transfer")
+
 add_library(v04_runner_log_failure_probe SHARED support/runner_log_failure_probe.c)
 target_link_libraries(v04_runner_log_failure_probe PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME v04_runner_log_completion_mpi_2

@@ -1187,7 +1187,12 @@ Status compile_components_scalable(Implementation &impl) {
       impl.component_labels.erase(std::unique(impl.component_labels.begin(),
                                               impl.component_labels.end()),
                                   impl.component_labels.end());
-      if (impl.component_labels.empty())
+      // An immersed-domain partition may be entirely solid even though the
+      // collective domain has active fluid.  Such a rank owns no local
+      // components but must still participate in every graph and solver
+      // collective.  A non-empty local activity set with no component remains
+      // an invalid graph construction.
+      if (impl.component_labels.empty() && local_active_count != 0U)
         return {StatusCode::invalid_plan, kFreshProjectionPlan};
       impl.component_dirichlet.assign(impl.component_labels.size(), 0U);
       impl.component_distributed.assign(impl.component_labels.size(), 0U);

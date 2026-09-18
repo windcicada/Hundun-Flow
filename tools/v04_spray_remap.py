@@ -60,6 +60,36 @@ def source_state(p, gas):
     return mass, h
 
 
+def injector_state(args, inventory_sha):
+    explicit = (getattr(args, 'injector_next_ordinal', None),
+                getattr(args, 'injector_residual_mass', None))
+    require((explicit[0] is None) == (explicit[1] is None),
+            'injector counter and residual must be supplied together')
+    injector_id = getattr(args, 'injector_id', 1)
+    require(isinstance(injector_id, int) and 0 < injector_id < 2**64,
+            'injector id')
+    source_step = None
+    if explicit[0] is not None:
+        next_ordinal, residual = explicit
+    else:
+        audit_path = Path(args.inventory).parent/'inventory.json'
+        require(audit_path.is_file(), 'source spray inventory audit is required')
+        audit = json.loads(audit_path.read_text())
+        require(audit.get('schema') == 'hundun_coast_spray_transfer_v1' and
+                audit.get('transfer_sha256') == inventory_sha and audit.get('ranks'),
+                'source spray inventory identity')
+        states = {(row['spray_step'], row['cumulative_injected'],
+                   row['cumulative_added'], row['excess_mass_kg'])
+                  for row in audit['ranks']}
+        require(len(states) == 1, 'source injector state differs by rank')
+        source_step, injected, next_ordinal, residual = states.pop()
+        require(injected == next_ordinal, 'legacy injector counters disagree')
+    require(isinstance(next_ordinal, int) and 0 <= next_ordinal < 2**64 and
+            math.isfinite(residual) and residual >= 0, 'source injector state')
+    return dict(id=injector_id, next_ordinal=next_ordinal,
+                residual_mass_kg=residual, source_spray_step=source_step)
+
+
 def convert(args):
     output = Path(args.output)
     require(not output.exists(), 'output directory already exists')
@@ -68,6 +98,7 @@ def convert(args):
     hashes = {name: sha(path) for name, path in inputs.items()}
     require(hashes['inventory'] == args.inventory_sha, 'inventory SHA256 mismatch')
     require(hashes['source_gas'] == SOURCE_GAS_SHA, 'frozen 624CF thermodynamics identity')
+    injection = injector_state(args, hashes['inventory'])
     gas = json.loads(inputs['source_gas'].read_text())
     records = [json.loads(line) for line in inputs['inventory'].read_text().splitlines()]
     require(records, 'empty inventory')
@@ -138,7 +169,10 @@ def convert(args):
         target_enthalpy='native liquid asset reference plus integrated cp',
         source_density='1037.096 - 0.7233865*T - 9.255437 + 3/(733-T)',
         source_properties_sha256=SOURCE_PROPERTIES_SHA,
-        pending=['target mesh ownership', 'legacy SGS history physical admission', 'native Restart assembly'],
+        pending=['target mesh ownership', 'native Restart assembly'],
+        history_policy=dict(age='reset_zero', tab='reset_zero',
+                            breakup_ordinal='reset_zero', sgs='reset_zero'),
+        injector_state=injection,
         inputs={name: dict(path=str(path), sha256=hashes[name]) for name, path in inputs.items()},
         parcels=len(records), retained=sum(p['kind']=='retained' for p in records),
         daughters=sum(p['kind']=='daughter' for p in records),
@@ -161,6 +195,14 @@ def convert(args):
             for p in mapped:
                 stream.write(json.dumps(p, sort_keys=True, allow_nan=False, separators=(',', ':'))+'\n')
         report['mapped_sha256'] = sha(parcel_path)
+        restart = dict(format='hundun_spray_restart_import_v1',
+            parcels_file='parcels.jsonl', parcels=len(mapped),
+            mapped_sha256=report['mapped_sha256'],
+            history_policy=report['history_policy'],
+            injectors=[{k: injection[k] for k in
+                        ('id', 'next_ordinal', 'residual_mass_kg')}])
+        (stage/'restart.json').write_text(
+            json.dumps(restart, indent=2, sort_keys=True, allow_nan=False)+'\n')
         (stage/'report.json').write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False)+'\n')
         # All source, native, per-parcel and global checks precede publication.
         require(not output.exists(), 'output directory appeared during conversion')
@@ -177,6 +219,9 @@ def main():
         p.add_argument('--'+name, required=True)
     p.add_argument('--phase', default='kerosene-thermo')
     p.add_argument('--species', default='H2,H2O,CO,CO2,O2,N2,C12H23')
+    p.add_argument('--injector-id', type=int, default=1)
+    p.add_argument('--injector-next-ordinal', type=int)
+    p.add_argument('--injector-residual-mass', type=float)
     args = p.parse_args()
     result = convert(args)
     print(json.dumps({k: result[k] for k in ('parcels', 'source_liquid_mass_kg',

@@ -664,7 +664,14 @@ ParcelEventsReport pass(const ParcelEventsInput &in, ParcelPass which) {
       } else
         state.owner_global_cell = event.next_global_cell;
     }
-    step = std::min(in.initial_substep_s, target_time - time);
+    // Retain the accepted local scale instead of restarting every interval at
+    // the full wave size.  A stiff parcel would otherwise repeat the same
+    // chain of rejected halvings after every accepted substep and exhaust the
+    // bounded attempt budget even though its admissible step is stable.
+    const double remaining = target_time - time;
+    const double grown =
+        step >= .5 * in.initial_substep_s ? in.initial_substep_s : 2 * step;
+    step = std::min(grown, remaining);
   }
   result.status = ParcelEventsStatus::success;
   result.available = true;

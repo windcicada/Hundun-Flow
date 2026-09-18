@@ -418,7 +418,22 @@ target_link_libraries(v04_coast_restart_import PRIVATE hundun_v04_core)
 # Full stochastic current-state migration with explicit method recovery.
 add_executable(v04_pdf_import "${hundun_repository_root}/tools/v04_pdf_import.cpp")
 target_link_libraries(v04_pdf_import PRIVATE hundun_v04_core)
-target_include_directories(v04_pdf_import PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(v04_pdf_import PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  "${hundun_v04_yyjson_root}")
+
+# Cold geometry gate for the native 624CF continuation mesh.  Keeping this
+# separate from the solver makes STL/topology regressions observable before a
+# reacting package or a migrated restart is involved.
+add_executable(v04_624cf_geometry_audit
+  "${hundun_repository_root}/tools/v04_624cf_geometry_audit.cpp")
+target_link_libraries(v04_624cf_geometry_audit PRIVATE hundun_v04_core)
+
+# Read-only AECSC current-state decoder and conservative 624CF transfer
+# builder. It emits the V2 fixed-pressure input consumed by v04_pdf_import.
+add_executable(v04_aecsc_pdf_transfer
+  "${hundun_repository_root}/tools/v04_aecsc_pdf_transfer.cpp")
+target_link_libraries(v04_aecsc_pdf_transfer PRIVATE hundun_v04_core)
 
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the

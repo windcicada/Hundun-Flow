@@ -19,7 +19,8 @@ with tempfile.TemporaryDirectory() as temp:
         inventory_sha=remap.sha(fixtures/'spray-parcels.jsonl'),
         source_gas=fixtures/'spray-source.json', gas=fixtures/'spray-gas.yaml',
         liquid=fixtures/'spray-liquid.asset', native=native, output=root/'map',
-        phase='kerosene-thermo', species='H2,H2O,CO,CO2,O2,N2,C12H23')
+        phase='kerosene-thermo', species='H2,H2O,CO,CO2,O2,N2,C12H23',
+        injector_id=1, injector_next_ordinal=77, injector_residual_mass=1e-12)
     report = remap.convert(args)
     first = (root/'map/parcels.jsonl').read_bytes()
     other = copy.copy(args)
@@ -30,6 +31,11 @@ with tempfile.TemporaryDirectory() as temp:
     mapped = [json.loads(s) for s in first.splitlines()]
     assert [p['source'] for p in mapped] == source
     assert report['halo'] == 1 and report['daughters'] == 1
+    restart = json.loads((root/'map/restart.json').read_text())
+    assert restart['format'] == 'hundun_spray_restart_import_v1'
+    assert restart['parcels'] == len(mapped)
+    assert restart['injectors'] == [dict(id=1, next_ordinal=77,
+                                         residual_mass_kg=1e-12)]
     for p in mapped:
         assert p['target_thermodynamics']['temperature_k'] > p['source']['temperature_k']+.1
         assert p['target_thermodynamics']['droplet_diameter_m'] > p['source']['droplet_diameter_m']*1.006

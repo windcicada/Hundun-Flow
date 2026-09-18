@@ -1,0 +1,88 @@
+{
+  "schema": "hundun.cantera.prebuilt.linux-x86_64.624cf.v1",
+  "version": "3.2.0",
+  "scope": "624CF research continuation on the 624CF branch",
+  "build_type": "Release",
+  "builder": "Ubuntu 22.04 snapshot 20260809T120000Z; GCC 11; libstdc++; C++17",
+  "source": {
+    "url": "https://github.com/Cantera/cantera/releases/download/v3.2.0/cantera-3.2.0.tar.gz",
+    "sha256": "a94682ef3cb60dc57c8d14fc4cccd94e8f6bb74cab9c3f5465ee90832859360b",
+    "local_patches": []
+  },
+  "builder_rootfs": {
+    "image": "ubuntu-22.04-minimal-cloudimg-amd64-root.tar.xz",
+    "sha256": "1bd7959194d3fa7b9660b169f010ff222109a885559108028c79e244d649234a",
+    "apt_snapshot": "https://snapshot.ubuntu.com/ubuntu/20260809T120000Z",
+    "libc6": "2.35-0ubuntu3.14",
+    "gcc_11": "11.4.0-1ubuntu1~22.04.3",
+    "scons": "4.0.1+dfsg-2",
+    "doxygen": "1.9.1-2ubuntu2"
+  },
+  "build_profile": {
+    "python_package": false,
+    "f90_interface": false,
+    "example_data": false,
+    "googletest": "none",
+    "hdf_support": false,
+    "system_blas_lapack": false,
+    "system_eigen": false,
+    "system_fmt": false,
+    "system_sundials": false,
+    "system_yamlcpp": false,
+    "renamed_shared_libraries": true,
+    "versioned_shared_library": true,
+    "layout": "standard",
+    "package_build": true,
+    "use_rpath_linkage": false,
+    "cxx_flags": "-std=c++17 -D_GLIBCXX_USE_CXX11_ABI=1 -DEIGEN_MPL2_ONLY -march=x86-64 -mtune=generic"
+  },
+  "normalization": {
+    "operations": [
+      "strip --strip-debug",
+      "objcopy --remove-section .note.gnu.build-id"
+    ],
+    "reason": "Cantera sourcegen iterates Python sets in generated CLib includes and cabinet declarations. That changes debug information and therefore the linker-generated Build-ID, while the stripped runtime payload is byte-identical. Removing only that note produces a deterministic admitted identity.",
+    "independent_rebuild_runtime_sha256": [
+      "6da4485658097eb459423e9cb50813dbf9f25f32e669ab658f92b2d3518f484d",
+      "6da4485658097eb459423e9cb50813dbf9f25f32e669ab658f92b2d3518f484d"
+    ]
+  },
+  "abi": {
+    "architecture": "x86_64",
+    "isa": "x86-64",
+    "glibc_floor": "2.35",
+    "glibcxx_cxx11_abi": 1,
+    "maximum_glibc": "GLIBC_2.34",
+    "maximum_glibcxx": "GLIBCXX_3.4.29",
+    "maximum_cxxabi": "CXXABI_1.3.9",
+    "soname": "libcantera_shared.so.3"
+  },
+  "library": {
+    "path": "lib/libcantera_shared.so.3.2.0",
+    "sha256": "6da4485658097eb459423e9cb50813dbf9f25f32e669ab658f92b2d3518f484d",
+    "bytes": 10164656,
+    "build_id": "absent_after_deterministic_normalization",
+    "needed": ["libc.so.6", "libgcc_s.so.1", "libm.so.6", "libstdc++.so.6"],
+    "rpath": "absent",
+    "runpath": "absent"
+  },
+  "layout": {
+    "include": "include",
+    "data": "share/cantera/data",
+    "licenses": "licenses",
+    "mechanism_count": 0,
+    "python_file_count": 0,
+    "static_library_count": 0
+  },
+  "license_files": [
+    "licenses/Cantera/License.txt",
+    "licenses/UPSTREAM-COMBINED-LICENSES.txt",
+    "licenses/Boost/LICENSE_1_0.txt",
+    "licenses/Boost/ubuntu-package-copyright",
+    "licenses/Eigen/COPYING.MPL2",
+    "licenses/SUNDIALS/LICENSE",
+    "licenses/SUNDIALS/NOTICE",
+    "licenses/fmt/LICENSE.rst",
+    "licenses/yaml-cpp/LICENSE"
+  ]
+}

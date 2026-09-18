@@ -68,8 +68,16 @@ function(hundun_configure_cantera_package package_root)
 
   file(SHA256 "${package_root}/lib/libcantera_shared.so.3.2.0"
     library_sha256)
-  if(NOT library_sha256 STREQUAL
-     "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760")
+  # Both identities are repository-audited packages. The first is the
+  # original Stage 4 artifact. The second is the 624CF Jammy snapshot rebuild
+  # whose non-deterministic debug-derived GNU Build-ID was removed before its
+  # runtime payload was hashed. See PREBUILT-LINUX-X86_64-624CF.json.
+  set(verified_library_sha256
+    "093b62eadc4d44c3ef227c2d59554542820fdd8fde3497a0dcc46e3360040760"
+    "6da4485658097eb459423e9cb50813dbf9f25f32e669ab658f92b2d3518f484d")
+  list(FIND verified_library_sha256 "${library_sha256}"
+    verified_library_index)
+  if(verified_library_index EQUAL -1)
     message(FATAL_ERROR
       "verified Cantera package is incomplete: shared-library SHA-256 mismatch")
   endif()

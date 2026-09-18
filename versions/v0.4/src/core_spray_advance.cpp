@@ -250,7 +250,8 @@ Status ProductParcelAdvance::wave(portable::Revision revision, double start,
     in.relative_tolerance = relative_tolerance_;
     const auto result = integrate_parcel_events(in);
     if (!result.available)
-      return result.status == ParcelEventsStatus::provider_failure
+      return result.status == ParcelEventsStatus::provider_failure ||
+                     result.status == ParcelEventsStatus::capacity_exceeded
                  ? unavailable()
                  : invalid(10270 + unsigned(result.status));
     const std::uint64_t prefix = std::uint64_t(index) << 32;

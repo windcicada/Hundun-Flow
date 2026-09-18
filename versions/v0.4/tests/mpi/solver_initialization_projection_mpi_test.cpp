@@ -174,6 +174,7 @@ struct Fixture {
   int size{};
   bool fragmented{};
   bool x_only_periodic{};
+  bool locally_empty_tail{};
   CartesianGeometryPlan geometry;
   MeshPatch patch{};
   BoundaryPlan boundary;
@@ -220,6 +221,10 @@ struct Fixture {
   double fixed_flux_sentinel{-3.75};
 
   bool global_active(Int3 global) const noexcept {
+    if (locally_empty_tail) {
+      const int nx = geometry.global_cells().x;
+      return size > 1 && global.x < nx - nx / size;
+    }
     if (fragmented)
       return (global.x & 1) == 0;
     const int nx = geometry.global_cells().x;
@@ -228,11 +233,13 @@ struct Fixture {
 
   bool initialize(FreshStartProjectionLinearRoute route, Int3 global_cells,
                   bool use_fragmented = false, bool use_x_only_periodic = false,
-                  bool mismatch_shared_mask = false) {
+                  bool mismatch_shared_mask = false,
+                  bool use_locally_empty_tail = false) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     fragmented = use_fragmented;
     x_only_periodic = use_x_only_periodic;
+    locally_empty_tail = use_locally_empty_tail;
     ValidatedModel model;
     model.mesh = mesh_spec(global_cells);
     model.fingerprint = 0x97260001U;
@@ -348,7 +355,7 @@ struct Fixture {
               global_active(low) && global_active(high) ? 1U : 0U;
         }
 
-    if (!fragmented) {
+    if (!fragmented && !locally_empty_tail) {
       const Int3 solid_global{global_cells.x / 3, 0, 0};
       if (owns(patch, solid_global)) {
         const Int3 local{solid_global.x - patch.begin.x,
@@ -807,6 +814,47 @@ bool test_neighbor_mask_mismatch(int rank, int size) {
                 "one-rank shared-face mask mismatch is collectively rejected");
 }
 
+bool test_locally_empty_partition(int rank, int size) {
+  if (size == 1)
+    return true;
+  const Int3 global{8 * size, 6, 4};
+  Fixture fixture;
+  bool passed = expect(
+      fixture.initialize(FreshStartProjectionLinearRoute::native_mg_fgmres,
+                         global, false, true, false, true),
+      rank, "collective projection accepts one all-solid partition");
+  if (!passed)
+    return false;
+
+  const int local_empty =
+      std::none_of(fixture.active_cells.begin(), fixture.active_cells.end(),
+                   [](std::uint8_t value) { return value != 0U; })
+          ? 1
+          : 0;
+  int empty_ranks = 0;
+  MPI_Allreduce(&local_empty, &empty_ranks, 1, MPI_INT, MPI_SUM,
+                MPI_COMM_WORLD);
+  const auto &red = fixture.plan.red();
+  passed &= expect(
+      fixture.patch.process_grid.x == size &&
+          fixture.patch.process_grid.y == 1 &&
+          fixture.patch.process_grid.z == 1 && empty_ranks == 1 &&
+          red.valid() &&
+          red.active_cells ==
+              static_cast<std::uint64_t>(global.x - 8) * global.y * global.z,
+      rank,
+      "the all-solid rank retains collective graph and solver authority");
+  if (!passed)
+    return false;
+
+  FreshStartKinematicProjectionCandidateCertificate candidate;
+  const Status projected = fixture.project(candidate);
+  passed &= expect(same_status(projected) && projected && candidate.valid(),
+                   rank,
+                   "the all-solid rank participates through projection audit");
+  return passed;
+}
+
 bool test_payload_is_surface_bounded(int rank, int size) {
   Fixture small;
   Fixture large;
@@ -990,6 +1038,7 @@ int main(int argc, char **argv) {
   passed &= test_collective_commit_transaction(rank, size);
   passed &= test_rank_local_incompatibility(rank, size);
   passed &= test_neighbor_mask_mismatch(rank, size);
+  passed &= test_locally_empty_partition(rank, size);
   passed &= test_payload_is_surface_bounded(rank, size);
   passed &= test_rank_local_stage_failure_rendezvous(rank, size);
   const bool global_passed = collective(passed);
