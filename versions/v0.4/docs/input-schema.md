@@ -11,7 +11,7 @@ production advancement admits CN/BE and backward Euler.
 `examples/air.d` supplies O2/N2 NASA thermodynamics and Perry transport;
 use O2 mass fraction 0.23291751145757963 and N2 as the balance species.
 `transport_perry Tc Pc` is the canonical transport token. The historical
-`transport_coast_perry` and `coast_cn_be` input spellings resolve to the
+`transport_perry` and `reference_cn_be` input spellings resolve to the
 same current transport and time methods.
 
 
@@ -29,7 +29,7 @@ nested paths, incorrect suffixes, missing files, symbolic links, and hard-link
 aliases are rejected.
 
 Rank 0 alone opens the case-root descriptor, `case.json`, `.d`, and STL files. It
-reads and parses the thermophysical `.d` file and any COAST runtime-axis file
+reads and parses the thermophysical `.d` file and any REFERENCE runtime-axis file
 exactly once, normalizes the closed schema, hashes the complete typed model and
 referenced bytes, and broadcasts a bounded typed model. The runtime model retains
 compact typed thermophysical data and effective axis coordinates, never the
@@ -251,7 +251,7 @@ required boundary, scheme, and time-control field are explicit.
 The `mesh` object normally has exactly `kind`, `domain`, `exact_cells`,
 `base_spacing`, `minimum_spacing`, `max_growth_ratio`, `focus_regions`,
 `limits`, `data_files`, and `immersed_boundary`. The
-`coast_runtime_axes_v1` variant additionally requires `axes_file`. `domain` has
+`runtime_axes_v1` variant additionally requires `axes_file`. `domain` has
 exactly `lower` and `upper`; `limits` has exactly `max_global_cells` and
 `max_memory_bytes_per_rank`; each focus-region object has exactly `lower`,
 `upper`, and `target_spacing`.
@@ -287,14 +287,14 @@ touching boxes are rejected. After clipping, regions are sorted
 lexicographically by lower bound, upper bound, and target spacing, then exact
 duplicates are removed. Negative zero is normalized to positive zero.
 
-### COAST runtime-axis Cartesian mesh
+### REFERENCE runtime-axis Cartesian mesh
 
-For `kind: "coast_runtime_axes_v1"`, `exact_cells` and `base_spacing` are
+For `kind: "runtime_axes_v1"`, `exact_cells` and `base_spacing` are
 required and the mesh object additionally contains a direct-root `.dat`
 `axes_file`. Its closed text format is:
 
 ```text
-COAST_RUNTIME_AXES 1
+RUNTIME_AXES 1
 grid NX NY NZ
 x NX+1
 <x-face coordinates>
@@ -308,7 +308,7 @@ Counts must match `exact_cells`, coordinates must be finite and strictly
 increasing after projection to float32, endpoints must match the declared
 domain after the same projection, and trailing tokens are rejected. HUNDUN
 stores each effective coordinate as `double(float(source))` so the geometry is
-identical to the COAST Fortran runtime representation. The source bytes, direct
+identical to the REFERENCE Fortran runtime representation. The source bytes, direct
 path, and all effective coordinates participate in case identity. Declared
 spacing/focus controls remain auditable generator metadata; runtime metrics are
 computed only from the imported faces.
@@ -404,10 +404,10 @@ records, and exactly one transport record:
 
 - `transport_constant <mu> <k>`; or
 - `transport_sutherland <mu_ref> <T_ref> <S> <Pr>`; or
-- `transport_coast_native_air` for the one-species fixed 0.21 O2/0.79 N2
+- `transport_nasa_air` for the one-species fixed 0.21 O2/0.79 N2
   pseudo-air contract.
 
-`transport_coast_native_air` takes no numeric arguments. It is accepted only
+`transport_nasa_air` takes no numeric arguments. It is accepted only
 with the registered molecular weight and NASA7 records for that fixed mixture.
 It evaluates temperature-dependent heat capacity, Yoon--Thodos species
 viscosities with Wilke mixture weighting, and `k=cp*mu/0.70`; it is not a
@@ -579,7 +579,7 @@ bounds remain explicit for every control kind.
 | --- | --- |
 | `units` | `SI` |
 | `thermophysics.data_file` | unique direct-root name ending in `.d` |
-| `mesh.axes_file` | required unique direct-root name ending in `.dat` only for `coast_runtime_axes_v1` |
+| `mesh.axes_file` | required unique direct-root name ending in `.dat` only for `runtime_axes_v1` |
 | `mesh.data_files[]` | unique direct-root names ending in `.d` |
 | `mesh.immersed_boundary` | `null`, the legacy two-key object `{ "stl_file": "body.stl", "fluid_side": "outside" | "inside" }`, or that object plus exactly `"reconstruction_policy": "strict_quadratic" | "adaptive_order"`; the STL remains a unique direct-root `.stl` file |
 

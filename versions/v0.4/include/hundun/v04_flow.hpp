@@ -18,7 +18,7 @@
 
 namespace hundun::v04 {
 
-namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; }
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; class StatisticalFaceBasis; }
 
 class IbmEquationInterfacePlan;
 class EBTopology;
@@ -270,6 +270,8 @@ struct EquationAssemblyContext {
   StageId additional_contribution_stage{};
   const EnthalpyMidpointView* enthalpy_midpoint{};
   const ScalarMidpointView* scalar_midpoint{};
+  // Internal, sweep-scoped reuse of the statistical diffusion face basis.
+  detail::StatisticalFaceBasis* statistical_face_basis{};
 };
 
 struct EquationSystemView {
@@ -582,7 +584,7 @@ struct MomentumPredictorSolveReport {
   std::array<LinearSolveResult, 3U> components{};
   std::uint8_t solve_calls{};
   // Number of full momentum predictor passes at this target time. PISO uses
-  // one; COAST-consistent SIMPLE reassembles momentum before its second
+  // one; REFERENCE-consistent SIMPLE reassembles momentum before its second
   // pressure correction and therefore uses two.
   std::uint8_t predictor_passes{};
 };

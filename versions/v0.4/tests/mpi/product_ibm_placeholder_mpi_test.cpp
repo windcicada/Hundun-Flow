@@ -135,7 +135,7 @@ bool native_placeholder_perturbation(int rank, double solid_temperature,
                    -1.091801341e-10, -4.317787988e-13, -1050.5394088, 3.1124135035};
   air.nasa7_high = {3.1013370688, 1.24138813631e-3, -4.1882038804e-7,
                     6.641656204e-11, -3.9127843272e-15, -985.27467132, 5.3560174057};
-  air.transport_law = TransportLaw::coast_native_air;
+  air.transport_law = TransportLaw::nasa_air;
   air.viscosity_reference = air.conductivity = 0.0;
   ThermodynamicsPlan thermo;
   Status status = ThermodynamicsPlan::compile(spec, {}, thermo);

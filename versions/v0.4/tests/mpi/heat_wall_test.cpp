@@ -45,7 +45,7 @@ bool run(unsigned face, double flux, bool perry, bool backward_euler = false,
   model.boundaries[face].heat_flux = flux;
   if (perry) {
     auto& gas = model.thermophysics.species.front();
-    gas.transport_law = TransportLaw::coast_perry;
+    gas.transport_law = TransportLaw::perry;
     gas.viscosity_reference = gas.conductivity = 0;
     gas.prandtl = 0.70;
     gas.critical_temperature = 126.2;

@@ -51,17 +51,9 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
     hash *= UINT64_C(1099511628211);
   }
   if (scheme == TimeScheme::cn_be) {
-    if (cold_revision != ColdHistoryRevision::quadratic_pressure)
-      for (char byte : std::string_view("coast-ibm-fluid-pressure-delta-v1;")) {
-        hash ^= static_cast<unsigned char>(byte);
-        hash *= UINT64_C(1099511628211);
-      }
-    if (cold_revision == ColdHistoryRevision::mach_tvd ||
-        cold_revision == ColdHistoryRevision::pressure_coupled)
-      for (char byte : std::string_view("coast-momentum-central-vls-mach06-global-v1;")) {
-        hash ^= static_cast<unsigned char>(byte);
-        hash *= UINT64_C(1099511628211);
-      }
+    // Stable prefix identities preserve existing inert Restart compatibility.
+    constexpr std::uint64_t prefix_ids[]{UINT64_C(4668308334626397711),UINT64_C(2818332073769911531),UINT64_C(55930283030908869),UINT64_C(55930283030908869)};
+    hash=prefix_ids[static_cast<unsigned>(cold_revision)];
   }
   if (scheme == TimeScheme::cn_be &&
       cold_revision == ColdHistoryRevision::pressure_coupled)
@@ -105,7 +97,7 @@ product_method_history_signature(TimeScheme scheme, bool transported_scalars,
       hash *= UINT64_C(1099511628211);
     }
   if (esf && scheme == TimeScheme::cn_be)
-    for (char byte : std::string_view(";pdf-before-flow-bounded-maxnorm-frozen-molar-batch-window-v3")) {
+    for (char byte : std::string_view(";pdf-before-flow-bounded-recurrence-frozen-carrier-invariant-rate-molar-batch-window-v6")) {
       hash ^= static_cast<unsigned char>(byte);
       hash *= UINT64_C(1099511628211);
     }

@@ -42,7 +42,7 @@ assert report["counts"] == dict(slots=4, retired=1, indexed=3, positive=2,
                                dummy_positive=0, pending_children=2, positive_children=1,
                                zero_inventory_children=1)
 assert [(p["kind"], p["source_ordinal"]) for p in parcels] == [("retained", 4), ("retained", 2), ("daughter", 1)]
-assert all(p["coast_cell"] == 14 for p in parcels[1:])
+assert all(p["reference_cell"] == 14 for p in parcels[1:])
 assert math.isclose(parcels[0]["droplet_diameter_m"], 30e-6, rel_tol=1e-15)
 assert parcels[1]["multiplicity"] == 2 and parcels[2]["multiplicity"] == 2
 assert parcels[1]["legacy_state"] == list(struct.unpack("<22f", rows[11][88:176]))
@@ -94,4 +94,4 @@ with tempfile.TemporaryDirectory(prefix="hf-spray-") as temp:
     (busy/"parcels.tmp").write_text("existing work")
     assert run(busy).returncode != 0
     assert (busy/"parcels.tmp").read_text() == "existing work"
-print("coast_spray slots=partitioned units=SI daughters=REAL histories=exact corruptions=7 publication=checked passed=1")
+print("reference_spray slots=partitioned units=SI daughters=REAL histories=exact corruptions=7 publication=checked passed=1")

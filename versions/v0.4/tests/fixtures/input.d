@@ -1,5 +1,5 @@
 C-----------------------------------------------------------------------
-C   COAST1: settle to 28000, then fresh time averages through 38000
+C   REFERENCE1: settle to 28000, then fresh time averages through 38000
 C-----------------------------------------------------------------------
 false                           /use if number blocks > number of cores
 C-----------------------------------------------------------------------

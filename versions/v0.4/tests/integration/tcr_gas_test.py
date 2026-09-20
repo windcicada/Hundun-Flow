@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """GTMC JL4/4-field dynamic TCR through native run and partitioned Restart."""
+from flow_budget import check_flow, check_omission_counterexamples
 import hashlib
 import json
 from pathlib import Path
@@ -43,11 +44,8 @@ def run(label, ranks, steps, restart=None):
     rows = [json.loads(line) for line in (output/'diagnostics.jsonl').read_text().splitlines()]
     for row in rows:
         p = row['payload']
-        assert abs(p['mass_balance_defect_kg_s']*p['dt'])/p['mass_kg'] < 1e-12
-        scale = max(1., abs(p['internal_energy_J'])+p['kinetic_energy_J'])
-        assert abs(p['total_energy_balance_defect_W']*p['dt'])/scale < 1e-12
-        for entry in p['composition_balance']['elements']:
-            assert entry['relative_defect'] < 1e-6
+        check_flow(p)
+        check_omission_counterexamples(p)
     return output
 
 seed = run('1', 1, 3)

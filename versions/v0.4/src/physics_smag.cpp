@@ -23,7 +23,7 @@ Status smagorinsky_kinematic_viscosity(const VelocityGradient& gradient,
   VelocityGradient scaled = gradient;
   if (gradient_scale != 1.0)
     for (double& value : scaled.value) value /= gradient_scale;
-  // COAST gamma_smagorinsky uses the full symmetric strain, including
+  // REFERENCE gamma_smagorinsky uses the full symmetric strain, including
   // dilatation, and Delta = cbrt(cell volume). Gradients are velocity-major.
   double contraction = 0.0;
   for (unsigned i = 0; i < 3; ++i) {

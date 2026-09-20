@@ -205,8 +205,8 @@ receipt, full20 requires an `ACCEPT` paired-statistics result, and literature
 requires a complete primary-data receipt plus physical-accuracy acceptance.
 An accepted receipt containing any false check is invalid.
 
-COAST/HUNDUN scientific-work equivalence uses
-`HUNDUN_V04_COAST_EQUIVALENCE_V2`. The rule can be validated while the receipt
+REFERENCE/HUNDUN scientific-work equivalence uses
+`HUNDUN_V04_REFERENCE_EQUIVALENCE_V2`. The rule can be validated while the receipt
 is `UNSEALED`; formal pairing additionally requires
 `v04_evidence_validate.py equivalence --require-sealed`, which rejects a
 changed rule, a non-`SEALED` status, or any unresolved capability and identity

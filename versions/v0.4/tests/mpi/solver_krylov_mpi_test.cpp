@@ -1507,6 +1507,14 @@ bool test_breakdown_maxiter_and_stale_identity(MPI_Comm communicator,
       std::abs(below.final_true_residual-.75)<1e-14,rank,
       "reference maximum norm is independent of global cell count");
 
+  max_control.absolute_tolerance=1e-14;
+  max_control.accept_iteration_limit=true;max_control.bounded_recurrence=true;
+  const auto recurrence=solve_bicgstab(identity_op,fixed,invocation(fixture,max_control),
+      fixture.workspace,fixture.reductions);
+  passed &= expect(bool(recurrence.status) && recurrence.iterations==1 &&
+      recurrence.recursive_residual<1e-13 && recurrence.final_true_residual<1e-13,
+      rank,"finite-volume recurrence handles a zero second image and reports true residual");
+
   const LinearIdentity live = fixture.expected;
   fixture.expected.fingerprint += 1U;
   const std::uint32_t calls_before_stale = regular.calls();

@@ -1,5 +1,5 @@
-# HUNDUN development-state transfer for COAST GTMC cold CH4/air.
-# Molecular weights and NASA7 coefficients are copied from the audited COAST
+# HUNDUN development-state transfer for REFERENCE GTMC cold CH4/air.
+# Molecular weights and NASA7 coefficients are copied from the audited REFERENCE
 # therm.d snapshot. HUNDUN intentionally retains Ru=8314.46261815324.
 HUNDUN_THERMOPHYSICS_V1
 temperature_bounds 200 6000

@@ -11,7 +11,7 @@
 using namespace hundun::v04;
 using namespace hundun::v04::test;
 
-bool run(unsigned nf) {
+bool run(unsigned nf,bool frozen=false) {
   CandidateBoundaryFixture fixture;
   CandidateBoundaryFixtureSpec spec;spec.cells_per_axis=9;
   if(!fixture.initialize(MPI_COMM_WORLD,spec))return false;
@@ -21,6 +21,7 @@ bool run(unsigned nf) {
   const double base_h=cp*(300-298.15)+30000;
   chemistry::detail::AnalyticIsomerBackend gas(2,false,cp);
   auto model=product_model(fixture.geometry.global_cells());
+  if(frozen){model.time.scheme=TimeScheme::cn_be;model.solver.coupling=CouplingKind::outer_corrected;}
   model.schemes.species=model.schemes.enthalpy=ConvectionScheme::central2;
   const auto air=model.thermophysics.species.front();
   model.thermophysics.species.assign(2,air);
@@ -107,7 +108,7 @@ bool run(unsigned nf) {
   HaloEngine correction_halo;
   const HaloFieldSpec correction_spec{830,1,3};
   if(!correction_halo.reserve(MPI_COMM_WORLD,fixture.patch,{&correction_spec,1},fixture.boundary.halo_topology()))return false;
-  const auto original_bytes=esf.owned_bytes();
+  auto original_bytes=esf.owned_bytes();
   double error=0,gap=0;bool passed=true;
   std::vector<double> first;
   for(unsigned attempt=0;attempt<2;++attempt) {
@@ -115,21 +116,22 @@ bool run(unsigned nf) {
     if(status && attempt==1) {
       const auto saved_source=source.storage;
       auto stale=as_const(density.view);++stale.revision;
-      const auto rejected=esf.react(reaction,thermo,{trial_views.data(),nf},aux.view,
+      const auto rejected=esf.react(MPI_COMM_WORLD,reaction,thermo,{trial_views.data(),nf},aux.view,
           stale,as_const(pi.view),pressure,0,dt,4,9+attempt,{&source.view,1});
       passed &= rejected.code==StatusCode::invalid_plan && source.storage==saved_source;
       status=prepare(9+attempt);
     }
-    if(status)status=esf.react(reaction,thermo,{trial_views.data(),nf},aux.view,
+    if(status)status=esf.react(MPI_COMM_WORLD,reaction,thermo,{trial_views.data(),nf},aux.view,
         as_const(density.view),as_const(pi.view),pressure,0,dt,4,9+attempt,{&source.view,1});
     if(!status){std::cerr<<"reaction "<<unsigned(status.code)<<'/'<<status.detail<<'\n';return false;}
     std::size_t i=0;
     for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
       const Int3 c{x,y,z};const int gx=x+fixture.patch.begin.x;
-      const double basis=rho-dt*(mass_flux(gx+1)-mass_flux(gx))/fixture.cell_volume(c);
+      const double remapped=rho-dt*(mass_flux(gx+1)-mass_flux(gx))/fixture.cell_volume(c);
+      const double basis=frozen ? rho : remapped;
       const double delta=.3*std::expm1(-2*dt),expected=basis*delta/dt;
       error=std::max(error,std::abs(source.view.unchecked(c,0)-expected)/std::max(1.,std::abs(expected)));
-      gap=std::max(gap,std::abs(source.view.unchecked(c,0)-rho*delta/dt));
+      gap=std::max(gap,std::abs(source.view.unchecked(c,0)-(frozen ? remapped : rho)*delta/dt));
       passed &= std::abs(aux.view.unchecked(c,0)-(.3+delta))<2e-14;
       if(attempt==0)first.push_back(source.view.unchecked(c,0));
       else passed &= first[i]==source.view.unchecked(c,0);
@@ -172,8 +174,9 @@ bool run(unsigned nf) {
       for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x)
         for(unsigned c=0;c<3;++c)passed &= corrected.view.unchecked({x,y,z},c)==snapshot.unchecked({x,y,z},c);
     }
-    passed &= esf.owned_bytes()==original_bytes;
-    const auto duplicate=esf.react(reaction,thermo,{trial_views.data(),nf},aux.view,
+    if(attempt==0)original_bytes=esf.owned_bytes();
+    else passed &= esf.owned_bytes()==original_bytes;
+    const auto duplicate=esf.react(MPI_COMM_WORLD,reaction,thermo,{trial_views.data(),nf},aux.view,
         as_const(density.view),as_const(pi.view),pressure,0,dt,4,9+attempt,{&source.view,1});
     passed &= duplicate.code==StatusCode::invalid_plan;
     ConstFieldView stale_seed;
@@ -184,12 +187,12 @@ bool run(unsigned nf) {
   const double saved_face=flux.x.unchecked({1,0,0});
   flux.x.unchecked({1,0,0})=1e6;
   const auto invalid_carrier=prepare(11);
-  passed &= invalid_carrier.code==StatusCode::numerical_failure;
+  passed &= frozen ? bool(invalid_carrier) : invalid_carrier.code==StatusCode::numerical_failure;
   ConstFieldView stale_seed;
   passed &= !esf.correction_seed(0,830,{4,10,1},stale_seed);
   flux.x.unchecked({1,0,0})=saved_face;
   status=prepare(12);
-  if(status)status=esf.react(reaction,thermo,{trial_views.data(),nf},aux.view,
+  if(status)status=esf.react(MPI_COMM_WORLD,reaction,thermo,{trial_views.data(),nf},aux.view,
       as_const(density.view),as_const(pi.view),pressure,0,dt,4,12,{&source.view,1});
   passed &= bool(status);
   std::size_t check=0;
@@ -201,7 +204,7 @@ bool run(unsigned nf) {
   esf.discard();
   passed &= !esf.correction_seed(0,830,{4,12,1},current_seed);
   status=prepare(13);
-  if(status)status=esf.react(reaction,thermo,{trial_views.data(),nf},aux.view,
+  if(status)status=esf.react(MPI_COMM_WORLD,reaction,thermo,{trial_views.data(),nf},aux.view,
       as_const(density.view),as_const(pi.view),pressure,0,dt,4,13,{&source.view,1});
   passed &= bool(status) && bool(esf.correction_seed(nf,830,{4,13,1},current_seed));
   // Joint physical-mean/auxiliary-pressure closure on the actual reactor
@@ -374,7 +377,7 @@ bool run(unsigned nf) {
 }
 int main(int argc,char**argv) {
   MPI_Init(&argc,&argv);
-  int local=run(2) && run(4),global=0;
+  int local=run(2) && run(4) && run(2,true) && run(4,true),global=0;
   MPI_Allreduce(&local,&global,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
   MPI_Finalize();return global ? 0 : 1;
 }

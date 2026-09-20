@@ -772,7 +772,7 @@ bool valid_candidate_storage_lineage(const CompiledCasePlan& plan, int rank) {
 bool run_candidate_storage_lineage_only(int rank) {
   ValidatedModel model = test::product_model({17, 11, 7});
   SpeciesThermophysicalSpec& air = model.thermophysics.species.front();
-  air.molecular_weight = kCoastNativeAirMolecularWeight;
+  air.molecular_weight = kNasaAirMolecularWeight;
   air.nasa7_low = {3.5838100068,      -7.2700635412e-4,
                    1.67056387003e-6, -1.091801341e-10,
                    -4.317787988e-13, -1050.5394088,
@@ -783,7 +783,7 @@ bool run_candidate_storage_lineage_only(int rank) {
                     5.3560174057};
   air.viscosity_reference = 0.0;
   air.conductivity = 0.0;
-  air.transport_law = TransportLaw::coast_native_air;
+  air.transport_law = TransportLaw::nasa_air;
   model.fingerprint = UINT64_C(0x18000c501);
   CompiledCasePlan plan;
   Status status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan);

@@ -233,7 +233,7 @@ bool owner_exchange(int rank, int ranks) {
 bool native_gas_halo(int rank, int ranks) {
   const Int3 global{17, 11, 7};
   CartesianMeshSpec mesh;
-  mesh.kind = GeometryKind::coast_runtime_axes_v1;
+  mesh.kind = GeometryKind::runtime_axes_v1;
   mesh.axes_file = "manufactured-axes.dat";
   mesh.has_exact_cells = true;
   mesh.exact_cells = global;
@@ -246,7 +246,7 @@ bool native_gas_halo(int rank, int ranks) {
   for (unsigned d = 0; d < 3; ++d)
     for (int i = 0; i <= sizes[d]; ++i) {
       const double t = double(i) / sizes[d];
-      mesh.coast_runtime_faces[d].push_back(.5 * t + .5 * t * t);
+      mesh.runtime_faces[d].push_back(.5 * t + .5 * t * t);
     }
   CartesianGeometryPlan geometry;
   MeshPatch patch;

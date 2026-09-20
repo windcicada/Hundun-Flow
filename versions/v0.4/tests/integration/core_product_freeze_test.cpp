@@ -310,7 +310,7 @@ bool test_cold_momentum_mach_policy() {
                     !detail::cold_momentum_uses_tvd(0.60) &&
                     detail::cold_momentum_uses_tvd(std::nextafter(0.60, 1.0)) &&
                     detail::cold_momentum_uses_tvd(1.3),
-                "COAST momentum TVD uses the strict isothermal Mach threshold");
+                "REFERENCE momentum TVD uses the strict isothermal Mach threshold");
 }
 
 bool test_cn_pressure_checkerboard() {
@@ -530,7 +530,7 @@ bool test_cold_perry_diffusion_contract(bool reference_stopping, bool static_out
   model.boundaries[0].scalars.push_back({"air", ScalarBoundaryKind::zero_gradient});
   model.boundaries[1].scalars.push_back({"air", ScalarBoundaryKind::zero_gradient});
   auto &species = model.thermophysics.species.front();
-  species.transport_law = TransportLaw::coast_perry;
+  species.transport_law = TransportLaw::perry;
   species.viscosity_reference = species.conductivity = 0.0;
   species.prandtl = 0.70;
   species.critical_temperature = 126.2;

@@ -5,7 +5,7 @@
 
 namespace hundun::v04::detail {
 
-// COAST cgsol scales each per-volume row and its RHS before IC/CG. Keep the
+// REFERENCE cgsol scales each per-volume row and its RHS before IC/CG. Keep the
 // caller's original row for its original-equation audit and correction flux.
 inline Status scale_iccg_row(const ColdPressureRow& row, double volume,
                              ColdPressureRow& out) noexcept {

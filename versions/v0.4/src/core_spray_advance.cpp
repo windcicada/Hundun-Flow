@@ -386,7 +386,7 @@ Status ProductParcelAdvance::sgs_step(portable::Revision revision,
     if (!result.available) return invalid(10265);
     if (result.candidate_count > parcel_capacity_ - next_.size()) return capacity();
     if (result.parent_removed) {
-      // The COAST binary law conserves bulk mass/momentum/enthalpy. Surface
+      // The REFERENCE binary law conserves bulk mass/momentum/enthalpy. Surface
       // creation is a separate model diagnostic, as in the audited kernel.
       const auto &b = result.breakup_budget;
       breakup_energy_.surface_increase_j += b.surface_energy_increase_j;

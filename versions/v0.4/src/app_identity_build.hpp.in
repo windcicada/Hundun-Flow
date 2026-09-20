@@ -7,6 +7,8 @@
 
 namespace hundun::v04::detail {
 
+inline constexpr std::string_view product_version = "@HUNDUN_PRODUCT_VERSION@";
+
 inline constexpr std::string_view identity_source_commit =
     "@HUNDUN_SOURCE_COMMIT_ESCAPED@";
 inline constexpr std::string_view identity_source_tree =

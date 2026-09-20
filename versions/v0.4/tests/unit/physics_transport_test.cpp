@@ -151,7 +151,7 @@ ThermophysicalSpec two_species_spec(bool sutherland) {
   return spec;
 }
 
-ThermophysicalSpec coast_native_air_spec() {
+ThermophysicalSpec nasa_air_spec() {
   ThermophysicalSpec spec;
   spec.data_file = "thermophysics.d";
   spec.minimum_temperature = 200.0;
@@ -172,7 +172,7 @@ ThermophysicalSpec coast_native_air_spec() {
                     -4.1882038804e-7, 6.641656204e-11,
                     -3.9127843272e-15, -985.27467132,
                     5.3560174057};
-  air.transport_law = TransportLaw::coast_native_air;
+  air.transport_law = TransportLaw::nasa_air;
   spec.species.push_back(air);
   return spec;
 }
@@ -401,7 +401,7 @@ bool test_transport_rejects_mismatched_thermodynamics() {
   return passed;
 }
 
-bool test_coast_perry_mixture() {
+bool test_perry_mixture() {
   auto spec = two_species_spec(false);
   spec.maximum_temperature = 6000;
   spec.species = {species("CH4", 16.04308, 4.0, 0.0, 0.0),
@@ -409,7 +409,7 @@ bool test_coast_perry_mixture() {
                   species("N2", 28.0134, 3.5, 0.0, 0.0)};
   const double tc[]{190.7, 154.4, 126.2}, pc[]{45.8, 49.7, 33.5};
   for (std::size_t i = 0; i < spec.species.size(); ++i) {
-    spec.species[i].transport_law = TransportLaw::coast_perry;
+    spec.species[i].transport_law = TransportLaw::perry;
     spec.species[i].prandtl = 0.70;
     spec.species[i].critical_temperature = tc[i];
     spec.species[i].critical_pressure = pc[i];
@@ -423,10 +423,10 @@ bool test_coast_perry_mixture() {
   ThermodynamicsPlan thermo;
   TransportPlan transport;
   if (!expect(compile(spec, thermo, transport), "Perry mixture compiles")) return false;
-  bool passed = expect(transport.kernel() == TransportKernel::coast_perry &&
+  bool passed = expect(transport.kernel() == TransportKernel::perry &&
       transport.has_effective_enthalpy_transport() && transport.enthalpy_prandtl() == 0.70,
       "mixture exposes its effective enthalpy transport contract");
-  // Original COAST viscos.F90 in REAL4 with fsc=Y/W. Frozen independent
+  // Original REFERENCE viscos.F90 in REAL4 with fsc=Y/W. Frozen independent
   // oracle: 10 temperatures x 5 CH4/air mixtures, including pure endpoints.
   constexpr double oracle[][4]{
       {200, 0, 0.23291751145757963, 1.3187656804802828e-05},
@@ -485,7 +485,7 @@ bool test_coast_perry_mixture() {
     MolecularTransportState state;
     passed &= expect(transport.evaluate(sample[0], {y, 2U}, state) &&
         close(state.viscosity, sample[3], 6e-7, 0.0),
-        "Perry/Wilke matches the original REAL4 COAST routine");
+        "Perry/Wilke matches the original REAL4 REFERENCE routine");
     const double cp = kUniversalGasConstant *
         (4.0 * y[0] / 16.04308 + 3.5 * y[1] / 31.9988 +
          3.5 * (1.0 - y[0] - y[1]) / 28.0134);
@@ -528,21 +528,21 @@ bool test_coast_perry_mixture() {
   return passed;
 }
 
-bool test_coast_native_air_oracle() {
-  const ThermophysicalSpec spec = coast_native_air_spec();
+bool test_nasa_air_oracle() {
+  const ThermophysicalSpec spec = nasa_air_spec();
   ThermodynamicsPlan thermodynamics;
   TransportPlan transport;
   bool passed = expect(static_cast<bool>(ThermodynamicsPlan::compile(
                            spec, {}, thermodynamics)) &&
                            static_cast<bool>(TransportPlan::compile(
                                spec, thermodynamics, transport)),
-                       "COAST-native fixed air compiles without a species scalar");
+                       "REFERENCE-native fixed air compiles without a species scalar");
   if (!passed) return false;
   passed &= expect(thermodynamics.kernel() == ThermodynamicsKernel::nasa7 &&
-                       transport.kernel() == TransportKernel::coast_native_air,
-                   "COAST-native air keeps variable thermo and transport kernels");
+                       transport.kernel() == TransportKernel::nasa_air,
+                   "REFERENCE-native air keeps variable thermo and transport kernels");
   passed &= expect(transport.enthalpy_prandtl() == 0.70,
-                   "COAST-native air fixes the volume enthalpy Prandtl to 0.70");
+                   "REFERENCE-native air fixes the volume enthalpy Prandtl to 0.70");
 
   struct Oracle {
     double temperature;
@@ -565,7 +565,7 @@ bool test_coast_native_air_oracle() {
           273.15, {}, reference_enthalpy, reference_cp,
           reference_gas_constant)) &&
           close(reference_enthalpy, 0.0, 0.0, 1.0e-11),
-      "COAST-native primary enthalpy is referenced to 273.15 K");
+      "REFERENCE-native primary enthalpy is referenced to 273.15 K");
   for (const Oracle& expected : oracle) {
     double enthalpy = 0.0;
     double cp = 0.0;
@@ -586,7 +586,7 @@ bool test_coast_native_air_oracle() {
                   2.0e-13) &&
             close(state.viscosity, expected.viscosity, 2.0e-13) &&
             close(state.conductivity, expected.conductivity, 2.0e-13),
-        "COAST-native air matches the 21/79 NASA/Yoon-Thodos/Wilke oracle");
+        "REFERENCE-native air matches the 21/79 NASA/Yoon-Thodos/Wilke oracle");
   }
   double effective_conductivity = 0.0;
   double effective_diffusivity = 0.0;
@@ -600,7 +600,7 @@ bool test_coast_native_air_oracle() {
           close(effective_diffusivity, effective_viscosity / 0.70) &&
           close(effective_conductivity,
                 heat_capacity * effective_viscosity / 0.70),
-      "COAST-native volume enthalpy diffusion includes mu_sgs at Pr=0.70");
+      "REFERENCE-native volume enthalpy diffusion includes mu_sgs at Pr=0.70");
 
   ThermophysicalSpec extra_species = spec;
   extra_species.species.push_back(spec.species.front());
@@ -608,7 +608,7 @@ bool test_coast_native_air_oracle() {
   ThermodynamicsPlan rejected_thermodynamics;
   passed &= expect(!ThermodynamicsPlan::compile(
                        extra_species, {}, rejected_thermodynamics),
-                   "COAST-native air rejects a multi-species surrogate");
+                   "REFERENCE-native air rejects a multi-species surrogate");
   const std::array<TransportedScalarSpec, 1U> extra_species_scalar{{
       {"air", TransportedScalarRole::species}}};
   passed &= expect(!ThermodynamicsPlan::compile(
@@ -616,7 +616,7 @@ bool test_coast_native_air_oracle() {
                        {extra_species_scalar.data(),
                         extra_species_scalar.size()},
                        rejected_thermodynamics),
-                   "COAST-native air rejects an extra species equation");
+                   "REFERENCE-native air rejects an extra species equation");
   return passed;
 }
 
@@ -1061,8 +1061,8 @@ int main(int argc, char** argv) {
   passed &= test_constant_and_wilke_transport();
   passed &= test_sutherland_temperature_dependence();
   passed &= test_transport_rejects_mismatched_thermodynamics();
-  passed &= test_coast_native_air_oracle();
-  passed &= test_coast_perry_mixture();
+  passed &= test_nasa_air_oracle();
+  passed &= test_perry_mixture();
   passed &= test_derived_gradient_lifecycle();
   passed &= test_quadratic_gradient(uniform_mesh(), false);
   passed &= test_quadratic_gradient(stretched_mesh(), true);

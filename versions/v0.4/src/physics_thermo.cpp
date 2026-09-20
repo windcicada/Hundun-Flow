@@ -32,7 +32,7 @@ constexpr std::uint32_t kClosedMassConvergence = 823U;
 constexpr std::size_t kMaximumSpecies = 65U;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
-constexpr double kCoastNativeAirEnthalpyReferenceTemperature = 273.15;
+constexpr double kNasaAirEnthalpyReferenceTemperature = 273.15;
 
 bool finite(double value) noexcept { return std::isfinite(value); }
 
@@ -326,12 +326,12 @@ Status ThermodynamicsPlan::compile(
         canonical_spec.temperature_relative_tolerance;
     candidate.maximum_iterations_ =
         canonical_spec.maximum_temperature_iterations;
-    const bool coast_native_air =
+    const bool nasa_air =
         canonical_spec.species.size() == 1U &&
         canonical_spec.species.front().transport_law ==
-            TransportLaw::coast_native_air;
+            TransportLaw::nasa_air;
     candidate.universal_gas_constant_ =
-        coast_native_air ? kCoastNativeAirUniversalGasConstant
+        nasa_air ? kNasaAirUniversalGasConstant
                          : kUniversalGasConstant;
     const Status identity_status = detail::thermophysical_spec_fingerprint(
         canonical_spec, candidate.source_fingerprint_);
@@ -357,10 +357,10 @@ Status ThermodynamicsPlan::compile(
           canonical_spec.species[species];
       std::array<double, 7U> low = source.nasa7_low;
       std::array<double, 7U> high = source.nasa7_high;
-      if (coast_native_air) {
-        // Ordinary non-reacting COAST stores primary h as h(T)-h(273.15 K).
+      if (nasa_air) {
+        // Ordinary non-reacting REFERENCE stores primary h as h(T)-h(273.15 K).
         const double reference = dimensionless_h(
-            kCoastNativeAirEnthalpyReferenceTemperature, low);
+            kNasaAirEnthalpyReferenceTemperature, low);
         low[5U] -= reference;
         high[5U] -= reference;
       }

@@ -49,7 +49,7 @@ double face(int axis, int index) {
   const double f = static_cast<double>(index) / n;
   const double value = (immersed ? -2.0 : 0.0) + length * (f + (stretched ?
       0.1 * std::sin(2.0 * std::acos(-1.0) * f) / (2.0 * std::acos(-1.0)) : 0.0));
-  // COAST axes have float32 effective coordinates by contract.
+  // REFERENCE axes have float32 effective coordinates by contract.
   return stretched ? static_cast<double>(static_cast<float>(value)) : value;
 }
 double width(int axis, int index) { return face(axis, index + 1) - face(axis, index); }
@@ -85,11 +85,11 @@ ValidatedModel model(bool species, double dt) {
         "cylinder_ascii.stl",ImmersedFluidSide::outside};
   }
   if (stretched) {
-    m.mesh.kind = GeometryKind::coast_runtime_axes_v1;
+    m.mesh.kind = GeometryKind::runtime_axes_v1;
     m.mesh.axes_file = "in-memory-scalar-contract-axes";
     for (int a = 0; a < 3; ++a) {
       const int n = a == 0 ? cells.x : a == 1 ? cells.y : cells.z;
-      for (int i = 0; i <= n; ++i) m.mesh.coast_runtime_faces[a].push_back(face(a, i));
+      for (int i = 0; i <= n; ++i) m.mesh.runtime_faces[a].push_back(face(a, i));
     }
   }
   m.fingerprint = species ? 0x5343414c02U : 0x5343414c01U;

@@ -33,7 +33,7 @@
         "CMAKE_CXX_FLAGS": "-stdlib=libstdc++ -D_GLIBCXX_USE_CXX11_ABI=1 -ffp-contract=off -flto=thin",
         "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
         "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
-        "HUNDUN_BUILD_TESTS": "ON",
+        "HUNDUN_BUILD_TESTS": "OFF",
         "HUNDUN_ENABLE_REACTING_CANTERA": "ON",
         "HUNDUN_CANTERA_PACKAGE_ROOT": "$env{HUNDUN_CANTERA_ROOT}"
       }
@@ -67,7 +67,9 @@
     {
       "name": "release",
       "configurePreset": "release",
-      "targets": ["hundun"]
+      "targets": [
+        "hundun"
+      ]
     },
     {
       "name": "asan",

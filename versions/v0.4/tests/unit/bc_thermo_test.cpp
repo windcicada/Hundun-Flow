@@ -423,7 +423,7 @@ struct MixtureFixture {
     ThermophysicalSpec thermo = mixture_spec();
     if (perry) {
       for (auto &entry : thermo.species) {
-        entry.transport_law = TransportLaw::coast_perry;
+        entry.transport_law = TransportLaw::perry;
         entry.viscosity_reference = 0.0;
         entry.conductivity = 0.0;
         entry.prandtl = 0.70;

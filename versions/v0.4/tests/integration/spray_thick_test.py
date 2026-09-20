@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Native THICK_EX with real kerosene thermo and 1/2/4-rank restart."""
+from flow_budget import check_flow, check_composition, check_omission_counterexamples
 import hashlib
 import json
 import math
@@ -26,7 +27,8 @@ def validate_esf_records(records):
             for group in ("species", "elements"):
                 for entry in budget[group]:
                     assert all(math.isfinite(v) for k, v in entry.items() if k != "name")
-                    assert entry["relative_defect"] < 1e-6, (label, row["step"], entry)
+            check_composition(p)
+            check_omission_counterexamples(p)
             previous = (rows[i - 1] if i else records["1"][-1] if label in ("2", "r")
                         else records["2"][-1] if label == "4" else None)
             if previous:
@@ -293,10 +295,13 @@ end
         for row in rows:
             p = row["payload"]
             assert p["phase_mass_input_kg_s"] > 0
-            assert abs(p["mass_balance_defect_kg_s"] * p["dt"]) / p["mass_kg"] < 1e-12
             scale = max(1., abs(p["internal_energy_J"]) + p["kinetic_energy_J"])
-            assert abs(p["total_energy_balance_defect_W"] * p["dt"]) / scale < 1e-12
-            if scheme == "cn_be":
+            if esf:
+                check_flow(p)
+            else:
+                assert abs(p["mass_balance_defect_kg_s"] * p["dt"]) / p["mass_kg"] < 1e-12
+                assert abs(p["total_energy_balance_defect_W"] * p["dt"]) / scale < 1e-12
+            if scheme == "cn_be" and not esf:
                 if not ibm:
                     assert p["kinetic_energy_J"] > 1e-11 * scale
                 assert abs(p["total_energy_balance_defect_W"]) / max(

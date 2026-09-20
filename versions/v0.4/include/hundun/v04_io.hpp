@@ -188,6 +188,8 @@ struct RestartWriteReport {
   Status cleanup_status{};
   IoFailureContext cleanup_failure{};
   std::size_t rank_payload_bytes{};
+  // Rank-local encode, write, hash, readback, metadata and publication seconds.
+  std::array<double,6> phase_seconds{};
   // Peak bulk byte buffers, gather/record arrays; excludes borrowed fields,
   // small path strings, allocator bookkeeping, MPI and the solver resident set.
   std::size_t peak_bulk_staging_bytes{};

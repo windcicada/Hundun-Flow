@@ -2334,7 +2334,7 @@ Status local_pressure_outlet_closure(
         const double target = neumann
             ? pressure_reference + pressure_perturbation.unchecked(owner, 0U)
             : spec.pressure;
-        if (hf_coast_common_terminal_outlet_v1(
+        if (hf_reference_common_terminal_outlet_v1(
                 observed, target, &residual) != 0)
           return {StatusCode::numerical_failure, kProductBinding};
         maximum = std::max(maximum, residual);
@@ -3722,7 +3722,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   const bool fixed_pressure = model.thermophysics.fixed_pressure_pa > 0;
   const auto schedule = effective_coupling(model.time.scheme, model.solver.coupling);
   const bool cold_perry = cold_model && !model.thermophysics.species.empty() &&
-      coast_mixture_transport(model.thermophysics.species.front().transport_law);
+      reference_mixture_transport(model.thermophysics.species.front().transport_law);
   const bool incompatible_lewis = cold_perry && std::any_of(
       model.transported_scalars.begin(), model.transported_scalars.end(),
       [](const TransportedScalarSpec &scalar) {
@@ -4707,7 +4707,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   if (status && immersed) {
     candidate->ibm_equations.emplace();
     const auto pressure_gradient = model.time.scheme == TimeScheme::cn_be
-        ? IbmPressureGradientKind::coast_fluid_delta
+        ? IbmPressureGradientKind::reference_fluid_delta
         : IbmPressureGradientKind::quadratic_neumann;
     if (model.patch_inlets)
       status = IbmEquationInterfacePlan::compile(
@@ -9492,7 +9492,7 @@ Status ProductDriver::Impl::execute_attempt(
   }
   FieldView accepted_source_mu, accepted_source_gradient, accepted_source_effective;
   if ((cold_method && product.reaction.mixing_enabled()) || product.spray.sgs_enabled()) {
-    // COAST refreshes viscosity before scalar/chemistry advancement. Rebuild
+    // REFERENCE refreshes viscosity before scalar/chemistry advancement. Rebuild
     // the accepted transport state after every attempt, including retries;
     // endpoint and candidate solves may have replaced the shared workspace.
     FieldView mu, effective, gradient;
@@ -9938,14 +9938,18 @@ Status ProductDriver::Impl::execute_attempt(
     auto& workspace=product.transport_krylov_workspace;
     const double pdf_solve_begin=MPI_Wtime();
     unsigned pdf_calls=0,pdf_iterations=0,pdf_caps=0;
+    unsigned long long pdf_face_reuses{};
+    detail::ScalarWork pdf_work;
     double pdf_maximum=0.;
     auto& pc=product.esf.transport_preconditioner();
     auto& rows=product.esf.transport_rows();
     const auto active=product.ibm_equations ? product.ibm_equations->cell_activity() : Span<const std::uint8_t>{};
     const auto fluid=[&](std::size_t i){return active.size==0 || active.data[i]!=0;};
-    if(esf_composition_ledger.active())
-      esf_composition_ledger.add_total(detail::CompositionBalanceLedger::transport,
-          detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),accepted_flux,active));
+    if(esf_composition_ledger.active()) {
+      const auto flow_sum=detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),accepted_flux,active);
+      esf_composition_ledger.add_total(detail::CompositionBalanceLedger::transport,flow_sum);
+      esf_composition_ledger.add_total(detail::CompositionBalanceLedger::advective,flow_sum);
+    }
     zero_field(old);zero_field(mean);zero_field(iterate);
     for(int z=-old.ghosts.z;z<cells.z+old.ghosts.z;++z)
       for(int y=-old.ghosts.y;y<cells.y+old.ghosts.y;++y)
@@ -10103,6 +10107,8 @@ Status ProductDriver::Impl::execute_attempt(
             context.mixture_transport=&mixture;
           }
           s=product.reductions.consensus(s);if(!s)return s;
+          detail::StatisticalFaceBasis face_basis;
+          context.statistical_face_basis=product.esf.common_transport() ? &face_basis : nullptr;
           for(std::size_t c=0;c<=ns;++c) {
             const bool heat=c==ns;
             if(heat) {
@@ -10171,7 +10177,7 @@ Status ProductDriver::Impl::execute_attempt(
                 detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep)};
             pc.reset_identity(identity);
             detail::ScalarCorrectionRuntime runtime{rows,pc,product.krylov_halo,workspace,product.reductions,
-                identity,{1e-4*reference_scale[c],0.,10,11,0,true,true}};
+                identity,{1e-4*reference_scale[c],0.,10,11,0,true,true,true},&pdf_work};
             detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,
                 heat ? BoundaryStage::enthalpy : BoundaryStage::scalar,
                 heat ? product.schemes.enthalpy() : product.schemes.species(),
@@ -10182,6 +10188,8 @@ Status ProductDriver::Impl::execute_attempt(
             pdf_maximum=std::max(pdf_maximum,solved.final_true_residual/reference_scale[c]);
             s=solved.status;if(!s)return s;
           }
+          pdf_face_reuses+=face_basis.reuses;
+          context.statistical_face_basis=nullptr;
           s=close_frame(current);if(!s)return s;
           if(dual_esf && field>0 && sweep==1) {
             if(esf_composition_ledger.active()) {
@@ -10192,9 +10200,37 @@ Status ProductDriver::Impl::execute_attempt(
                 if(s && product.ibm_equations)
                   s=detail::IbmScalarTransport::constrain_flux(*product.ibm_equations,
                       {detail::IbmScalarTransport::Quantity::independent_species,c},accepted_flux,{ax,ay,az});
-                if(s)esf_composition_ledger.freeze_transport(c,
-                    detail::CompositionBalanceLedger::flux_sum(product.equations.kernels(),
-                        {as_const(ax),as_const(ay),as_const(az),accepted_flux.revision},active));
+                if(s) {
+                  using Ledger=detail::CompositionBalanceLedger;
+                  long double transport_sum{},advective_sum{},equation_sum{};
+                  std::size_t i{};
+                  for(int z=0;z<cells.z && s;++z)for(int y=0;y<cells.y && s;++y)for(int x=0;x<cells.x;++x,++i) {
+                    if(!fluid(i))continue;
+                    const Int3 cell{x,y,z};
+                    const long double q=current.unchecked(cell,mapping.data[c]);
+                    const long double old_q=accepted.unchecked(cell,mapping.data[c]);
+                    const double volume=detail::cell_volume(product.equations.kernels(),cell);
+                    const long double scalar_div=static_cast<long double>(ax.unchecked({x+1,y,z}))-ax.unchecked(cell)+
+                        static_cast<long double>(ay.unchecked({x,y+1,z}))-ay.unchecked(cell)+
+                        static_cast<long double>(az.unchecked({x,y,z+1}))-az.unchecked(cell);
+                    const long double mass_div=static_cast<long double>(accepted_flux.x.unchecked({x+1,y,z}))-accepted_flux.x.unchecked(cell)+
+                        static_cast<long double>(accepted_flux.y.unchecked({x,y+1,z}))-accepted_flux.y.unchecked(cell)+
+                        static_cast<long double>(accepted_flux.z.unchecked({x,y,z+1}))-accepted_flux.z.unchecked(cell);
+                    esf::detail::IemSource mixing;
+                    if(esf::detail::iem_source(volume,cache.unchecked(cell,2),cache.unchecked(cell,3),
+                        product.esf.mixing_cd(i,mapping.data[c]),product.esf.mixing_control(i,mapping.data[c]),
+                        mean.unchecked(cell,mapping.data[c]),mixing)!=portable::Status::success) {
+                      s={StatusCode::numerical_failure,10232};break;
+                    }
+                    const long double source=mixing.explicit_source_density-mixing.implicit_sink_density*q+
+                        product.esf.frozen_noise_source(i,field-1,mapping.data[c]);
+                    transport_sum+=scalar_div;advective_sum+=q*mass_div;
+                    equation_sum+=volume*(density.unchecked(cell,0)*(q-old_q)/step.dt-source)+scalar_div-q*mass_div;
+                  }
+                  esf_composition_ledger.freeze_transport(c,transport_sum);
+                  esf_composition_ledger.add(c,Ledger::advective,advective_sum/nf);
+                  esf_composition_ledger.add(c,Ledger::transport_residual,equation_sum/nf);
+                }
               }
               s=product.reductions.consensus(s);if(!s)return s;
             }
@@ -10212,9 +10248,12 @@ Status ProductDriver::Impl::execute_attempt(
       else {iterate=current;s=copy_interior(as_const(current),esf_trial[field-1]);}
       s=product.reductions.consensus(s);if(!s)return s;
     }
+    s=detail::report_scalar_work("pdf",pdf_work,communicator);
+    if(!s)return s;
     double pdf_local[2]{MPI_Wtime()-pdf_solve_begin,pdf_maximum},pdf_global[2]{};
     s=product.reductions.checked_max({pdf_local,2},{pdf_global,2});if(!s)return s;
     int pdf_rank{};MPI_Comm_rank(communicator,&pdf_rank);
+    if(pdf_rank==0)std::fprintf(stdout,"transport_basis face_reuses=%llu\n",pdf_face_reuses);
     if(pdf_rank==0)std::fprintf(stdout,"esf_transport_control calls=%u iterations=%u capped=%u maximum_residual=%.17g seconds=%.17g solver=bicgstab_dilu maxit=10 tolerance=1e-4 sweeps=2\n",
         pdf_calls,pdf_iterations,pdf_caps,pdf_global[1],pdf_global[0]);
     if(product.summary.coupling==CouplingKind::outer_corrected) {
@@ -11422,7 +11461,7 @@ Status ProductDriver::Impl::execute_attempt(
   // Material refresh below includes a collective result. Every rank enters
   // that stage with the same prerequisite, including a local EOS failure.
   status = product.reductions.consensus(status);
-  // COAST viscos is evaluated before the current step's PDF transport.
+  // REFERENCE viscos is evaluated before the current step's PDF transport.
   // Its molecular material must depend on accepted history, not a guess.
   if(cold_method && status){
     for(int z=0;z<cells.z && status;++z)for(int y=0;y<cells.y && status;++y)for(int x=0;x<cells.x;++x){
@@ -12641,6 +12680,7 @@ Status ProductDriver::Impl::execute_attempt(
       // mass flux. Their transport is independent of the pressure/EOS solve.
       const auto solve_cold_passives=[&](ConstFaceFluxView flux) -> Status {
         if(passive_trial.empty())return {};
+        detail::ScalarWork passive_work;
         if(!scalar_remap || !passive_factor || passive_rows.empty())
           return {StatusCode::invalid_plan,kProductBinding};
         FieldView diagonal,rhs,residual,gamma,variation,linear_rhs,increment,backup;
@@ -12734,7 +12774,9 @@ Status ProductDriver::Impl::execute_attempt(
           bool converged=false;
           for(unsigned sweep=0;sweep<(dual_esf ? 2U : 64U);++sweep) {
             EquationAssemblyCertificate certificate;
+            const auto assembly_begin=MPI_Wtime();
             s=assemble(certificate);
+            passive_work.assembly+=MPI_Wtime()-assembly_begin;++passive_work.assemblies;
             double maximum[2]{},sums[2]{};
             for(int z=0;z<cells.z && s;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
               const Int3 c{x,y,z};
@@ -12772,10 +12814,10 @@ Status ProductDriver::Impl::execute_attempt(
             passive_factor->reset_identity(identity);
             detail::ScalarCorrectionRuntime runtime{passive_rows,*passive_factor,product.krylov_halo,
                 scalar_workspace,product.reductions,identity,dual_esf
-                    ? LinearSolveControl{1e-3*scalar_scale,0.,20,21,0,true,true} : equation_solve};
+                    ? LinearSolveControl{1e-3*scalar_scale,0.,20,21,0,true,true,true} : equation_solve,&passive_work};
             detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,BoundaryStage::scalar,
                 product.schemes.passive_scalar(),as_const(trial_velocity),context,state.density,scalar,trial,false};
-            const auto solved=detail::correct_scalar(problem,storage,runtime,assemble,refresh);
+            const auto solved=detail::correct_scalar(problem,storage,runtime,assemble,refresh,&certificate);
             ++report.cold.passive_solve_calls;report.cold.passive_iterations+=solved.iterations;
             if(!solved.status)return solved.status;
           }
@@ -12783,7 +12825,7 @@ Status ProductDriver::Impl::execute_attempt(
           trial=original;scalar.trial=as_const(trial);
           passive_accepted[q]=as_const(trial);
         }
-        return {};
+        return detail::report_scalar_work("passive",passive_work,communicator);
       };
 
       // This branch returns before the PISO enthalpy reconstruction. Its
@@ -12856,12 +12898,12 @@ Status ProductDriver::Impl::execute_attempt(
             product.ibm_equations ? &*product.ibm_equations : nullptr);
         return product.reductions.consensus(prepared_faces);
       };
-      bool coast_momentum_tvd{};
+      bool reference_momentum_tvd{};
       bool quiescent_reference_pending{};
       std::vector<std::uint8_t> nascent_species_reference;
       {
         const std::size_t reference_count = 5U + species_history.size();
-        // ewt/ewt_pdf run before the COAST PDF/flow updates. Freeze the
+        // ewt/ewt_pdf run before the REFERENCE PDF/flow updates. Freeze the
         // conservative maxima of the accepted state. Initially absent
         // components use the first resolved response, frozen below.
         std::vector<double> local(reference_count + 2U, 0.0);
@@ -12957,14 +12999,14 @@ Status ProductDriver::Impl::execute_attempt(
         if (!status) return status;
         if (global.back() != 0.0)
           return {StatusCode::numerical_failure, 17852U};
-        coast_momentum_tvd = detail::cold_momentum_uses_tvd(global[reference_count]);
+        reference_momentum_tvd = detail::cold_momentum_uses_tvd(global[reference_count]);
         int rank{};
         MPI_Comm_rank(communicator, &rank);
         if (rank == 0)
           std::fprintf(stdout,
               "cold_momentum_policy accepted_isothermal_Mach_max=%.17g "
               "tvd=%d threshold=0.60 base=central2 scope=global_step\n",
-              global[reference_count], int(coast_momentum_tvd));
+              global[reference_count], int(reference_momentum_tvd));
         reference_momentum_scale=std::max(1e-15,std::hypot(global[0],global[1],global[2]))/
             (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
         if (reference_stopping) {
@@ -13006,7 +13048,7 @@ Status ProductDriver::Impl::execute_attempt(
       std::vector<double> species_residual_limits;
       bool conservative_energy_requested{};
       // Physical composition follows the complete random-field transport
-      // and reactor state. Field0 remains COAST's frozen noise-reduced
+      // and reactor state. Field0 remains REFERENCE's frozen noise-reduced
       // pressure anchor; pressure work shifts h0 and physical h together.
       // PDF transport/mixing/chemistry is complete before the flow sweeps.
       // Bind the frozen transport ledger and close its mean boundary trace once.
@@ -13297,7 +13339,7 @@ Status ProductDriver::Impl::execute_attempt(
                 for (int x=0; x<cells.x; ++x)
                   species_trial[j].unchecked({x,y,z},0)=
                       species_history[j].accepted.unchecked({x,y,z},0);
-          // COAST's continuity-reduced row supplies the first coupling
+          // REFERENCE's continuity-reduced row supplies the first coupling
           // guess. A terminal residual request targets the full conservative
           // row: a represented mass residual can otherwise bias a trace
           // species after the reduced search reaches its half-ULP floor.
@@ -13830,7 +13872,7 @@ Status ProductDriver::Impl::execute_attempt(
                 product.topology ? &*product.topology : nullptr,
                 product.boundary, equation_state, assembly, momentum_system,
                 rows, observed, product.schemes.momentum(),
-                coast_momentum_tvd);
+                reference_momentum_tvd);
           std::size_t restore_index{};
           for (int z = 0; z < cells.z; ++z)
             for (int y = 0; y < cells.y; ++y)
@@ -13877,7 +13919,7 @@ Status ProductDriver::Impl::execute_attempt(
             // The selected Krylov solver owns its true-residual evaluations.
             // The independent terminal audit checks the final coupled state.
             const auto momentum_control=dual_esf
-                ? LinearSolveControl{1e-4*reference_momentum_scale,0.,50,51,0,true,true}
+                ? LinearSolveControl{1e-4*reference_momentum_scale,0.,50,51,0,true,true,true}
                 : equation_solve;
             const LinearSolveInvocation momentum_call{as_const(pressure_rhs),pressure_correction,
                 identity,momentum_control};
@@ -14001,7 +14043,7 @@ Status ProductDriver::Impl::execute_attempt(
             if(!probe_status)return probe_status;
             const double scale=std::sqrt(global[0]/global[1])/
                 (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
-            pressure_control={1e-4*scale,0.,500,501,0,true,true};
+            pressure_control={1e-4*scale,0.,500,501,0,true,true,true};
           }
           double original_l2_limit = 1.;
           detail::ColdPressureOperator op(use_iccg ? scaled_rows : rows, cells,
@@ -14706,7 +14748,7 @@ Status ProductDriver::Impl::execute_attempt(
                   product.topology ? &*product.topology : nullptr,
                   product.boundary, equation_state, assembly, momentum_system,
                   rows, observed, product.schemes.momentum(),
-                coast_momentum_tvd);
+                reference_momentum_tvd);
             std::size_t restore_index{};
             for (int z = 0; z < cells.z; ++z)
               for (int y = 0; y < cells.y; ++y)
@@ -14807,7 +14849,7 @@ Status ProductDriver::Impl::execute_attempt(
             break;
           }
           // A failed final momentum equation already rejects this outer
-          // candidate. COAST's max-norm stopping cannot accept it, so avoid
+          // candidate. REFERENCE's max-norm stopping cannot accept it, so avoid
           // assembling E/Y solely to rediscover that same rejection. The
           // accepted path still performs the complete independent audit.
           const double momentum_gate_local[3]{reference_local[0], final_local[0], final_local[5]};
@@ -14831,7 +14873,7 @@ Status ProductDriver::Impl::execute_attempt(
           {
             EquationAssemblyContext cold_energy_context;
             // Audit the same frozen face operator used by this transport
-            // correction, as COAST condif/step/cgstab do within one jstep.
+            // correction, as REFERENCE condif/step/cgstab do within one jstep.
             // Rebuilding the limiter here would audit a different matrix.
             cold_energy_context.mixture_transport=&mixture_faces;
             cold_energy_context.dt = step.dt;
@@ -15181,7 +15223,7 @@ Status ProductDriver::Impl::execute_attempt(
                 {report.cold.reference_residual.data(), report.cold.reference_residual.size()});
             if (!status) return status;
             if (outer_rank == 0)
-              std::fprintf(stdout, "coast_terminal_norm outer=%u M=%.17g E=%.17g Y=%.17g rtime=%.17g\n",
+              std::fprintf(stdout, "reference_terminal_norm outer=%u M=%.17g E=%.17g Y=%.17g rtime=%.17g\n",
                   cold_outer, report.cold.reference_residual[0], report.cold.reference_residual[1],
                   report.cold.reference_residual[2], product.cold_stopping->reference_time);
           }
@@ -15591,6 +15633,8 @@ Status ProductDriver::Impl::execute_attempt(
               const double volume=detail::cell_volume(product.equations.kernels(),cell);
               const double initial=initial_density.unchecked(cell,0),current=trial_density.unchecked(cell,0);
               esf_composition_ledger.add_total_storage(volume,initial,current);
+              const long double density_rate=static_cast<long double>(volume)*(static_cast<long double>(current)-initial)/step.dt;
+              esf_composition_ledger.add_total(Ledger::density_update,density_rate);
               for(std::size_t c=0;c<species_trial.size();++c) {
                 // Physical composition is the ensemble, rather than the
                 // separately rounded cache used by material queries. Average
@@ -15602,6 +15646,7 @@ Status ProductDriver::Impl::execute_attempt(
                 }
                 esf_composition_ledger.add_storage(c,volume,initial,current,
                     initial_mean/fields,current_mean/fields);
+                esf_composition_ledger.add(c,Ledger::density_update,density_rate*current_mean/fields);
               }
             }
             status=esf_composition_ledger.finish(product.reductions,conservation);
@@ -16256,6 +16301,10 @@ Status ProductDriver::Impl::execute_attempt(
                 as_const(trial_density),as_const(molecular_viscosity),as_const(velocity_gradient));
             });
             status=product.reductions.consensus(status);
+          }
+          if(product.esf.enabled()) {
+            const auto query_status=product.esf.report_queries(communicator);
+            if(status)status=query_status;
           }
           const auto prepare_status =
               transaction.collective_prepare(communicator, status, prepared);
@@ -18802,7 +18851,7 @@ Status ProductDriver::Impl::execute_attempt(
               double absolute_pi = 0.0;
               double compressibility_moment = 0.0;
               double compressibility_weight = 0.0;
-              const int terminal = hf_coast_common_terminal_cell_v2(
+              const int terminal = hf_reference_common_terminal_cell_v2(
                   rho, rho, rho_n, rho_nm1, volume, effective_bdf.a0,
                   effective_bdf.a1, effective_bdf.a2,
                   artifacts.flux.x.unchecked(cell),

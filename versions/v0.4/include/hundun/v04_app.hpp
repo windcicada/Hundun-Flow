@@ -541,6 +541,8 @@ struct DriverCompositionBalance {
   double noise_source{}, mixing_source{}, chemistry_source{};
   double defect{}, relative_defect{};
   double storage_roundoff_bound{}; // Same rate units as defect.
+  double advective_conversion{}, density_update{}, transport_equation_residual{};
+  double unexplained_defect{}; // Physical defect minus the independently frozen split terms.
   bool roundoff_applied{};
 };
 

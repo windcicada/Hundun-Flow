@@ -55,9 +55,9 @@ CartesianMeshSpec uniform_mesh(Int3 cells = {4, 4, 4}) {
 
 CartesianMeshSpec tensor_mesh() {
   CartesianMeshSpec mesh;
-  mesh.kind = GeometryKind::coast_runtime_axes_v1;
+  mesh.kind = GeometryKind::runtime_axes_v1;
   mesh.axes_file = "in-memory-axes.dat";
-  mesh.coast_runtime_faces = {
+  mesh.runtime_faces = {
       std::vector<double>{0.0, 0.4, 1.2, 2.5, 4.0},
       std::vector<double>{-2.0, -0.5, 0.25, 2.0},
       std::vector<double>{1.0, 1.1, 1.8, 3.0}};

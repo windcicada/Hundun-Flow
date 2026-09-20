@@ -308,21 +308,21 @@ bool test_source_terminal_balance() {
   double eos = -1, continuity = -1, mass = -1, volume = -1;
   double pi = -1, moment = -1, weight = -1;
   // d(rho)/dt=2, zero face flux; a source of 2 balances the cell.
-  const int status = hf_coast_common_terminal_cell_v2(
+  const int status = hf_reference_common_terminal_cell_v2(
       1.2, 1.2, 1.0, 0.0, 0.125, 10.0, -10.0, 0.0,
       0, 0, 0, 0, 0, 0, 2.0, 0, 0, 0,
       &eos, &continuity, &mass, &volume, &pi, &moment, &weight);
   bool passed = expect(status == 0 && continuity < 1e-15 &&
                        std::abs(mass - 0.15) < 1e-15,
                        "terminal continuity includes source without changing physical mass");
-  const int missing = hf_coast_common_terminal_cell_v2(
+  const int missing = hf_reference_common_terminal_cell_v2(
       1.2, 1.2, 1.0, 0.0, 0.125, 10.0, -10.0, 0.0,
       0, 0, 0, 0, 0, 0, 0.0, 0, 0, 0,
       &eos, &continuity, &mass, &volume, &pi, &moment, &weight);
   passed &= expect(missing == 0 && continuity > 0.08,
                    "missing mass source remains visible to terminal gate");
   continuity = -17;
-  const int invalid = hf_coast_common_terminal_cell_v2(
+  const int invalid = hf_reference_common_terminal_cell_v2(
       1.2, 1.2, 1.0, 0.0, 0.125, 10.0, -10.0, 0.0,
       0, 0, 0, 0, 0, 0, std::numeric_limits<double>::quiet_NaN(), 0, 0, 0,
       &eos, &continuity, &mass, &volume, &pi, &moment, &weight);

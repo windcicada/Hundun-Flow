@@ -461,6 +461,8 @@ struct LinearSolveControl {
   bool maximum_norm{};
   // Publish the finite candidate at the cap, retaining maximum_iterations.
   bool accept_iteration_limit{};
+  // Finite-volume recurrence policy; true residual is an independent observation.
+  bool bounded_recurrence{};
 };
 
 struct LinearConvergenceAuditCertificate {

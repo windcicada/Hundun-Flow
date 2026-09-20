@@ -56,7 +56,7 @@ HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以�
 
 Smagorinsky 通过 `"turbulence": {"model": "smagorinsky", "coefficient": 0.12}` 配置，系数默认值为 0.17。模型使用完整对称应变率和单元体积的立方根作为滤波尺度；`hundun check` 显示实际 SGS 模型与系数。
 
-LES 云图同时提供 `nu_sgs`（m²/s）、`k_sgs`（m²/s²）、`eps_sgs_volume`（W/m³）和 `eps_sgs_specific`（m²/s³）。耗散率采用 COAST 的分子＋SGS 黏度口径；这些代数量由已接受流场、物性和 IBM 梯度重建，随云图输出更新。`hundun check` 的 `derived_output_bytes` 显示每进程预分配的派生字段空间。
+LES 云图同时提供 `nu_sgs`（m²/s）、`k_sgs`（m²/s²）、`eps_sgs_volume`（W/m³）和 `eps_sgs_specific`（m²/s³）。耗散率采用分子＋SGS 有效黏度口径；这些代数量由已接受流场、物性和 IBM 梯度重建，随云图输出更新。`hundun check` 的 `derived_output_bytes` 显示每进程预分配的派生字段空间。
 
 | 顺序 | 计算阶段 | 状态处理 |
 | ---: | --- | --- |
@@ -141,6 +141,13 @@ mpirun -np 4 b3/versions/v0.4/hundun run case \
   --output run --steps 10 --output-interval 0 --restart-interval 10
 ```
 
+从已保存状态继续计算：
+
+```sh
+mpirun -np 4 b3/versions/v0.4/hundun run case \
+  --restart run/Restart --output next --steps 10 --restart-interval 10
+```
+
 化学精度细化续算使用 `--restart-refine-chemistry` 指定原算例：
 
 ```sh
@@ -157,14 +164,8 @@ mpirun -np 4 b3/versions/v0.4/hundun run fine \
 
 ## 文档
 
-- [快速开始](docs/user-guide/quick-start.md)
-- [配置说明](docs/api/configuration-schema.md)
-- [控制方程](docs/numerics/governing-equations.md)
-- [气相分子输运](docs/visc.md)
-- [离散方法](docs/numerics/discretization.md)
-- [Restart](docs/user-guide/restart.md)
-- [诊断输出](docs/user-guide/diagnostics.md)
-- [文档入口](docs/index.md)
+- [安装、运行与续算](docs/run.md)
+- [版本验收范围](docs/accept.md)
 
 ## 许可证
 
@@ -174,7 +175,7 @@ HUNDUN-FLOW采用Apache License 2.0，见[LICENSE](LICENSE)。第三方组件及
 
 [GTMC 气相模型](examples/g/README.md) 提供 JL4、四场 ESF、Vreman 与动态 TCR 的小型输入；
 [624CF 气液模型](examples/cf/README.md) 提供煤油四步反应、两场 ESF、动态 TCR、THICK_EX、SGS 破碎与固定热力学压力输入。
-两套示例均包含新算与原生 Restart 命令，模型定义和运行范围见[开发记录](docs/rc.md)。
+两套示例均包含新算与原生 Restart 命令，模型定义和运行范围见[使用说明](docs/run.md)。
 
 ## GTMC 燃烧模拟示范
 
@@ -190,6 +191,6 @@ HUNDUN-FLOW采用Apache License 2.0，见[LICENSE](LICENSE)。第三方组件及
 
 中央截面位于 z = −0.075 mm，展示合速度与物理平均焓／组分对应的
 温度；灰色表示 IBM 固体区域。二维图保留原始网格分辨率，三维
-展示沿各轴每隔一个单元采样。图面说明见[数据记录](docs/hot.md)。
+展示沿各轴每隔一个单元采样。图中物理量与单位随色标标注。
 
 ![GTMC 中央截面速度与温度](docs/images/gtmc-mid.png)

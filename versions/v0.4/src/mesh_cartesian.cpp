@@ -206,7 +206,7 @@ Status broadcast_geometry_metadata(GeometryKind& kind, Real3& lower,
     return {StatusCode::mpi_failure, kGeometryCollective};
   }
   if (wire_kind >
-          static_cast<std::uint8_t>(GeometryKind::coast_runtime_axes_v1) ||
+          static_cast<std::uint8_t>(GeometryKind::runtime_axes_v1) ||
       !std::all_of(bounds.begin(), bounds.end(),
                    [](double value) { return std::isfinite(value); }) ||
       !(bounds[0] < bounds[3]) || !(bounds[1] < bounds[4]) ||
@@ -321,14 +321,14 @@ PlanFingerprint geometry_fingerprint(
   return hash.finish();
 }
 
-Status copy_coast_runtime_faces(
+Status copy_runtime_faces(
     const CartesianMeshSpec& mesh,
     std::array<std::vector<double>, 3U>& faces) noexcept {
   if (mesh.axes_file.empty() || !mesh.has_exact_cells) {
     return {StatusCode::invalid_plan, kGeometryWire};
   }
   try {
-    faces = mesh.coast_runtime_faces;
+    faces = mesh.runtime_faces;
   } catch (const std::bad_alloc&) {
     return {StatusCode::allocation_failure, kGeometryWire};
   } catch (...) {
@@ -408,8 +408,8 @@ Status CartesianGeometryCompiler::compile(
       root_status = preflight_exact_geometry(mesh, root_payload_limit);
     }
     if (root_status) {
-      root_status = mesh.kind == GeometryKind::coast_runtime_axes_v1
-                        ? copy_coast_runtime_faces(mesh, faces)
+      root_status = mesh.kind == GeometryKind::runtime_axes_v1
+                        ? copy_runtime_faces(mesh, faces)
                         : detail::generate_cartesian_faces(
                               mesh, root_payload_limit, faces);
     }
@@ -441,7 +441,7 @@ Status CartesianGeometryCompiler::compile(
         root_status = metric_peak_gate(faces, root_payload_limit);
       }
       if (root_status &&
-          mesh.kind == GeometryKind::coast_runtime_axes_v1) {
+          mesh.kind == GeometryKind::runtime_axes_v1) {
         authoritative_lower = {faces[0].front(), faces[1].front(),
                                faces[2].front()};
         authoritative_upper = {faces[0].back(), faces[1].back(),

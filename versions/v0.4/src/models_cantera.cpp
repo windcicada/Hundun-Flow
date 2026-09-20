@@ -295,6 +295,7 @@ struct CanteraBackendRuntime::Impl final {
   double minimum_temperature{}, maximum_temperature{};
   CompositionIdentity composition;
   portable::GasIdentity gas_identity;
+  std::vector<std::uint8_t> chemically_invariant;
   combustion::ChemistryIdentity closure_identity;
 };
 
@@ -339,6 +340,18 @@ CanteraBackendRuntime::CanteraBackendRuntime(const CanteraBackendConfig &config)
   if (probe->thermo()->type() != "ideal-gas")
     throw std::invalid_argument(
         "portable constant-pressure backend requires ideal gas");
+  impl_->chemically_invariant.assign(probe->thermo()->nSpecies(),1);
+  for(std::size_t species=0;species<probe->thermo()->nSpecies();++species)
+    for(std::size_t reaction=0;reaction<probe->kinetics()->nReactions();++reaction)
+      if(probe->kinetics()->productStoichCoeff(species,reaction)!=
+         probe->kinetics()->reactantStoichCoeff(species,reaction)) {
+        impl_->chemically_invariant[species]=0;break;
+      }
+  // Fixed-material mechanisms carry thermodynamics in the asset and their
+  // reactions in the native kernel; its certificate supersedes empty kinetics.
+  if(kerosene)
+    for(std::size_t species=0;species<impl_->chemically_invariant.size();++species)
+      impl_->chemically_invariant[species]=kerosene->chemically_invariant(species);
   auto &gas = impl_->gas_identity;
   gas.mechanism_sha256 = impl_->sha256;
   gas.phase = impl_->phase;
@@ -496,6 +509,10 @@ const CompositionIdentity &CanteraBackend::composition() const noexcept {
 
 const portable::GasIdentity &CanteraBackend::gas_identity() const noexcept {
   return impl_->runtime->impl_->gas_identity;
+}
+bool CanteraBackend::chemically_invariant(std::size_t species) const noexcept {
+  const auto& flags=impl_->runtime->impl_->chemically_invariant;
+  return species<flags.size() && flags[species]!=0;
 }
 const combustion::ChemistryIdentity &
 CanteraBackend::closure_identity() const noexcept {
@@ -720,7 +737,7 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
           w.network->setMaxSteps(impl_->controls.maximum_internal_steps - total_steps);
           w.network->reinitialize();
           if(impl_->controls.molar_reference_controls && !w.reference_tolerances_initialized) {
-            // COAST integrates Y/W with atol=1e-10 kmol/kg, rtol=0.
+            // REFERENCE integrates Y/W with atol=1e-10 kmol/kg, rtol=0.
             // ReactorNet integrates Y: the equivalent component limit is W*atol.
             // Auxiliary mass/temperature tolerances keep numerical Jacobian
             // perturbations in physical units; PH closes the reported temperature.

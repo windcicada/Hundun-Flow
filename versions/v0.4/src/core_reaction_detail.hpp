@@ -708,7 +708,7 @@ public:
             if (!std::isfinite(mu) || !std::isfinite(mu_eff) || mu <= 0 ||
                 mu_eff < mu)
               return numerical();
-            // Zero net chemistry preserves its state, as in COAST's inactive
+            // Zero net chemistry preserves its state, as in REFERENCE's inactive
             // progress branch. A chemical timescale is needed for active rates.
             if (scale == 0.0) {
               for (auto &output : outputs_) output.unchecked(cell, 0) = 0.0;

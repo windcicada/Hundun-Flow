@@ -131,10 +131,10 @@ std::int32_t normal_index(Int3 face, CartesianAxis axis) noexcept {
              : (axis == CartesianAxis::y ? face.y : face.z);
 }
 
-// COAST pressure_delta_core mirrors the adjacent fluid difference across
+// REFERENCE pressure_delta_core mirrors the adjacent fluid difference across
 // a cut face. Sum the two half differences before converting to Cartesian
 // coordinates. Apply each cut axis once, including a one-cell fluid gap.
-double coast_pressure_link_correction(const CartesianKernelPlan& kernels,
+double reference_pressure_link_correction(const CartesianKernelPlan& kernels,
     const EBTopology& topology, const ImmersedLink& link,
     ConstFieldView pressure) noexcept {
   const auto axis = interface_face(link).axis;
@@ -892,7 +892,7 @@ Status IbmEquationInterfacePlan::compile_sources(
     IbmEquationInterfacePlan& out,
     IbmPressureGradientKind pressure_gradient) noexcept {
   if (pressure_gradient != IbmPressureGradientKind::quadratic_neumann &&
-      pressure_gradient != IbmPressureGradientKind::coast_fluid_delta)
+      pressure_gradient != IbmPressureGradientKind::reference_fluid_delta)
     return {StatusCode::invalid_plan, kIbmEquationPlan};
   if (!valid_plan_inputs(kernels, topology, boundary, metric) ||
       (mass_flux_sources.size != 0U && mass_flux_sources.data == nullptr) ||
@@ -907,7 +907,7 @@ Status IbmEquationInterfacePlan::compile_sources(
   fingerprint = mix(fingerprint, boundary.fingerprint());
   fingerprint = mix(fingerprint, metric.fingerprint());
   fingerprint = mix(fingerprint, topology.geometry_revision());
-  if (pressure_gradient == IbmPressureGradientKind::coast_fluid_delta)
+  if (pressure_gradient == IbmPressureGradientKind::reference_fluid_delta)
     fingerprint = mix(fingerprint, UINT64_C(0x434f415354504431));
   if (fingerprint == 0U) fingerprint = 1U;
   IbmEquationInterfacePlan candidate;
@@ -1980,7 +1980,7 @@ Status IbmEquationInterfacePlan::constrain_momentum(
       !detail::valid_cell_view(system.residual, cells, 0U, 3U))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
-  const bool coast_delta = pressure_gradient_ == IbmPressureGradientKind::coast_fluid_delta;
+  const bool reference_delta = pressure_gradient_ == IbmPressureGradientKind::reference_fluid_delta;
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const IbmInterfaceLinkMetric> physical_links = metric_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
@@ -2005,14 +2005,14 @@ Status IbmEquationInterfacePlan::constrain_momentum(
     const Int3 cell = link.fluid_local_index;
     const WallLinearization linearization = wall_linearization_[index];
     double pressure_ghost = 0.0;
-    if (status && !coast_delta)
+    if (status && !reference_delta)
       status = evaluate_quadratic_row(
           boundary_->reconstruction(), row.zero_normal_value_row,
           pressure_perturbation, 0U, 0.0, 0.0, pressure_ghost);
     const double solid_pressure =
         pressure_perturbation.unchecked(link.solid_local_index, 0U);
     const double pressure_gradient_correction =
-        coast_delta ? coast_pressure_link_correction(*kernels_, *topology_, link,
+        reference_delta ? reference_pressure_link_correction(*kernels_, *topology_, link,
                                                      pressure_perturbation) :
         linearization.solid_pressure_derivative_weight *
         (pressure_ghost - solid_pressure);
@@ -2143,7 +2143,7 @@ Status IbmEquationInterfacePlan::correct_pressure_gradient(
       detail::field_views_overlap(pressure, as_const(gradient)))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
-  const bool coast_delta = pressure_gradient_ == IbmPressureGradientKind::coast_fluid_delta;
+  const bool reference_delta = pressure_gradient_ == IbmPressureGradientKind::reference_fluid_delta;
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
   if (wall_linearization_.size() != rows.size)
@@ -2157,14 +2157,14 @@ Status IbmEquationInterfacePlan::correct_pressure_gradient(
     const InterfaceFace face = interface_face(link);
     const std::uint8_t component = static_cast<std::uint8_t>(face.axis);
     double ghost = 0.0;
-    if (!coast_delta)
+    if (!reference_delta)
       status = evaluate_quadratic_row(
           boundary_->reconstruction(), row.zero_normal_value_row, pressure, 0U,
           0.0, 0.0, ghost);
     const double solid =
         pressure.unchecked(link.solid_local_index, 0U);
     const double correction =
-        coast_delta ? coast_pressure_link_correction(*kernels_, *topology_, link, pressure) :
+        reference_delta ? reference_pressure_link_correction(*kernels_, *topology_, link, pressure) :
         linearization.solid_pressure_derivative_weight *
         (ghost - solid);
     const double value =
@@ -2198,7 +2198,7 @@ Status IbmEquationInterfacePlan::correct_pressure_work(
       detail::field_views_overlap(velocity, as_const(rate)))
     return status ? Status{StatusCode::invalid_plan, kIbmEquationApply}
                   : status;
-  const bool coast_delta = pressure_gradient_ == IbmPressureGradientKind::coast_fluid_delta;
+  const bool reference_delta = pressure_gradient_ == IbmPressureGradientKind::reference_fluid_delta;
   const Span<const ImmersedLink> links = topology_->links();
   const Span<const BoundaryStencilLink> rows = boundary_->links();
   if (wall_linearization_.size() != rows.size)
@@ -2212,13 +2212,13 @@ Status IbmEquationInterfacePlan::correct_pressure_work(
     const std::uint8_t component = static_cast<std::uint8_t>(face.axis);
     const WallLinearization linearization = wall_linearization_[index];
     double ghost = 0.0;
-    if (!coast_delta)
+    if (!reference_delta)
       status = evaluate_quadratic_row(
           boundary_->reconstruction(), row.zero_normal_value_row, pressure, 0U,
           0.0, 0.0, ghost);
     const double solid = pressure.unchecked(link.solid_local_index, 0U);
     const double pressure_gradient_correction =
-        coast_delta ? coast_pressure_link_correction(*kernels_, *topology_, link, pressure) :
+        reference_delta ? reference_pressure_link_correction(*kernels_, *topology_, link, pressure) :
         linearization.solid_pressure_derivative_weight * (ghost - solid);
     const double velocity_normal =
         velocity.unchecked(link.fluid_local_index, component);

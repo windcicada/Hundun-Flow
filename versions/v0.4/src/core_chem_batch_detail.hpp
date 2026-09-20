@@ -28,10 +28,6 @@ public:
     int rank{},size{};MPI_Comm_rank(comm,&rank);MPI_Comm_size(comm,&size);
     const auto begin=MPI_Wtime();
     int bad=0;std::size_t selected=0;unsigned long long steps=0;
-    std::vector<int> counts,displacements,received,offsets,position;
-    std::vector<double> send,recv,result,returned;
-    std::vector<std::size_t> indices;
-    std::vector<unsigned long long> totals;
     const auto agree=[&]() {int all=0;if(MPI_Allreduce(&bad,&all,1,MPI_INT,MPI_MAX,comm)!=MPI_SUCCESS)return false;bad=all;return !bad;};
     const std::size_t iw=ns_+2,ow=2*ns_+10;
     try {
@@ -108,7 +104,17 @@ public:
     out.internal_step_count=static_cast<std::uint32_t>(data[7]);out.integrated_heat_release_j_per_m3=data[8];out.completed_duration_s=dt_;
     return portable::Status::success;
   }
+  std::size_t owned_bytes() const noexcept {
+    return sizeof(*this)+(input_.capacity()+output_.capacity()+send.capacity()+recv.capacity()+result.capacity()+returned.capacity())*sizeof(double)
+      +samples_.capacity()*sizeof(portable::GasSample)+(hot_.capacity()+7)/8
+      +(counts.capacity()+displacements.capacity()+received.capacity()+offsets.capacity()+position.capacity())*sizeof(int)
+      +indices.capacity()*sizeof(std::size_t)+totals.capacity()*sizeof(unsigned long long);
+  }
 private:
+    std::vector<int> counts,displacements,received,offsets,position;
+    std::vector<double> send,recv,result,returned;
+    std::vector<std::size_t> indices;
+    std::vector<unsigned long long> totals;
   bool evaluate(const double* input,double duration,double* result,unsigned long long& steps) noexcept {
     portable::GasAdvanceQuery request{{revision_,gas_identity().composition_fingerprint,portable::GasStateCoordinates::pressure_enthalpy,input[0],input[1],0,input+2,ns_},time_,duration};
     portable::GasAdvanceOutput out{{},result,result+ns_,ns_};

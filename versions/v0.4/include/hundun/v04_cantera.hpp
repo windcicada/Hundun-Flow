@@ -100,6 +100,7 @@ public:
 
   std::size_t lane_index() const noexcept;
   const portable::GasIdentity &gas_identity() const noexcept override;
+  bool chemically_invariant(std::size_t) const noexcept override;
   portable::Status query_gas(const portable::GasQuery &,
                              portable::GasQueryOutput &) noexcept override;
   portable::Status query_sample(const portable::GasQuery &,portable::GasQueryOutput &) noexcept override;

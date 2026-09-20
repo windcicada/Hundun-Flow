@@ -87,6 +87,26 @@ int main(int argc,char** argv) {
         !report.species_balance[0].roundoff_applied);
     HUNDUN_CHECK(!Ledger::admissible(report.species_balance[2]) &&
         !report.species_balance[2].roundoff_applied);
+    // A flow-split explanation preserves the physical defect. Its independently
+    // frozen terms expose missing and doubled sources instead of absorbing them.
+    Ledger split;
+    HUNDUN_CHECK(split.initialize(identity,{mapping.data(),2},1,1,19,.125,false));
+    for(auto term:{Ledger::temporal,Ledger::advective,Ledger::density_update,Ledger::transport_residual}) {
+      const double value=term==Ledger::temporal ? 1. : term==Ledger::density_update ? .5 : .25;
+      split.add(0,term,value/ranks);split.add_total(term,value/ranks);
+    }
+    split.freeze_transport(0,0);split.freeze_transport(1,0);
+    split.add_pressure(0,0);split.add_pressure(1,0);
+    HUNDUN_CHECK(split.finish(reductions,report));
+    HUNDUN_CHECK_NEAR(report.species_balance[0].defect,1.,1e-14);
+    HUNDUN_CHECK_NEAR(report.species_balance[0].unexplained_defect,0.,1e-14);
+    HUNDUN_CHECK(!Ledger::admissible(report.species_balance[0]));
+    split.add(0,Ledger::chemistry,1e-3/ranks);
+    HUNDUN_CHECK(split.finish(reductions,report));
+    HUNDUN_CHECK_NEAR(report.species_balance[0].unexplained_defect,-1e-3,1e-14);
+    split.add(0,Ledger::chemistry,-2e-3/ranks);
+    HUNDUN_CHECK(split.finish(reductions,report));
+    HUNDUN_CHECK_NEAR(report.species_balance[0].unexplained_defect,1e-3,1e-14);
     if(rank==0)quiet.add_storage(0,-1,rho,rho,.232,.232);
     HUNDUN_CHECK(quiet.finish(reductions,report).code==StatusCode::numerical_failure);
     if(!rank)std::cout << "composition_balance ranks=" << ranks << " species=3 elements=2 closure=passed candidate_replace=passed rejection=atomic\n";

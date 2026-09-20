@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -1714,10 +1715,6 @@ Status RestartWriter::write(MPI_Comm communicator,
         : Status{StatusCode::invalid_plan, kRestartInput};
   });
   if (!status) return status;
-  std::uint64_t maximum_bytes = local_bytes;
-  if (MPI_Allreduce(MPI_IN_PLACE, &maximum_bytes, 1, MPI_UINT64_T,
-                     MPI_MAX, communicator) != MPI_SUCCESS)
-    return {StatusCode::mpi_failure, kRestartCollective};
   status = local_stage([&]() -> Status {
     std::size_t required = local_bytes;
     if (rank == 0) {
@@ -1726,10 +1723,9 @@ Status RestartWriter::write(MPI_Comm communicator,
       std::size_t metadata = 0U;
       if (!checked_multiply(static_cast<std::size_t>(size),
                              64U + sizeof(RankRecord) + 40U, metadata) ||
-          metadata > SIZE_MAX - common.data().size() - 24U ||
-          maximum_bytes > SIZE_MAX - metadata - common.data().size() - 24U)
+          metadata > SIZE_MAX - common.data().size() - 24U)
         return {StatusCode::invalid_plan, kRestartInput};
-      required = static_cast<std::size_t>(maximum_bytes) + metadata + common.data().size() + 24U;
+      required = std::max(local_bytes, metadata + common.data().size() + 24U);
     }
     return options.maximum_bulk_staging_bytes != 0U &&
                    required > options.maximum_bulk_staging_bytes
@@ -1779,8 +1775,11 @@ Status RestartWriter::write(MPI_Comm communicator,
 
   std::vector<std::uint8_t> rank_bytes;
   status = local_stage( [&]() -> Status {
+    auto clock=MPI_Wtime();
     Status local = encode_rank_block(snapshot, size, rank, rank_bytes,
                                      options.maximum_bulk_staging_bytes);
+    report.phase_seconds[0]=MPI_Wtime()-clock;
+    clock=MPI_Wtime();
     report.rank_payload_bytes = rank_bytes.size();
     report.peak_bulk_staging_bytes = rank_bytes.capacity();
     if (local &&
@@ -1788,6 +1787,7 @@ Status RestartWriter::write(MPI_Comm communicator,
                        rank_bytes, &report.failure)) {
       local = {StatusCode::io_failure, kRestartRankFile};
     }
+    report.phase_seconds[1]=MPI_Wtime()-clock;
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
     if (local && injected(detail::RestartFailurePoint::after_rank_file, rank))
       local = {StatusCode::io_failure, kRestartRankFile};
@@ -1796,6 +1796,7 @@ Status RestartWriter::write(MPI_Comm communicator,
   });
   if (!status) return status;
 
+  const auto hash_begin=MPI_Wtime();
   const std::array<std::uint64_t, 8U> local_record{{
       static_cast<std::uint64_t>(snapshot.patch.begin.x),
       static_cast<std::uint64_t>(snapshot.patch.begin.y),
@@ -1805,8 +1806,21 @@ Status RestartWriter::write(MPI_Comm communicator,
       static_cast<std::uint64_t>(snapshot.patch.cells.z),
       static_cast<std::uint64_t>(rank_bytes.size()),
       hash_bytes(rank_bytes.data(), rank_bytes.size())}};
+  report.phase_seconds[2]=MPI_Wtime()-hash_begin;
+  // Each owner verifies its durable payload before collective publication.
+  // Reuse the encoding buffer; all ranks agree before root writes the manifest.
+  status=local_stage([&]() -> Status {
+    const auto begin=MPI_Wtime();
+    const bool valid=read_file(pending/rank_name(static_cast<std::uint32_t>(rank)),
+        rank_bytes,local_bytes,local_record[6],&report.failure) &&
+        hash_bytes(rank_bytes.data(),rank_bytes.size())==local_record[7] &&
+        verified_integrity(rank_bytes);
+    report.phase_seconds[3]=MPI_Wtime()-begin;
+    return valid ? Status{} : Status{StatusCode::io_failure,kRestartIntegrity};
+  });
+  if(!status)return status;
   // The durable rank file and its fixed-size record now own the information.
-  // Do not keep our full payload alive while root verifies every rank file.
+  // Release the payload after the distributed readback.
   std::vector<std::uint8_t>().swap(rank_bytes);
   std::vector<std::uint64_t> gathered;
   status = local_stage( [&]() -> Status {
@@ -1820,6 +1834,7 @@ Status RestartWriter::write(MPI_Comm communicator,
                  communicator) != MPI_SUCCESS) {
     return {StatusCode::mpi_failure, kRestartCollective};
   }
+  const auto metadata_begin=MPI_Wtime();
   status = local_stage( [&]() -> Status {
     if (rank != 0) return {};
     std::vector<RankRecord> records(static_cast<std::size_t>(size));
@@ -1838,32 +1853,9 @@ Status RestartWriter::write(MPI_Comm communicator,
     Status local = encode_manifest(snapshot, size, records, manifest_bytes);
     if (local && !write_file_sync(pending / "manifest.bin", manifest_bytes, &report.failure))
       local = {StatusCode::io_failure, kRestartManifest};
-    std::size_t maximum_rank_bytes = 0U;
-    for (const auto& record : records) {
-      if (record.bytes > SIZE_MAX) return {StatusCode::invalid_plan, kRestartInput};
-      maximum_rank_bytes = std::max(maximum_rank_bytes, static_cast<std::size_t>(record.bytes));
-    }
-    const std::size_t metadata_bytes = gathered.capacity() * sizeof(std::uint64_t) +
-        records.capacity() * sizeof(RankRecord) + manifest_bytes.capacity();
-    if (maximum_rank_bytes > SIZE_MAX - metadata_bytes)
-      return {StatusCode::invalid_plan, kRestartInput};
-    const std::size_t peak = maximum_rank_bytes + metadata_bytes;
-    if (options.maximum_bulk_staging_bytes != 0U &&
-        peak > options.maximum_bulk_staging_bytes)
-      return {StatusCode::allocation_failure, kRestartIntegrity};
-    std::vector<std::uint8_t> verify;
-    verify.reserve(maximum_rank_bytes);
-    report.peak_bulk_staging_bytes = std::max(report.peak_bulk_staging_bytes, peak);
-    for (int source = 0; source < size && local; ++source) {
-      const RankRecord& record = records[static_cast<std::size_t>(source)];
-      if (!read_file(pending / rank_name(static_cast<std::uint32_t>(source)),
-                     verify, maximum_rank_bytes, record.bytes, &report.failure) ||
-          verify.size() != record.bytes ||
-          hash_bytes(verify.data(), verify.size()) != record.hash ||
-          !verified_integrity(verify)) {
-        local = {StatusCode::io_failure, kRestartIntegrity};
-      }
-    }
+    const std::size_t metadata_bytes=gathered.capacity()*sizeof(std::uint64_t)+
+        records.capacity()*sizeof(RankRecord)+manifest_bytes.capacity();
+    report.peak_bulk_staging_bytes=std::max(report.peak_bulk_staging_bytes,metadata_bytes);
     if (local && !sync_directory(pending, &report.failure))
       local = {StatusCode::io_failure, kRestartDirectory};
 #ifdef HUNDUN_V04_ENABLE_TEST_ACCESS
@@ -1874,6 +1866,8 @@ Status RestartWriter::write(MPI_Comm communicator,
     return local;
   });
   if (!status) return status;
+  report.phase_seconds[4]=MPI_Wtime()-metadata_begin;
+  const auto publication_begin=MPI_Wtime();
   status = local_stage([&]() -> Status {
     return rank == 0
                ? publish_generation(restart_directory, pending, generation, report)
@@ -1883,6 +1877,13 @@ Status RestartWriter::write(MPI_Comm communicator,
   if (MPI_Bcast(&publication, 1, MPI_UINT8_T, 0, communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kRestartCollective};
   report.publication = static_cast<RestartPublicationState>(publication);
+  report.phase_seconds[5]=MPI_Wtime()-publication_begin;
+  double maximum[6]{};
+  if (MPI_Reduce(report.phase_seconds.data(),maximum,6,MPI_DOUBLE,MPI_MAX,0,
+                 communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kRestartCollective};
+  if(rank==0)std::fprintf(stdout,"restart_cost encode=%.9g write=%.9g hash=%.9g readback=%.9g metadata=%.9g publish=%.9g scope=max_rank\n",
+      maximum[0],maximum[1],maximum[2],maximum[3],maximum[4],maximum[5]);
   if (!status) return status;
   report.cleanup_status = restart_local_stage(communicator, [&]() -> Status {
     return rank == 0

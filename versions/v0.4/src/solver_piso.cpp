@@ -8843,7 +8843,7 @@ Status PressureVelocityCoupler::audit_pending_final(
                      authority_failure ? kPisoCoupler : kPisoNumerical};
             continue;
           }
-          if (hf_coast_common_terminal_cell_v2(
+          if (hf_reference_common_terminal_cell_v2(
                   rho, eos, rho_n, rho_nm1, volume, input.bdf.a0,
                   input.bdf.a1, input.bdf.a2, fxm, fxp, fym, fyp, fzm, fzp,
                   detail::mass_source_rate(input.mass_source, cell),
@@ -8932,7 +8932,7 @@ Status PressureVelocityCoupler::audit_pending_final(
   }
   double mass_residual = 0.0;
   double gauge_residual = 0.0;
-  if (hf_coast_common_terminal_finalize_v1(
+  if (hf_reference_common_terminal_finalize_v1(
           closed ? 1 : 0, global_sum[0U], global_sum[1U],
           input.closed_mass_target, global_sum[2U], global_sum[3U],
           global_max[2U], global_max[3U], &mass_residual,
@@ -9098,7 +9098,7 @@ Status PressureVelocityCoupler::audit_pending_final(
   candidate_report.final_flux_revision = pending_flux.revision_;
   candidate_report.continuity_witness = global_continuity_witness;
   report = candidate_report;
-  int accepted = hf_coast_common_terminal_accept_v1(
+  int accepted = hf_reference_common_terminal_accept_v1(
       global_max[0U], global_max[1U], mass_residual, gauge_residual,
       impl.eos_tolerance, impl.continuity_tolerance,
       impl.closed_mass_tolerance, impl.gauge_tolerance);
@@ -9636,7 +9636,7 @@ Status PressureVelocityCoupler::audit_pressure_convergence(
         double absolute_pressure = 0.0;
         double pressure_moment = 0.0;
         double pressure_weight = 0.0;
-        if (hf_coast_common_terminal_cell_v2(
+        if (hf_reference_common_terminal_cell_v2(
                 rho, rho, rho_n, rho_nm1,
                 detail::cell_volume(*impl.kernels, cell), input.bdf.a0,
                 input.bdf.a1, input.bdf.a2, fxm, fxp, fym, fyp, fzm, fzp,

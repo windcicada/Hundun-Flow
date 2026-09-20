@@ -23,6 +23,9 @@ struct DynamicFilterMoments {
   double density{}, delta_squared{}, gradient_squared{};
   double density_delta_squared_gradient_squared{};
   double density_scalar_squared{}, scalar{};
+  // Centered evaluation of the same scalar moment difference.
+  double scalar_difference{};
+  bool centered_scalar_difference{};
 };
 struct DynamicFilterDonor {
   double density{}, volume{}, scalar{};

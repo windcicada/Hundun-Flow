@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused native V1/BE-recovery test for v04_coast_restart_import."""
+"""Focused native V1/BE-recovery test for v04_mesh_restart_import."""
 
 import argparse
 import json
@@ -12,7 +12,7 @@ import tempfile
 
 
 AIR_O2 = 0.23291751145757963
-COAST_RU = 8314.3
+REFERENCE_RU = 8314.3
 MOLECULAR_WEIGHTS = (16.04308, 31.9988, 28.0134)
 
 
@@ -76,7 +76,7 @@ def make_transfer(root: pathlib.Path, invalid_y: bool = False) -> None:
                 temperature = 295.0 + 0.2 * x + 0.1 * y + 0.05 * z
                 oxygen = (1.0 - methane) * AIR_O2
                 nitrogen = 1.0 - methane - oxygen
-                gas_constant = COAST_RU * (
+                gas_constant = REFERENCE_RU * (
                     methane / MOLECULAR_WEIGHTS[0]
                     + oxygen / MOLECULAR_WEIGHTS[1]
                     + nitrogen / MOLECULAR_WEIGHTS[2]
@@ -117,7 +117,7 @@ def main() -> int:
     parser.add_argument("--case-template", required=True, type=pathlib.Path)
     parser.add_argument("--thermo", required=True, type=pathlib.Path)
     options = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="hundun-coast-import-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="hundun-reference-import-") as temporary:
         root = pathlib.Path(temporary)
         case = root / "case"
         transfer = root / "transfer"
@@ -160,7 +160,7 @@ def main() -> int:
         assert memory["single_product_sum_upper_estimate"] >= (
             memory["bridge_payload"] + memory["sealed_arena"]
         )
-        assert receipt["gas_constants_J_per_kmol_K"]["COAST"] == COAST_RU
+        assert receipt["gas_constants_J_per_kmol_K"]["REFERENCE"] == REFERENCE_RU
         invalid_result = run_import(
             prefix + ["--case", str(case), "--transfer", str(invalid),
                       "--output", str(invalid_restart)], False
@@ -171,7 +171,7 @@ def main() -> int:
             )
         if (invalid_restart / "current").exists():
             raise AssertionError("invalid input published a restart")
-    print(f"coast_restart_import_cli ranks={options.ranks} ok")
+    print(f"mesh_restart_import_cli ranks={options.ranks} ok")
     return 0
 
 

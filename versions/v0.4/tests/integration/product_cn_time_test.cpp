@@ -115,7 +115,7 @@ bool run(double dt, bool be, bool thermal, double& error) {
   const double dx=2./cells.x, rho=pressure/(gas_constant*temperature);
   const double lambda=4*(thermal ? conductivity/(rho*cp) : viscosity/rho)*std::pow(std::sin(std::acos(-1.)/cells.x),2)/(dx*dx);
   const double exact_amplitude=amplitude*std::exp(-lambda*duration);
-  // COAST cmod halves each spatial row and adds its accepted-state action
+  // REFERENCE cmod halves each spatial row and adds its accepted-state action
   // before step adds rho/dt. For this eigenmode that gives the CN rational
   // factor below; the BE control uses the full implicit spatial row.
   const double factor=be ? 1/(1+lambda*dt) : (1-.5*lambda*dt)/(1+.5*lambda*dt);

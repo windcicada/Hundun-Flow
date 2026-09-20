@@ -657,10 +657,10 @@ struct IbmCellEquationView {
 // stationary immersed wall.  All hot methods are allocation-free and operate
 // on the owning fluid row; shared solid ghost values are never used as
 // boundary authority.
-// Cold COAST coupling uses fluid-side pressure differences at cut faces;
+// Cold REFERENCE coupling uses fluid-side pressure differences at cut faces;
 // the quadratic Neumann reconstruction remains the default for other methods.
 enum class IbmPressureGradientKind : std::uint8_t {
-  quadratic_neumann, coast_fluid_delta
+  quadratic_neumann, reference_fluid_delta
 };
 
 class IbmEquationInterfacePlan {

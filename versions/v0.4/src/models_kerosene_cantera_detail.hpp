@@ -43,6 +43,12 @@ public:
     suppressErrors(true);
   }
 
+  // The fixed-material source has one zero stoichiometric row, mapped
+  // through the same asset order as its rates.
+  bool chemically_invariant(std::size_t species) const noexcept {
+    return species==indices_[5];
+  }
+
   // Query preparation uses a local kernel, leaving an interval's frozen
   // coefficients intact. Outputs are kmol/(m3 s), in the asset's order.
   void molar_rates(const Cantera::ThermoPhase& phase, double* output) const {

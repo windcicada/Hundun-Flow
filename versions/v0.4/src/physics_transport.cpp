@@ -28,12 +28,12 @@ constexpr std::uint32_t kTransportNumerical = 2105U;
 constexpr std::size_t kMaximumSpecies = 65U;
 constexpr std::uint64_t kFnvOffset = UINT64_C(14695981039346656037);
 constexpr std::uint64_t kFnvPrime = UINT64_C(1099511628211);
-constexpr double kCoastNativeAirPrandtl = 0.70;
-constexpr std::array<double, 2U> kCoastNativeAirMoleFraction{0.21, 0.79};
-constexpr std::array<double, 2U> kCoastNativeAirSpeciesMolecularWeight{
+constexpr double kNasaAirPrandtl = 0.70;
+constexpr std::array<double, 2U> kNasaAirMoleFraction{0.21, 0.79};
+constexpr std::array<double, 2U> kNasaAirSpeciesMolecularWeight{
     31.9988, 28.0134};
-constexpr std::array<double, 2U> kCoastNativeAirCriticalPressure{49.7, 33.5};
-constexpr std::array<double, 2U> kCoastNativeAirCriticalTemperature{154.4,
+constexpr std::array<double, 2U> kNasaAirCriticalPressure{49.7, 33.5};
+constexpr std::array<double, 2U> kNasaAirCriticalTemperature{154.4,
                                                                     126.2};
 
 static_assert(std::is_nothrow_move_assignable_v<TransportPlan>,
@@ -130,13 +130,13 @@ double species_cp(const std::array<std::vector<double>, 7U>& nasa_low,
 // states low-pressure gas-viscosity correlation, followed by Wilke gas-
 // mixture weighting.  Tc is in K, Pc in atm, M in g/mol, the
 // correlation result is in micropoise, and 1 micropoise = 1e-7 Pa s.
-double coast_native_air_species_viscosity(std::size_t species,
+double nasa_air_species_viscosity(std::size_t species,
                                           double temperature) noexcept {
   const double critical_temperature =
-      kCoastNativeAirCriticalTemperature[species];
-  const double critical_pressure = kCoastNativeAirCriticalPressure[species];
+      kNasaAirCriticalTemperature[species];
+  const double critical_pressure = kNasaAirCriticalPressure[species];
   const double molecular_weight =
-      kCoastNativeAirSpeciesMolecularWeight[species];
+      kNasaAirSpeciesMolecularWeight[species];
   const double c1 =
       std::pow(critical_temperature, 1.0 / 6.0) /
       (std::sqrt(molecular_weight) *
@@ -149,11 +149,11 @@ double coast_native_air_species_viscosity(std::size_t species,
   return viscosity_micro_poises / c1 * 1.0e-7;
 }
 
-double coast_native_air_viscosity(double temperature) noexcept {
+double nasa_air_viscosity(double temperature) noexcept {
   std::array<double, 2U> viscosity{};
   for (std::size_t species = 0U; species < viscosity.size(); ++species) {
     viscosity[species] =
-        coast_native_air_species_viscosity(species, temperature);
+        nasa_air_species_viscosity(species, temperature);
   }
   double mixture = 0.0;
   for (std::size_t first = 0U; first < viscosity.size(); ++first) {
@@ -161,18 +161,18 @@ double coast_native_air_viscosity(double temperature) noexcept {
     for (std::size_t second = 0U; second < viscosity.size(); ++second) {
       const double phi =
           (1.0 / std::sqrt(8.0)) /
-          std::sqrt(1.0 + kCoastNativeAirSpeciesMolecularWeight[first] /
-                              kCoastNativeAirSpeciesMolecularWeight[second]) *
+          std::sqrt(1.0 + kNasaAirSpeciesMolecularWeight[first] /
+                              kNasaAirSpeciesMolecularWeight[second]) *
           std::pow(1.0 +
                        std::sqrt(viscosity[first] / viscosity[second]) *
                            std::pow(
-                               kCoastNativeAirSpeciesMolecularWeight[second] /
-                                   kCoastNativeAirSpeciesMolecularWeight[first],
+                               kNasaAirSpeciesMolecularWeight[second] /
+                                   kNasaAirSpeciesMolecularWeight[first],
                                0.25),
                    2.0);
-      denominator += kCoastNativeAirMoleFraction[second] * phi;
+      denominator += kNasaAirMoleFraction[second] * phi;
     }
-    mixture += kCoastNativeAirMoleFraction[first] * viscosity[first] /
+    mixture += kNasaAirMoleFraction[first] * viscosity[first] /
                denominator;
   }
   return mixture;
@@ -240,7 +240,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   if (!detail::canonicalize_thermophysical_spec(canonical_spec)) {
     return {StatusCode::invalid_plan, kTransportInput};
   }
-  const bool coast_perry = coast_mixture_transport(canonical_spec.species.front().transport_law);
+  const bool perry = reference_mixture_transport(canonical_spec.species.front().transport_law);
   std::array<std::uint8_t, kMaximumSpecies> seen{};
   seen[thermodynamics.dependent_species_] = 1U;
   for (const std::uint16_t mapped :
@@ -258,7 +258,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
 
   TransportPlan candidate;
   try {
-    if (coast_perry) {
+    if (perry) {
       candidate.perry_temperature_.resize(count);
       candidate.perry_scale_.resize(count);
       if (std::any_of(canonical_spec.species.begin(), canonical_spec.species.end(), [](const auto& item) {
@@ -289,13 +289,13 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   }
 
   bool any_sutherland = false;
-  bool coast_native_air = false;
+  bool nasa_air = false;
   for (std::size_t species = 0U; species < count; ++species) {
     const SpeciesThermophysicalSpec& input =
         canonical_spec.species[species];
     if (!finite_positive(input.molecular_weight) ||
-        (input.transport_law != TransportLaw::coast_native_air &&
-         !coast_mixture_transport(input.transport_law) &&
+        (input.transport_law != TransportLaw::nasa_air &&
+         !reference_mixture_transport(input.transport_law) &&
          !finite_positive(input.viscosity_reference)) ||
         !finite_positive(input.temperature_switch) ||
         std::abs(input.molecular_weight *
@@ -344,7 +344,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
         candidate.conductivity_[species] = 0.0;
         any_sutherland = true;
         break;
-      case TransportLaw::coast_perry:
+      case TransportLaw::perry:
         candidate.perry_temperature_[species] = input.critical_temperature;
         candidate.perry_scale_[species] =
             std::sqrt(input.molecular_weight) * std::pow(input.critical_pressure, 2.0 / 3.0) /
@@ -365,7 +365,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
         candidate.prandtl_[species] = 0.70;
         candidate.conductivity_[species] = 0.0;
         break;
-      case TransportLaw::coast_native_air:
+      case TransportLaw::nasa_air:
         if (count != 1U || input.viscosity_reference != 0.0 ||
             input.transport_reference_temperature != 0.0 ||
             input.sutherland_temperature != 0.0 || input.prandtl != 0.0 ||
@@ -376,7 +376,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
         candidate.sutherland_temperature_[species] = 0.0;
         candidate.prandtl_[species] = 0.0;
         candidate.conductivity_[species] = 0.0;
-        coast_native_air = true;
+        nasa_air = true;
         break;
       default:
         return {StatusCode::invalid_plan, kTransportSpecies};
@@ -386,13 +386,13 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
   candidate.dependent_species_ = thermodynamics.dependent_species_;
   candidate.minimum_temperature_ = thermodynamics.minimum_temperature_;
   candidate.maximum_temperature_ = thermodynamics.maximum_temperature_;
-  candidate.kernel_ = coast_perry ? TransportKernel::coast_perry : coast_native_air
-                          ? TransportKernel::coast_native_air
+  candidate.kernel_ = perry ? TransportKernel::perry : nasa_air
+                          ? TransportKernel::nasa_air
                           : (any_sutherland
                                  ? TransportKernel::sutherland_wilke
                                  : TransportKernel::constant);
   candidate.enthalpy_prandtl_ =
-      (coast_perry || coast_native_air) ? kCoastNativeAirPrandtl : 0.0;
+      (perry || nasa_air) ? kNasaAirPrandtl : 0.0;
   if (candidate.kernel_ == TransportKernel::constant) {
     try {
       candidate.constant_wilke_phi_.resize(count * count);
@@ -455,7 +455,7 @@ Status TransportPlan::compile(const ThermophysicalSpec& spec,
     }
   }
   for (std::size_t species = 0U; species < count; ++species) {
-    if (coast_perry) {
+    if (perry) {
       hash.real(candidate.perry_temperature_[species]);
       hash.real(candidate.perry_scale_[species]);
     }
@@ -501,7 +501,7 @@ Status TransportPlan::evaluate(
       wilke_denominator_reciprocal_.size() != count * count ||
       constant_wilke_phi_.size() !=
           (kernel_ == TransportKernel::constant ? count * count : 0U) ||
-      perry_temperature_.size() != (kernel_ == TransportKernel::coast_perry ? count : 0U) ||
+      perry_temperature_.size() != (kernel_ == TransportKernel::perry ? count : 0U) ||
       perry_scale_.size() != perry_temperature_.size() ||
       (!kerosene_vapor_.empty() && kerosene_vapor_.size() != count) ||
       independent_to_species_.size() + 1U != count ||
@@ -517,15 +517,15 @@ Status TransportPlan::evaluate(
     return {StatusCode::numerical_failure, kTransportComposition};
   }
 
-  if (kernel_ == TransportKernel::coast_native_air) {
-    const double viscosity = coast_native_air_viscosity(temperature);
+  if (kernel_ == TransportKernel::nasa_air) {
+    const double viscosity = nasa_air_viscosity(temperature);
     const double cp = species_cp(
         nasa_low_, nasa_high_,
         {temperature_switch_.data(), temperature_switch_.size()},
         {molecular_weight_.data(), molecular_weight_.size()}, 0U,
-        temperature, kCoastNativeAirUniversalGasConstant);
+        temperature, kNasaAirUniversalGasConstant);
     const double conductivity =
-        cp * viscosity / kCoastNativeAirPrandtl;
+        cp * viscosity / kNasaAirPrandtl;
     if (!finite_positive(viscosity) || !finite_positive(cp) ||
         !finite_positive(conductivity)) {
       return {StatusCode::numerical_failure, kTransportNumerical};
@@ -539,7 +539,7 @@ Status TransportPlan::evaluate(
   std::array<double, kMaximumSpecies> conductivity{};
   double mole_sum = 0.0;
   double mixture_cp = 0.0;
-  const bool perry = kernel_ == TransportKernel::coast_perry;
+  const bool perry = kernel_ == TransportKernel::perry;
   for (std::size_t species = 0U; species < count; ++species) {
     const double moles = mass_fraction[species] / molecular_weight_[species];
     const double reduced = perry ? temperature / perry_temperature_[species] : 0.0;
@@ -635,7 +635,7 @@ Status TransportPlan::effective_enthalpy_transport(
     double heat_capacity, double& conductivity,
     double& enthalpy_diffusivity) const noexcept {
   if (!has_effective_enthalpy_transport() ||
-      enthalpy_prandtl_ != kCoastNativeAirPrandtl) {
+      enthalpy_prandtl_ != kNasaAirPrandtl) {
     return {StatusCode::invalid_plan, kTransportInput};
   }
   if (!finite_positive(molecular_viscosity) ||

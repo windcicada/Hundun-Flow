@@ -28,6 +28,9 @@ int main(int argc,char** argv) {
   auto backend=chemistry::make_cantera_backend(config,pool);
   auto other=chemistry::make_cantera_backend(config,pool);
   HUNDUN_CHECK(pool.workspaces_are_distinct());
+  for(std::size_t species=0;species<7;++species)
+    HUNDUN_CHECK(backend->chemically_invariant(species)==(species==5));
+  HUNDUN_CHECK(!backend->chemically_invariant(7));
   std::array<double,7> ys{.001,.05,.005,.01,.2,.714,.02},d{},h{},rates{};
   portable::GasQuery q;q.revision.algorithm_version=1;
   q.composition_fingerprint=backend->composition().fingerprint;

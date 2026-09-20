@@ -149,7 +149,7 @@ end_species
 end
 )data";
 
-constexpr std::string_view kCoastNativeAirText = R"data(
+constexpr std::string_view kNasaAirText = R"data(
 HUNDUN_THERMOPHYSICS_V1
 temperature_bounds 200 6000
 temperature_inversion 1e-12 64
@@ -160,7 +160,7 @@ molecular_weight 28.850334
 temperature_switch 1000
 nasa7_low 3.5838100068 -7.2700635412e-4 1.67056387003e-6 -1.091801341e-10 -4.317787988e-13 -1050.5394088 3.1124135035
 nasa7_high 3.1013370688 1.24138813631e-3 -4.1882038804e-7 6.641656204e-11 -3.9127843272e-15 -985.27467132 5.3560174057
-transport_coast_native_air
+transport_nasa_air
 end_species
 end
 )data";
@@ -632,7 +632,7 @@ bool test_conserved_enthalpy_bounds() {
 bool test_native_air_near_reference_inverse() {
   ThermophysicalSpec spec;
   if (!expect(static_cast<bool>(detail::parse_thermophysical_text(
-                  kCoastNativeAirText, spec)),
+                  kNasaAirText, spec)),
               "native-air near-reference input parses")) return false;
   spec.data_file = "thermophysics.d";
   spec.minimum_temperature = 273.15;
@@ -1096,15 +1096,15 @@ end
                    "typed .d values are published without filename guessing");
   passed &= expect(detail::valid_thermophysical_spec(parsed),
                    "parsed typed payload passes the shared validator");
-  ThermophysicalSpec coast_native_air;
+  ThermophysicalSpec nasa_air;
   passed &= expect(
       static_cast<bool>(detail::parse_thermophysical_text(
-          kCoastNativeAirText, coast_native_air)) &&
-          coast_native_air.species.size() == 1U &&
-          coast_native_air.species.front().transport_law ==
-              TransportLaw::coast_native_air &&
-          coast_native_air.species.front().viscosity_reference == 0.0,
-      "COAST-native air has a parameter-free strict transport record");
+          kNasaAirText, nasa_air)) &&
+          nasa_air.species.size() == 1U &&
+          nasa_air.species.front().transport_law ==
+              TransportLaw::nasa_air &&
+          nasa_air.species.front().viscosity_reference == 0.0,
+      "REFERENCE-native air has a parameter-free strict transport record");
   passed &= expect(detail::thermophysical_spec_fingerprint(parsed) == 0U,
                    "fingerprint rejects a payload without source identity");
   parsed.data_file = "thermophysics.d";

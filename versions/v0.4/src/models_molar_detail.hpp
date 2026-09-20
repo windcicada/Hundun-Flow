@@ -9,7 +9,7 @@
 #include <memory>
 #include <vector>
 namespace hundun::v04::chemistry::detail {
-// COAST chemsol/ydot: T and rho belong to the beginning of the interval.
+// REFERENCE chemsol/ydot: T and rho belong to the beginning of the interval.
 // Only the specific mole numbers evolve. The caller closes the final PH state.
 class FrozenMolar final : public Cantera::FuncEval {
 public:

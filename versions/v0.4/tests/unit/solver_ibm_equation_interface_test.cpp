@@ -1269,7 +1269,7 @@ bool run() {
                    "IBM pressure correction matches the quadratic-row oracle");
 
   // GTMC failure pattern: a pressure minimum at a fluid--solid link must
-  // retain the restoring fluid-side pressure slope (COAST delta stencil).
+  // retain the restoring fluid-side pressure slope (REFERENCE delta stencil).
   for (std::size_t i = 0; i < links.size; ++i) {
     const auto& link = links.data[i];
     const auto axis = face_axis(link.direction);
@@ -1286,7 +1286,7 @@ bool run() {
     IbmEquationInterfacePlan cold_interface;
     passed &= expect(IbmEquationInterfacePlan::compile(
         kernels, fixture.topology, fixture.boundary, cold_interface,
-        IbmPressureGradientKind::coast_fluid_delta),
+        IbmPressureGradientKind::reference_fluid_delta),
         "cold pressure interface compiles its immutable gradient policy");
     passed &= expect(cold_interface.fingerprint() != interface.fingerprint(),
                      "pressure gradient policies have distinct identities");
@@ -1295,7 +1295,7 @@ bool run() {
     passed &= expect(corrected &&
         std::abs(slope.view.unchecked(link.fluid_local_index, axis) +
                  sign * 1000.0 * inverse_width) < 1e-8,
-        "COAST fluid-side pressure gradient restores a wall-adjacent minimum");
+        "REFERENCE fluid-side pressure gradient restores a wall-adjacent minimum");
     break;
   }
 
@@ -1711,7 +1711,7 @@ bool run() {
     IbmEquationInterfacePlan cold_interface;
     passed &= expect(IbmEquationInterfacePlan::compile(
         kernels, fixture.topology, fixture.boundary, cold_interface,
-        IbmPressureGradientKind::coast_fluid_delta),
+        IbmPressureGradientKind::reference_fluid_delta),
         "cold pressure coupling fixture compiles");
     auto cold_gradient = make_force_field(24U, cells, 3U, 0U, 35U, 125U);
     auto cold_work = make_force_field(27U, cells, 1U, 0U, 36U, 126U);
@@ -2126,7 +2126,7 @@ bool run() {
     std::cerr << "accepted-IBM-thermal-rate-mismatch=" << mismatch << '\n';
     passed &= expect(mismatch < 1.0e-10,
                      "persisted energy history and target residual use one IBM thermal operator");
-    // COAST bndry2 isolates solid thermal rows and removes cut-face heat
+    // REFERENCE bndry2 isolates solid thermal rows and removes cut-face heat
     // transfer. Stored rates must use that same operator for CN/BE history.
     const auto reconstructed_rhs = rhs.storage;
     const auto reconstructed_target = target_rate.storage;
@@ -2139,7 +2139,7 @@ bool run() {
          {{0, 0, 0}, cells}, 0U, 0U, 1U, 0U, nullptr}) &&
         interface.correct_impermeable_scalar_diffusion(
             as_const(t.view), as_const(lambda.view), target_rate.view),
-        "COAST binary-solid thermal reference evaluates");
+        "REFERENCE binary-solid thermal reference evaluates");
     double cold_mismatch = 0.0, closure_difference = 0.0;
     for (std::size_t i = 0U; i < rhs.storage.size(); ++i) {
       cold_mismatch = std::max(cold_mismatch,

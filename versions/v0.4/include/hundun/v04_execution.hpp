@@ -502,7 +502,7 @@ Status reconstruct_cartesian_convection_face(
     ConstFieldView transported, std::uint8_t component, CartesianAxis axis,
     Int3 face, double mass_rate, double& value) noexcept;
 
-// Common COAST VLS conductance for a normalized mixture. The dependent
+// Common REFERENCE VLS conductance for a normalized mixture. The dependent
 // species participates through 1-sum(Y). Conductances are integrated kg/s;
 // lower_weight carries only the artificial part, leaving physical diffusion
 // with its existing conservative authority. thermal_coordinate is optional.

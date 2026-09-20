@@ -879,7 +879,7 @@ Status prepare_physical_boundary_flux(
       local = {StatusCode::numerical_failure, kCandidateBoundaryNumerical};
     local = reductions.checked_sum({values, 2U}, {global, 2U}, local);
     if (!local) return local;
-    // COAST's positive existing-flow pool is scaled by (flow + summ)/flow,
+    // REFERENCE's positive existing-flow pool is scaled by (flow + summ)/flow,
     // where summ is minus the global continuity residual. No area fallback
     // and no local reverse-flow clipping are introduced.
     const double scale = global[1] > 1e-25

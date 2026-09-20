@@ -3,7 +3,11 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-project(HundunFlow VERSION 1.0.0 LANGUAGES C CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" HUNDUN_PRODUCT_VERSION LIMIT_COUNT 1)
+if(NOT HUNDUN_PRODUCT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "VERSION must contain a semantic product version")
+endif()
+project(HundunFlow VERSION ${HUNDUN_PRODUCT_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -206,6 +210,7 @@ string(APPEND HUNDUN_BUILD_MANIFEST_CANONICAL
   "link_flags=${HUNDUN_PERFORMANCE_LINK_FLAGS}\n"
   "build_type=${CMAKE_BUILD_TYPE}\n"
   "source_version=v0.4\n"
+  "product_version=${HUNDUN_PRODUCT_VERSION}\n"
   "tests=${HUNDUN_BUILD_TESTS}\n"
   "asan=${HUNDUN_ENABLE_ASAN}\n"
   "ubsan=${HUNDUN_ENABLE_UBSAN}\n"
@@ -397,6 +402,7 @@ hundun_v04_configure_core(hundun_v04_core)
 add_executable(hundun
   src/app_main.cpp)
 target_link_libraries(hundun PRIVATE hundun_v04_core)
+target_include_directories(hundun PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(hundun PRIVATE
   HUNDUN_RUNTIME_TARGET_MANIFEST="${HUNDUN_APP_MANIFEST}"
   HUNDUN_V04_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -415,9 +421,9 @@ target_include_directories(v04_thin_domain_runner PRIVATE
 # Offline, audited GTMC mean-field transfer bridge.  It deliberately writes a
 # legacy V1 restart so the first solver step performs backward-Euler history
 # recovery instead of treating synthesized history as an exact checkpoint.
-add_executable(v04_coast_restart_import
-  "${hundun_repository_root}/tools/v04_coast_restart_import.cpp")
-target_link_libraries(v04_coast_restart_import PRIVATE hundun_v04_core)
+add_executable(v04_mesh_restart_import
+  "${hundun_repository_root}/tools/v04_mesh_restart_import.cpp")
+target_link_libraries(v04_mesh_restart_import PRIVATE hundun_v04_core)
 
 # Full stochastic current-state migration with explicit method recovery.
 add_executable(v04_pdf_import "${hundun_repository_root}/tools/v04_pdf_import.cpp")

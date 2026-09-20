@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location('coast_input', sys.argv.pop(1))
+spec = importlib.util.spec_from_file_location('reference_input', sys.argv.pop(1))
 reader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reader)
 FIXTURE = Path(__file__).parent.parent / 'fixtures' / 'input.d'

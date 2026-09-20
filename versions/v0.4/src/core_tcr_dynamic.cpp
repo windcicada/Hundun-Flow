@@ -200,7 +200,7 @@ Status DynamicTcrPlan::finish(DynamicTcrHistory &history,Span<const FieldView> f
   s=agree(s);if(!s)return s;
   const auto active=[&](std::size_t i){return !activity.size || activity.data[i]!=0;};
   // Complete weak species rates from the same species' eligible neighbors,
-  // with the declared all-species global mean as the COAST fallback.
+  // with the declared all-species global mean as the REFERENCE fallback.
   double totals[2]{};std::size_t i{};
   for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
     const Int3 c{x,y,z};const auto *p=history.candidate(i);

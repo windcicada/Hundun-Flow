@@ -69,7 +69,7 @@ struct DualStateReport {
 };
 DualStateReport dual_state_moments(const DualStateRequest&,
                                   DualStateOutput) noexcept;
-// COAST evaluates auxiliary EOS with positive species weights, retaining
+// REFERENCE evaluates auxiliary EOS with positive species weights, retaining
 // the raw field0 tuple. A normalized PH query uses Y_s=max(Y0_s,0)/M and
 // h=h0/M, M=sum(max(Y0_s,0)); its density divided by M is the auxiliary
 // pressure density. This is an algebraic coordinate change for the same

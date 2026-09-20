@@ -113,7 +113,7 @@ inline Status close_mixture_scalar_rows(
 }
 
 // Frozen-density stochastic transport uses rho*(q-q_old)/dt and the
-// advective operator div(F*q)-q*div(F). COAST condif forms its diagonal
+// advective operator div(F*q)-q*div(F). REFERENCE condif forms its diagonal
 // from the six neighbour coefficients, followed by step(rho) and mixer.
 // The ordinary conservative equation remains the reference assembly;
 // this closure applies the explicit change of equation and its derivative.

@@ -195,7 +195,7 @@ bool test_sgs_state_units_and_precision() {
       std::abs(state.kinetic_energy_m2_s2-std::pow(.03,2./3.))<1e-14 &&
       std::abs(state.dissipation_w_m3-.3)<1e-14 &&
       std::abs(state.specific_dissipation_m2_s3-.15)<1e-14,
-      "SGS energy and both dissipation units match COAST algebra");
+      "SGS energy and both dissipation units match REFERENCE algebra");
   SgsState marker{1.,2.,3.,4.};state=marker;
   passed &= expect(!sgs_state_from_viscosity(g,.25,-2.,.01,.02,state) &&
       std::memcmp(&state,&marker,sizeof(state))==0,"invalid SGS input preserves output");

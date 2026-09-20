@@ -19,12 +19,12 @@
 
 namespace hundun::v04::detail {
 
-// COAST cold-flow row operators, adapted to Hundun field views and linear
+// REFERENCE cold-flow row operators, adapted to Hundun field views and linear
 // interfaces. Momentum and ordinary h use CN; mass and PDF scalars use BE.
-// Spatial and temporal identities are verified separately against the COAST
+// Spatial and temporal identities are verified separately against the REFERENCE
 // condif, gvctr, cmod and step routines. IBM solids receive isolated unit rows.
 
-// COAST gvctr/gvctr3 interpolate the coefficient and midpoint velocity
+// REFERENCE gvctr/gvctr3 interpolate the coefficient and midpoint velocity
 // separately, then multiply. Interpolating their cellwise product differs
 // across a density/composition interface.
 inline double cold_coefficient_face_flux(
@@ -47,7 +47,7 @@ inline double cold_coefficient_face_flux(
 // Return metric*gamma for compress. Gradients are (p_i-p_{i-1})/distance,
 // (p_{i+1}-p_i)/distance and (p_{i+2}-p_{i+1})/distance. Preserve vls's
 // positive-flow IBM fallback to the upper gradient. Thresholds are explicit:
-// COAST uses small=1e-30 and epsilon of its REAL kind for uround.
+// REFERENCE uses small=1e-30 and epsilon of its REAL kind for uround.
 inline double cold_pressure_limiter_diffusion(
     double lower_gradient, double face_gradient, double upper_gradient,
     double lower_weight, double density_flux, bool lower_stencil_allowed,
@@ -64,12 +64,12 @@ inline double cold_pressure_limiter_diffusion(
          std::abs(density_flux) * limiter;
 }
 
-// Prototype for the COAST cold pressure correction, in positive-neighbour
+// Prototype for the REFERENCE cold pressure correction, in positive-neighbour
 // storage: A*x = diagonal*x - sum(neighbour*x_neighbour).
 // Faces use x-,x+,y-,y+,z-,z+ and positive Cartesian flux orientation.
 struct ColdPressureFace {
   double projection{};          // metric * interpolated dt
-  double owner_lower_weight{};  // COAST w at the lower-index cell
+  double owner_lower_weight{};  // REFERENCE w at the lower-index cell
   double density_flux{};        // interpolated drho/dp * U_mid dot area
   double limiter_diffusion{};   // metric * pressure TVD gamma
   double mass_flux{};
@@ -199,7 +199,7 @@ inline bool assemble_cold_pressure_row(
         volume;
     row.rhs -= sign * f.mass_flux / volume;
   }
-  // COAST applies the pressure IBM coefficient hook after press/compress/step.
+  // REFERENCE applies the pressure IBM coefficient hook after press/compress/step.
   // Its scalar-flux hook must already have supplied zero blocked-face fluxes.
   for (unsigned i = 0; i < 6; ++i)
     if (faces[i].solid_neighbour) {
@@ -224,7 +224,7 @@ inline double cold_pressure_flux_correction(double mass_flux, double projection,
   return mass_flux - projection * (upper_dp - lower_dp);
 }
 
-// Keep density and drhodt relaxation identical. COAST update.F90 uses 0.5;
+// Keep density and drhodt relaxation identical. REFERENCE update.F90 uses 0.5;
 // a full fixed-temperature pressure correction uses 1 and preserves the
 // ideal-gas EOS when derivative=rho/p. The caller selects the stage convention.
 inline bool correct_cold_pressure_density(double density, double density_rate,
@@ -246,7 +246,7 @@ inline bool correct_cold_pressure_density(double density, double density_rate,
   return true;
 }
 
-// COAST cmod followed by step: centre only the spatial matrix action.
+// REFERENCE cmod followed by step: centre only the spatial matrix action.
 // The source RHS is retained in full. storage is rho for per-volume rows,
 // or rho*V for integrated rows; the caller supplies the intended time level.
 inline bool time_centre_cold_row(const ColdPressureRow& spatial,
@@ -280,7 +280,7 @@ inline bool time_centre_cold_row(const ColdPressureRow& spatial,
 struct ColdTransportFace {
   double diffusion{}, lower_weight{}, mass_flux{};
 };
-// COAST condif on an orthogonal grid, TVD disabled (momentum reference).
+// REFERENCE condif on an orthogonal grid, TVD disabled (momentum reference).
 // This is the advective row; source and boundary elimination follow separately.
 inline bool assemble_cold_transport_row(
     double volume, const std::array<ColdTransportFace, 6>& faces, double source,
@@ -304,7 +304,7 @@ inline bool assemble_cold_transport_row(
   return true;
 }
 
-// COAST PDF path: step without cmod. An advective BE row uses old density
+// REFERENCE PDF path: step without cmod. An advective BE row uses old density
 // for exact equivalence with conservative transport and BE continuity.
 inline bool add_cold_backward_euler_storage(const ColdPressureRow& spatial,
                                             double old_value,
@@ -478,22 +478,33 @@ class ColdPressureOperator final : public LinearOperator {
   mutable LinearOperatorFailureProvenance failure_{};
 };
 
-// Rank-local DILU: COAST uses a local incomplete-factorization pressure
+// Rank-local DILU: REFERENCE uses a local incomplete-factorization pressure
 // preconditioner. Retain opposite-direction coefficient products here since
 // compress and volume normalization make the C++ pressure rows nonsymmetric.
 class ColdPressureDilu final : public LinearPreconditioner {
  public:
   void reset_identity(LinearIdentity identity) noexcept { identity_=identity; }
   std::uint64_t owned_payload_bytes() const noexcept {
-    return inverse_.capacity() * sizeof(double);
+    return inverse_.capacity()*sizeof(double)+matrix_.capacity()*sizeof(ColdPressureRow);
   }
   ColdPressureDilu(const std::vector<ColdPressureRow>& rows, Int3 cells,
-                   LinearIdentity identity)
+                   LinearIdentity identity,bool reuse_matrix=false)
       : rows_(rows),
         cells_(cells),
         identity_(identity),
-        inverse_(rows.size()) {}
+        inverse_(rows.size()),matrix_(reuse_matrix ? rows.size() : 0) {}
+  bool reused_last_prepare() const noexcept {return reused_;}
   Status prepare() {
+    reused_=false;
+    if(valid_ && matrix_.size()==rows_.size()) {
+      bool same=true;
+      for(std::size_t i=0;i<rows_.size() && same;++i) {
+        same=rows_[i].diagonal==matrix_[i].diagonal;
+        for(unsigned a=0;a<6 && same;++a)same=rows_[i].neighbour[a]==matrix_[i].neighbour[a];
+      }
+      if(same){reused_=true;return {};}
+    }
+    valid_=false;
     const std::size_t stride[]{1, std::size_t(cells_.x),
                                std::size_t(cells_.x) * cells_.y};
     std::size_t i{};
@@ -511,6 +522,7 @@ class ColdPressureDilu final : public LinearPreconditioner {
             return {StatusCode::numerical_failure, 17803};
           inverse_[i] = 1 / diagonal;
         }
+    if(!matrix_.empty()){std::copy(rows_.begin(),rows_.end(),matrix_.begin());valid_=true;}
     return {};
   }
   LinearPreconditionerCertificate certificate() const noexcept override {
@@ -553,9 +565,11 @@ class ColdPressureDilu final : public LinearPreconditioner {
   Int3 cells_;
   LinearIdentity identity_;
   std::vector<double> inverse_;
+  std::vector<ColdPressureRow> matrix_;
+  bool valid_{},reused_{};
 };
 
-// COAST enables momentum VLS above its isothermal Mach threshold.
+// REFERENCE enables momentum VLS above its isothermal Mach threshold.
 // Freeze one globally agreed choice for the whole nonlinear time step.
 inline bool cold_momentum_uses_tvd(double isothermal_mach) noexcept {
   return isothermal_mach > 0.60;
@@ -573,7 +587,7 @@ inline Status close_cold_momentum_rows(
     const EquationSystemView& reference,
     std::array<std::vector<ColdPressureRow>, 3>& rows,
     ColdMomentumClosureReport& report, ConvectionScheme reference_convection,
-    bool coast_momentum_tvd) {
+    bool reference_momentum_tvd) {
   const auto cells = patch.cells;
   if (!valid_mass_source(state.mass_source,state.mass_source.identity,
                          context.time,cells))
@@ -642,7 +656,7 @@ inline Status close_cold_momentum_rows(
         for (unsigned component = 0; component < 3; ++component) {
           ColdPressureRow spatial = base;
           double convection_correction{};
-          if (reference_convection != ConvectionScheme::central2 || coast_momentum_tvd) {
+          if (reference_convection != ConvectionScheme::central2 || reference_momentum_tvd) {
             auto limited_faces = faces;
             for (unsigned f = 0; f < 6; ++f) {
               const unsigned a = f / 2;
@@ -670,7 +684,7 @@ inline Status close_cold_momentum_rows(
               };
               const double weight = faces[f].lower_weight;
               const double flux = faces[f].mass_flux;
-              const double limiter = coast_momentum_tvd
+              const double limiter = reference_momentum_tvd
                   ? cold_pressure_limiter_diffusion(
                         gradient(before, lower), gradient(lower, upper),
                         gradient(upper, after), weight, flux,

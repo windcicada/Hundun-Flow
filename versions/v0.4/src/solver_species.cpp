@@ -266,6 +266,13 @@ Status assemble_transport(
     const EnthalpyEquationPlan* statistical_enthalpy=nullptr) noexcept {
   const auto* mixture = (spec.role == TransportedScalarRole::species || statistical_enthalpy)
       ? context.mixture_transport : nullptr;
+  auto* basis=context.statistical_face_basis;
+  // Only the complete frozen statistical operator admits shared face storage.
+  if(basis && (retain_diagonal || density_units || context.scalar_midpoint ||
+      allow_partial || !system.x_coefficient.base || !context.mixture_transport))
+    return {StatusCode::invalid_plan,kScalarAssembly};
+  const auto face_key=detail::StatisticalFaceBasis::identify(context,diffusivity,system);
+  const bool reuse_faces=basis && basis->take(face_key);
   detail::EquationContributionSelection descriptors{};
   if (!detail::select_equation_contributions(
           all_descriptors, context.contribution_stage,
@@ -588,7 +595,7 @@ Status assemble_transport(
     }
   }
 
-  if (!retain_diagonal && system.x_coefficient.base != nullptr) {
+  if (!reuse_faces && !retain_diagonal && system.x_coefficient.base != nullptr) {
     evaluated = fill_face_coefficients<CartesianAxis::x>(
         kernels, diffusivity, box, system.x_coefficient);
     if (evaluated) {
@@ -604,7 +611,7 @@ Status assemble_transport(
     return evaluated;
   }
 
-  if (!retain_diagonal && mixture && system.x_coefficient.base) {
+  if (!reuse_faces && !retain_diagonal && mixture && system.x_coefficient.base) {
     const std::array<FaceFieldView,3> coefficients{
         system.x_coefficient,system.y_coefficient,system.z_coefficient};
     for (unsigned a=0; a<3; ++a) {
@@ -656,6 +663,7 @@ Status assemble_transport(
   }
   certificate = {fingerprint, context.scope, context.time, context.geometry,
                  context.face_flux, assembled_state, context.dt};
+  if(basis)basis->publish(face_key);
   return {};
 }
 

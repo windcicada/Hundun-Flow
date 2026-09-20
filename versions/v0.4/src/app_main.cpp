@@ -4,6 +4,7 @@
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_mpi_runtime.hpp"
 #include "app_import_detail.hpp"
+#include "app_identity_build.hpp"
 
 #include <mpi.h>
 
@@ -235,7 +236,7 @@ int main(int argc, char* argv[]) {
   argc=static_cast<int>(arguments.size());argv=argument_pointers.data();
   int result = 2;
   if (argc == 2 && std::string_view{argv[1]} == "--version") {
-    if (rank == 0) std::cout << "HUNDUN-FLOW 1.0.0 source=v0.4\n";
+    if (rank == 0) std::cout << "HUNDUN-FLOW " << hundun::v04::detail::product_version << " source=v0.4\n";
     result = 0;
   } else if (argc >= 3 && std::string_view{argv[1]} == "import") {
     const char* format=nullptr;

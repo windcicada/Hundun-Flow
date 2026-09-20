@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <cstring>
 
 namespace hundun::v04::detail {
 // Close a complete species tuple after a linear solve. The dependent species
@@ -55,6 +56,43 @@ inline bool close_statistical_composition(Span<double> fractions,
   for (std::size_t s = 0; s < fractions.size; ++s) fractions.data[s] = candidate[s];
   return true;
 }
+
+// A basis lives for one frozen field sweep. Only geometry/material face
+// conductances are shared; source diagonals, boundary rows, RHS and residuals
+// are independently assembled for every component. The enclosing scheduler
+// owns these output faces and resets the basis before any unrelated write.
+class StatisticalFaceBasis {
+ public:
+  using Key=std::array<std::uint64_t,25>;
+  static Key identify(const EquationAssemblyContext& c,ConstFieldView gamma,
+                      const EquationSystemView& out) noexcept {
+    std::uint64_t dt{};std::memcpy(&dt,&c.dt,sizeof(dt));
+    return {c.geometry,c.boundary,c.thermo,c.transport,c.time,c.face_flux,
+      c.face_flux_authority,c.face_flux_storage,c.face_flux_revision_domain,dt,
+      gamma.revision,gamma.storage_identity,gamma.revision_domain,
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(gamma.base)),
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(c.immersed_interface)),
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(c.mixture_transport)),
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(out.x_coefficient.base)),
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(out.y_coefficient.base)),
+      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(out.z_coefficient.base)),
+      static_cast<std::uint64_t>(c.box.begin.x),static_cast<std::uint64_t>(c.box.begin.y),
+      static_cast<std::uint64_t>(c.box.begin.z),static_cast<std::uint64_t>(c.scope),
+      c.mixture_transport ? c.mixture_transport->linearization : 0,
+      c.mixture_transport ? c.mixture_transport->face_flux : 0};
+  }
+  bool take(const Key& key) noexcept {
+    const bool reuse=ready_ && key==key_;
+    ready_=false;
+    if(reuse)++reuses;
+    return reuse;
+  }
+  void publish(const Key& key) noexcept {key_=key;ready_=true;}
+  unsigned long long reuses{};
+ private:
+  Key key_{};
+  bool ready_{};
+};
 
 // A component solve can temporarily leave the composition simplex while the
 // other components still hold their previous iterate. Accepted histories stay

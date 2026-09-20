@@ -34,6 +34,8 @@ public:
     for(unsigned face=0;face<6;++face)
       physical_boundary_[face]=model.boundaries[face].flow_kind!=BoundaryKind::periodic;
     spec_ = *model.reaction.esf;
+    frozen_chemistry_carrier_=model.time.scheme==TimeScheme::cn_be &&
+        model.solver.coupling==CouplingKind::outer_corrected;
     chemistry_screen_=model.reaction.representation==ReactionSpec::Representation::direct_cantera;
     const auto& gas_names=gas.gas_identity().species_names;
     const auto fuel_name=spec_.tcr.mode!=TcrMode::off ? spec_.tcr.fuel :
@@ -92,7 +94,8 @@ public:
     const std::size_t per_cell =
         sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5) +
         spec_.fields*sizeof(portable::GasSample) +
-        (spec_.tcr.mode!=TcrMode::experimental || dynamic_tcr() ? sizeof(ColdPressureRow)+sizeof(double) : 0) +
+        (spec_.fields+1)*(sizeof(portable::GasSample)+(ns_+2)*sizeof(double)) +
+        (spec_.tcr.mode!=TcrMode::experimental || dynamic_tcr() ? 2*sizeof(ColdPressureRow)+sizeof(double) : 0) +
         (dyn711() ? 2*(sizeof(tcr::detail::Dyn711RateState)*ns_+40+40*ns_)+
              8*(2*ns_+3)+ns_+2 : dynamic_tcr() ? 32 * (5*ns_+3) + 48 :
          tcr ? 2 * (sizeof(tcr::detail::History) +
@@ -173,11 +176,13 @@ public:
     workspace_ = std::make_unique<esf::detail::Workspace>(ns_, spec_.fields);
     if (implicit_transport()) {
       transport_rows_.resize(count_);
-      transport_pc_=std::make_unique<ColdPressureDilu>(transport_rows_,cells_,LinearIdentity{});
+      transport_pc_=std::make_unique<ColdPressureDilu>(transport_rows_,cells_,LinearIdentity{},true);
     }
     rates_.resize(count_ * spec_.fields * stride_);
     reactor_density_.resize(count_ * spec_.fields);
     reactor_samples_.resize(count_*spec_.fields);
+    query_samples_.resize(count_*(spec_.fields+1));
+    query_keys_.resize(query_samples_.size()*(ns_+2));
     gradients_.resize(3 * rates_.size());
     scratch_.resize(3 * count_);
     mass_divergence_.resize(count_);
@@ -311,7 +316,7 @@ public:
     if (!enabled())
       return 0;
     std::uint64_t bytes =
-        sizeof(*this) + reactor_samples_.capacity()*sizeof(portable::GasSample) + immersed_bytes_ + workspace_->owned_bytes() +
+        sizeof(*this) + query_samples_.capacity()*sizeof(portable::GasSample) + query_keys_.capacity()*sizeof(double) + (chemistry_batch_ ? chemistry_batch_->owned_bytes() : 0) + reactor_samples_.capacity()*sizeof(portable::GasSample) + immersed_bytes_ + workspace_->owned_bytes() +
         mixture_storage_.counters().aligned_payload_bytes +
         mixture_species_.capacity() * sizeof(ConstFieldView) +
         tcr_history.owned_bytes() +
@@ -567,7 +572,7 @@ public:
     return {};
   }
   // Explicit transport carries its own statistical auxiliary mean. The
-  // implicit COAST schedule replaces this with its independent field0 solve.
+  // implicit REFERENCE schedule replaces this with its independent field0 solve.
   Status capture_auxiliary(Span<const FieldView> fields, FieldView auxiliary) const noexcept {
     if(fields.size!=spec_.fields || auxiliary.components!=stride_ ||
        auxiliary.interior.x!=cells_.x || auxiliary.interior.y!=cells_.y || auxiliary.interior.z!=cells_.z)
@@ -811,13 +816,15 @@ public:
       if(!begun)return begun;
     }
     // Freeze the transport's extensive carrier before any chemistry. It is
-    // distinct from each reactor's PH/EOS density and from field0's density.
+    // distinct from each reactor's PH/EOS density. PDF-before-flow chemistry
+    // uses the same frozen rho as its transport time term. The legacy
+    // conservative remap path retains its equivalent transported carrier.
     std::size_t carrier_cell=0;
     for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)
       for(int x=0;x<cells_.x;++x,++carrier_cell) {
         const Int3 c{x,y,z};
         const double accepted=rho.unchecked(c,0),volume=cell_volume(kernels,c);
-        const double carrier=implicit_transport() && active(carrier_cell)
+        const double carrier=implicit_transport() && !frozen_chemistry_carrier_ && active(carrier_cell)
             ? frozen_density_carrier_mass(flux,c,accepted*volume,1/dt)/volume : accepted;
         if(!std::isfinite(accepted) || accepted<=0 || !std::isfinite(carrier) || carrier<=0)
           invalid_input=1;
@@ -1192,9 +1199,10 @@ public:
         carrier_density.revision_domain!=transport_density_authority_.revision_domain;
     int invalid_local=invalid_state,invalid_global=0;
     if(MPI_Allreduce(&invalid_local,&invalid_global,1,MPI_INT,MPI_MAX,communicator)!=MPI_SUCCESS || invalid_global)return invalid();
-    ChemistryBatch batch(*gas.gas_advance(),chemistry_budget_);
     int batch_bad=0;
     try {
+      if(!chemistry_batch_)chemistry_batch_=std::make_unique<ChemistryBatch>(*gas.gas_advance(),chemistry_budget_);
+      auto& batch=*chemistry_batch_;
       batch.reset(ns_,revision,time,dt);
       std::size_t index=0;
       for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x,++index) {
@@ -1238,6 +1246,7 @@ public:
     } catch(...) {batch_bad=1;}
     int global_bad=0;
     if(MPI_Allreduce(&batch_bad,&global_bad,1,MPI_INT,MPI_MAX,communicator)!=MPI_SUCCESS || global_bad)return numerical();
+    auto& batch=*chemistry_batch_;
     const auto batch_status=batch.execute(communicator);
     if(!batch_status)return batch_status;
     const auto mapping = gas.species_indices();
@@ -1339,8 +1348,12 @@ public:
               // Source rates are specific mole-number rates. Convert both
               // intervals by the same species molecular weight and time.
               const double mw=gas.gas_identity().molecular_weights_kg_per_kmol[q];
-              const double pdf=chemical_delta[q]/(dt*mw);
-              const double rate=positive_weight*(final_y[q]-normalized[q])/(dt*mw);
+              // A zero stoichiometric row has no chemical control rate.
+              // Dependent-species closure roundoff remains in the physical
+              // increment ledger, rather than selecting a spurious TCR branch.
+              const bool invariant=gas.gas_query()->chemically_invariant(q);
+              const double pdf=invariant ? 0. : chemical_delta[q]/(dt*mw);
+              const double rate=invariant ? 0. : positive_weight*(final_y[q]-normalized[q])/(dt*mw);
               if(dyn711()) {
                 if(!std::isfinite(pdf) || !std::isfinite(rate))return numerical();
                 dyn_rates_[q*count_+i]=pdf;dyn_rates_[(ns_+q)*count_+i]=rate;
@@ -1462,14 +1475,15 @@ public:
       raw_auxiliary[c]=auxiliary.unchecked(cell,c)+(c==ns_ ? delta_h : 0.);
     esf::detail::AuxiliaryPressureState pressure_state;
     double auxiliary_temperature{};
+    const auto cell_index=(std::size_t(cell.z)*cells_.y+cell.y)*cells_.x+cell.x;
     auto status=query_auxiliary(gas,thermo,raw_auxiliary.data(),pressure,revision,
-                                &pressure_state,&auxiliary_temperature);
+                                &pressure_state,&auxiliary_temperature,count_*spec_.fields+cell_index);
     if (!status) return status;
     for (std::size_t f=0;f<fields.size;++f) {
       for (std::size_t c=0;c<stride_;++c)
         tuple_[f*stride_+c]=fields.data[f].unchecked(cell,c)+(c==ns_ ? delta_h : 0.);
       portable::GasSample sample;
-      status=query(gas,thermo,tuple_.data()+f*stride_,pressure,revision,sample);
+      status=query(gas,thermo,tuple_.data()+f*stride_,pressure,revision,sample,false,cell_index*spec_.fields+f);
       if (!status) return status;
       densities[f]=sample.density_kg_per_m3;
     }
@@ -1525,6 +1539,16 @@ public:
     auxiliary.unchecked(cell,ns_)+=delta_h;
     for (std::size_t c=0;c<stride_;++c)physical_mean.unchecked(cell,c)=mean[c];
     out=candidate;
+    return {};
+  }
+  Status report_queries(MPI_Comm communicator) noexcept {
+    unsigned long long local[2]{query_calls_,query_hits_},global[2]{};
+    if (MPI_Reduce(local,global,2,MPI_UNSIGNED_LONG_LONG,MPI_SUM,0,communicator)!=MPI_SUCCESS)
+      return {StatusCode::mpi_failure,10237};
+    int rank{};
+    if (MPI_Comm_rank(communicator,&rank)!=MPI_SUCCESS) return {StatusCode::mpi_failure,10237};
+    if(rank==0)std::fprintf(stdout,"thermo_queries calls=%llu cache_hits=%llu state=physical_and_auxiliary\n",global[0],global[1]);
+    query_calls_=query_hits_=0;
     return {};
   }
   void discard() noexcept {
@@ -1621,14 +1645,14 @@ private:
   Status query_auxiliary(const ProductReactionSources& gas,
       const ThermodynamicsPlan& thermo,const double* row,double pressure,
       portable::Revision revision, esf::detail::AuxiliaryPressureState* output=nullptr,
-      double* temperature=nullptr) noexcept {
+      double* temperature=nullptr,std::size_t cache_slot=SIZE_MAX) noexcept {
     std::array<double,UINT8_MAX> normalized{};
     const auto coordinates=esf::detail::auxiliary_eos_coordinates(
         {revision,gas.chemistry_identity().fingerprint,1,ns_,row},revision,normalized.data(),ns_);
     if(coordinates.status!=portable::Status::success)return numerical();
     normalized[ns_]=coordinates.query_enthalpy_j_per_kg;
     portable::GasSample sample;
-    const auto status=query(gas,thermo,normalized.data(),pressure,revision,sample);
+    const auto status=query(gas,thermo,normalized.data(),pressure,revision,sample,false,cache_slot);
     if(!status)return status;
     esf::detail::AuxiliaryPressureState pressure_state;
     if (esf::detail::auxiliary_pressure_state(coordinates,sample,revision,
@@ -1641,8 +1665,18 @@ private:
   Status query(const ProductReactionSources &gas,
                const ThermodynamicsPlan &thermo, const double *row,
                double pressure, portable::Revision revision,
-               portable::GasSample &sample,bool rates=false) noexcept {
+               portable::GasSample &sample,bool rates=false,std::size_t cache_slot=SIZE_MAX) noexcept {
     pressure=thermo.eos_pressure(pressure);
+    ++query_calls_;
+    double* key=cache_slot<query_samples_.size() && !rates ? query_keys_.data()+cache_slot*(ns_+2) : nullptr;
+    if(key) {
+      const auto& saved=query_samples_[cache_slot];
+      if(saved.density_kg_per_m3>0 && saved.revision==revision &&
+          saved.composition_fingerprint==gas.gas_identity().composition_fingerprint &&
+          key[0]==pressure && std::equal(row,row+stride_,key+1)) {
+        ++query_hits_;sample=saved;return {};
+      }
+    }
     double sum = 0;
     for (std::size_t s = 0; s < ns_; ++s) {
       if (!std::isfinite(row[s]) || row[s] < 0 || row[s] > 1)
@@ -1692,6 +1726,7 @@ private:
         !close(v.cp_j_per_kg_k, native.cp) || !(v.cp_j_per_kg_k > 0))
       return numerical();
     sample = v;
+    if(key) {key[0]=pressure;std::copy_n(row,stride_,key+1);query_samples_[cache_slot]=v;}
     return {};
   }
   Status progress_rate(const ProductReactionSources &gas,
@@ -1759,9 +1794,12 @@ private:
   std::vector<double> thermal_coordinate_;
   std::vector<std::array<double, 3>> wiener_;
   std::vector<double> field_rates_, field_pressures_, field_densities_;
-  std::vector<portable::GasSample> reactor_samples_;
+  std::vector<portable::GasSample> reactor_samples_,query_samples_;
+  std::vector<double> query_keys_;
+  std::uint64_t query_calls_{},query_hits_{};
   std::size_t chemistry_budget_{};
-  bool chemistry_screen_{};
+  std::unique_ptr<ChemistryBatch> chemistry_batch_;
+  bool chemistry_screen_{},frozen_chemistry_carrier_{};
   std::size_t chemistry_fuel_{};
   std::unique_ptr<esf::detail::Workspace> workspace_;
   std::vector<ColdPressureRow> transport_rows_;

@@ -75,6 +75,29 @@ bool dynamic_filter_moments(const DynamicFilterDonor *donors, unsigned count,
   for (double v:{m.density,m.delta_squared,m.scalar,m.density_scalar_squared,
       m.density_delta_squared_gradient_squared,m.gradient_squared})
     if (!std::isfinite(v)) return false;
+  // Evaluate E[rho Y^2] - E[rho] E[Y]^2 about the donor
+  // reference and weighted mean. Uniform scalars then produce exact zero,
+  // rather than cancellation between two finite background moments.
+  long double weight{}, rho_sum{}, delta_sum{};
+  const long double reference=donors[0].scalar;
+  for(unsigned i=0;i<count;++i) {
+    const auto &d=donors[i];
+    const long double w=static_cast<long double>(d.density)*d.volume;
+    weight+=w;rho_sum+=w*d.density;
+    delta_sum+=w*(static_cast<long double>(d.scalar)-reference);
+  }
+  const long double rho_mean=rho_sum/weight, delta_mean=delta_sum/weight;
+  long double difference{};
+  for(unsigned i=0;i<count;++i) {
+    const auto &d=donors[i];
+    const long double w=static_cast<long double>(d.density)*d.volume;
+    const long double dy=(static_cast<long double>(d.scalar)-reference)-delta_mean;
+    difference+=w*(d.density*dy*dy+
+        2*(reference+delta_mean)*(d.density-rho_mean)*dy);
+  }
+  m.scalar_difference=static_cast<double>(1e6L*difference/weight);
+  m.centered_scalar_difference=true;
+  if(!std::isfinite(m.scalar_difference))return false;
   moments=m;
   return true;
 }
@@ -86,7 +109,8 @@ DynamicFilterProducts dynamic_filter_products(const DynamicFilterMoments &v) noe
   if (v.density <= 0 || v.delta_squared <= 0 || v.gradient_squared < 0 ||
       v.density_delta_squared_gradient_squared < 0 || v.density_scalar_squared < 0)
     return {};
-  const double l = std::abs(v.density_scalar_squared - v.density * v.scalar * v.scalar);
+  const double l = std::abs(v.centered_scalar_difference ? v.scalar_difference :
+      v.density_scalar_squared - v.density * v.scalar * v.scalar);
   const double m = std::abs(v.density * v.delta_squared * v.gradient_squared -
                              v.density_delta_squared_gradient_squared);
   if (!std::isfinite(l) || !std::isfinite(m)) return {};

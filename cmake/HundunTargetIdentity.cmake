@@ -9,7 +9,9 @@ function(hundun_v04_identity_inputs root output)
     "${root}/versions/v0.4/src/*"
     "${root}/cmake/*"
     "${root}/third_party/yyjson/*")
-  list(APPEND inputs "${root}/CMakeLists.txt" "${root}/versions/v0.4/CMakeLists.txt")
+  # Internal test drivers are absent from product source archives.
+  list(FILTER inputs EXCLUDE REGEX "/cmake/tests/")
+  list(APPEND inputs "${root}/VERSION" "${root}/CMakeLists.txt" "${root}/versions/v0.4/CMakeLists.txt")
   set(${output} "${inputs}" PARENT_SCOPE)
 endfunction()
 

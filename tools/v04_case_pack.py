@@ -192,7 +192,7 @@ def pack(args):
         with tarfile.open(str(stage/'source.tar.gz')) as archive:
             for member in archive.getmembers():
                 name = member.name
-                if member.isfile() and name != 'versions/v0.4/src/app_main.cpp' and (name in ('CMakeLists.txt','versions/v0.4/CMakeLists.txt') or
+                if member.isfile() and name != 'versions/v0.4/src/app_main.cpp' and (name in ('VERSION','CMakeLists.txt','versions/v0.4/CMakeLists.txt') or
                     any(name.startswith(prefix) for prefix in
                         ('versions/v0.4/include/','versions/v0.4/src/','cmake/','third_party/yyjson/'))):
                     source_hashes[name] = hashlib.sha256(archive.extractfile(member).read()).hexdigest()

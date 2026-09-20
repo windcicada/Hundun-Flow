@@ -42,6 +42,7 @@ void test_exact_identity_and_independent_lanes() {
   HUNDUN_CHECK(pool.workspaces_are_distinct());
   auto lane0 = hundun::v04::chemistry::make_cantera_backend(config(), pool);
   auto lane1 = hundun::v04::chemistry::make_cantera_backend(config(), pool);
+  HUNDUN_CHECK(!lane0->chemically_invariant(0) && !lane0->chemically_invariant(1));
   HUNDUN_CHECK(lane0->lane_index() == 0U);
   HUNDUN_CHECK(lane1->lane_index() == 1U);
   HUNDUN_CHECK(lane0->composition().fingerprint ==

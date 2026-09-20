@@ -15,7 +15,7 @@ namespace hundun::v04::detail {
 class CompositionBalanceLedger {
  public:
   enum Term : unsigned { accepted, current, temporal, transport, pressure,
-                         noise, mixing, chemistry, term_count };
+                         noise, mixing, chemistry, advective, density_update, transport_residual, term_count };
   using Row = std::array<long double, term_count>;
   Status initialize(const portable::GasIdentity& identity,
       Span<const std::size_t> mapping, std::size_t dependent,
@@ -188,7 +188,7 @@ class CompositionBalanceLedger {
   static void report(DriverCompositionBalance& out,const Row& row,long double bound) noexcept {
     const long double defect=row[temporal]+row[transport]+row[pressure]-row[noise]-row[mixing]-row[chemistry];
     long double scale=1e-30L;
-    for (unsigned t=temporal;t<term_count;++t) scale=std::max(scale,std::abs(row[t]));
+    for (unsigned t=temporal;t<=chemistry;++t) scale=std::max(scale,std::abs(row[t]));
     out.accepted_inventory=static_cast<double>(row[accepted]);
     out.current_inventory=static_cast<double>(row[current]);
     out.temporal_rate=static_cast<double>(row[temporal]);
@@ -198,6 +198,10 @@ class CompositionBalanceLedger {
     out.mixing_source=static_cast<double>(row[mixing]);
     out.chemistry_source=static_cast<double>(row[chemistry]);
     out.defect=static_cast<double>(defect);
+    out.advective_conversion=static_cast<double>(row[advective]);
+    out.density_update=static_cast<double>(row[density_update]);
+    out.transport_equation_residual=static_cast<double>(row[transport_residual]);
+    out.unexplained_defect=static_cast<double>(defect-row[advective]-row[density_update]-row[transport_residual]);
     out.relative_defect=static_cast<double>(std::abs(defect)/scale);
     out.storage_roundoff_bound=static_cast<double>(bound);
     out.roundoff_applied=out.relative_defect>=1e-6 && admissible(out);

@@ -2,6 +2,7 @@
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Year.M: 2026.09
 #pragma once
 #include "solver_mixture_rows_detail.hpp"
+#include <cstdio>
 
 namespace hundun::v04::detail {
 struct FrozenScalarProblem {
@@ -22,6 +23,10 @@ struct ScalarCorrectionStorage {
   EquationSystemView equation;
   FieldView boundary_variation, rhs, increment, backup;
 };
+struct ScalarWork {
+  double assembly{},closure{},factor{},solve{},refresh{};
+  unsigned long long assemblies{},factor_reuses{},operators{},preconditioners{},reductions{};
+};
 struct ScalarCorrectionRuntime {
   std::vector<ColdPressureRow>& rows;
   ColdPressureDilu& preconditioner;
@@ -30,7 +35,21 @@ struct ScalarCorrectionRuntime {
   ReductionEngine& reductions;
   LinearIdentity identity;
   LinearSolveControl control;
+  ScalarWork* work{};
 };
+
+inline Status report_scalar_work(const char* module,const ScalarWork& work,MPI_Comm comm) noexcept {
+  double local[5]{work.assembly,work.closure,work.factor,work.solve,work.refresh},maximum[5]{};
+  unsigned long long count[5]{work.assemblies,work.factor_reuses,work.operators,work.preconditioners,work.reductions},counts[5]{};
+  if (MPI_Reduce(local,maximum,5,MPI_DOUBLE,MPI_MAX,0,comm)!=MPI_SUCCESS ||
+      MPI_Reduce(count,counts,5,MPI_UNSIGNED_LONG_LONG,MPI_MAX,0,comm)!=MPI_SUCCESS)
+    return {StatusCode::mpi_failure,17866};
+  int rank{};
+  if (MPI_Comm_rank(comm,&rank)!=MPI_SUCCESS) return {StatusCode::mpi_failure,17866};
+  if(rank==0)std::fprintf(stdout,"transport_cost module=%s assembly=%.9g closure=%.9g factor=%.9g solve=%.9g refresh=%.9g assemblies=%llu factor_reuses=%llu operators=%llu preconditioners=%llu reductions=%llu scope=max_rank_stages\n",
+      module,maximum[0],maximum[1],maximum[2],maximum[3],maximum[4],counts[0],counts[1],counts[2],counts[3],counts[4]);
+  return {};
+}
 
 // One correction from the common equation assembly. assemble(certificate)
 // reads the current scalar/history and fills storage.equation; refresh(trial)
@@ -40,7 +59,8 @@ struct ScalarCorrectionRuntime {
 template<class Assemble,class Refresh>
 LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
     const ScalarCorrectionStorage& storage, ScalarCorrectionRuntime& runtime,
-    Assemble&& assemble, Refresh&& refresh) noexcept {
+    Assemble&& assemble, Refresh&& refresh,
+    const EquationAssemblyCertificate* assembled=nullptr) noexcept {
   constexpr std::uint32_t invalid=17864,numerical=17865;
   LinearSolveResult result;
   const auto cells=p.kernels.cells();
@@ -98,7 +118,13 @@ LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
     copy(as_const(storage.backup),p.trial);
   };
   EquationAssemblyCertificate certificate;
-  status=assemble(certificate);
+  auto clock=MPI_Wtime();
+  if(assembled)certificate=*assembled;else {
+    status=assemble(certificate);
+    if(runtime.work)++runtime.work->assemblies;
+  }
+  if(runtime.work)runtime.work->assembly+=MPI_Wtime()-clock;
+  clock=MPI_Wtime();
   if(status) {
     if(p.frozen_density) status=close_frozen_density_scalar_rows(p.kernels,p.boundary,
         p.boundary_stage,q.field,p.scheme,p.boundary_velocity,p.context,p.density,
@@ -113,8 +139,14 @@ LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
     rollback();result.status=status;result.termination=LinearTermination::operator_failure;
     result.lowest_failing_rank=runtime.reductions.lowest_failing_rank();return result;
   }
+  if(runtime.work)runtime.work->closure+=MPI_Wtime()-clock;
+  clock=MPI_Wtime();
   // Row closure already divides the integrated equation by cell volume.
   status=runtime.preconditioner.prepare();
+  if(runtime.work) {
+    runtime.work->factor+=MPI_Wtime()-clock;
+    runtime.work->factor_reuses+=runtime.preconditioner.reused_last_prepare();
+  }
   status=runtime.reductions.consensus(status);
   if(!status) {
     rollback();result.status=status;result.termination=LinearTermination::preconditioner_failure;
@@ -128,9 +160,16 @@ LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
   ColdPressureOperator op(runtime.rows,cells,runtime.halo,runtime.identity);
   const LinearSolveInvocation invocation{as_const(storage.rhs),storage.increment,
       runtime.identity,runtime.control};
+  clock=MPI_Wtime();
   result=runtime.control.maximum_norm
       ? solve_bicgstab(op,runtime.preconditioner,invocation,runtime.workspace,runtime.reductions)
       : solve_fgmres(op,runtime.preconditioner,invocation,runtime.workspace,runtime.reductions);
+  if(runtime.work) {
+    runtime.work->solve+=MPI_Wtime()-clock;
+    runtime.work->operators+=result.operator_applies;
+    runtime.work->preconditioners+=result.preconditioner_applies;
+    runtime.work->reductions+=result.reduction_calls;
+  }
   status=runtime.reductions.consensus(result.status);
   if(!status) {
     rollback();result.status=status;
@@ -149,7 +188,9 @@ LinearSolveResult correct_scalar(const FrozenScalarProblem& p,
   for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x)
     p.trial.unchecked({x,y,z},0)+=storage.increment.unchecked({x,y,z},0);
   ++p.trial.revision;
+  clock=MPI_Wtime();
   status=refresh(p.trial);
+  if(runtime.work)runtime.work->refresh+=MPI_Wtime()-clock;
   status=runtime.reductions.consensus(status);
   if(!status) {
     rollback();result.status=status;result.termination=LinearTermination::operator_failure;

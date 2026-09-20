@@ -569,7 +569,7 @@ class ScalarMassRemap {
     if (!valid_mass_source(state.mass_source,state.mass_source.identity,
                            context.time,cells_))
       local={StatusCode::invalid_plan,kInvalid};
-    // COAST's advective BE row is R_Y-Y*R_mass with old-density storage.
+    // REFERENCE's advective BE row is R_Y-Y*R_mass with old-density storage.
     // This row operation supplies an uncommitted coupling guess. The public
     // target-time assembler and final conservation audit retain R_Y itself.
     if (continuity_reduced && (!intermediate_coupling ||

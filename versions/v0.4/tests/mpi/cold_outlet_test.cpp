@@ -38,7 +38,7 @@ bool run(double speed, double composition = 0.3, bool inlet_reference = false,
   outlet.scalars[0].backflow_kind = ScalarBoundaryKind::dirichlet;
   outlet.scalars[0].backflow_value = 0.1;
   auto &gas = model.thermophysics.species.front();
-  gas.transport_law = TransportLaw::coast_perry;
+  gas.transport_law = TransportLaw::perry;
   gas.viscosity_reference = gas.conductivity = 0;
   gas.prandtl = 0.70;
   gas.critical_temperature = 126.2;

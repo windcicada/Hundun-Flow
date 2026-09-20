@@ -85,6 +85,8 @@ int main(int argc,char** argv) {
               kappa_roundoff_bound=std::max(kappa_roundoff_bound,tolerance);
             }
           }
+          if(gap>=tolerance && gap>history_error)
+            std::printf("tcr_history_difference rank=%d cell=%zu coordinate=%zu first=%.17g second=%.17g tolerance=%.17g\n",rank,cell,j,x,y,tolerance);
           records_equal &= std::isfinite(x) && std::isfinite(y) && gap<tolerance;
           history_error=std::max(history_error,gap);
         }
@@ -184,9 +186,9 @@ int main(int argc,char** argv) {
       offset+=width;
     }
     MPI_Allreduce(MPI_IN_PLACE,live,3,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
-    if(!all(valid && live[0]>0 && live[1]>0 && live[2]>0))return 10;
     if(!rank)std::printf("dynamic_tcr history=audited cadence_phase=%llu rate_max=%.17g kappa_change=%.17g cd_change=%.17g\n",
         static_cast<unsigned long long>(a.step%4),live[0],live[1],live[2]);
+    if(!all(valid && live[0]>0 && live[1]>0 && live[2]>0))return 10;
   }
   if(wall) {
     // Native V5 variable cell records: header, TCR, parcels, injectors.
@@ -256,6 +258,37 @@ int main(int argc,char** argv) {
     if(!rank)std::printf("dyn711_remix physical_fields_collapsed=%d relative_spread=%.17g\n",int(valid),spread);
     if(!valid)return 10;
   }
+  // Mechanical pressure is a perturbation of the stored absolute reference.
+  // Its spatial work U.grad(p) propagates primary pressure differences into
+  // the persisted enthalpy rate. Bound that propagation from the actual
+  // compared states and mesh, independently of the measured rate difference.
+  const auto pressure_work_bound=[&](const std::vector<RestartImageField>& left,
+                                      const std::vector<RestartImageField>& right) {
+    double gap{}, speed{};
+    for(std::size_t f=0;f<left.size();++f) {
+      if(f>=right.size() || left[f].values.size()!=right[f].values.size())continue;
+      if(left[f].role==RestartFieldRole::pressure_perturbation)
+        for(std::size_t i=0;i<left[f].values.size();++i)
+          gap=std::max(gap,std::abs(left[f].values[i]-right[f].values[i]));
+      if(left[f].role==RestartFieldRole::velocity)
+        for(std::size_t i=0;i+2<left[f].values.size();i+=3)
+          speed=std::max({speed,std::abs(left[f].values[i])+std::abs(left[f].values[i+1])+std::abs(left[f].values[i+2]),
+              std::abs(right[f].values[i])+std::abs(right[f].values[i+1])+std::abs(right[f].values[i+2])});
+    }
+    double values[]{gap,speed};MPI_Allreduce(MPI_IN_PLACE,values,2,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+    double dx=INFINITY;
+    const double lo[]{model.mesh.lower.x,model.mesh.lower.y,model.mesh.lower.z};
+    const double hi[]{model.mesh.upper.x,model.mesh.upper.y,model.mesh.upper.z};
+    const int n[]{a.global_cells.x,a.global_cells.y,a.global_cells.z};
+    for(unsigned d=0;d<3;++d) {
+      const auto& faces=model.mesh.runtime_faces[d];
+      if(faces.empty())dx=std::min(dx,(hi[d]-lo[d])/n[d]);
+      else for(std::size_t i=1;i<faces.size();++i)dx=std::min(dx,faces[i]-faces[i-1]);
+    }
+    return 2*values[0]*values[1]/dx;
+  };
+  const double current_work_bound=pressure_work_bound(a.fields,b.fields);
+  const double previous_work_bound=pressure_work_bound(a.previous_fields,b.previous_fields);
   double maximum_flux_difference{};unsigned long long total{};
   const auto fields=[&](const char* level,const std::vector<RestartImageField>& x,const std::vector<RestartImageField>& y) {
     if(!all(x.size()==y.size()))return false;
@@ -270,8 +303,15 @@ int main(int argc,char** argv) {
         }
         MPI_Allreduce(MPI_IN_PLACE,v,2,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
         MPI_Allreduce(MPI_IN_PLACE,&differences,1,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
-        const double relative=v[0]/std::max(1.,v[1]);worst=std::max(worst,relative);passed &= relative<field_limit;
-        if(!rank)std::printf("compare level=%s field=%u role=%u component=%u abs=%.17g scale=%.17g relative=%.17g unequal=%llu\n",level,x[f].field,unsigned(x[f].role),c,v[0],std::max(1.,v[1]),relative,differences);
+        double scale=std::max(1.,v[1]);
+        if(x[f].role==RestartFieldRole::pressure_perturbation)
+          scale=std::max({scale,std::abs(a.pressure_reference),std::abs(a.previous_pressure_reference)});
+        const double propagated=x[f].role==RestartFieldRole::enthalpy_nonadvective_rate ?
+            (std::string_view(level)=="rate" ? current_work_bound : previous_work_bound) : 0.;
+        const double relative=v[0]/scale;worst=std::max(worst,relative);
+        passed &= v[0]<field_limit*scale+propagated;
+        if(!rank && propagated>0)std::printf("pressure_work_propagation level=%s absolute_bound=%.17g\n",level,propagated);
+        if(!rank)std::printf("compare level=%s field=%u role=%u component=%u abs=%.17g scale=%.17g relative=%.17g unequal=%llu\n",level,x[f].field,unsigned(x[f].role),c,v[0],scale,relative,differences);
       }
     }
     return true;

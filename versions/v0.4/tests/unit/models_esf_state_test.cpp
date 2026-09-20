@@ -143,7 +143,7 @@ int main() {
   if (!successful(r) || !near(gmean[0],.0008741208563179175) ||
       !near(r.statistical_density_kg_per_m3,static_cast<double>(4/volume)) ||
       !(gvariance[0]>1e-6) || near(gmean[0],field0[0])) return 18;
-  // Auxiliary signed coordinates follow COAST's positive-weight EOS.
+  // Auxiliary signed coordinates follow REFERENCE's positive-weight EOS.
   // For ideal mixtures this PH normalization yields the identical T and
   // pressure density, including the extensive weight in the gas law.
   double signed_aux[]{-.1,1.1,200000},normalized[]{71,83};

@@ -137,6 +137,7 @@ PlanFingerprint solve_contract_fingerprint(
   hash = mix_contract(hash, invocation.control.restart);
   hash = mix_contract(hash, invocation.control.maximum_norm);
   hash = mix_contract(hash, invocation.control.accept_iteration_limit);
+  hash = mix_contract(hash, invocation.control.bounded_recurrence);
   hash = mix_contract(
       hash, invocation.convergence_audit == nullptr
                 ? 0U
@@ -939,7 +940,8 @@ Status validate_common(LinearAlgorithm algorithm,
        pc.status_scope != LinearPreconditionerStatusScope::collective) ||
       !same_shape(op.local_shape, invocation.rhs.interior) ||
       requirements.algorithm != algorithm ||
-      ((control.maximum_norm || control.accept_iteration_limit) &&
+      (control.bounded_recurrence && (!control.maximum_norm || !control.accept_iteration_limit)) ||
+      ((control.maximum_norm || control.accept_iteration_limit || control.bounded_recurrence) &&
        (algorithm != LinearAlgorithm::bicgstab || invocation.convergence_audit != nullptr)) ||
       !shape_contains(requirements.maximum_shape, invocation.rhs.interior) ||
       workspace.fingerprint() == 0U || reductions.capacity() == 0U ||
@@ -2669,6 +2671,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
   const bool prepared_batch =
       preconditioner_apply_lifecycle ==
       LinearPreconditionerApplyLifecycle::prepared_batch;
+  const bool recurrence=invocation.control.bounded_recurrence;
   LinearSolveResult result;
   const Int3 shape = invocation.rhs.interior;
   FieldView x = workspace.vector(0U, shape);
@@ -2789,7 +2792,7 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
           ax,9U,workspace,reductions,result,result.final_true_residual,invocation.control.maximum_norm);
       if(!checked)return finish_failure(result,checked,LinearTermination::operator_failure,
           resources,reductions,initial_calls);
-      result.recursive_residual=result.final_true_residual;
+      result.recursive_residual=recurrence ? best_norm : result.final_true_residual;
       auto capped=finish_success(result,as_const(best),invocation,resources,reductions,initial_calls);
       if(capped.status)capped.termination=LinearTermination::maximum_iterations;
       return capped;
@@ -2888,17 +2891,17 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
         form_bicgstab_intermediate(s, as_const(r), as_const(v), alpha,
                                    s_local_scale));
     double s_norm = 0.0;
-    status = invocation.control.maximum_norm
+    status = recurrence ? status : invocation.control.maximum_norm
                  ? global_norm(reductions, as_const(s), status, s_norm, true)
                  : status
                  ? global_norm_from_local_scale(reductions, as_const(s),
                                                 s_local_scale, {}, s_norm)
                  : global_norm(reductions, as_const(s), status, s_norm);
-    if (!status) {
+    if (!status && !recurrence) {
       return finish_failure(result, status, LinearTermination::non_finite,
                             resources, reductions, initial_calls);
     }
-    if (s_norm <= tolerance) {
+    if (!recurrence && s_norm <= tolerance) {
       status = revise(workspace, 0U, x,
                       add_scaled(x, alpha, as_const(p_hat)));
       ++result.iterations;
@@ -2949,9 +2952,12 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
       continue;
     }
 
-    const Status s_preconditioner_status = apply_preconditioner(
+    // A collective preconditioner requires agreement before entering its call.
+    if(recurrence && preconditioner_status_scope==LinearPreconditionerStatusScope::collective)
+      status=reductions.consensus(status);
+    const Status s_preconditioner_status = status ? apply_preconditioner(
         preconditioner, as_const(s), s_hat, 6U, result.iterations * 2U + 1U,
-        workspace, result, prepared_batch ? &batch_ticket : nullptr);
+        workspace, result, prepared_batch ? &batch_ticket : nullptr) : status;
     const Status s_preconditioner_consensus =
         preconditioner_status_scope ==
                 LinearPreconditionerStatusScope::collective
@@ -2979,13 +2985,14 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
       return finish_failure(result, status, LinearTermination::operator_failure,
                             resources, reductions, initial_calls);
     }
-    if (!(global[1] > 0.0) || !std::isfinite(global[0]) ||
+    if ((!recurrence && !(global[1] > 0.0)) || !std::isfinite(global[0]) ||
         !std::isfinite(global[1])) {
       return finish_failure(
           result, {StatusCode::numerical_failure, kLinearSolveBreakdown},
           LinearTermination::breakdown, resources, reductions, initial_calls);
     }
-    omega = global[0] / global[1];
+    omega = recurrence && (global[1]<=1e-30 || std::abs(global[0])>2.*std::abs(global[1]))
+        ? 1. : global[0] / global[1];
     if (omega == 0.0 || !std::isfinite(omega)) {
       return finish_failure(
           result, {StatusCode::numerical_failure, kLinearSolveBreakdown},
@@ -3015,12 +3022,21 @@ LinearSolveResult solve_bicgstab(const LinearOperator& linear_operator,
     }
     retain_best(recursive);
     result.recursive_residual = recursive;
-    const bool verify = recursive <= tolerance ||
+    if(recurrence && (recursive<=tolerance || result.iterations==invocation.control.maximum_iterations)) {
+      if(recursive>tolerance)return capped_result();
+      // Observe the final equation once; recurrence decides the stopping step.
+      status=compute_true_residual(linear_operator,invocation.rhs,x,r,1U,ax,9U,
+          workspace,reductions,result,result.final_true_residual,true);
+      if(!status)return finish_failure(result,status,LinearTermination::operator_failure,
+          resources,reductions,initial_calls);
+      return finish_success(result,as_const(x),invocation,resources,reductions,initial_calls);
+    }
+    const bool verify = !recurrence && (recursive <= tolerance ||
                         result.iterations %
                                 invocation.control.true_residual_interval ==
                             0U ||
                         result.iterations ==
-                            invocation.control.maximum_iterations;
+                            invocation.control.maximum_iterations);
     if (verify) {
       cached_rho_available = false;
       status = compute_true_residual(

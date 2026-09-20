@@ -28,7 +28,7 @@ enum class MgCorrectionScaling : std::uint8_t {
 enum class GeometryKind : std::uint8_t {
   uniform,
   tensor_stretched,
-  coast_runtime_axes_v1
+  runtime_axes_v1
 };
 enum class TurbulenceKind : std::uint8_t {
   none,
@@ -71,7 +71,7 @@ enum class BoundaryKind : std::uint8_t {
   adiabatic_wall,
   isothermal_wall,
   heat_flux_wall,
-  // Zero normal gradients and signed outlet-flux mass closure (COAST -2).
+  // Zero normal gradients and signed outlet-flux mass closure (REFERENCE -2).
   zero_gradient_mass_outlet
 };
 inline bool is_candidate_transport_outlet(BoundaryKind kind) noexcept {
@@ -109,13 +109,13 @@ constexpr CouplingKind effective_coupling(TimeScheme time,
 enum class TransportLaw : std::uint8_t {
   constant,
   sutherland,
-  coast_native_air,
-  coast_perry,
+  nasa_air,
+  perry,
   kerosene_vapor
 };
 
-constexpr bool coast_mixture_transport(TransportLaw law) noexcept {
-  return law == TransportLaw::coast_perry || law == TransportLaw::kerosene_vapor;
+constexpr bool reference_mixture_transport(TransportLaw law) noexcept {
+  return law == TransportLaw::perry || law == TransportLaw::kerosene_vapor;
 }
 enum class ImmersedFluidSide : std::uint8_t { outside, inside };
 enum class IbmReconstructionPolicy : std::uint8_t {
@@ -219,7 +219,7 @@ struct MeshLimits {
 struct CartesianMeshSpec {
   GeometryKind kind{GeometryKind::uniform};
   std::filesystem::path axes_file;
-  std::array<std::vector<double>, 3U> coast_runtime_faces;
+  std::array<std::vector<double>, 3U> runtime_faces;
   Real3 lower{};
   Real3 upper{};
   bool has_exact_cells{};
@@ -329,7 +329,7 @@ struct SolverToleranceSpec {
   double gauge{1.0e-10};
 };
 
-// COAST ewt/ewt_pdf: freeze max accepted conservative variables per attempt,
+// REFERENCE ewt/ewt_pdf: freeze max accepted conservative variables per attempt,
 // divide by this physical reference time, and test equation residuals.
 struct ColdStoppingSpec {
   double reference_time{};
@@ -406,7 +406,7 @@ struct SpeciesThermophysicalSpec {
   double sutherland_temperature{};
   double prandtl{};
   double conductivity{};
-  double critical_temperature{};  // K, COAST/Perry corresponding states.
+  double critical_temperature{};  // K, REFERENCE/Perry corresponding states.
   double critical_pressure{};     // atm.
 };
 

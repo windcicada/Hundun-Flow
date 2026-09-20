@@ -889,11 +889,11 @@ bool test_tvd_stretched_face_envelope() {
   bool passed=true;
   for(int axis=0;axis<3;++axis) {
     auto mesh=mesh_spec(8,false);
-    mesh.kind=GeometryKind::coast_runtime_axes_v1;
+    mesh.kind=GeometryKind::runtime_axes_v1;
     mesh.axes_file="in-memory-tvd-envelope";
     for(int a=0;a<3;++a) for(int i=0;i<=8;++i) {
       const double nonuniform[]{0.0,0.05,0.1,0.3,0.5,0.7,0.8,0.9,1.0};
-      mesh.coast_runtime_faces[a].push_back(static_cast<double>(
+      mesh.runtime_faces[a].push_back(static_cast<double>(
           static_cast<float>(a==axis ? nonuniform[i] : i/8.0)));
     }
     KernelFixture f; FieldRegistry registry; TimeSchemePlan time;

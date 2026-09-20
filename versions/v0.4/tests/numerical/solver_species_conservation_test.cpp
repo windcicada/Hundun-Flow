@@ -834,7 +834,7 @@ bool test_mixture_face_closure() {
   auto first = make_field(80U, cells, 1U, 2U, 501U);
   auto second = make_field(81U, cells, 1U, 2U, 502U);
   bool passed = true;
-  // COAST gam_tvd/vls on this normalized three-species stencil selects
+  // REFERENCE gam_tvd/vls on this normalized three-species stencil selects
   // the common upwind state (.2,.7,.1) in either flow direction.
   for (unsigned axis = 0; axis < 3; ++axis)
     for (double direction : {1.0, -1.0}) {
@@ -886,7 +886,7 @@ bool test_mixture_face_closure() {
       {linear.data(),linear.size()},as_const(thermal.view),CartesianAxis::x,
       {3,3,3},1.0,1e-6,smooth,true,MixtureFlatStencilPolicy::upwind_constraint);
   passed &= expect(bool(smooth_status) && close(smooth.diffusion,.5),
-      "implicit constant coordinate retains the COAST VLS upwind constraint");
+      "implicit constant coordinate retains the REFERENCE VLS upwind constraint");
   smooth_status=prepare_cartesian_mixture_face(fixture.equations.kernels(),
       {linear.data(),linear.size()},as_const(thermal.view),CartesianAxis::x,
       {3,3,3},1.0,1e-6,smooth,true,static_cast<MixtureFlatStencilPolicy>(255));
@@ -1080,7 +1080,7 @@ bool test_mixture_equation_faces() {
                           0,0,1,flux.revision};
     status=cartesian_mixture_transport(fixture.equations.kernels(),mixture,
         as_const(gamma.view),flux,call);
-    // Complete COAST VLS selects total conductance .5. The three flux
+    // Complete REFERENCE VLS selects total conductance .5. The three flux
     // differences at x=2 are (.2,.1,-.3), independent of their split into
     // physical and artificial diffusion. At x=1 the upstream plateau holds.
     if (!expect(bool(status) &&
@@ -1128,7 +1128,7 @@ bool test_mixture_equation_faces() {
     std::cout << "mixture_equation species=" << s << " residual=" << r
               << " conductance=" << D << '\n';
     passed &= expect(bool(status) && close(r,s==0 ? .2 : .1) && close(D,.5),
-                     "production residual and matrix use the common COAST face conductance");
+                     "production residual and matrix use the common REFERENCE face conductance");
   }
   auto h=make_field(kEnthalpy,cells,1U,2U,520U);
   auto correction_context=context;
@@ -1209,6 +1209,27 @@ bool test_mixture_equation_faces() {
       "statistical component assembly permits a finite off-simplex trial with fixed common faces");
   passed &= expect(bool(status) && certificate.plan!=public_certificate.plan,
       "statistical component certificate has its own plan identity");
+  detail::StatisticalFaceBasis basis;
+  context.statistical_face_basis=&basis;
+  for(unsigned repeat=0;repeat<2;++repeat) {
+    status=detail::StatisticalSpecies::assemble(fixture.equations.species(),1,state,material,{},context,system,certificate);
+    passed &= expect(bool(status) && diagonal.bytes==reference_diagonal && rhs.bytes==reference_rhs &&
+        residual.bytes==reference_residual && ax.bytes==reference_x && ay.bytes==reference_y && az.bytes==reference_z,
+        "prepared common faces preserve the complete matrix, RHS and true residual exactly");
+  }
+  passed &= expect(basis.reuses==1,"second component assembly reuses frozen conductances");
+  // Changing the material revision rebuilds even when values remain equal.
+  auto revised_diffusion=diffusion;
+  for(auto& value:revised_diffusion)++value.revision;
+  material.scalar_mass_diffusivity={revised_diffusion.data(),revised_diffusion.size()};
+  ++material.enthalpy_diffusivity.revision;
+  status=detail::StatisticalSpecies::assemble(fixture.equations.species(),1,state,material,{},context,system,certificate);
+  passed &= expect(bool(status) && basis.reuses==1 && ax.bytes==reference_x,
+      "material revision invalidates prepared conductances");
+  material.scalar_mass_diffusivity={diffusion.data(),diffusion.size()};
+  material.enthalpy_diffusivity=as_const(gamma.view);
+  context.statistical_face_basis=nullptr;
+
   std::cout<<"statistical species partial_sum="<<1.125<<" status="<<unsigned(status.code)<<'/'<<status.detail<<'\n';
   passed &= check_scalar_correction_rows(fixture,as_const(trial_a.view),state,material,{},
       correction_context,system,false,false,false,true);
@@ -1505,7 +1526,7 @@ bool test_ibm_species_matrix(bool passive = false, bool periodic = false) {
         "IBM complete transport retains fluid diffusion and wall impermeability");
   };
   passed &= check_wall_transport();
-  // The COAST selector's downstream fallback reaches the solid placeholder.
+  // The REFERENCE selector's downstream fallback reaches the solid placeholder.
   // Fluid-face coefficients must stay invariant under changes to that state.
   for(int z=0;z<n;++z) for(int y=0;y<n;++y) for(int x=0;x<n;++x)
     if(!fluid({x,y,z})) q.view.unchecked({x,y,z},0U)=.8;
@@ -2590,7 +2611,7 @@ bool test_implicit_mixture_solve(MPI_Comm comm, bool frozen=false, bool heat=fal
       };
       const LinearIdentity identity{1040,context.time,fixture.geometry.fingerprint(),workspace.fingerprint(),1041};
       detail::ColdPressureOperator op(rows,cells,halo,identity);
-      detail::ColdPressureDilu pc(rows,cells,identity);
+      detail::ColdPressureDilu pc(rows,cells,identity,true);
       for (int sweep=0;sweep<2;++sweep) {
         if(frozen) {
           detail::FrozenScalarProblem problem{fixture.equations.kernels(),fixture.boundary,
@@ -2663,6 +2684,15 @@ bool test_implicit_mixture_solve(MPI_Comm comm, bool frozen=false, bool heat=fal
           if(!solved.status) {std::cerr<<"frozen correction status="<<unsigned(solved.status.code)
               <<'/'<<solved.status.detail<<'\n';return false;}
           iterations+=solved.iterations;
+          // RHS changes retain the factor; an actual operator change rebuilds it.
+          if (!pc.prepare() || !pc.reused_last_prepare()) return false;
+          const auto saved_row=rows.front();
+          rows.front().rhs+=1.;
+          if (!pc.prepare() || !pc.reused_last_prepare()) return false;
+          rows.front().diagonal+=1.;
+          if (!pc.prepare() || pc.reused_last_prepare()) return false;
+          rows.front()=saved_row;
+          if (!pc.prepare() || pc.reused_last_prepare()) return false;
         } else {
         EquationAssemblyCertificate certificate;
         status=assemble_equation(certificate);

@@ -29,7 +29,7 @@ molecular_weight 28.850334
 temperature_switch 1000
 nasa7_low 3.5838100068 -7.2700635412e-4 1.67056387003e-6 -1.091801341e-10 -4.317787988e-13 -1050.5394088 3.1124135035
 nasa7_high 3.1013370688 1.24138813631e-3 -4.1882038804e-7 6.641656204e-11 -3.9127843272e-15 -985.27467132 5.3560174057
-transport_coast_native_air
+transport_nasa_air
 end_species
 end
 """
@@ -54,10 +54,10 @@ def main():
         model["mesh"]["domain"] = {"lower": [-4, -2, -2], "upper": [4, 2, 2]}
         model["mesh"]["exact_cells"] = [16, 16, 16]
         model["mesh"]["minimum_spacing"] = [.5, .25, .25]
-        # The public case contract restricts native-air transport to COAST axes.
-        model["mesh"].update(kind="coast_runtime_axes_v1", axes_file="axes.dat",
+        # The public case contract restricts native-air transport to REFERENCE axes.
+        model["mesh"].update(kind="runtime_axes_v1", axes_file="axes.dat",
                               base_spacing=[.5, .25, .25])
-        axes = ["COAST_RUNTIME_AXES 1", "grid 16 16 16"]
+        axes = ["RUNTIME_AXES 1", "grid 16 16 16"]
         for axis, lower, spacing in (("x", -4, .5), ("y", -2, .25), ("z", -2, .25)):
             axes += [axis + " 17", " ".join(str(lower + i * spacing) for i in range(17))]
         (case / "axes.dat").write_text("\n".join(axes) + "\n")

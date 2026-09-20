@@ -21,6 +21,16 @@ int main() {
   c=cdphyso_species_control(.3,1e-15,1,1e-12);
   ok &= c.available && near(c.selected/1e-15,.3) && c.effective==1e-4;
   ok &= !cdphyso_species_control(.3,NAN,1,1e-12).available;
+  std::array<DynamicFilterDonor,8> uniform;
+  for(unsigned i=0;i<uniform.size();++i)
+    uniform[i]={.3123456789+i*.0001,1e-9,.7123456789,{1e-8,0,0}};
+  DynamicFilterMoments centered;
+  ok &= dynamic_filter_moments(uniform.data(),8,centered) &&
+      centered.centered_scalar_difference && centered.scalar_difference==0;
+  uniform[0].scalar+=.01;
+  ok &= dynamic_filter_moments(uniform.data(),8,centered) &&
+      std::abs(centered.scalar_difference-(centered.density_scalar_squared-
+          centered.density*centered.scalar*centered.scalar)) < 1e-9;
   const auto m=dynamic_filter_products({2,3,4,20,22,3});
   ok &= m.available && near(m.m_squared,1) && near(m.l_times_m,1);
   ok &= dynamic_cd_from_products(0,0)==2 && dynamic_cd_from_products(1,4)==1 &&

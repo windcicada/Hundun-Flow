@@ -99,6 +99,9 @@ public:
   virtual ~GasQueryProvider() = default;
   virtual const GasIdentity &gas_identity() const noexcept = 0;
   virtual Status query_gas(const GasQuery &, GasQueryOutput &) noexcept = 0;
+  // True certifies an identically zero net stoichiometric row, including all reactions.
+  // An unspecified provider returns false; a zero sampled rate is insufficient.
+  virtual bool chemically_invariant(std::size_t) const noexcept { return false; }
   // Sample-only requests preserve array storage; consumers read only sample.
   // Providers without a specialized implementation retain the full query.
   virtual Status query_sample(const GasQuery& q, GasQueryOutput& out) noexcept {

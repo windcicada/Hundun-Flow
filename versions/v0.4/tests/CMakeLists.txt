@@ -109,14 +109,14 @@ add_test(NAME v04_thin_domain_runner_self_test
 set_tests_properties(v04_thin_domain_runner_self_test PROPERTIES TIMEOUT 30)
 
 foreach(rank_count IN ITEMS 1 2)
-  add_test(NAME v04_coast_restart_import_cli_mpi_${rank_count}
+  add_test(NAME v04_mesh_restart_import_cli_mpi_${rank_count}
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/integration/coast_restart_import_cli_test.py"
-      --binary "$<TARGET_FILE:v04_coast_restart_import>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/mesh_restart_import_cli_test.py"
+      --binary "$<TARGET_FILE:v04_mesh_restart_import>"
       --mpi "${MPIEXEC_EXECUTABLE}" --ranks "${rank_count}"
       --case-template "${CMAKE_CURRENT_SOURCE_DIR}/data/case_minimal_valid.json"
       --thermo "${CMAKE_CURRENT_SOURCE_DIR}/data/gtmc_hundun_thermophysics.d")
-  set_tests_properties(v04_coast_restart_import_cli_mpi_${rank_count}
+  set_tests_properties(v04_mesh_restart_import_cli_mpi_${rank_count}
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 180 RUN_SERIAL TRUE
     LABELS "gtmc-transfer")
 endforeach()
@@ -231,11 +231,11 @@ add_test(NAME v04_evidence_workflow
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
           "${hundun_repository_root}/tools/v04_evidence_validate.py"
           self-test)
-add_test(NAME v04_coast_spray_inventory
+add_test(NAME v04_reference_spray_inventory
   COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
-          "${CMAKE_CURRENT_SOURCE_DIR}/integration/coast_spray_test.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/integration/reference_spray_test.py"
           "${hundun_repository_root}/tools/v04_spray_inventory.py")
-set_tests_properties(v04_coast_spray_inventory PROPERTIES TIMEOUT 30)
+set_tests_properties(v04_reference_spray_inventory PROPERTIES TIMEOUT 30)
 add_test(NAME v04_evidence_v4_product_validator
   COMMAND "${CMAKE_COMMAND}"
           "-DPRODUCT=$<TARGET_FILE:hundun>"

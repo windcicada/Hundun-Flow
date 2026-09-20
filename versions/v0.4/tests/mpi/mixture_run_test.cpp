@@ -46,7 +46,7 @@ bool run(double formation, std::vector<double>& fractions, bool variable_density
   outlet.scalars={{"air",ScalarBoundaryKind::zero_gradient},
                   {"B",ScalarBoundaryKind::zero_gradient}};
   auto gas=model.thermophysics.species.front();
-  gas.transport_law=TransportLaw::coast_perry;
+  gas.transport_law=TransportLaw::perry;
   gas.viscosity_reference=gas.conductivity=0;
   gas.prandtl=.7; gas.critical_temperature=126.2; gas.critical_pressure=33.5;
   const double R=kUniversalGasConstant/gas.molecular_weight;

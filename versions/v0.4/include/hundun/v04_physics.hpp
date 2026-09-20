@@ -18,8 +18,8 @@
 namespace hundun::v04 {
 
 inline constexpr double kUniversalGasConstant = 8314.46261815324;
-inline constexpr double kCoastNativeAirUniversalGasConstant = 8314.3;
-inline constexpr double kCoastNativeAirMolecularWeight = 28.850334;
+inline constexpr double kNasaAirUniversalGasConstant = 8314.3;
+inline constexpr double kNasaAirMolecularWeight = 28.850334;
 
 enum class ThermodynamicsKernel : std::uint8_t { nasa7, constant_cp };
 
@@ -267,8 +267,8 @@ class ThermodynamicsPlan {
 enum class TransportKernel : std::uint8_t {
   constant,
   sutherland_wilke,
-  coast_native_air,
-  coast_perry
+  nasa_air,
+  perry
 };
 
 struct MolecularTransportState {
@@ -300,8 +300,8 @@ class TransportPlan {
   TransportKernel kernel() const noexcept { return kernel_; }
   double enthalpy_prandtl() const noexcept { return enthalpy_prandtl_; }
   bool has_effective_enthalpy_transport() const noexcept {
-    return kernel_ == TransportKernel::coast_native_air ||
-           kernel_ == TransportKernel::coast_perry;
+    return kernel_ == TransportKernel::nasa_air ||
+           kernel_ == TransportKernel::perry;
   }
   PlanFingerprint fingerprint() const noexcept { return fingerprint_; }
 

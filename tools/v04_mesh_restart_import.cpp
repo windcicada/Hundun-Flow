@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
-// Offline bridge from the audited COAST/VTK mean-field transfer arrays to a
+// Offline bridge from the audited REFERENCE/VTK mean-field transfer arrays to a
 // native HUNDUN v0.4 legacy restart.  This intentionally reconstructs h and
-// rho with HUNDUN thermodynamics; it is not a COAST PDF restart continuation.
+// rho with HUNDUN thermodynamics; it is not a REFERENCE PDF restart continuation.
 
 #include "hundun/v04_app.hpp"
 #include "hundun/v04_io.hpp"
@@ -40,7 +40,7 @@ constexpr double kDefaultDt = 5.456638518808177e-7;
 constexpr double kDefaultPressureReference = 100000.0;
 constexpr double kSolidTemperature = 295.0;
 constexpr double kCarrierOxygenMassFraction = 0.23291751145757963;
-constexpr double kCoastGasConstant = 8314.3;
+constexpr double kReferenceGasConstant = 8314.3;
 
 enum Detail : std::uint32_t {
   kArguments = 24001U,
@@ -77,8 +77,8 @@ struct SourceBlock {
   std::vector<float> pressure_absolute;
   std::vector<float> temperature;
   std::vector<float> methane;
-  std::vector<float> coast_density;
-  std::vector<float> coast_flow_enthalpy;
+  std::vector<float> reference_density;
+  std::vector<float> reference_flow_enthalpy;
   std::vector<std::uint8_t> fluid;
 
   std::size_t offset(Int3 global) const noexcept {
@@ -106,13 +106,13 @@ struct Audit {
   std::uint64_t maximum_workspace_bytes_per_rank{};
   std::uint64_t service_staging_bytes_per_rank{};
   std::uint64_t estimated_single_product_peak_bytes_per_rank{};
-  long double coast_mass{};
+  long double reference_mass{};
   long double hundun_mass{};
-  long double coast_energy{};
+  long double reference_energy{};
   long double hundun_energy{};
-  long double coast_kinetic_energy{};
+  long double reference_kinetic_energy{};
   long double hundun_kinetic_energy{};
-  long double coast_total_energy{};
+  long double reference_total_energy{};
   long double hundun_total_energy{};
   long double same_density_enthalpy_change{};
   long double absolute_energy_change{};
@@ -275,7 +275,7 @@ bool parse_options(int argc, char** argv, Options& options) {
 
 std::string usage() {
   return
-      "usage: v04_coast_restart_import --case CASE_ROOT --transfer "
+      "usage: v04_mesh_restart_import --case CASE_ROOT --transfer "
       "TRANSFER_ROOT --output RESTART_ROOT [--step N] [--time S] [--dt S] "
       "[--pressure-reference PA]\n";
 }
@@ -402,8 +402,8 @@ Status read_source(const std::filesystem::path& root, Int3 global_cells,
       {"p_abs.f32", &candidate.pressure_absolute},
       {"temperature.f32", &candidate.temperature},
       {"Y_CH4.f32", &candidate.methane},
-      {"rho.f32", &candidate.coast_density},
-      {"flow_h.f32", &candidate.coast_flow_enthalpy}}};
+      {"rho.f32", &candidate.reference_density},
+      {"flow_h.f32", &candidate.reference_flow_enthalpy}}};
   Status status;
   for (const Field& field : fields) {
     status = read_f32_box(root / field.name, global_cells, candidate.begin,
@@ -465,16 +465,16 @@ Status reconstruct(const SourceBlock& source,
     const double pressure = source.pressure_absolute[cell];
     const double temperature = source.temperature[cell];
     const double methane = source.methane[cell];
-    const double coast_density = source.coast_density[cell];
-    const double coast_h = source.coast_flow_enthalpy[cell];
+    const double reference_density = source.reference_density[cell];
+    const double reference_h = source.reference_flow_enthalpy[cell];
     if (!std::isfinite(u) || !std::isfinite(v) || !std::isfinite(w) ||
         !std::isfinite(pressure) || !(pressure > 0.0) ||
         !std::isfinite(temperature) ||
         temperature < thermodynamics.minimum_temperature() ||
         temperature > thermodynamics.maximum_temperature() ||
         !std::isfinite(methane) || methane < 0.0 || methane > 1.0 ||
-        !std::isfinite(coast_density) || !(coast_density > 0.0) ||
-        !std::isfinite(coast_h))
+        !std::isfinite(reference_density) || !(reference_density > 0.0) ||
+        !std::isfinite(reference_h))
       return {StatusCode::numerical_failure, kInputValue};
     const double oxygen = (1.0 - methane) * kCarrierOxygenMassFraction;
     const std::array<double, 2U> species{{methane, oxygen}};
@@ -891,38 +891,38 @@ Status local_audit(const CartesianGeometryPlan& geometry,
             static_cast<long double>(dx.data[static_cast<std::size_t>(global.x)]) *
             dy.data[static_cast<std::size_t>(global.y)] *
             dz.data[static_cast<std::size_t>(global.z)];
-        const long double coast_rho = source.coast_density[input];
-        const long double coast_h = source.coast_flow_enthalpy[input];
+        const long double reference_rho = source.reference_density[input];
+        const long double reference_h = source.reference_flow_enthalpy[input];
         const long double hundun_rho = reconstructed.density[input];
         const long double hundun_h = reconstructed.enthalpy[input];
-        const long double coast_energy = volume * coast_rho * coast_h;
+        const long double reference_energy = volume * reference_rho * reference_h;
         const long double hundun_energy = volume * hundun_rho * hundun_h;
         const long double speed_square =
             static_cast<long double>(source.u[input]) * source.u[input] +
             static_cast<long double>(source.v[input]) * source.v[input] +
             static_cast<long double>(source.w[input]) * source.w[input];
-        const long double coast_kinetic =
-            0.5L * volume * coast_rho * speed_square;
+        const long double reference_kinetic =
+            0.5L * volume * reference_rho * speed_square;
         const long double hundun_kinetic =
             0.5L * volume * hundun_rho * speed_square;
         const long double pressure_work_inventory =
             volume * source.pressure_absolute[input];
-        const long double difference = hundun_energy - coast_energy;
-        candidate.coast_mass += volume * coast_rho;
+        const long double difference = hundun_energy - reference_energy;
+        candidate.reference_mass += volume * reference_rho;
         candidate.hundun_mass += volume * hundun_rho;
-        candidate.coast_energy += coast_energy;
+        candidate.reference_energy += reference_energy;
         candidate.hundun_energy += hundun_energy;
-        candidate.coast_kinetic_energy += coast_kinetic;
+        candidate.reference_kinetic_energy += reference_kinetic;
         candidate.hundun_kinetic_energy += hundun_kinetic;
-        candidate.coast_total_energy +=
-            coast_energy - pressure_work_inventory + coast_kinetic;
+        candidate.reference_total_energy +=
+            reference_energy - pressure_work_inventory + reference_kinetic;
         candidate.hundun_total_energy +=
             hundun_energy - pressure_work_inventory + hundun_kinetic;
         candidate.same_density_enthalpy_change +=
-            volume * coast_rho * (hundun_h - coast_h);
+            volume * reference_rho * (hundun_h - reference_h);
         candidate.absolute_energy_change += std::abs(difference);
         const double density_error =
-            reconstructed.density[input] - source.coast_density[input];
+            reconstructed.density[input] - source.reference_density[input];
         candidate.density_error_sum += density_error;
         candidate.density_error_square_sum +=
             static_cast<long double>(density_error) * density_error;
@@ -942,9 +942,9 @@ Status reduce_audit(MPI_Comm communicator, Audit& audit) noexcept {
                     MPI_UINT64_T, MPI_SUM, communicator) != MPI_SUCCESS)
     return {StatusCode::mpi_failure, kCollective};
   std::array<long double, 14U> sums{{
-      audit.coast_mass,
+      audit.reference_mass,
       audit.hundun_mass,
-      audit.coast_energy,
+      audit.reference_energy,
       audit.hundun_energy,
       audit.same_density_enthalpy_change,
       audit.absolute_energy_change,
@@ -952,9 +952,9 @@ Status reduce_audit(MPI_Comm communicator, Audit& audit) noexcept {
       audit.density_error_square_sum,
       audit.native_flux_absolute_change,
       audit.native_internal_source_absolute_mass_flow,
-      audit.coast_kinetic_energy,
+      audit.reference_kinetic_energy,
       audit.hundun_kinetic_energy,
-      audit.coast_total_energy,
+      audit.reference_total_energy,
       audit.hundun_total_energy}};
   if (MPI_Allreduce(MPI_IN_PLACE, sums.data(), static_cast<int>(sums.size()),
                     MPI_LONG_DOUBLE, MPI_SUM, communicator) != MPI_SUCCESS)
@@ -978,9 +978,9 @@ Status reduce_audit(MPI_Comm communicator, Audit& audit) noexcept {
   audit.solid_cells = counts[1U];
   audit.native_flux_changed_owned_faces = counts[2U];
   audit.native_internal_source_faces = counts[3U];
-  audit.coast_mass = sums[0U];
+  audit.reference_mass = sums[0U];
   audit.hundun_mass = sums[1U];
-  audit.coast_energy = sums[2U];
+  audit.reference_energy = sums[2U];
   audit.hundun_energy = sums[3U];
   audit.same_density_enthalpy_change = sums[4U];
   audit.absolute_energy_change = sums[5U];
@@ -988,9 +988,9 @@ Status reduce_audit(MPI_Comm communicator, Audit& audit) noexcept {
   audit.density_error_square_sum = sums[7U];
   audit.native_flux_absolute_change = sums[8U];
   audit.native_internal_source_absolute_mass_flow = sums[9U];
-  audit.coast_kinetic_energy = sums[10U];
+  audit.reference_kinetic_energy = sums[10U];
   audit.hundun_kinetic_energy = sums[11U];
-  audit.coast_total_energy = sums[12U];
+  audit.reference_total_energy = sums[12U];
   audit.hundun_total_energy = sums[13U];
   audit.density_error_max = maxima[0U];
   audit.field_readback_max = maxima[1U];
@@ -1047,8 +1047,8 @@ Status write_audit(const Options& options, const CartesianGeometryPlan& geometry
       options.output_root / "mean-field-transfer.json.tmp";
   std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
   if (!stream) return {StatusCode::io_failure, kAuditWrite};
-  const long double energy_change = audit.hundun_energy - audit.coast_energy;
-  const long double mass_change = audit.hundun_mass - audit.coast_mass;
+  const long double energy_change = audit.hundun_energy - audit.reference_energy;
+  const long double mass_change = audit.hundun_mass - audit.reference_mass;
   const long double density_mean = audit.fluid_cells == 0U
       ? 0.0L
       : audit.density_error_sum / audit.fluid_cells;
@@ -1059,7 +1059,7 @@ Status write_audit(const Options& options, const CartesianGeometryPlan& geometry
          << "{\n"
          << "  \"schema\": \"gtmc-hundun-native-mean-field-transfer/v1\",\n"
          << "  \"status\": \"ok\",\n"
-         << "  \"scope\": \"HUNDUN development-state transfer; not COAST/PDF restart equivalence\",\n"
+         << "  \"scope\": \"HUNDUN development-state transfer; not REFERENCE/PDF restart equivalence\",\n"
          << "  \"case_root\": "
          << json_string(options.case_root.generic_string()) << ",\n"
          << "  \"transfer_root\": "
@@ -1083,32 +1083,32 @@ Status write_audit(const Options& options, const CartesianGeometryPlan& geometry
          << "    \"persisted_face_flux\": \"ProductDriver applies compiled immersed-inlet source authority before the native snapshot is written; outer-boundary faces retain the imported estimate until the recovery step resolves boundary conditions\"\n"
          << "  },\n"
          << "  \"excluded_source_fields\": [\"pressure_correction_dp\", \"mixture_fraction_nvf\", \"flow_h_as_restart_authority\"],\n"
-         << "  \"gas_constants_J_per_kmol_K\": {\"COAST\": "
-         << kCoastGasConstant << ", \"HUNDUN\": " << kUniversalGasConstant
+         << "  \"gas_constants_J_per_kmol_K\": {\"REFERENCE\": "
+         << kReferenceGasConstant << ", \"HUNDUN\": " << kUniversalGasConstant
          << ", \"difference\": "
-         << kUniversalGasConstant - kCoastGasConstant << "},\n"
+         << kUniversalGasConstant - kReferenceGasConstant << "},\n"
          << "  \"cell_counts\": {\"fluid\": " << audit.fluid_cells
          << ", \"solid_placeholder\": " << audit.solid_cells << "},\n"
-         << "  \"mass_kg\": {\"COAST_vtk_rho\": " << audit.coast_mass
+         << "  \"mass_kg\": {\"REFERENCE_vtk_rho\": " << audit.reference_mass
          << ", \"HUNDUN_eos\": " << audit.hundun_mass
          << ", \"change\": " << mass_change << "},\n"
-         << "  \"enthalpy_inventory_J\": {\"COAST_raw_rho_h\": "
-         << audit.coast_energy << ", \"HUNDUN_eos_rho_h\": "
+         << "  \"enthalpy_inventory_J\": {\"REFERENCE_raw_rho_h\": "
+         << audit.reference_energy << ", \"HUNDUN_eos_rho_h\": "
          << audit.hundun_energy << ", \"change\": " << energy_change
          << ", \"sum_absolute_cell_change\": "
          << audit.absolute_energy_change
-         << ", \"same_COAST_density_h_change\": "
+         << ", \"same_REFERENCE_density_h_change\": "
          << audit.same_density_enthalpy_change << "},\n"
-         << "  \"kinetic_energy_J\": {\"COAST_vtk_rho\": "
-         << audit.coast_kinetic_energy << ", \"HUNDUN_eos_rho\": "
+         << "  \"kinetic_energy_J\": {\"REFERENCE_vtk_rho\": "
+         << audit.reference_kinetic_energy << ", \"HUNDUN_eos_rho\": "
          << audit.hundun_kinetic_energy << ", \"change\": "
-         << audit.hundun_kinetic_energy - audit.coast_kinetic_energy
+         << audit.hundun_kinetic_energy - audit.reference_kinetic_energy
          << "},\n"
-         << "  \"total_energy_rho_e_plus_kinetic_J\": {\"COAST\": "
-         << audit.coast_total_energy << ", \"HUNDUN\": "
+         << "  \"total_energy_rho_e_plus_kinetic_J\": {\"REFERENCE\": "
+         << audit.reference_total_energy << ", \"HUNDUN\": "
          << audit.hundun_total_energy << ", \"change\": "
-         << audit.hundun_total_energy - audit.coast_total_energy << "},\n"
-         << "  \"HUNDUN_rho_minus_COAST_rho_kg_m3\": {\"mean\": "
+         << audit.hundun_total_energy - audit.reference_total_energy << "},\n"
+         << "  \"HUNDUN_rho_minus_REFERENCE_rho_kg_m3\": {\"mean\": "
          << density_mean << ", \"rmse\": " << density_rmse
          << ", \"max_absolute\": " << audit.density_error_max << "},\n"
          << "  \"native_flux_adjustment\": {\"changed_owned_faces\": "
@@ -1268,8 +1268,8 @@ int run(MPI_Comm communicator, const Options& options, int rank) {
     };
     for (const std::vector<float>* values : {
              &source.u, &source.v, &source.w, &source.pressure_absolute,
-             &source.temperature, &source.methane, &source.coast_density,
-             &source.coast_flow_enthalpy})
+             &source.temperature, &source.methane, &source.reference_density,
+             &source.reference_flow_enthalpy})
       add(vector_bytes(values->size(), sizeof(float)));
     for (const std::vector<double>* values : {
              &reconstructed.enthalpy, &reconstructed.density,
@@ -1444,11 +1444,11 @@ int run(MPI_Comm communicator, const Options& options, int rank) {
               << audit.native_internal_source_absolute_mass_flow
               << " estimated_peak_bytes_per_rank="
               << audit.estimated_single_product_peak_bytes_per_rank
-              << " mass_change_kg=" << audit.hundun_mass - audit.coast_mass
+              << " mass_change_kg=" << audit.hundun_mass - audit.reference_mass
               << " enthalpy_inventory_change_J="
-              << audit.hundun_energy - audit.coast_energy
+              << audit.hundun_energy - audit.reference_energy
               << " total_energy_change_J="
-              << audit.hundun_total_energy - audit.coast_total_energy
+              << audit.hundun_total_energy - audit.reference_total_energy
               << " field_readback_max=" << audit.field_readback_max
               << " flux_readback_max=" << audit.flux_readback_max << '\n';
   }

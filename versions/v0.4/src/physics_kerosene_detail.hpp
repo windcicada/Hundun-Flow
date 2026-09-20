@@ -9,7 +9,7 @@ namespace hundun::v04::detail {
 inline double kerosene_liquid_density(double temperature) noexcept {
   return 1.037096e3 - 7.233865e-1 * temperature - 9.255437e3 / (733.0 - temperature);
 }
-// COAST's gaseous kerosene relation, shared by bulk flow and the film query.
+// REFERENCE's gaseous kerosene relation, shared by bulk flow and the film query.
 // Callers validate the temperature domain and the positive returned viscosity.
 inline double kerosene_vapor_viscosity(double temperature) noexcept {
   return temperature > 400.0

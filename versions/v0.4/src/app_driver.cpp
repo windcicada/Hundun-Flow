@@ -1049,8 +1049,12 @@ static Status run_application(MPI_Comm communicator,
             terminal.final_flux == 0U ||
             terminal.final_flux != step.piso.final_flux_revision)
           return Status{StatusCode::invalid_plan, kApplicationDiagnostics};
-        const std::array<std::pair<const char*, double>, 21U> values{{
+        const std::array<std::pair<const char*, double>, 25U> values{{
             {"dt", step.proposal.dt},
+            {"continuity_equation_sum_kg_s", terminal.continuity_signed},
+            {"energy_equation_sum_W", terminal.energy_signed},
+            {"mass_budget_identity_kg_s", balance.mass_balance_defect-terminal.continuity_signed},
+            {"energy_budget_identity_W", balance.total_energy_balance_defect-terminal.energy_signed},
             {"mass_kg", terminal.mass},
             {"internal_energy_J", terminal.internal_energy},
             {"kinetic_energy_J", terminal.kinetic_energy},
@@ -1097,13 +1101,16 @@ static Status run_application(MPI_Comm communicator,
             for(const auto& row:(group ? balance.element_balance : balance.species_balance)) {
               if(!first)payload << ',';first=false;
               payload << "{\"name\":\"" << detail::output_json_escape(row.name) << '"';
-              const std::array<std::pair<const char*,double>,11> entries{{
+              const std::array<std::pair<const char*,double>,15> entries{{
                   {"accepted_inventory",row.accepted_inventory},{"current_inventory",row.current_inventory},
                   {"temporal_rate",row.temporal_rate},{"transport_outflow",row.transport_outflow},
                   {"pressure_outflow",row.pressure_outflow},{"noise_source",row.noise_source},
                   {"mixing_source",row.mixing_source},{"chemistry_source",row.chemistry_source},
                   {"defect",row.defect},{"relative_defect",row.relative_defect},
-                  {"storage_roundoff_bound",row.storage_roundoff_bound}}};
+                  {"storage_roundoff_bound",row.storage_roundoff_bound},
+                  {"advective_conversion",row.advective_conversion},{"density_update",row.density_update},
+                  {"transport_equation_residual",row.transport_equation_residual},
+                  {"unexplained_defect",row.unexplained_defect}}};
               for(const auto& entry:entries) {
                 if(!std::isfinite(entry.second))return Status{StatusCode::invalid_plan,kApplicationDiagnostics};
                 payload << ",\"" << entry.first << "\":" << entry.second;

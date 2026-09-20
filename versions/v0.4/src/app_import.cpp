@@ -565,7 +565,7 @@ int run(const char *case_root, const char *transfer, const char *output,
                return reconstruct(h, thermo, transport_plan, b);
              })))
     return 5;
-  // Quantify canonical native mean EOS relative to the COAST startup PDF EOS.
+  // Quantify canonical native mean EOS relative to the REFERENCE startup PDF EOS.
   std::array<double, 6> audit{};
   for (int z = 0; z < patch.cells.z; ++z)
     for (int y = 0; y < patch.cells.y; ++y)
@@ -645,7 +645,7 @@ int run(const char *case_root, const char *transfer, const char *output,
       file << (i ? "," : "") << std::quoted(h.passive_names[h.passive_mapping[i]]);
     file << "]"
          << ",\"scope\":\"fixed PDF p/h/Y, canonical native mean EOS versus "
-            "COAST startup harmonic PDF EOS\"}\n";
+            "REFERENCE startup harmonic PDF EOS\"}\n";
     if (!file)
       s = invalid(24111);
   }
