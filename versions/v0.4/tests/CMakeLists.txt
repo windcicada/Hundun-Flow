@@ -2846,3 +2846,23 @@ add_test(NAME v04_gas_passive_cli
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/gas_passive_test.py"
     "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}")
 set_tests_properties(v04_gas_passive_cli PROPERTIES PROCESSORS 4 TIMEOUT 240 RUN_SERIAL TRUE)
+
+add_executable(v04_chem_batch_test mpi/chem_batch_test.cpp)
+target_include_directories(v04_chem_batch_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_link_libraries(v04_chem_batch_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count 1 2 4)
+  add_test(NAME v04_chem_batch_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}" "$<TARGET_FILE:v04_chem_batch_test>")
+  set_tests_properties(v04_chem_batch_mpi_${rank_count} PROPERTIES TIMEOUT 30 PROCESSORS ${rank_count})
+endforeach()
+
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  add_test(NAME v04_hot_cli
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/hot_test.py"
+      "$<TARGET_FILE:hundun>" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jl4-flow"
+      "${MPIEXEC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/hot"
+      "${hundun_repository_root}/tools/v04_evidence_validate.py"
+      "$<TARGET_FILE:v04_kerosene_esf_test>")
+  set_tests_properties(v04_hot_cli PROPERTIES TIMEOUT 180 PROCESSORS 4 RUN_SERIAL TRUE)
+endif()

@@ -5,6 +5,7 @@
 #include "models_orders_detail.hpp"
 #include "models_roundoff_detail.hpp"
 #include "models_kerosene_cantera_detail.hpp"
+#include "models_molar_detail.hpp"
 
 #include "cantera/base/Solution.h"
 #include "cantera/kinetics/Kinetics.h"
@@ -212,6 +213,7 @@ struct Workspace final {
   std::shared_ptr<Cantera::Reactor> reactor;
   std::unique_ptr<Cantera::ReactorNet> network;
   std::unique_ptr<detail::KeroseneMaterial> kerosene;
+  std::unique_ptr<detail::FrozenMolar> molar;
   std::vector<double> query_diffusion, query_enthalpies, query_rates;
   std::vector<double> advance_fractions, advance_delta;
   bool reference_tolerances_initialized{};
@@ -270,6 +272,7 @@ Workspace make_workspace(const std::filesystem::path &mechanism,
   result.kinetics = result.solution->kinetics();
   result.kerosene = detail::kerosene_material(result.solution);
   result.transport = result.solution->transport();
+  result.molar=std::make_unique<detail::FrozenMolar>(*result.thermo,*result.kinetics);
   result.reactor = std::make_shared<Cantera::IdealGasConstPressureReactor>(
       result.solution, false);
   result.network = std::make_unique<Cantera::ReactorNet>(result.reactor);
@@ -501,6 +504,13 @@ CanteraBackend::closure_identity() const noexcept {
 portable::Status
 CanteraBackend::query_gas(const portable::GasQuery &q,
                           portable::GasQueryOutput &out) noexcept {
+  return query_impl(q,out,true);
+}
+portable::Status CanteraBackend::query_sample(const portable::GasQuery &q,portable::GasQueryOutput &out) noexcept {
+  return query_impl(q,out,false);
+}
+portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
+    portable::GasQueryOutput &out,bool complete) noexcept {
   out.sample = {};
   if (impl_->pool_lifetime.expired())
     return portable::Status::unavailable;
@@ -577,6 +587,7 @@ CanteraBackend::query_gas(const portable::GasQuery &q,
          std::abs(sample.enthalpy_j_per_kg - q.enthalpy_j_per_kg) >
              1e-10 * std::max(1., std::abs(q.enthalpy_j_per_kg))))
       return portable::Status::provider_failure;
+    if(!complete) {out.sample=sample;return portable::Status::success;}
     w.transport->getMixDiffCoeffs(w.query_diffusion.data());
     thermo.getPartialMolarEnthalpies(w.query_enthalpies.data());
     if (w.kerosene) w.kerosene->molar_rates(thermo, w.query_rates.data());
@@ -680,7 +691,7 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
                                     w.query_enthalpies.data(),
                                     w.query_rates.data(),
                                     n};
-    auto status = query_gas(r.state, sample);
+    auto status = query_impl(r.state, sample, false);
     if (status != portable::Status::success)
       return status;
     const double initial_rho = sample.sample.density_kg_per_m3;
@@ -694,6 +705,10 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
               absolute_tolerance, impl_->controls.maximum_internal_steps - total_steps,
               w.advance_fractions,impl_->controls.molar_reference_controls);
           count = w.kerosene->steps();
+        } else if(impl_->controls.frozen_material_interval) {
+          integration_started=true;
+          w.molar->integrate(r.duration_s,impl_->controls.maximum_internal_steps-total_steps,w.advance_fractions);
+          count=w.molar->steps();
         } else {
           // Independent cell intervals share storage, not reactor volume history.
           w.reactor->setInitialVolume(1.0);
@@ -789,7 +804,7 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
       }
       auto final_query = r.state;
       final_query.mass_fractions = w.advance_fractions.data();
-      status = query_gas(final_query, sample);
+      status = query_impl(final_query, sample, false);
       if (status != portable::Status::success)
         return status;
       std::copy(w.advance_fractions.begin(), w.advance_fractions.end(),
@@ -809,7 +824,7 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
       if (integration_started && !steps_recorded) {
         try {
           const auto count = w.kerosene ? w.kerosene->steps() :
-              w.network->solverStats()["steps"].asInt();
+              (impl_->controls.frozen_material_interval ? w.molar->steps() : w.network->solverStats()["steps"].asInt());
           if (count < 0) total_steps = impl_->controls.maximum_internal_steps;
           else total_steps += static_cast<unsigned>(count);
         } catch (...) {
@@ -1034,7 +1049,8 @@ make_cantera_backend(const CanteraBackendConfig &config,
                      CanteraWorkspacePool &pool) {
   // The donor obtained these checks from its case schema. This independent
   // backend has no schema caller, so reject controls before claiming a lane.
-  if (!std::isfinite(config.chemistry.relative_tolerance) ||
+  if ((config.chemistry.frozen_material_interval && !config.chemistry.molar_reference_controls) ||
+      !std::isfinite(config.chemistry.relative_tolerance) ||
       (config.chemistry.relative_tolerance < 0.0 ||
        (config.chemistry.relative_tolerance == 0.0 && !config.chemistry.molar_reference_controls)) ||
       !std::isfinite(config.chemistry.absolute_tolerance) ||

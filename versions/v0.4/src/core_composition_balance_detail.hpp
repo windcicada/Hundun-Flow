@@ -144,19 +144,27 @@ class CompositionBalanceLedger {
     }
     catch (...) {local={StatusCode::allocation_failure,17861};}
     status=reductions.consensus(local); if (!status) return status;
-    for(std::size_t first=0;first<ns;first+=8) {
-      std::array<double,8> input{};
-      const auto count=std::min<std::size_t>(8,ns-first);
-      for(std::size_t j=0;j<count;++j)input[j]=static_cast<double>(storage_bounds_[first+j]);
-      status=reductions.checked_sum({input.data(),count},{bounds.data()+first,count},{});
+    // Fill each reduction packet to the negotiated capacity. Species and
+    // storage-roundoff bounds remain separate coordinates in the same SUM.
+    const std::size_t width=term_count+1;
+    std::vector<double> packed, reduced;
+    try {
+      packed.resize(ns*width);reduced.resize(ns*width);
+      for(std::size_t s=0;s<ns;++s) {
+        for(unsigned t=0;t<term_count;++t)packed[s*width+t]=static_cast<double>(rows_[s][t]);
+        packed[s*width+term_count]=static_cast<double>(storage_bounds_[s]);
+      }
+    } catch(...) {local={StatusCode::allocation_failure,17861};}
+    status=reductions.consensus(local);if(!status)return status;
+    if(reductions.capacity()==0)return invalid();
+    for(std::size_t first=0;first<packed.size();first+=reductions.capacity()) {
+      const auto count=std::min(reductions.capacity(),packed.size()-first);
+      status=reductions.checked_sum({packed.data()+first,count},{reduced.data()+first,count},{});
       if(!status)return status;
     }
-    for (std::size_t s=0;s<ns;++s) {
-      std::array<double,term_count> input{}, result{};
-      for (unsigned t=0;t<term_count;++t) input[t]=static_cast<double>(rows_[s][t]);
-      status=reductions.checked_sum({input.data(),term_count},{result.data(),term_count},{});
-      if (!status) return status;
-      for (unsigned t=0;t<term_count;++t) global[s][t]=result[t];
+    for(std::size_t s=0;s<ns;++s) {
+      for(unsigned t=0;t<term_count;++t)global[s][t]=reduced[s*width+t];
+      bounds[s]=reduced[s*width+term_count];
       report(species[s],global[s],bounds[s]);
     }
     for (std::size_t e=0;e<ne;++e) {

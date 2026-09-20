@@ -25,6 +25,8 @@ struct ChemistrySolverConfig final {
   double absolute_tolerance{};
   int maximum_internal_steps{};
   bool molar_reference_controls{};
+  // Reference ESF: integrate Y/W at the interval-start temperature and density.
+  bool frozen_material_interval{};
 };
 struct CanteraBackendConfig final {
   CanteraMechanismConfig mechanism;
@@ -100,6 +102,7 @@ public:
   const portable::GasIdentity &gas_identity() const noexcept override;
   portable::Status query_gas(const portable::GasQuery &,
                              portable::GasQueryOutput &) noexcept override;
+  portable::Status query_sample(const portable::GasQuery &,portable::GasQueryOutput &) noexcept override;
   const combustion::ChemistryIdentity &closure_identity() const noexcept;
   portable::Status advance_gas(const portable::GasAdvanceQuery &,
                                portable::GasAdvanceOutput &) noexcept override;
@@ -112,6 +115,7 @@ public:
 private:
   struct Impl;
   explicit CanteraBackend(std::unique_ptr<Impl>) noexcept;
+  portable::Status query_impl(const portable::GasQuery &,portable::GasQueryOutput &,bool) noexcept;
   std::unique_ptr<Impl> impl_;
   friend std::unique_ptr<CanteraBackend>
   make_cantera_backend(const CanteraBackendConfig &, CanteraWorkspacePool &);

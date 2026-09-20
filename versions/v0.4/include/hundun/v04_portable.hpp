@@ -99,6 +99,11 @@ public:
   virtual ~GasQueryProvider() = default;
   virtual const GasIdentity &gas_identity() const noexcept = 0;
   virtual Status query_gas(const GasQuery &, GasQueryOutput &) noexcept = 0;
+  // Sample-only requests preserve array storage; consumers read only sample.
+  // Providers without a specialized implementation retain the full query.
+  virtual Status query_sample(const GasQuery& q, GasQueryOutput& out) noexcept {
+    return query_gas(q,out);
+  }
 };
 
 struct GasAdvanceQuery {

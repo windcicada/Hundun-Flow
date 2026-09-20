@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "core_reaction_detail.hpp"
+#include "core_chem_batch_detail.hpp"
 #include "core_tcr_history_detail.hpp"
 #include "core_tcr_dynamic_detail.hpp"
 #include "hundun/v04_ibm.hpp"
@@ -33,6 +34,12 @@ public:
     for(unsigned face=0;face<6;++face)
       physical_boundary_[face]=model.boundaries[face].flow_kind!=BoundaryKind::periodic;
     spec_ = *model.reaction.esf;
+    chemistry_screen_=model.reaction.representation==ReactionSpec::Representation::direct_cantera;
+    const auto& gas_names=gas.gas_identity().species_names;
+    const auto fuel_name=spec_.tcr.mode!=TcrMode::off ? spec_.tcr.fuel :
+        (std::find(gas_names.begin(),gas_names.end(),"CH4")!=gas_names.end() ? "CH4" : "C12H23");
+    chemistry_fuel_=std::find(gas_names.begin(),gas_names.end(),fuel_name)-gas_names.begin();
+    chemistry_screen_=chemistry_screen_ && chemistry_fuel_<gas_names.size();
     cells_ = cells;
     ns_ = gas.gas_identity().species_names.size();
     gas_fingerprint_=gas.fingerprint();
@@ -84,6 +91,7 @@ public:
     }
     const std::size_t per_cell =
         sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5) +
+        spec_.fields*sizeof(portable::GasSample) +
         (spec_.tcr.mode!=TcrMode::experimental || dynamic_tcr() ? sizeof(ColdPressureRow)+sizeof(double) : 0) +
         (dyn711() ? 2*(sizeof(tcr::detail::Dyn711RateState)*ns_+40+40*ns_)+
              8*(2*ns_+3)+ns_+2 : dynamic_tcr() ? 32 * (5*ns_+3) + 48 :
@@ -105,6 +113,7 @@ public:
     if (count_ > SIZE_MAX / per_cell || extra_bytes > maximum_bytes ||
         count_ * per_cell > maximum_bytes - extra_bytes)
       return {StatusCode::allocation_failure, 10215};
+    chemistry_budget_=maximum_bytes-count_*per_cell-extra_bytes;
     if (common_transport_) {
       const auto allocated = FaceFluxStorage::allocate_workspace(cells, 1, mixture_storage_);
       if (!allocated) return allocated;
@@ -168,6 +177,7 @@ public:
     }
     rates_.resize(count_ * spec_.fields * stride_);
     reactor_density_.resize(count_ * spec_.fields);
+    reactor_samples_.resize(count_*spec_.fields);
     gradients_.resize(3 * rates_.size());
     scratch_.resize(3 * count_);
     mass_divergence_.resize(count_);
@@ -301,7 +311,7 @@ public:
     if (!enabled())
       return 0;
     std::uint64_t bytes =
-        sizeof(*this) + immersed_bytes_ + workspace_->owned_bytes() +
+        sizeof(*this) + reactor_samples_.capacity()*sizeof(portable::GasSample) + immersed_bytes_ + workspace_->owned_bytes() +
         mixture_storage_.counters().aligned_payload_bytes +
         mixture_species_.capacity() * sizeof(ConstFieldView) +
         tcr_history.owned_bytes() +
@@ -1118,6 +1128,7 @@ public:
             if (!status)
               return status;
             reactor_density_[i * spec_.fields + f] = sample.density_kg_per_m3;
+            reactor_samples_[i*spec_.fields+f]=sample;
             for (std::size_t c = 0; c < stride_; ++c)
               trial.data[f].unchecked(cell, c) = moved.candidate.values[f * stride_ + c];
           }
@@ -1154,6 +1165,7 @@ public:
             transport_revision_,sample);
         if(!status)return status;
         reactor_density_[i*spec_.fields+f]=sample.density_kg_per_m3;
+        reactor_samples_[i*spec_.fields+f]=sample;
       }
     }
     transport_ready_=true;return {};
@@ -1161,7 +1173,7 @@ public:
   // Enter only after all ranks have accepted the complete spatial/mixing
   // phase. Thermodynamic queries and TCR preparation precede this boundary;
   // the interval provider then reads the assembled field state.
-  Status react(const ProductReactionSources &gas, const ThermodynamicsPlan& thermo,
+  Status react(MPI_Comm communicator,const ProductReactionSources &gas, const ThermodynamicsPlan& thermo,
                Span<FieldView> trial, FieldView auxiliary,
                ConstFieldView carrier_density, ConstFieldView pi, double pressure_reference, double time,
                double dt, std::uint64_t step, RevisionToken generation,
@@ -1170,15 +1182,64 @@ public:
     const bool ready = transport_ready_;
     transport_ready_ = false;
     correction_seed_ready_ = false;
-    if (!ready || transport_revision_ != revision || time != transport_time_ ||
+    const bool invalid_state = !ready || transport_revision_ != revision || time != transport_time_ ||
         dt != transport_dt_ || trial.size != spec_.fields || sources.size != ns_ - 1 ||
         auxiliary.components!=stride_ ||
         carrier_density.base!=transport_density_authority_.base ||
         carrier_density.field!=transport_density_authority_.field ||
         carrier_density.revision!=transport_density_authority_.revision ||
         carrier_density.storage_identity!=transport_density_authority_.storage_identity ||
-        carrier_density.revision_domain!=transport_density_authority_.revision_domain)
-      return invalid();
+        carrier_density.revision_domain!=transport_density_authority_.revision_domain;
+    int invalid_local=invalid_state,invalid_global=0;
+    if(MPI_Allreduce(&invalid_local,&invalid_global,1,MPI_INT,MPI_MAX,communicator)!=MPI_SUCCESS || invalid_global)return invalid();
+    ChemistryBatch batch(*gas.gas_advance(),chemistry_budget_);
+    int batch_bad=0;
+    try {
+      batch.reset(ns_,revision,time,dt);
+      std::size_t index=0;
+      for(int z=0;z<cells_.z;++z)for(int y=0;y<cells_.y;++y)for(int x=0;x<cells_.x;++x,++index) {
+        if(!active(index))continue;
+        const Int3 cell{x,y,z};
+        const double pressure=thermo.eos_pressure(pressure_reference+pi.unchecked(cell,0));
+        const auto add=[&](const double* row,const portable::GasSample* cached=nullptr) {
+          portable::GasSample sample;
+          Status status;
+          if(cached)sample=*cached;else status=query(gas,thermo,row,pressure,revision,sample);
+          if(!status){batch_bad=1;return;}
+          const bool tcr=dynamic_tcr();
+          const double lower=tcr ? 800. : 600.;
+          const double fuel_limit=(tcr || !chemistry_screen_) ? 0. : 1e-16*gas.gas_identity().molecular_weights_kg_per_kmol[chemistry_fuel_];
+          const bool hot=!chemistry_screen_ || (sample.temperature_k>=lower &&
+              sample.temperature_k<2800. && row[chemistry_fuel_]>fuel_limit);
+          batch.add(pressure,row[ns_],row,hot,&sample);
+        };
+        std::array<double,UINT8_MAX> row{},raw{};
+        for(std::size_t f=0;f<spec_.fields;++f) {
+          for(std::size_t q=0;q<stride_;++q)row[q]=trial.data[f].unchecked(cell,q);
+          add(row.data(),&reactor_samples_[index*spec_.fields+f]);
+        }
+        if(dynamic_tcr()) {
+          if(dyn711()) {
+            for(std::size_t q=0;q<stride_;++q) {
+              long double mean=0.;
+              for(std::size_t f=0;f<spec_.fields;++f)mean+=trial.data[f].unchecked(cell,q)/static_cast<long double>(spec_.fields);
+              row[q]=static_cast<double>(mean);
+            }
+          } else {
+            for(std::size_t q=0;q<stride_;++q)raw[q]=auxiliary.unchecked(cell,q);
+            const auto coords=esf::detail::auxiliary_eos_coordinates(
+                {revision,gas.chemistry_identity().fingerprint,1,ns_,raw.data()},revision,row.data(),ns_);
+            if(coords.status!=portable::Status::success)batch_bad=1;
+            row[ns_]=coords.query_enthalpy_j_per_kg;
+          }
+          add(row.data());
+        }
+      }
+    } catch(...) {batch_bad=1;}
+    int global_bad=0;
+    if(MPI_Allreduce(&batch_bad,&global_bad,1,MPI_INT,MPI_MAX,communicator)!=MPI_SUCCESS || global_bad)return numerical();
+    const auto batch_status=batch.execute(communicator);
+    if(!batch_status)return batch_status;
     const auto mapping = gas.species_indices();
     std::size_t i = 0;
     for (int z = 0; z < cells_.z; ++z)
@@ -1202,7 +1263,7 @@ public:
               &gas.chemistry_identity(), &gas.gas_identity(), pressures.data(),
               reactor_density_.data() + i * spec_.fields, time, dt,
               esf::detail::ReactionIntervals::full,true};
-          const auto reacted = workspace_->react(reaction, *gas.gas_advance());
+          const auto reacted = workspace_->react(reaction, batch);
           const double rho=transport_carrier_density_[i];
           if (reacted.status != portable::Status::success || !(rho>0) || !std::isfinite(rho) ||
               !reacted.mean_integrated_mass_fraction_delta)
@@ -1238,7 +1299,7 @@ public:
                 portable::GasStateCoordinates::pressure_enthalpy,pressures[0],
                 normalized[ns_],psr.temperature_k,normalized.data(),ns_};
             portable::GasAdvanceOutput output{{},final_y.data(),delta.data(),ns_};
-            const auto advanced=gas.gas_advance()->advance_gas({input,time,dt},output);
+            const auto advanced=batch.advance_gas({input,time,dt},output);
             if(advanced!=portable::Status::success ||
                 output.final_mass_fractions!=final_y.data() ||
                 output.integrated_species_density_delta_kg_per_m3!=delta.data() ||
@@ -1580,7 +1641,7 @@ private:
   Status query(const ProductReactionSources &gas,
                const ThermodynamicsPlan &thermo, const double *row,
                double pressure, portable::Revision revision,
-               portable::GasSample &sample) noexcept {
+               portable::GasSample &sample,bool rates=false) noexcept {
     pressure=thermo.eos_pressure(pressure);
     double sum = 0;
     for (std::size_t s = 0; s < ns_; ++s) {
@@ -1610,7 +1671,7 @@ private:
         {}, diffusion_.data(), enthalpies_.data(), query_rates_.data(), ns_};
     if (!portable::same_gas_identity(gas.gas_identity(),
                                      gas.gas_query()->gas_identity()) ||
-        gas.gas_query()->query_gas(request, output) !=
+        (rates ? gas.gas_query()->query_gas(request, output) : gas.gas_query()->query_sample(request, output)) !=
             portable::Status::success ||
         output.diffusivities_m2_per_s != diffusion_.data() ||
         output.species_enthalpies_j_per_kg != enthalpies_.data() ||
@@ -1638,7 +1699,7 @@ private:
                        double pressure, portable::Revision revision,
                        double &rate) noexcept {
     portable::GasSample sample;
-    auto status = query(gas, thermo, row, pressure, revision, sample);
+    auto status = query(gas, thermo, row, pressure, revision, sample,true);
     if (!status)
       return status;
     double total = 0, magnitude = 0;
@@ -1698,6 +1759,10 @@ private:
   std::vector<double> thermal_coordinate_;
   std::vector<std::array<double, 3>> wiener_;
   std::vector<double> field_rates_, field_pressures_, field_densities_;
+  std::vector<portable::GasSample> reactor_samples_;
+  std::size_t chemistry_budget_{};
+  bool chemistry_screen_{};
+  std::size_t chemistry_fuel_{};
   std::unique_ptr<esf::detail::Workspace> workspace_;
   std::vector<ColdPressureRow> transport_rows_;
   std::unique_ptr<ColdPressureDilu> transport_pc_;

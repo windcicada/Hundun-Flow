@@ -10158,14 +10158,12 @@ Status ProductDriver::Impl::execute_attempt(
                   {&contribution,1},context,equation,certificate);
             };
             const auto refresh=[&](FieldView& updated) {
-              auto closed=runtime_write_view(current.field,current);
-              if(closed)closed=boundary_aliases_for(current);
+              // This sweep uses frozen common face coefficients. Each scalar
+              // has its own equation; subsequent components consume their own
+              // original ghosts. Publish the whole tuple once at sweep end.
+              const auto refreshed=runtime_write_view(current.field,current);
               updated=alias(current,component,quantity);
-              if(closed && physical)closed=heat
-                  ? apply_boundary_ghosts(BoundaryStage::enthalpy,product.boundary,{&updated,1},boundary_values)
-                  : apply_boundary_ghosts(BoundaryStage::scalar,product.boundary,
-                      {boundary_aliases.data(),fields.scalars.size()},boundary_values);
-              return exchange_frame(current,closed);
+              return refreshed;
             };
             const LinearIdentity identity{
                 detail::product_mix(product.equations.species().fingerprint(),UINT64_C(0x5354494d504c01)+field*(ns+1)+c),
@@ -10352,7 +10350,7 @@ Status ProductDriver::Impl::execute_attempt(
     status = product.reductions.consensus(status);
     if (status)
       status = detail::measure_elapsed(physics_nanoseconds[2U], true, [&]() noexcept {
-        return product.esf.react(product.reaction, product.thermodynamics,
+        return product.esf.react(communicator,product.reaction, product.thermodynamics,
           {esf_trial.data(), product.fields.esf_fields.size()}, esf_auxiliary,
           product.spray.enabled() ? as_const(post_rho) : rho_history.accepted,
           pressure_history.accepted, pressure_reference, time.time(), step.dt,

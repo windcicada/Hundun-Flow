@@ -65,6 +65,7 @@ public:
         config.chemistry = {r.relative_tolerance, r.absolute_tolerance,
                             int(r.maximum_internal_steps),r.mode==ReactionMode::esf_tpdf};
         if(config.chemistry.molar_reference_controls) {
+          config.chemistry.frozen_material_interval=true;
           config.chemistry.relative_tolerance=0.;
           config.chemistry.absolute_tolerance=1e-10;
         }

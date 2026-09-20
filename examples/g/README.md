@@ -15,3 +15,7 @@ mpiexec -n 2 hundun run examples/g --output g2 --steps 1 \
 ```
 
 [动态 TCR](../../docs/tcr.md) · [压力分工](../../docs/p0.md) · [运行记录](../../docs/rc.md)
+
+实场运行可使用 `bash tools/hot.sh <程序> <算例> <Restart> <输出目录> <步数> 128`。
+默认每 100 步输出可视化、每 500 步保存 Restart、每 10 步输出诊断。
+`HF_PLOT_EVERY`、`HF_SAVE_EVERY`、`HF_DIAG_EVERY` 分别配置三种频率。

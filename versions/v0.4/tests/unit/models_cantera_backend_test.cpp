@@ -269,10 +269,38 @@ void test_neutral_gas_query_and_closure_bridge() {
   HUNDUN_CHECK(film_result.film.vapor_diffusivity_m2_per_s > 0);
 }
 
-void test_interval_call_order(bool reference=false) {
+void test_frozen_material_solution() {
+  using namespace hundun::v04;
+  auto c=config();c.chemistry={0.,1e-10,5000,true,true};
+  auto runtime=std::make_shared<chemistry::CanteraBackendRuntime>(c);
+  chemistry::CanteraWorkspacePool pool(runtime,1);
+  auto gas=chemistry::make_cantera_backend(c,pool);
+  double y[2]{1,0},d[2]{},h[2]{},rates[2]{};
+  portable::GasQuery q{{1,1,1},gas->composition().fingerprint,
+      portable::GasStateCoordinates::pressure_temperature,101325,0,1200,y,2};
+  portable::GasQueryOutput sample{{},d,h,rates,2};
+  HUNDUN_CHECK(gas->query_gas(q,sample)==portable::Status::success);
+  const double kf=rates[1]/sample.sample.density_kg_per_m3;
+  const double enthalpy=sample.sample.enthalpy_j_per_kg;
+  y[0]=0;y[1]=1;
+  HUNDUN_CHECK(gas->query_gas(q,sample)==portable::Status::success);
+  const double kr=rates[0]/sample.sample.density_kg_per_m3;
+  y[0]=1;y[1]=0;q.coordinates=portable::GasStateCoordinates::pressure_enthalpy;
+  q.enthalpy_j_per_kg=enthalpy;
+  double final[2],delta[2];portable::GasAdvanceOutput out{{},final,delta,2};
+  HUNDUN_CHECK(gas->advance_gas({q,0,1e-4},out)==portable::Status::success);
+  const double equilibrium=kr/(kf+kr);
+  HUNDUN_CHECK_NEAR(final[0],equilibrium+(1-equilibrium)*std::exp(-(kf+kr)*1e-4),2e-8);
+  HUNDUN_CHECK_NEAR(out.final_sample.enthalpy_j_per_kg,enthalpy,1e-8);
+  d[0]=h[0]=rates[0]=-123.;
+  HUNDUN_CHECK(gas->query_sample(q,sample)==portable::Status::success);
+  HUNDUN_CHECK(d[0]==-123. && h[0]==-123. && rates[0]==-123.);
+}
+
+void test_interval_call_order(bool reference=false,bool frozen=false) {
   using namespace hundun::v04;
   auto c = config();
-  if(reference)c.chemistry={0.,1e-10,5000,true};
+  if(reference)c.chemistry={0.,1e-10,5000,true,frozen};
   auto runtime = std::make_shared<chemistry::CanteraBackendRuntime>(c);
   chemistry::CanteraWorkspacePool pool(runtime, 1);
   auto gas = chemistry::make_cantera_backend(c, pool);
@@ -559,8 +587,10 @@ int main(int argc, char **argv) {
   return hundun::test::run([&] {
     HUNDUN_CHECK(argc == 3);
     mechanism_path = argv[1];
+    test_frozen_material_solution();
     test_interval_call_order();
     test_interval_call_order(true);
+    test_interval_call_order(true,true);
     test_autonomous_interval_epoch();
     test_interval_budget_preserves_output();
     test_continuous_nasa_and_identity(argv[2]);
