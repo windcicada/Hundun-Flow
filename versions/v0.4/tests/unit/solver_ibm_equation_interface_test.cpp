@@ -101,6 +101,78 @@ bool positive_face(ImmersedFaceDirection direction) {
          direction == ImmersedFaceDirection::z_positive;
 }
 
+bool test_many_prescribed_face_queries(unsigned repeats) {
+  IbmForceFixture fixture;
+  if (!expect(fixture.initialize(MPI_COMM_SELF, 16), "many-source fixture")) return false;
+  auto model = product_model({16, 16, 16});
+  model.mesh = force_mesh(16);
+  FieldRegistry registry; BoundaryPlan boundary; SchemePlan schemes; TimeSchemePlan time;
+  CartesianKernelPlan kernels;
+  auto status = BoundaryCompiler::compile(MPI_COMM_SELF, model, fixture.geometry,
+      fixture.patch, registry, boundary, schemes, time);
+  if (status) status = CartesianKernelPlan::compile(schemes, fixture.geometry,
+      fixture.patch, boundary, kernels);
+  if (!expect(status, "many-source Cartesian kernel")) return false;
+  const auto links = fixture.topology.links();
+  std::vector<IbmInterfaceInletState> states;
+  std::vector<IbmInterfaceMassFluxSource> mass_sources;
+  for (std::size_t i = 0; i < links.size; i += 2) {
+    const auto& link = links.data[i];
+    const double sign = positive_face(link.direction) ? -1.0 : 1.0;
+    IbmInterfaceInletState state{};
+    state.global_link = link.global_link;
+    state.face_mass_flux = sign * double(i + 1) * 0.001;
+    state.enthalpy = 300000.0;
+    if (face_axis(link.direction) == 0) state.velocity.x = sign;
+    if (face_axis(link.direction) == 1) state.velocity.y = sign;
+    if (face_axis(link.direction) == 2) state.velocity.z = sign;
+    states.push_back(state);
+    mass_sources.push_back({state.global_link, state.face_mass_flux});
+  }
+  // Deliberately reverse input order. Source identities, face traversal and
+  // query order are distinct; the constrained physical flux is the oracle.
+  std::reverse(states.begin(), states.end());
+  std::reverse(mass_sources.begin(), mass_sources.end());
+  bool passed = expect(states.size() > 20, "many-source fixture is nontrivial");
+  for (bool full_state : {false, true}) {
+    IbmEquationInterfacePlan interface;
+    if (full_state)
+      status = IbmEquationInterfacePlan::compile(kernels, fixture.topology,
+          fixture.boundary, fixture.topology.interface_metric(),
+          {states.data(), states.size()}, 0U, interface);
+    else
+      status = IbmEquationInterfacePlan::compile(kernels, fixture.topology,
+          fixture.boundary, fixture.topology.interface_metric(),
+          {mass_sources.data(), mass_sources.size()}, interface);
+    if (!expect(status, "many-source interface")) return false;
+    auto x = make_face(CartesianAxis::x, fixture.patch.cells, 601);
+    auto y = make_face(CartesianAxis::y, fixture.patch.cells, 601);
+    auto z = make_face(CartesianAxis::z, fixture.patch.cells, 601);
+    FaceFluxView flux{x.view, y.view, z.view, 21U, {}};
+    status = interface.constrain_interface_flux(flux);
+    if (!expect(status, "many-source authoritative flux")) return false;
+    unsigned long long hits = 0;
+    const double begin = MPI_Wtime();
+    for (unsigned repeat = 0; repeat < repeats; ++repeat)
+      for (const auto& field : {x.view, y.view, z.view})
+        for (int k = 0; k < field.extents.z; ++k)
+          for (int j = 0; j < field.extents.y; ++j)
+            for (int i = 0; i < field.extents.x; ++i) {
+              double value = -123456.0;
+              const bool found = interface.prescribed_face_flux(field.axis, {i,j,k}, value);
+              const double reference = field.unchecked({i,j,k});
+              const bool expected = reference != 0.0 && reference != 7.0;
+              if (found != expected || (found ? value != reference : value != -123456.0))
+                return expect(false, "many-source query agrees exactly with physical face flux");
+              hits += found;
+            }
+    passed &= expect(hits == states.size() * repeats, "every source is queried once per pass");
+    std::cout << "source_lookup full_state=" << full_state << " sources=" << states.size()
+              << " repeats=" << repeats << " seconds=" << MPI_Wtime()-begin << '\n';
+  }
+  return passed;
+}
+
 bool test_small_species_interface_transport() {
   constexpr int n=16; IbmForceFixture fixture;
   if(!expect(fixture.initialize(MPI_COMM_SELF,n),"small-species IBM fixture compiles")) return false;
@@ -2250,7 +2322,8 @@ bool run() {
 
 int main(int argc, char** argv) {
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) return 2;
-  const bool passed = test_small_species_interface_transport() &&
+  const bool passed = test_many_prescribed_face_queries(argc > 1 ? 32U : 1U) &&
+                      test_small_species_interface_transport() &&
                       test_prescribed_interface_mass_flux() && run();
   MPI_Finalize();
   return passed ? 0 : 1;

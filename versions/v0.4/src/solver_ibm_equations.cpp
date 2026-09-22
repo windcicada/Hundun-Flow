@@ -97,6 +97,16 @@ InterfaceFace interface_face(const ImmersedLink& link) noexcept {
   return result;
 }
 
+bool source_face_less(const FrozenConvectionFixedFace& left,
+                      const FrozenConvectionFixedFace& right) noexcept {
+  if (left.axis != right.axis)
+    return static_cast<std::uint8_t>(left.axis) <
+           static_cast<std::uint8_t>(right.axis);
+  if (left.index.z != right.index.z) return left.index.z < right.index.z;
+  if (left.index.y != right.index.y) return left.index.y < right.index.y;
+  return left.index.x < right.index.x;
+}
+
 double fluid_material_conductance(const CartesianKernelPlan& kernels,
                                  ConstFieldView diffusivity,
                                  const ImmersedLink& link,
@@ -1118,19 +1128,7 @@ Status IbmEquationInterfacePlan::compile_sources(
       }
       std::sort(candidate.prescribed_source_faces_.begin(),
                 candidate.prescribed_source_faces_.end(),
-                [](const FrozenConvectionFixedFace& left,
-                   const FrozenConvectionFixedFace& right) noexcept {
-                  const auto left_axis =
-                      static_cast<std::uint8_t>(left.axis);
-                  const auto right_axis =
-                      static_cast<std::uint8_t>(right.axis);
-                  if (left_axis != right_axis) return left_axis < right_axis;
-                  if (left.index.z != right.index.z)
-                    return left.index.z < right.index.z;
-                  if (left.index.y != right.index.y)
-                    return left.index.y < right.index.y;
-                  return left.index.x < right.index.x;
-                });
+                source_face_less);
       for (std::size_t index = 1U;
            index < candidate.prescribed_source_faces_.size(); ++index) {
         const FrozenConvectionFixedFace& prior =
@@ -1329,6 +1327,17 @@ bool IbmEquationInterfacePlan::prescribed_face_flux(
     CartesianAxis axis, Int3 face, double& phi) const noexcept {
   if (!validate_bound(*this, kernels_, topology_, boundary_, metric_))
     return false;
+  // Bulk transport asks about every Cartesian face, although prescribed
+  // inlets are sparse. The compiler already sealed this sorted face schedule
+  // for fixed-state convection. Reject misses in logarithmic time before
+  // visiting source payloads; mass-only plans retain their legacy path.
+  if (inlet_state_bound_) {
+    const FrozenConvectionFixedFace key{axis, face};
+    const auto found = std::lower_bound(prescribed_source_faces_.begin(),
+        prescribed_source_faces_.end(), key, source_face_less);
+    if (found == prescribed_source_faces_.end() || found->axis != axis ||
+        !same_index(found->index, face)) return false;
+  }
   const Span<const ImmersedLink> links = topology_->links();
   for (const PrescribedInterfaceFlux& source :
        prescribed_interface_fluxes_) {
