@@ -174,6 +174,7 @@ struct Fixture {
   int size{};
   bool fragmented{};
   bool x_only_periodic{};
+  unsigned sparse_activity{}; // 1: fluid on first x slab only; 2: globally solid.
   CartesianGeometryPlan geometry;
   MeshPatch patch{};
   BoundaryPlan boundary;
@@ -220,6 +221,8 @@ struct Fixture {
   double fixed_flux_sentinel{-3.75};
 
   bool global_active(Int3 global) const noexcept {
+    if (sparse_activity == 1U) return global.x < geometry.global_cells().x / size;
+    if (sparse_activity == 2U) return false;
     if (fragmented)
       return (global.x & 1) == 0;
     const int nx = geometry.global_cells().x;
@@ -228,11 +231,12 @@ struct Fixture {
 
   bool initialize(FreshStartProjectionLinearRoute route, Int3 global_cells,
                   bool use_fragmented = false, bool use_x_only_periodic = false,
-                  bool mismatch_shared_mask = false) {
+                  bool mismatch_shared_mask = false, unsigned use_sparse_activity = 0U) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     fragmented = use_fragmented;
     x_only_periodic = use_x_only_periodic;
+    sparse_activity = use_sparse_activity;
     ValidatedModel model;
     model.mesh = mesh_spec(global_cells);
     model.fingerprint = 0x97260001U;
@@ -348,7 +352,7 @@ struct Fixture {
               global_active(low) && global_active(high) ? 1U : 0U;
         }
 
-    if (!fragmented) {
+    if (!fragmented && sparse_activity == 0U) {
       const Int3 solid_global{global_cells.x / 3, 0, 0};
       if (owns(patch, solid_global)) {
         const Int3 local{solid_global.x - patch.begin.x,
@@ -495,6 +499,11 @@ struct Fixture {
     spec.solve = route == FreshStartProjectionLinearRoute::native_mg_fgmres
                      ? LinearSolveControl{1.0e-13, 1.0e-12, 500U, 4U, restart}
                      : LinearSolveControl{1.0e-11, 5.0e-10, 500U, 4U, restart};
+    // PCG restarts its direction on every true-residual replacement. Allow
+    // enough conjugate directions for the isolated fluid slab's gauge mode.
+    if (sparse_activity == 1U &&
+        route == FreshStartProjectionLinearRoute::jacobi_pcg_oracle)
+      spec.solve.true_residual_interval = 64U;
     if (route == FreshStartProjectionLinearRoute::jacobi_pcg_oracle)
       spec.continuity_absolute_tolerance = 5.0e-8;
     spec.mg_policy.pre_sweeps = 1U;
@@ -537,6 +546,39 @@ struct Fixture {
     return plan.audit(solved, out);
   }
 };
+
+bool test_solid_only_ranks(int rank, int size) {
+  if (size < 2) return true;
+  for (auto route : {FreshStartProjectionLinearRoute::native_mg_fgmres,
+                    FreshStartProjectionLinearRoute::jacobi_pcg_oracle}) {
+    Fixture fixture;
+    if (!expect(fixture.initialize(route, {8*size,6,4}, false, false, false, 1U),
+                rank, "projection admits ranks owning no fluid cells")) return false;
+    int empty = std::none_of(fixture.active_cells.begin(), fixture.active_cells.end(),
+                             [](std::uint8_t value) { return value != 0; });
+    int empty_total = 0;
+    MPI_Allreduce(&empty, &empty_total, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    if (!expect(empty_total > 0 && empty_total < size &&
+                fixture.plan.red().component_count == 1U &&
+                fixture.plan.red().anchored_component_count == 1U,
+                rank, "fixture contains solid-only ranks and one global fluid component")) return false;
+    FreshStartKinematicProjectionCandidateCertificate candidate;
+    const auto status = fixture.project(candidate);
+    if (!status && rank == 0)
+      std::cerr << "solid-only projection route=" << unsigned(route) << " status="
+                << unsigned(status.code) << '/' << status.detail
+                << " residual=" << fixture.last_solve.final_true_residual << '\n';
+    if (!expect(same_status(status) && status && candidate.valid(), rank,
+                "solid-only ranks participate in projection solve and audit")) return false;
+  }
+  Fixture empty;
+  const bool compiled = empty.initialize(FreshStartProjectionLinearRoute::jacobi_pcg_oracle,
+      {8*size,6,4}, false, false, false, 2U);
+  return expect(!compiled && same_status(empty.compile_status) &&
+                empty.compile_status.code == StatusCode::invalid_plan &&
+                empty.compile_status.detail == 9721U,
+                rank, "globally empty fluid domain remains invalid");
+}
 
 bool test_distributed_projection(int rank, int size) {
   Fixture fixture;
@@ -987,6 +1029,7 @@ int main(int argc, char **argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   bool passed = test_distributed_projection(rank, size);
+  passed &= test_solid_only_ranks(rank, size);
   passed &= test_collective_commit_transaction(rank, size);
   passed &= test_rank_local_incompatibility(rank, size);
   passed &= test_neighbor_mask_mismatch(rank, size);

@@ -1187,8 +1187,9 @@ Status compile_components_scalable(Implementation &impl) {
       impl.component_labels.erase(std::unique(impl.component_labels.begin(),
                                               impl.component_labels.end()),
                                   impl.component_labels.end());
-      if (impl.component_labels.empty())
-        return {StatusCode::invalid_plan, kFreshProjectionPlan};
+      // A valid immersed domain may leave this partition entirely solid.
+      // Such ranks own no components but must join the same collectives.
+      // The global component-count check below still rejects an empty domain.
       impl.component_dirichlet.assign(impl.component_labels.size(), 0U);
       impl.component_distributed.assign(impl.component_labels.size(), 0U);
       component_index.reserve(2U * impl.component_labels.size() + 1U);
