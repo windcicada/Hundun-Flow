@@ -94,10 +94,16 @@ bool composition(Span<const double> independent,
     const double value = independent.data[index];
     const std::size_t species = mapping.data[index];
     if (!std::isfinite(value) || value < 0.0 || species >= species_count ||
-        species == dependent_species || value > 1.0 - sum) {
+        species == dependent_species || value > 1.0) {
       return false;
     }
     sum += value;
+    // Match ThermodynamicsPlan's represented simplex. A major fraction can
+    // round to one while a positive radical remains below its half-ULP;
+    // comparing that radical with 1-sum rejects an otherwise admitted state.
+    if (!std::isfinite(sum) || sum > 1.0) {
+      return false;
+    }
     mass_fraction[species] = value;
   }
   const double dependent = 1.0 - sum;
