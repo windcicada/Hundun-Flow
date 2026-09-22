@@ -582,6 +582,61 @@ void test_expired_pool_returns_explicit_failure() {
                portable::Status::unavailable);
 }
 
+void test_ph_temperature_representation() {
+  using namespace hundun::v04;
+  auto c = config();
+  auto runtime = std::make_shared<chemistry::CanteraBackendRuntime>(c);
+  chemistry::CanteraWorkspacePool pool(runtime, 1);
+  auto gas = chemistry::make_cantera_backend(c, pool);
+  double y[]{0., 1.}, d[2], h[2], rates[2], final[2], delta[2];
+  portable::GasQuery q{{1, 1, 1}, gas->composition().fingerprint,
+                       portable::GasStateCoordinates::pressure_enthalpy,
+                       101325, 0, 200, y, 2};
+  portable::GasQueryOutput out{{}, d, h, rates, 2};
+  // B's enthalpy zero is near 200.454 K. A temperature ULP changes h by
+  // more than the absolute PH gate: arbitrary small h need not be exactly
+  // representable by a double temperature, even for constant heat capacity.
+  for (double target : {0., 1e-8, -1e-8, 1.4960475865133063, -2.}) {
+    for (double seed : {200., 1000., 4999.}) {
+      q.coordinates = portable::GasStateCoordinates::pressure_enthalpy;
+      q.temperature_k = seed;
+      q.enthalpy_j_per_kg = target;
+      HUNDUN_CHECK(gas->query_gas(q, out) == portable::Status::success);
+      const auto resolved = out.sample;
+      HUNDUN_CHECK_NEAR(resolved.enthalpy_j_per_kg, target,
+                        1e-10 * std::max(1., std::abs(target)));
+      // Independently query the returned temperature and the adjacent
+      // temperature toward the target. A residual above the original gate
+      // is admissible only at the closest end of this one-ULP bracket.
+      q.coordinates = portable::GasStateCoordinates::pressure_temperature;
+      q.temperature_k = resolved.temperature_k;
+      HUNDUN_CHECK(gas->query_gas(q, out) == portable::Status::success);
+      const double residual = out.sample.enthalpy_j_per_kg - target;
+      if (std::abs(residual) > 1e-10 * std::max(1., std::abs(target))) {
+        q.temperature_k = std::nextafter(q.temperature_k,
+            residual > 0 ? 0. : std::numeric_limits<double>::infinity());
+        HUNDUN_CHECK(gas->query_gas(q, out) == portable::Status::success);
+        const double adjacent = out.sample.enthalpy_j_per_kg - target;
+        HUNDUN_CHECK((residual < 0 && adjacent >= 0) ||
+                     (residual > 0 && adjacent <= 0));
+        HUNDUN_CHECK(std::abs(residual) <= std::abs(adjacent));
+        HUNDUN_CHECK(std::abs(adjacent - residual) <=
+            8 * resolved.cp_j_per_kg_k *
+                std::abs(q.temperature_k - resolved.temperature_k));
+      }
+      q.coordinates = portable::GasStateCoordinates::pressure_enthalpy;
+      q.temperature_k = seed;
+      portable::GasAdvanceOutput advanced{{}, final, delta, 2};
+      HUNDUN_CHECK(gas->advance_gas({q, 0, 0}, advanced) ==
+                   portable::Status::success);
+      HUNDUN_CHECK(advanced.final_sample.enthalpy_j_per_kg == target);
+      HUNDUN_CHECK(final[0] == y[0] && final[1] == y[1]);
+      const auto legacy = gas->evaluate({101325, target, {0., 1.}});
+      HUNDUN_CHECK_NEAR(legacy.temperature_k, resolved.temperature_k, 1e-10);
+    }
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -601,5 +656,6 @@ int main(int argc, char **argv) {
     test_controls_are_validated_without_product_schema();
     test_neutral_gas_query_and_closure_bridge();
     test_expired_pool_returns_explicit_failure();
+    test_ph_temperature_representation();
   });
 }

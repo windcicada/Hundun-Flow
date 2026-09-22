@@ -242,23 +242,50 @@ void continue_enthalpy(Cantera::ThermoPhase& thermo) {
   }
 }
 
-// Cantera's relative HP stopping criterion can leave a residual above the
-// public absolute-h gate near the enthalpy reference zero. Finish against
-// that same gate with fixed-composition Newton corrections.
-void solve_pressure_enthalpy(Cantera::ThermoPhase& thermo,double target,double pressure) {
+// Finish Cantera's relative HP solve against the public absolute-h gate.
+// Near an enthalpy zero, no double temperature may attain that gate. Only
+// then admit the closest endpoint of an adjacent-temperature root bracket;
+// its enthalpy span must also be consistent with roundoff in a smooth h(T).
+// Return the PH coordinate in that case, retaining its authority instead of
+// replacing it with the forward-evaluated h of the rounded temperature.
+double solve_pressure_enthalpy(Cantera::ThermoPhase& thermo,double target,double pressure) {
   thermo.setState_HP(target,pressure,1e-12);
   const double tolerance=1e-10*std::max(1.,std::abs(target));
   for(unsigned correction=0;correction<4;++correction) {
     const double residual=target-thermo.enthalpy_mass();
-    if(std::isfinite(residual) && std::abs(residual)<=tolerance)return;
+    if(std::isfinite(residual) && std::abs(residual)<=tolerance)
+      return thermo.enthalpy_mass();
     const double cp=thermo.cp_mass();
     const double temperature=thermo.temperature()+residual/cp;
     if(!std::isfinite(cp) || cp<=0 || !std::isfinite(temperature) || temperature<=0)
       throw std::runtime_error("invalid PH correction");
     thermo.setState_TP(temperature,pressure);
   }
-  if(std::abs(target-thermo.enthalpy_mass())>tolerance)
-    throw std::runtime_error("PH correction residual exceeds query tolerance");
+  const double enthalpy=thermo.enthalpy_mass();
+  const double residual=target-enthalpy;
+  if(std::isfinite(residual) && std::abs(residual)<=tolerance)return enthalpy;
+  const double temperature=thermo.temperature(),cp=thermo.cp_mass();
+  const double adjacent=std::nextafter(temperature,residual>0?
+      std::numeric_limits<double>::infinity():0.);
+  if(std::isfinite(residual) && std::isfinite(cp) && cp>0 &&
+      std::isfinite(adjacent) && adjacent>0 && adjacent!=temperature) {
+    thermo.setState_TP(adjacent,pressure);
+    const double next_h=thermo.enthalpy_mass(),next_residual=target-next_h;
+    const double next_cp=thermo.cp_mass();
+    const double span=std::abs(next_h-enthalpy);
+    const double roundoff_span=8*(std::max(cp,next_cp)*std::abs(adjacent-temperature));
+    const bool bracket=(residual<0 && next_residual>=0) ||
+                       (residual>0 && next_residual<=0);
+    // A discontinuity must not pass merely because it straddles the target.
+    if(bracket && std::isfinite(next_residual) && std::isfinite(next_cp) && next_cp>0 &&
+        std::isfinite(roundoff_span) && span<=roundoff_span) {
+      if(std::abs(residual)<std::abs(next_residual) ||
+          (std::abs(residual)==std::abs(next_residual) && temperature<adjacent))
+        thermo.setState_TP(temperature,pressure);
+      return target;
+    }
+  }
+  throw std::runtime_error("PH correction residual exceeds query tolerance");
 }
 
 Workspace make_workspace(const std::filesystem::path &mechanism,
@@ -557,12 +584,14 @@ portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
   const double maximum=config.maximum_temperature>0?config.maximum_temperature:thermo.maxTemp();
   try {
     thermo.setMassFractions_NoNorm(q.mass_fractions);
+    double resolved_enthalpy{};
     if (q.coordinates == portable::GasStateCoordinates::pressure_temperature) {
       if (!std::isfinite(q.temperature_k) ||
           q.temperature_k < minimum ||
           q.temperature_k > maximum)
         return portable::Status::invalid_input;
       thermo.setState_TP(q.temperature_k, q.pressure_pa);
+      resolved_enthalpy = thermo.enthalpy_mass();
     } else if (q.coordinates ==
                portable::GasStateCoordinates::pressure_enthalpy) {
       if (!std::isfinite(q.enthalpy_j_per_kg))
@@ -574,7 +603,8 @@ portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
           ? q.temperature_k : std::clamp(298.15, minimum, maximum);
       thermo.setState_TP(seed, q.pressure_pa);
       // Resolve PH more tightly than the public query conservation gate.
-      solve_pressure_enthalpy(thermo, q.enthalpy_j_per_kg, q.pressure_pa);
+      resolved_enthalpy =
+          solve_pressure_enthalpy(thermo, q.enthalpy_j_per_kg, q.pressure_pa);
     } else
       return portable::Status::invalid_input;
     portable::GasSample sample{q.revision,
@@ -582,7 +612,7 @@ portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
                                thermo.pressure(),
                                thermo.temperature(),
                                thermo.density(),
-                               thermo.enthalpy_mass(),
+                               resolved_enthalpy,
                                thermo.cp_mass(),
                                w.transport->viscosity(),
                                w.transport->thermalConductivity()};
@@ -666,11 +696,9 @@ CanteraBackend::evaluate(const ThermochemicalPoint &point) const {
   }
   const double pressure_tolerance =
       1.0e-12 * std::max(1.0, std::abs(point.p0_pa));
-  const double enthalpy_tolerance =
-      1.0e-10 * std::max(1.0, std::abs(point.h_tc_j_per_kg));
-  if (std::abs(thermo.pressure() - point.p0_pa) > pressure_tolerance ||
-      std::abs(thermo.enthalpy_mass() - point.h_tc_j_per_kg) >
-          enthalpy_tolerance) {
+  // The PH solve already verifies h, including the adjacent-temperature
+  // representation proof when the absolute-h gate cannot be represented.
+  if (std::abs(thermo.pressure() - point.p0_pa) > pressure_tolerance) {
     throw std::runtime_error(
         "Cantera thermodynamic state inversion changed input authority");
   }
