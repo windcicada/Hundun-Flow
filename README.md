@@ -1,196 +1,183 @@
 # HUNDUN-FLOW
 
-在AI辅助编程加速模型实现背景下，针对湍流燃烧模型创新向真实燃烧室数值模拟转化所面临的多物理过程耦合、数值算法集成与软件架构协同难题，开发开源燃烧室模拟软件 HUNDUN-FLOW，为研究者快速实现与系统验证模型构想、构建自主可扩展的科研软件体系提供计算基础。
+English | [简体中文](README.zh-CN.md)
 
-近年来，AI技术推动了湍流燃烧建模研究和数值模拟技术的发展，研究者可以将物理认识与模型构思快速转化为算法和程序模块。HUNDUN-FLOW提供开放的核心实现、明确的模块接口和面向Coding Agent的工作规范，支持研究者开展方法开发与软件扩展。
+HUNDUN-FLOW is an open-source simulation code for turbulent reacting flows and dilute sprays. It provides a computational foundation for turning physical models into coupled numerical methods and developing research software. Its C++17 implementation combines Message Passing Interface (MPI) parallelism with explicit module interfaces and coding-agent guidance. The Apache License 2.0 supports research, commercial use, and proprietary extensions under its terms.
 
-HUNDUN-FLOW面向湍流燃烧数值模拟研究，采用C++17和MPI开发，以笛卡尔网格、局部重构浸没边界方法（IBM）和CN/BE外迭代压力耦合为基础，组织LES、PaSR/TCR-TPDF与拉格朗日喷雾模型。研发目标包括局部加密、几何自动标记及面向真实燃烧室的多物理过程模拟。软件采用Apache License 2.0，支持研究者按照许可条款开发、使用和分发自己的衍生程序，并自主选择衍生代码的开放方式。
+The solver uses finite-volume discretization on Cartesian grids, local-reconstruction immersed boundary methods (IBM), and pressure-based coupling. Large-eddy simulation (LES), finite-rate chemistry, partially stirred reactor (PaSR) closure, Eulerian stochastic fields (ESF), and Lagrangian parcels share thermodynamic services and conservation accounting. This organization supports AI-assisted model implementation while keeping equations, state ownership, and numerical checks explicit.
 
-软件的命名来自《山海经·西山经》，其中以“其状如黄囊，赤如丹火”描述帝江，HUNDUN-FLOW将其工程化地理解为一个由边界包围的囊状密闭腔体，内部承载湍流流动-燃烧化学反应相互作用的多物理过程，这一意象与燃烧室数值模拟相呼应。另外“浑敦”同时表示有待分解和建模的复杂整体，数值模拟的任务是从这种复杂性中建立物理认识。
+The name comes from the description of Dijiang in the “Western Mountains” chapter of *Shan Hai Jing* (*Classic of Mountains and Seas*). Its pouch-shaped, fiery-red appearance provides an image for a bounded combustion chamber containing interacting flow and chemical processes. *Hundun* also denotes an undifferentiated whole, from which modeling seeks to establish physical understanding.
 
-## 程序架构
+[Version 1.1.0](https://github.com/windcicada/Hundun-Flow/releases/tag/v1.1.0) covers fixed Cartesian grids, static immersed boundaries, and dilute parcels. Release checks cover selected flow, transport, chemistry, dynamic micromixing, gas–liquid exchange, and restart combinations. Long-duration combustor calculations and statistical assessment remain separate validation tasks; the recorded scope is given in [release acceptance](docs/accept.md).
 
-下列表格介绍HUNDUN-FLOW的总体架构与算法设计，当前实现集中于`versions/v0.4`。程序采用自上而下的分层架构。应用层定义算例并组织计算，模型与SDK层提供物理模型及其接口，求解与网格层完成离散和几何处理，并行运行时管理分布式数据、通信和持久化。依赖关系保持为`applications -> models/sdk -> solver/mesh -> runtime`，字段所有权和MPI通信由运行时统一管理。
+## Software architecture
 
-| 层次 | 逻辑模块 | 主要职责 | 接口边界 |
-| --- | --- | --- | --- |
-| 应用编排层 | `applications/` | 解析算例配置，组装网格、求解器和物理模型，执行主时间循环与运行生命周期。 | 应用通过SDK选择模型和参数，模型内部的数值顺序由相应模块管理。 |
-| 模型与SDK层 | `models/`、`sdk/` | 提供湍流、燃烧、喷雾、边界等模型，以及字段视图、类型化服务、源项累加器和模型注册接口。 | 模型读取受控字段视图并返回候选增量和计算报告，状态发布由求解事务统一完成。 |
-| 数值求解层 | `solver/` | 求解质量、动量、组分和总热化学焓方程，执行外迭代、SIMPLE/PISO耦合与时间推进、化学积分和线性求解。 | 求解器使用网格与运行时服务，外部热化学库通过适配器接入。 |
-| 网格与几何层 | `mesh/` | 管理笛卡尔网格、局部加密、全局网格编号、几何查询、IBM标记、局部重构及网格耦合模板。 | 几何模块提供距离、法向和相交信息；离散模块使用形成后的边界状态与通量。 |
-| 并行运行时层 | `runtime/` | 管理MPI域分解、Halo交换、字段存储、确定性随机数、parcel迁移、Restart、输出与诊断。 | 运行时统一维护分布式状态、所有权和通信计划，并向上层提供稳定的数据访问接口。 |
+The implementation has a flat source layout with modules grouped by responsibility. Public headers reside in `versions/v0.4/include/hundun`, and implementations reside in `versions/v0.4/src`. The directory name retains the implementation lineage; the root `VERSION` file defines the product version.
 
-### 主要模块
-
-| 模块 | 功能 | 主要数据或接口 |
+| Layer / source prefix | Responsibility | Interface boundary |
 | --- | --- | --- |
-| 算例编译与运行驱动 | 将JSON输入解析为网格、字段、模型、通信和输出计划，并按固定顺序执行初始化、时间推进、检查与保存。 | `ResolvedCase`、`CompiledCasePlan`、模型注册表 |
-| 字段与状态管理 | 声明守恒量、派生量、Ghost宽度、读写权限、Restart和输出策略；区分已接受状态、当前尝试状态和时间历史。 | `FieldRegistry`、`FieldView`、`AttemptTransaction` |
-| 流动与压力耦合 | 组装低马赫数质量和动量方程，形成Rhie-Chow面通量，并通过CN/BE外迭代、SIMPLE或PISO满足连续性约束。 | `MeanState`、`FaceMassFlux`、压力校正报告 |
-| 反应标量输运 | 推进全部物种的$\rho Y_k$和包含生成焓的$\rho h_{\mathrm{tc}}$，计算分子与亚格子扩散通量，并保持组分、元素和能量一致性。 | 组分场、总热化学焓场、输运性质服务 |
-| 热力学与化学后端 | 根据$p_0$、$h_{\mathrm{tc}}$和组分恢复温度及物性，推进有限速率化学并返回积分物种增量和热化学报告。 | `ThermodynamicsService`、`TransportPropertyService`、`ChemistryBackend` |
-| LES湍流模型 | 由局部速度梯度和网格尺度计算亚格子黏度与标量扩散率，为动量输运和燃烧混合时间尺度提供闭合量。 | Smagorinsky、WALE、Vreman、$\nu_t$、$Sc_t$、滤波尺度$\Delta$ |
-| 燃烧闭合 | 组织有限速率平均态、部分搅拌反应器（PaSR）和TCR-TPDF路径，使化学增量按照相应的湍流-化学相互作用关系进入守恒方程。 | 混合时间尺度、化学时间尺度、PaSR反应比例、TCR混合状态参数$\kappa$和闭合报告 |
-| TCR-TPDF | 管理平均态、随机场、参考反应状态、反应集合和微观混合。混合状态参数$\kappa$在根的可接受性和分支历史确定后恢复，并进入微观混合闭合。 | `StochasticFieldSet`、`ReactionEnsemble`、`PsrShadowState`、TCR根状态 |
-| 网格与IBM | 根据几何和笛卡尔网格生成流体/固体标记及局部重构模板，向流动、组分、焓和parcel模块提供边界状态与表面查询。 | `GeometryScene`、IBM标记、重构模板、表面法向 |
-| 拉格朗日喷雾 | 管理具有稳定ID的计算液滴（parcel）、喷嘴注入、液体物性、阻力、传热传质、单组分蒸发、TAB破碎、IBM碰撞和MPI迁移。 | parcel的数组结构（SoA）容器、`LiquidPropertyService`、`SprayExchangeDelta` |
-| 守恒耦合事务 | 汇总化学与模型源项；两相交换同时登记parcel变化和气相质量、动量、组分及焓变化。 | `SourceAccumulator`、`ReactingSourceTransaction`、`SprayCouplingTransaction` |
-| 并行、Restart与诊断 | 根据分区拓扑形成Halo和parcel迁移计划，保存守恒状态、随机场、随机数时钟及parcel，并输出残差和守恒收支。 | `ExchangePlan`、Checkpoint、Evidence与诊断报告 |
+| Application: `app_*` | Parse case input, compile execution plans, expose the command-line interface, and record build identity. | Case preparation resolves model choices and resource requirements before time integration. |
+| State and orchestration: `core_*` | Own fields, workspaces, time histories, the product driver, and coupled step acceptance. | Trial states become accepted states after the configured checks succeed across MPI ranks. |
+| Physical models: `models_*` | Implement combustion closures, ESF, micromixing, chemistry adapters, and parcel kernels. | Value inputs, borrowed views, and providers return candidate changes and reports. |
+| Material services: `physics_*` | Provide thermodynamics, transport properties, LES closures, and source-contribution interfaces. | State revisions and material identities determine which properties and sources are valid. |
+| Discrete equations: `solver_*` | Assemble momentum, pressure, enthalpy, and scalar equations; apply linear solvers and preconditioners. | Operators consume mesh metrics, boundary states, and consistent face fluxes. |
+| Mesh and boundaries: `mesh_*`, `bc_*` | Build Cartesian meshes, query geometry, prepare IBM reconstruction, and impose physical boundary conditions. | Geometry and reconstruction plans supply the data used by the discrete equations. |
+| Communication: `parallel_*` | Manage CPU resources, halo exchange, and distributed donor communication. | Prepared communication plans define ownership, buffers, and completion requirements. |
+| Persistence and output: `io_*` | Write visualization, checkpoints, monitoring, and run evidence. | Output refers to accepted states; restart validates state, assets, and method history. |
 
-## 主要算法
+## Numerical methods
 
-### 网格与浸没边界
+### Mesh, transport, and pressure coupling
 
-| 步骤 | 处理内容 | 输出及用途 |
-| --- | --- | --- |
-| 1. 几何输入 | 读取STL或解析几何，并建立部件、位置、姿态和表面查询。 | 统一的几何场景及其版本标识。 |
-| 2. 网格生成 | 建立笛卡尔网格、局部加密区域、网格度量和跨分区一致的全局Cell ID。 | 守恒控制体及MPI分区拓扑。 |
-| 3. 网格标记 | 计算单元与几何表面的空间关系，区分流体、固体和边界邻近单元。 | IBM标记、距离和表面法向。 |
-| 4. 局部重构 | 在边界邻近区域构造局部插值或多项式重构，形成速度、组分和焓的边界状态。 | IBM重构模板及其适用阶次报告。 |
-| 5. 守恒离散 | 将重构边界状态写入有限体积通量和壁面作用量。 | 流动、组分、焓方程及parcel碰撞查询使用的边界数据。 |
-| 6. 几何更新 | 几何发生变化时更新几何版本、相关网格标记和重构模板。 | 更新后的计算域描述，控制方程接口保持稳定。 |
+The mesh is fixed during a run and may use uniform or stretched Cartesian spacing. STL surfaces or imported Cartesian markers define static immersed boundaries. Local reconstruction supplies boundary-adjacent states; adaptive reconstruction order refers to the interpolation order on the fixed mesh.
 
-### 流动、燃烧与喷雾耦合
+| Component | Method and role |
+| --- | --- |
+| Spatial discretization | Cell-centered finite volumes with Rhie–Chow face-flux construction couple pressure and velocity. IBM reconstruction supplies wall-adjacent values. |
+| Time integration | The default CN/BE scheme combines Crank–Nicolson (CN) momentum integration with backward Euler (BE) reactive-scalar updates. Ordinary single-fluid enthalpy uses CN; reacting and spray configurations use BE for enthalpy and composition. |
+| Pressure coupling | CN/BE uses `outer_corrected`. Explicit `backward_euler` configurations use PISO or SIMPLE scheduling. Coupling checks evaluate the original discrete equations. |
+| LES | Smagorinsky, WALE, and Vreman closures provide subgrid-scale (SGS) viscosity. The supplied reacting-flow examples use Vreman. |
+| Species and enthalpy | Independent species fields reconstruct the full composition. Total thermochemical enthalpy includes species formation enthalpies; material queries recover temperature and transport properties. |
+| Linear solution | Iterative solvers use configured iteration budgets and report independently evaluated residuals. Reusable transport coefficients and preconditioners reduce repeated assembly work. |
 
-默认瞬态计算采用 CN/BE：动量与普通单流体焓使用 CN，组分、反应、ESF 和喷雾路径的焓与组分共同使用 BE，`outer_corrected` 外迭代按原方程残差收敛。`backward_euler` 配合 PISO 或 SIMPLE 调度。平均反应与代数 PaSR 通过公共组分源进入 CN/BE；ESF 使用其显式配置的化学、输运与混合顺序。
+### Combustion and micromixing
 
-Smagorinsky 通过 `"turbulence": {"model": "smagorinsky", "coefficient": 0.12}` 配置，系数默认值为 0.17。模型使用完整对称应变率和单元体积的立方根作为滤波尺度；`hundun check` 显示实际 SGS 模型与系数。
+The turbulence–chemistry closure and chemistry representation are separate choices. Closure identifiers are `finite_rate_mean`, `pasr_algebraic_v1`, and `esf_tpdf`. The `direct_cantera` representation supplies the reacting backend; `analytic_isomer` provides an analytic chemistry option for controlled tests.
 
-LES 云图同时提供 `nu_sgs`（m²/s）、`k_sgs`（m²/s²）、`eps_sgs_volume`（W/m³）和 `eps_sgs_specific`（m²/s³）。耗散率采用分子＋SGS 有效黏度口径；这些代数量由已接受流场、物性和 IBM 梯度重建，随云图输出更新。`hundun check` 的 `derived_output_bytes` 显示每进程预分配的派生字段空间。
+| Component | Method and coupling |
+| --- | --- |
+| Mean-state finite rate | Integrate chemistry at the mean thermochemical state and register its species source. This path supplies the mean-state baseline. |
+| Algebraic PaSR | Combine named chemical and mixing timescales to obtain a reaction fraction. The same fraction weights all reacting-species contributions and their associated heat-release accounting. Unavailable timescales produce an explicit status. |
+| Transported PDF / ESF | Represent the transported probability density function (TPDF) with an ensemble of stochastic composition fields. Each spatial MPI rank holds all local fields. Production checks cover 2, 4, 8, and 16 fields, subject to species and memory limits. |
+| Micromixing | Interaction by Exchange with the Mean (IEM) supplies the baseline mixing operator. The Turbulence–Chemistry Recursive (TCR) model recovers mixing-state parameters from reaction-rate information and supplies history-dependent mixing controls. |
+| Dynamic TCR | `cdphyso_dynamic_v1` and `dyn711_v1` retain distinct rate statistics and update schedules. `experimental` applies accepted controls; `shadow` records dynamic history while retaining baseline IEM mixing. |
+| Chemistry services | Shared thermodynamic and kinetic interfaces support state recovery, rate queries, and interval integration. Prepared batch workspaces reuse backend resources. Mechanism identity includes phase, species ordering, and configured rate regularization. |
 
-| 顺序 | 计算阶段 | 状态处理 |
-| ---: | --- | --- |
-| 1 | 从已接受状态建立当前时间步的尝试状态，并准备网格、Halo、模型和输出计划。 | 时间历史和已接受状态保持只读。 |
-| 2 | 根据守恒状态恢复温度、密度和输运性质，计算LES亚格子黏度及标量扩散率。 | 派生量与当前尝试状态的版本绑定。 |
-| 3 | 执行第一化学半步`C1`，推进平均态或各随机场的有限速率反应。 | 化学后端返回积分物种增量和结构化状态。 |
-| 4 | 组装动量、全部物种和总热化学焓的守恒输运，执行随机场输运和第一次PISO校正。 | 形成预测速度、守恒面质量通量和输运候选状态。 |
-| 5 | 执行PaSR反应比例闭合或TCR微观混合闭合，并计算一次parcel predictor/corrector及相间交换。 | 喷雾源同时登记到平均态和全部随机场。 |
-| 6 | 执行第二化学半步`C2`。 | 化学积分使用包含最终蒸发组分和焓源的状态。 |
-| 7 | 汇总随机场积分反应增量，计算PSR参考反应率，恢复TCR混合状态参数$\kappa$并执行元素与统计一致性处理。 | 形成平均态反应源候选和燃烧闭合报告。 |
-| 8 | 执行第二次PISO校正。 | 压力方程使用最终热化学状态及全部质量、动量和焓源。 |
-| 9 | 完成IBM碰撞、TAB子parcel生成和MPI迁移的分阶段登记，并检查有限性、守恒收支和全进程状态。 | 依据检查结果统一提交状态、历史、随机数时钟和parcel，或恢复时间步起点并重新计算。 |
+PaSR uses the scalar-dissipation mixing timescale
 
-### 燃烧闭合与化学后端
+$$
+\tau_{\mathrm{mix}}=\frac{C_Z\Delta^2}{2(D+D_t)},
+\qquad D_t=\frac{\nu_t}{Sc_t},
+\qquad \kappa_{\mathrm{PaSR}}=\frac{\tau_{\mathrm{chem}}}{\tau_{\mathrm{chem}}+\tau_{\mathrm{mix}}}.
+$$
 
-机理文件可为指定反应配置低浓度级数延拓，瞬时化学源与反应器积分共享该速率关系；配置方式见[化学机理说明](docs/chem.md)。
+Here, $C_Z$ is an explicit model coefficient, $\Delta$ is the filter width, $D$ is molecular diffusivity, $\nu_t$ is SGS kinematic viscosity, and $Sc_t$ is the turbulent Schmidt number. The chemical-timescale definition belongs to the selected model contract. The PaSR reaction fraction $\kappa_{\mathrm{PaSR}}$ and the TCR mixing-state parameter $\kappa$ have separate definitions and roles.
 
-| 对象 | 数值处理 | 耦合规则 |
-| --- | --- | --- |
-| 有限速率平均态 | 对平均热化学状态执行有限速率化学推进，形成原始物种与能量候选增量。 | 作为平均态有限速率基线，并与其他闭合共用`ChemistryBackend`。 |
-| PaSR | 使用$\tau_{\mathrm{mix}}=C_Z\Delta^2/[2(D+\nu_t/Sc_t)]$计算混合时间尺度，并结合具名化学时间尺度得到PaSR反应比例$\kappa_{\mathrm{PaSR}}$。 | 同一个$\kappa_{\mathrm{PaSR}}$作用于全部反应物种增量及相应能量报告；时间尺度检查结果通过具名状态返回。 |
-| TPDF/ESF | 输运概率密度函数（TPDF）采用欧拉随机场（ESF）表示，每个空间MPI进程持有全部`N`个随机场。CN/BE流程按输运、反对称随机增量、隐式IEM混合与化学区间组织更新；对称化学分裂保留为显式方法。 | 随机场使用统一密度、面通量和化学后端；反应增量由`ReactionEnsemble`求平均。 |
-| PSR参考状态 | 从当前`MeanState`构造完全搅拌反应器（PSR）参考状态，并通过同一化学后端计算参考反应率。 | 参考状态用于反应率比和诊断；平均态与随机场承担对流、扩散、Halo和压力求解。 |
-| 动态TCR | `cdphyso_dynamic_v1`使用随机场／field0参考区间反应率、逐组分κ与空间统计Cd调节IEM混合。 | 动态历史随气相和颗粒共同提交并写入Restart；[模型定义](docs/tcr.md)。 |
-| TCR代数根 | 湍流–化学递归（TCR）模型使用有效反应物分数$\eta$和反应率比$R$确定可接受候选根集合。唯一可接受根对应$\kappa$的直接代数恢复；多个可接受分支由分支历史提供恢复信息。 | 恢复后的混合状态参数$\kappa$进入同一微观混合闭合，并输出根状态、分支状态和恢复报告。 |
-| 一致性处理 | 对全部组分和随机场执行联合的单纯形、元素、均值和矩约束处理。 | 一致性报告与反应源候选共同进入守恒源项事务。 |
+For the current CN/BE ESF schedule, transport, paired Wiener increments, implicit IEM mixing, and chemistry precede the flow corrections. Outer corrections reuse the resulting chemistry state. The physical ensemble mean carries composition and enthalpy; an independent `field0` supplies the reduced-noise state used for pressure coupling. TCR statistics follow the selected model's schedule, and accepted histories participate in the common step decision. [ESF configuration](docs/esf.md) and [TCR definitions](docs/tcr.md) specify these contracts.
 
-### 拉格朗日喷雾
+### Lagrangian sprays
 
-| 步骤 | 数值处理 | 守恒与并行处理 |
-| --- | --- | --- |
-| 注入 | 根据喷嘴质量流率、时间区间和喷雾分布生成parcel；ID和随机数由喷嘴、已接受时间步和序号确定。 | 注入结果先进入尝试状态，重算保持相同的随机身份。 |
-| 气相采样 | 通过`ParcelGridCouplingStencil`从`MeanState`采样速度、温度、密度、输运性质和燃料蒸气分数。 | 采样与源项沉积使用同一组归一化权重。 |
-| 动量交换 | Schiller–Naumann关联式根据滑移速度、粒径和气相性质计算阻力。 | parcel动量变化与气相动量源成对登记。 |
-| 传热传质 | Ranz–Marshall关联式计算Nusselt数、Sherwood数及传热传质系数。 | 传热、显热、潜热和蒸气热化学焓使用统一符号约定。 |
-| 蒸发 | THICK_EX与Abramzon–Sirignano作为具名蒸发选项更新液滴质量与温度；624CF采用THICK_EX与气液共同守恒交换。 | 实际积分增量进入`SprayExchangeDelta`，后续子步从事件时刻停止。 |
-| 轨迹积分 | 每个气相宏时间步执行一次predictor和一次corrector，内部子步由particle CFL、热时间尺度和蒸发时间尺度共同确定。 | 全部子步累计为一份parcel与气相交换报告。 |
-| IBM碰撞 | 轨迹线段查询最早的表面相交事件，并根据表面法向和恢复系数计算反弹。 | 事件在当前所有者进程中登记，跨分区轨迹保持唯一parcel所有权。 |
-| SGS破碎 | 按流体侧eps/ρ采样积累暴露历史，在流体步末计算随机破碎与子滴分布。 | 子滴、随机时钟与质量／动量／焓交换随统一事务提交。 |
-| TAB破碎 | TAB变形方程计算液滴变形和破碎判据，子parcel继承材料并获得稳定ID。 | 子parcel的质量、动量、温度和代表液滴数（multiplicity）收支随事务检查。 |
-| MPI迁移 | 根据轨迹终点和全局网格编号确定新所有者，按稳定顺序打包和交换parcel。 | 创建、删除和迁移在全进程检查通过后统一发布。 |
+A parcel represents a weighted population of single-component droplets. Stable IDs identify injection, breakup, migration, and restart records. Gas sampling and source deposition connect parcel motion to the Eulerian fields.
 
-## 架构与算法设计依据
+| Process | Method and accounting |
+| --- | --- |
+| Injection and trajectories | Injection candidates retain deterministic identities. Adaptive parcel substeps resolve cell crossings, wall impacts, exits, and evaporation endpoints. |
+| Momentum and transfer | Schiller–Naumann drag uses local gas and liquid properties. Heat and mass transfer follow the selected evaporation formulation. Wall rebound uses the static-geometry intersection and surface normal. |
+| Evaporation | `abramzon_sirignano` and `thick_exchange` select Abramzon–Sirignano and THICK_EX formulations. Liquid properties, vapor-species mapping, and absolute liquid enthalpy share explicit material references. |
+| Breakup | `tab` selects the Taylor analogy breakup (TAB) model; `stochastic_sgs` selects the SGS-exposure model. Parent replacement, child IDs, and model histories enter candidate state. |
+| Two-way exchange | Parcel mass, momentum, enthalpy, and kinetic-energy changes define gas-side exchange. Each physical exchange is counted once; every ESF receives the same gas source. |
+| Migration and persistence | Endpoint ownership determines MPI migration. Parcel state and histories are accepted or rejected together with the gas state and retained in native restart records. |
 
-| 设计问题 | 采用的设计 | 依据 |
-| --- | --- | --- |
-| 守恒量的一致表达 | 质量、动量、全部物种和总热化学焓采用有限体积守恒形式；化学与两相交换通过源项事务进入控制方程。 | 守恒变量和成对源项便于逐单元及全局检查质量、元素、动量和能量收支。 |
-| 空间与时间精度 | 空间离散采用二阶有限体积、局部重构IBM和Rhie-Chow面通量；时间格式采用CN/BE或BE，耦合调度独立配置。 | 动量、标量与多物理组合分别通过空间和时间细化检查离散精度。 |
-| 多物理耦合顺序 | TPDF/TCR、喷雾和IBM由职责完整的模块管理内部步骤，应用驱动只调用完整的时间步接口。 | 固定的数据依赖和调用顺序便于保持反应源、蒸发源、最终面通量和压力校正的一致性。 |
-| 时间步状态的一致提交与回退 | 流动、化学、随机场和parcel先更新尝试状态。全部MPI进程完成守恒与有限性检查后统一提交；需要重试时恢复时间步起点。 | 该机制使各物理量对应同一已接受时间步端点，并使全部MPI进程保持一致。 |
-| 模型与求解器分离 | 模型通过字段视图及热力学、输运、化学和几何服务获取数据，并返回候选增量与报告。 | 稳定接口限定第三方依赖和数据访问范围，也便于替换模型及独立验证数值内核。 |
-| 并行确定性 | 网格使用全局Cell ID，随机场采用计数器随机数生成器（Counter-RNG），parcel采用稳定ID和确定性遍历顺序。 | 随机身份和事件顺序与MPI分区解耦，Restart可以延续相同的数值序列。 |
-| 大规模并行效率 | 局部加密集中网格分辨率，字段和parcel采用连续的数组结构（SoA）存储，Halo与迁移在计算前形成计划并使用异步通信。 | 计算和通信边界保持明确，时间步内减少临时分配、拓扑搜索和全局同步。 |
-| 面向研究代码扩展 | 配置、字段、服务、算法状态和诊断报告具有明确命名；Coding Agent通过相同接口读取计划、调用模块和检查结果。 | 显式契约降低跨模块修改范围，使物理构思可以映射到可测试的程序模块。 |
+Liquid-property conventions and evaporation details are given in [liquid properties](docs/liquid.md).
 
-## 构建
+## Design rationale
 
-Release 组合采用 CMake 3.21 及以上版本、Clang 15、libstdc++ ABI1、
-Ninja、MPI 3 及以上实现和固定 Cantera 3.2 程序包。配套 Linux 环境
-使用 glibc 2.35；构建保留 FP64，采用 ThinLTO 与 lld。
+| Design choice | Numerical or software basis |
+| --- | --- |
+| Shared conservation accounting | Consistent species, element, momentum, and energy definitions make chemical and interphase sources traceable. Raw budget defects and discrete-equation residuals remain separately visible. |
+| Common step acceptance and rollback | Flow, stochastic fields, model clocks, and parcels represent the same accepted time endpoint. A rejected attempt retains the previous accepted state for retry. |
+| Explicit module contracts | State revisions, units, material identities, borrowed views, and workspace capacities define each call. This supports isolated model tests and bounded code changes. |
+| Deterministic stochastic identities | Counter-based random numbers, stable parcel IDs, and accepted-step clocks preserve retry identities and support cross-partition restart checks. |
+| Prepared execution | HUNDUN-owned workspaces and communication buffers are prepared before use. Shared transport assembly, preconditioner reuse, and batched chemistry limit repeated work. Third-party resource behavior remains backend-specific. |
+| Agent-assisted development | Named interfaces, case checks, contribution rules, and run evidence give coding agents the same verifiable numerical contracts used in manual development. |
+
+## Build and run
+
+### Packaged runtime
+
+The [v1.1.0 release](https://github.com/windcicada/Hundun-Flow/releases/tag/v1.1.0) provides source, Linux x86-64 runtime, and example archives, together with acceptance notes, dependency licenses, and `SHA256SUMS`. The runtime contains its own MPI and chemistry dependencies. From the extracted runtime directory:
+
+```sh
+./run --version
+./run check case
+./mpirun -n 2 ./run run case --restart restart --output next --steps 1
+```
+
+### Source build
+
+The documented release profile uses CMake 3.21+, Ninja, Clang 15, lld, libstdc++ ABI1, MPI 3+, and FP64 with ThinLTO. `HUNDUN_CANTERA_ROOT` points to the project's pinned, hash-verified Cantera 3.2.0 SDK. Its Linux x86-64 build targets glibc 2.35 or later. Select the intended `clang` and `clang++` through `PATH` before configuring.
+
+Run from the repository root:
 
 ```sh
 HUNDUN_CANTERA_ROOT=/path/to/cantera cmake --preset release
 cmake --build --preset release -j 2
-b3/versions/v0.4/hundun --version
+export PATH="$PWD/b3/versions/v0.4:$PATH"
+hundun --version
 ```
 
-## 运行
+### New calculation and restart
 
-默认时间推进采用 CN/BE，局部 CFL 目标为 0.30，浮动范围为 0.25–0.35。
-时间格式通过 `time.scheme` 配置，耦合调度通过 `solver.coupling` 配置。
-当前 CN/BE 使用 `outer_corrected` 外迭代校正，`backward_euler` 使用
-PISO 或 SIMPLE。旧 CN/BE 输入按原实际行为转换为 `outer_corrected`，
-保持等价算例的原生续算身份。`hundun check` 显示实际时间格式、耦合方式和资源计划。
-`hundun init-case --output case` 生成对应配置；已有算例按其显式时间控制参数运行。
-
-计算开始前先检查算例和MPI分解：
+Generate a starter case, inspect its compiled plan, and run a short calculation:
 
 ```sh
-mpirun -np 4 b3/versions/v0.4/hundun check case --dry-plan
-mpirun -np 4 b3/versions/v0.4/hundun run case \
-  --output run --steps 10 --output-interval 0 --restart-interval 10
+hundun init-case --output case
+mpiexec -n 4 hundun check case --dry-plan
+mpiexec -n 4 hundun run case --output run --steps 10 \
+  --output-interval 0 --restart-interval 10 --diagnostics-interval 1
 ```
 
-从已保存状态继续计算：
+`hundun check` reports the time scheme, pressure coupling, model selection, and resource plan. The default Courant–Friedrichs–Lewy (CFL) target is 0.30, with a holding interval of 0.25–0.35; explicit case settings take precedence. Case checks verify configuration and resource admission; numerical validation uses the observables and tolerances defined for each case.
+
+Continue from the saved state, using a new output directory:
 
 ```sh
-mpirun -np 4 b3/versions/v0.4/hundun run case \
-  --restart run/Restart --output next --steps 10 --restart-interval 10
+mpiexec -n 2 hundun run case --restart run/Restart --output next \
+  --steps 10 --output-interval 0 --restart-interval 10 --diagnostics-interval 1
 ```
 
-化学精度细化续算使用 `--restart-refine-chemistry` 指定原算例：
+Native restart retains fields, time histories, face fluxes, stochastic fields, model clocks, and parcels. It supports the documented repartitioning path when the MPI rank count changes. The case and physical assets retain their identities. Detailed instructions are in [installation, running, and restart](docs/run.md).
 
-```sh
-mpirun -np 4 b3/versions/v0.4/hundun run fine \
-  --restart run/Restart --restart-refine-chemistry case \
-  --output fine-run --steps 10 --output-interval 0 --restart-interval 10
-```
+| Run output | Purpose |
+| --- | --- |
+| `monitor.jsonl` | Time-step controls, equation iterations, and module timings. |
+| `diagnostics.jsonl` | Mass, species, element, and energy accounting. |
+| `evidence.jsonl` | Program, input, and accepted-state identities. |
+| `Restart/` | Verified checkpoint generations for continuation. |
 
-`fine` 保持原算例的物理输入和资产内容，收紧化学相对／绝对容差，
-并保持或增加化学内部步数预算。当前场、历史场、面通量和方法历史
-继续沿用原生检查点，Evidence 记录来源算例身份。
+## Model examples
 
-正式计算应检查边界方向、IBM重构、CFL、组分正性、质量与能量残差、limiter活性和统计窗口。Evidence记录保存在运行目录中。
+| Example | Configuration |
+| --- | --- |
+| [GTMC gas model](examples/g/README.md) | Methane/JL4 chemistry, four ESF, Vreman, and dynamic TCR. |
+| [624CF gas–liquid model](examples/cf/README.md) | Four-step kerosene chemistry, two ESF, Vreman, dynamic TCR, static IBM, THICK_EX evaporation, SGS breakup, and fixed thermodynamic pressure. |
 
-## 文档
+Both directories contain small native model demonstrations and fresh-run/restart commands. Full combustor geometries and long-duration reference calculations have their own inputs and acceptance records.
 
-- [安装、运行与续算](docs/run.md)
-- [版本验收范围](docs/accept.md)
+## GTMC combustion-field demonstration
 
-## 许可证
+The following images show a native GTMC restart calculation at accepted step 32016 and $t=21.815583$ ms on a $153\times325\times151$ mesh. The snapshot uses methane/JL4 chemistry, four-field ESF/TPDF, IEM, Vreman, and static IBM. It illustrates an instantaneous field; statistical assessment and release acceptance have separate evidence records. [Image provenance](docs/hot.md) records the source state and rendering checks.
 
-HUNDUN-FLOW采用Apache License 2.0，见[LICENSE](LICENSE)。第三方组件及许可证见[THIRD_PARTY.md](THIRD_PARTY.md)。
+The three-dimensional view combines translucent combustor geometry, 1400 K and 1800 K temperature isosurfaces, and instantaneous streamlines colored by speed.
 
-## 原生模型示例
+![GTMC geometry, temperature isosurfaces, and speed-colored streamlines](docs/images/gtmc-3d.png)
 
-[GTMC 气相模型](examples/g/README.md) 提供 JL4、四场 ESF、Vreman 与动态 TCR 的小型输入；
-[624CF 气液模型](examples/cf/README.md) 提供煤油四步反应、两场 ESF、动态 TCR、THICK_EX、SGS 破碎与固定热力学压力输入。
-两套示例均包含新算与原生 Restart 命令，模型定义和运行范围见[使用说明](docs/run.md)。
+The central plane at $z=-0.075$ mm shows speed and temperature recovered from the physical mean enthalpy and composition. Gray regions mark IBM solids. The plane retains the original mesh resolution; the three-dimensional view samples every second cell along each axis.
 
-## GTMC 燃烧模拟示范
+![GTMC central-plane speed and temperature](docs/images/gtmc-mid.png)
 
-真实 GTMC 续算场，第 32016 步，t = 21.815583 ms；网格规模
-153 × 325 × 151，采用 CN/BE、Vreman 和四随机场 ESF/TPDF，
-气相反应使用 methane/jl4 机理。
+## Documentation and contributions
 
-三维图展示完整半透明燃烧室几何、1400 K／1800 K 温度等值面，
-以及覆盖旋流器通道的瞬时流线。435 个种子点分布于五个高度的
-实际流体单元，流线按合速度着色。
+| Topic | Reference |
+| --- | --- |
+| Installation, case checks, execution, and restart | [Run guide](docs/run.md) |
+| Release contents and verification scope | [Release notes](docs/release.md), [acceptance record](docs/accept.md) |
+| Chemistry and material definitions | [Reaction-rate regularization](docs/chem.md), [liquid properties](docs/liquid.md) |
+| Stochastic fields and micromixing | [ESF](docs/esf.md), [dynamic TCR](docs/tcr.md) |
+| Development and contribution provenance | [Repository guidance](AGENTS.md), [contributing](CONTRIBUTING.md), [Developer Certificate of Origin](DCO.md) |
 
-![GTMC 燃烧场半透明三维展示](docs/images/gtmc-3d.png)
+The linked model and development documents are maintained in the repository, primarily in Chinese. Contributions require documented provenance and a DCO sign-off (`git commit -s`).
 
-中央截面位于 z = −0.075 mm，展示合速度与物理平均焓／组分对应的
-温度；灰色表示 IBM 固体区域。二维图保留原始网格分辨率，三维
-展示沿各轴每隔一个单元采样。图中物理量与单位随色标标注。
+## License
 
-![GTMC 中央截面速度与温度](docs/images/gtmc-mid.png)
+HUNDUN-FLOW is distributed under the [Apache License 2.0](LICENSE). Derivative programs may use open-source or proprietary licensing, subject to the applicable license conditions. Third-party dependencies retain their own licenses; see [THIRD_PARTY.md](THIRD_PARTY.md).
