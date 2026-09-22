@@ -1089,8 +1089,11 @@ static Status run_application(MPI_Comm communicator,
           payload << ",\"" << value.first << "\":" << value.second;
         }
         if(balance.composition_valid) {
-          payload << ",\"composition_balance\":{\"scope\":\"gas_transport_reaction\",\"density\":\"field0\","
-                  << "\"composition\":\"physical_ensemble_mean\",\"revision\":" << balance.composition_revision
+          const bool ensemble=model.reaction.mode==ReactionMode::esf_tpdf;
+          payload << ",\"composition_balance\":{\"scope\":\"gas_transport_reaction\",\"density\":\""
+                  << (ensemble ? "field0" : "mean") << "\",\"composition\":\""
+                  << (ensemble ? "physical_ensemble_mean" : "mean_mass_fractions")
+                  << "\",\"revision\":" << balance.composition_revision
                   << ",\"duration_s\":" << balance.composition_duration
                   << ",\"after_parcel_exchange\":" << (balance.composition_after_parcel_exchange ? "true" : "false")
                   << ",\"species_units\":\"kg,kg/s\",\"element_units\":\"kmol(atoms),kmol(atoms)/s\""

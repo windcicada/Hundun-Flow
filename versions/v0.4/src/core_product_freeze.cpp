@@ -15635,6 +15635,69 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status)
             return status;
           double balance_s = MPI_Wtime() - balance_begin, max_balance_s{};
+          if(product.reaction.interval_enabled() && !product.spray.enabled()) {
+            using Ledger=detail::CompositionBalanceLedger;
+            Ledger mean_ledger;
+            status=mean_ledger.initialize(product.reaction.gas_identity(),
+                product.reaction.species_indices(),product.reaction.dependent_index(),
+                1,step.generation,step.dt,false);
+            const auto chemistry=product.reaction.contributions();
+            if(chemistry.size!=species_trial.size())
+              status={StatusCode::invalid_plan,kProductBinding};
+            FieldView gamma;
+            if(status)status=runtime_write_view(product.fields.scalar_diffusivity,gamma);
+            status=product.reductions.consensus(status);if(!status)return status;
+            std::size_t i{};
+            for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x,++i) {
+              if(pressure_energy_activity.cells.size && !pressure_energy_activity.cells.data[i])continue;
+              const Int3 c{x,y,z};
+              const double volume=detail::cell_volume(product.equations.kernels(),c);
+              const double before=rho_history.accepted.unchecked(c,0),after=trial_density.unchecked(c,0);
+              mean_ledger.add_total_storage(volume,before,after);
+              for(std::size_t j=0;j<species_trial.size();++j) {
+                mean_ledger.add_storage(j,volume,before,after,
+                    species_history[j].accepted.unchecked(c,0),species_trial[j].unchecked(c,0));
+                // The terminal species audit has reweighted the actual
+                // integrated chemistry to this final density. Do not infer
+                // chemistry or transport from a residual closure identity.
+                mean_ledger.add(j,Ledger::chemistry,static_cast<long double>(volume)*
+                    chemistry.data[j].explicit_source_density.unchecked(c,0));
+              }
+            }
+            mean_ledger.add_total(Ledger::transport,Ledger::flux_sum(
+                product.equations.kernels(),cold_final_flux,pressure_energy_activity.cells));
+            for(std::size_t j=0;j<species_trial.size() && status;++j) {
+              const auto& spec=*product.equations.species().spec(j);
+              for(int z=-1;z<=cells.z;++z)for(int y=-1;y<=cells.y;++y)for(int x=-1;x<=cells.x;++x) {
+                if((x<0 || x>=cells.x)+(y<0 || y>=cells.y)+(z<0 || z>=cells.z)>1)continue;
+                const Int3 c{x,y,z};const double mu=molecular_viscosity.unchecked(c,0);
+                gamma.unchecked(c,0)=mu/spec.molecular_schmidt+
+                    std::max(0.,effective_viscosity.unchecked(c,0)-mu)/spec.turbulent_schmidt;
+              }
+              // BE transport precedes the interval reactor. Export its
+              // actual face operator at the final mass flux, using the
+              // retained pre-reaction composition and the same IBM faces.
+              // The terminal row coefficients are dead scratch at this point.
+              status=form_cartesian_mixture_transport_flux(product.equations.kernels(),
+                  mixture_faces,as_const(gamma),cold_final_flux,scalar_remap->target_species(j),
+                  {x_coefficient,y_coefficient,z_coefficient});
+              if(status && product.ibm_equations)
+                status=detail::IbmScalarTransport::constrain_flux(*product.ibm_equations,
+                    {detail::IbmScalarTransport::Quantity::independent_species,j},cold_final_flux,
+                    {x_coefficient,y_coefficient,z_coefficient});
+              if(status) {
+                const ConstFaceFluxView flux{as_const(x_coefficient),as_const(y_coefficient),
+                    as_const(z_coefficient),cold_final_flux.revision};
+                mean_ledger.freeze_transport(j,Ledger::flux_sum(
+                    product.equations.kernels(),flux,pressure_energy_activity.cells));
+                // Pressure transport is already included in the final flux.
+                mean_ledger.add_pressure(j,0);
+              }
+            }
+            status=product.reductions.consensus(status);if(!status)return status;
+            status=mean_ledger.finish(product.reductions,conservation);
+            if(!status)return status;
+          }
           if(esf_composition_ledger.active()) {
             using Ledger=detail::CompositionBalanceLedger;
             const auto initial_density=esf_ledger_initial_density;

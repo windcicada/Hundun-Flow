@@ -359,6 +359,38 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
       status = {StatusCode::numerical_failure, 99001};
       break;
     }
+    if (interval && cn) {
+      const auto& balance=report.conservation;
+      bool budget=balance.composition_valid && balance.composition_revision!=0 &&
+          balance.composition_duration==model.time.initial_dt &&
+          !balance.composition_after_parcel_exchange &&
+          balance.species_balance.size()==2 && balance.element_balance.size()==1;
+      if(budget) {
+        const auto& a=balance.species_balance[0];
+        const auto& b=balance.species_balance[1];
+        const auto& element=balance.element_balance[0];
+        const double mass=a.current_inventory+b.current_inventory;
+        const double previous=reverse
+            ? 1-(1-initial_y)*std::exp(-2*model.time.initial_dt*(step-1))
+            : initial_y*std::exp(-2*model.time.initial_dt*(step-1));
+        const double chemistry=mass*(expected-previous)/model.time.initial_dt;
+        const double tolerance=2e-9*std::max(1.,std::abs(chemistry));
+        budget=a.name=="A" && b.name=="B" && element.name=="X" && mass>0 &&
+            std::abs(a.current_inventory/mass-expected)<2e-9 &&
+            std::abs(a.accepted_inventory/mass-previous)<2e-9 &&
+            (reverse ? a.chemistry_source>0 : a.chemistry_source<0) &&
+            std::abs(a.chemistry_source-chemistry)<tolerance &&
+            std::abs(a.chemistry_source+b.chemistry_source)<tolerance &&
+            std::abs(a.defect)<tolerance && std::abs(b.defect)<tolerance &&
+            std::abs(a.transport_outflow)<tolerance &&
+            std::abs(element.chemistry_source)<tolerance &&
+            std::abs(element.defect)<tolerance;
+      }
+      if(!collective(budget)) {
+        if(rank==0)std::cerr << "mean reaction composition budget failed\n";
+        status={StatusCode::numerical_failure,99005};break;
+      }
+    }
   }
   MPI_Allreduce(MPI_IN_PLACE, &maximum_error, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   const bool okay = collective(status && maximum_error < 2e-9 && report.accepted_step == 3);
