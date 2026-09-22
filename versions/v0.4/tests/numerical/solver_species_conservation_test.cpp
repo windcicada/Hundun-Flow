@@ -8,6 +8,7 @@
 #include "../../src/solver_mixture_rows_detail.hpp"
 #include "../../src/solver_mixture_bound_detail.hpp"
 #include "../../src/solver_mixture_step_detail.hpp"
+#include "../../src/solver_mixture_transport_detail.hpp"
 #include "../../src/solver_statistical_detail.hpp"
 #include "../../src/models_esf_detail.hpp"
 #include "../../src/core_esf_energy_detail.hpp"
@@ -1028,6 +1029,64 @@ bool test_species_storage_increment() {
                 << " chemical_first=" << chemical_first << " residual=" << actual << '\n';
       passed &= expect(bool(assembled) && actual == -parcel,
           "species residual preserves a small parcel source after chemical cancellation");
+    }
+  return passed;
+}
+
+bool test_mixture_material_floor() {
+  ProductionFixture fixture;
+  if (!expect(make_production_fixture(8,fixture,true),
+      "different-diffusivity face fixture compiles")) return false;
+  const auto cells=fixture.patch.cells;
+  auto first=make_field(kSpecies,cells,1,2,501);
+  auto second=make_field(kPassive,cells,1,2,502);
+  auto thermal=make_field(23,cells,1,2,503);
+  auto mu=make_field(24,cells,1,2,504);
+  auto effective=make_field(25,cells,1,2,505);
+  auto minimum=make_field(26,cells,1,2,506);
+  auto physical=make_field(27,cells,1,2,507);
+  FaceFluxStorage storage;
+  FaceFluxView flow,work,transported;
+  auto status=FaceFluxStorage::allocate_workspace(cells,3,storage);
+  if(status)status=storage.workspace_view(0,801,flow);
+  if(status)status=storage.workspace_view(1,802,work);
+  if(status)status=storage.workspace_view(2,803,transported);
+  if(!expect(bool(status),"different-diffusivity workspaces allocate"))return false;
+  const std::array<ConstFieldView,2> composition{as_const(first.view),as_const(second.view)};
+  const std::array<FaceFieldView,3> faces{flow.x,flow.y,flow.z};
+  const std::array<FaceFieldView,3> output{transported.x,transported.y,transported.z};
+  bool passed=true;
+  for(double turbulent : {0.0,.0625}) for(double thermal_gamma : {2.0,.03125})
+    for(unsigned axis=0;axis<3;++axis) for(double direction : {1.0,-1.0}) {
+      fill_field(mu,.03125);fill_field(effective,.03125+turbulent);
+      fill_field(thermal,thermal_gamma);
+      // Fixture Sc=.5 and Sc_t=2; physical species diffusion stays unchanged.
+      const double species_gamma=.0625+.5*turbulent;
+      fill_field(physical,species_gamma);
+      for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)
+        for(int x=-2;x<cells.x+2;++x){
+          const int coordinate=axis==0?x:axis==1?y:z;
+          const bool downstream=direction>0 ? coordinate>=3 : coordinate<3;
+          first.view.unchecked({x,y,z},0)=downstream ? 5.6e-14 : 0;
+          second.view.unchecked({x,y,z},0)=downstream ? .2 : .1;
+        }
+      for(unsigned a=0;a<3;++a){const auto f=faces[a];
+        for(int z=0;z<f.extents.z;++z)for(int y=0;y<f.extents.y;++y)
+          for(int x=0;x<f.extents.x;++x)f.unchecked({x,y,z})=a==axis?direction:0;
+      }
+      status=detail::prepare_mixture_diffusivity(fixture.equations.species(),
+          as_const(thermal.view),as_const(mu.view),as_const(effective.view),minimum.view);
+      MixtureTransportFaces mixture;
+      if(status)status=prepare_cartesian_mixture_transport(fixture.equations.kernels(),
+          {composition.data(),composition.size()},{},as_const(minimum.view),as_const(flow),
+          work,901,mixture);
+      if(status)status=form_cartesian_mixture_transport_flux(fixture.equations.kernels(),
+          mixture,as_const(physical.view),as_const(flow),as_const(first.view),output);
+      const double outward=direction*output[axis].unchecked({3,3,3});
+      const double expected=-.125*std::max(0.0,species_gamma-thermal_gamma)*5.6e-14;
+      passed &= expect(bool(status) && outward<=0 &&
+          std::abs(outward-expected)<1e-28,
+          "shared stabilization cannot remove an absent species with weaker physical diffusion");
     }
   return passed;
 }
@@ -3044,6 +3103,9 @@ int main(int argc, char** argv) {
   if (argc==2 && std::string_view(argv[1])=="--bound") {
     const bool passed=test_mixture_bound_repair(MPI_COMM_WORLD);MPI_Finalize();return passed ? 0 : 1;
   }
+  if (argc==2 && std::string_view(argv[1])=="--mixture-material") {
+    const bool passed=test_mixture_material_floor();MPI_Finalize();return passed ? 0 : 1;
+  }
   if (argc==2 && (std::string_view(argv[1])=="--face" || std::string_view(argv[1])=="--flat-face")) {
     const bool passed=mixture_face_probe(std::string_view(argv[1])=="--flat-face");
     MPI_Finalize();
@@ -3084,6 +3146,7 @@ int main(int argc, char** argv) {
   passed &= test_mixture_flux_ledger();
   passed &= test_species_storage_increment();
   passed &= test_mixture_equation_faces();
+  passed &= test_mixture_material_floor();
   passed &= test_frozen_scalar_rows();
   passed &= test_passive_midpoint();
   passed &= test_inlet_scalar_material();

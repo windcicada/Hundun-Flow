@@ -5,6 +5,47 @@
 
 namespace hundun::v04::detail {
 
+// A shared artificial conductance must account for the least diffusive
+// equation. Subtracting thermal diffusion alone under-stabilizes species
+// with larger Schmidt numbers. The harmonic face operator is monotone in
+// both cell coefficients, so their pointwise minimum supplies a face lower
+// bound. Each equation retains its original physical material operator.
+inline Status prepare_mixture_diffusivity(const SpeciesEquationPlan& species,
+    ConstFieldView thermal, ConstFieldView molecular, ConstFieldView effective,
+    FieldView minimum) noexcept {
+  const auto cells=thermal.interior;
+  if (!species.fingerprint() ||
+      !valid_cell_view(thermal,cells,0,1,1) ||
+      !valid_cell_view(molecular,cells,0,1,1) ||
+      !valid_cell_view(effective,cells,0,1,1) ||
+      !valid_cell_view(as_const(minimum),cells,0,1,1) ||
+      field_views_overlap(thermal,as_const(minimum)) ||
+      field_views_overlap(molecular,as_const(minimum)) ||
+      field_views_overlap(effective,as_const(minimum)))
+    return {StatusCode::invalid_plan,17872};
+  for (int z=-1;z<=cells.z;++z) for(int y=-1;y<=cells.y;++y)
+    for(int x=-1;x<=cells.x;++x) {
+      if ((x<0 || x>=cells.x)+(y<0 || y>=cells.y)+(z<0 || z>=cells.z)>1) continue;
+      const Int3 c{x,y,z};
+      double value=thermal.unchecked(c,0);
+      const double mu=molecular.unchecked(c,0);
+      double mut=effective.unchecked(c,0)-mu;
+      if (mut<0 && mut>-1e-12*std::max(1.0,mu)) mut=0;
+      if (!std::isfinite(value) || value<=0 || !std::isfinite(mu) || mu<0 ||
+          !std::isfinite(mut) || mut<0)
+        return {StatusCode::numerical_failure,17872};
+      for(std::size_t s=0;s<species.size();++s) {
+        const auto& spec=*species.spec(s);
+        const double gamma=mu/spec.molecular_schmidt+mut/spec.turbulent_schmidt;
+        if (!std::isfinite(gamma) || gamma<=0)
+          return {StatusCode::numerical_failure,17872};
+        value=std::min(value,gamma);
+      }
+      minimum.unchecked(c,0)=value;
+    }
+  return {};
+}
+
 inline double mixture_face_extra(const MixtureTransportFaces* mixture,
                                  unsigned axis, Int3 face) noexcept {
   if (mixture == nullptr) return 0.0;

@@ -25,6 +25,7 @@
 #include "solver_cold.hpp"
 #include "solver_iccg.hpp"
 #include "solver_mixture_step_detail.hpp"
+#include "solver_mixture_transport_detail.hpp"
 #include "solver_statistical_detail.hpp"
 #include <cstdio>
 #include "solver_conservative_energy_detail.hpp"
@@ -12891,12 +12892,22 @@ Status ProductDriver::Impl::execute_attempt(
                         pressure_energy_candidate_enthalpy.unchecked(c,0));
               }
         }
+        auto mixture_diffusivity=as_const(enthalpy_diffusivity);
+        FieldView minimum_diffusivity;
+        if (prepared_faces && !species_trial.empty()) {
+          prepared_faces=runtime_write_view(product.fields.scalar_diffusivity,
+              minimum_diffusivity);
+          if (prepared_faces) prepared_faces=detail::prepare_mixture_diffusivity(
+              product.equations.species(),as_const(enthalpy_diffusivity),
+              as_const(molecular_viscosity),as_const(effective_viscosity),minimum_diffusivity);
+          mixture_diffusivity=as_const(minimum_diffusivity);
+        }
         if (prepared_faces) prepared_faces=prepare_cartesian_mixture_transport(
             product.equations.kernels(),
             {mixture_species.data(),mixture_species.size()},
             species_trial.empty() ? as_const(trial_enthalpy) :
                 as_const(pressure_energy_candidate_enthalpy),
-            as_const(enthalpy_diffusivity),flux,
+            mixture_diffusivity,flux,
             mixture_workspace,++mixture_iteration,mixture_faces,
             product.ibm_equations ? &*product.ibm_equations : nullptr);
         return product.reductions.consensus(prepared_faces);
