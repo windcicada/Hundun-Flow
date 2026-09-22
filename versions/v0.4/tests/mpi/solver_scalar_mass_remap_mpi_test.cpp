@@ -316,9 +316,116 @@ bool run() {
   return passed;
 }
 
+bool target_species_budget() {
+  CandidateBoundaryFixture fixture;
+  CandidateBoundaryFixtureSpec spec;
+  spec.multispecies=true;
+  if (!fixture.initialize(MPI_COMM_WORLD,spec)) return false;
+  const auto cells=fixture.patch.cells;
+  fill(fixture.density,1.0);
+  std::array<FieldId,2> ids{};
+  std::array<FieldView,2> input{};
+  std::array<OwnedField,2> accepted,previous;
+  std::array<PrimitiveHistory,2> history{};
+  for(unsigned s=0;s<2;++s) {
+    auto& field=fixture.independent_species[s];
+    fill(field,s==0 ? .25 : 1e-20);
+    ids[s]=field.view.field; input[s]=field.view;
+    accepted[s]=make_field(ids[s],cells,1,0,4100+s,5100+s);
+    previous[s]=make_field(ids[s],cells,1,0,4200+s,5200+s);
+    fill(accepted[s],s==0 ? .25 : 1e-20);
+    fill(previous[s],s==0 ? .25 : 1e-19);
+    history[s]={as_const(input[s]),as_const(accepted[s].view),
+                as_const(previous[s].view)};
+  }
+  // A decaying trace has a negative exact BDF2 target, although its current
+  // bounded value satisfies the outer solve's absolute equation budget.
+  // Asking this provisional update for machine-relative closure stalls the
+  // common bounded search, as in reacting transport with trace radicals.
+  auto viscosity=make_field(70,cells,1,2,4300,5300);
+  auto diffusivity=make_field(71,cells,1,2,4301,5301);
+  auto diagonal=make_field(72,cells,1,0,4302,5302);
+  auto rhs=make_field(73,cells,1,0,4303,5303);
+  auto residual=make_field(74,cells,1,0,4304,5304);
+  fill(viscosity,1e-60);
+  EquationStateView state;
+  state.density={as_const(fixture.density.view),as_const(fixture.density.view),
+                 as_const(fixture.density.view)};
+  state.independent_species={history.data(),history.size()};
+  EquationMaterialView material;
+  material.molecular_viscosity=material.effective_viscosity=as_const(viscosity.view);
+  EquationAssemblyContext context;
+  context.dt=1.; context.bdf={1.5,-2.,.5,2U}; context.time=4400;
+  context.geometry=fixture.geometry.topology_revision();
+  context.boundary=fixture.boundary.revision();
+  context.thermo=fixture.thermodynamics.fingerprint();
+  context.transport=fixture.transport.fingerprint();
+  context.contribution_stage=1;
+  FaceFluxStorage storage; FaceFluxView flux;
+  auto status=FaceFluxStorage::allocate_workspace(cells,1,storage);
+  if(status)status=storage.workspace_view(0,4401,flux);
+  if(!status)return false;
+  for(auto f:{flux.x,flux.y,flux.z})
+    for(int z=0;z<f.extents.z;++z)for(int y=0;y<f.extents.y;++y)
+      for(int x=0;x<f.extents.x;++x)f.unchecked({x,y,z})=0.;
+  context.mass_flux=as_const(flux); context.face_flux=flux.revision;
+  context.provisional_mass_flux=true;
+  const std::array<TransportedScalarRole,2> roles{
+      TransportedScalarRole::species,TransportedScalarRole::species};
+  detail::ScalarMassRemap remap;
+  status=remap.allocate(fixture.patch,{ids.data(),2},{roles.data(),2},2);
+  if(status)status=remap.bind(MPI_COMM_WORLD,fixture.boundary);
+  if(!status)return false;
+  const BoundaryResolvedValues values{
+      {fixture.boundary_scalar_values.data(),fixture.boundary_scalar_values.size()},
+      {fixture.boundary_vector_values.data(),fixture.boundary_vector_values.size()},
+      {fixture.boundary_normal_gradient_values.data(),fixture.boundary_normal_gradient_values.size()}};
+  const EquationSystemView scratch{diagonal.view,rhs.view,residual.view};
+  bool passed=true;
+  for(unsigned mode=0;mode<5;++mode) {
+    const std::array<double,2> limits{1e-12,mode==3 ? 1e-25 : 1e-12};
+    auto ctx=context;
+    if(mode==4) {
+      ctx.scope=EquationAssemblyScope::final_conservative;
+      ctx.provisional_mass_flux=false;
+      ctx.mass_flux=fixture.committed_flux();
+      ctx.face_flux=ctx.mass_flux.revision;
+      ctx.face_flux_authority=ctx.mass_flux.certificate.authority();
+      ctx.face_flux_storage=ctx.mass_flux.certificate.storage();
+      ctx.face_flux_revision_domain=ctx.mass_flux.certificate.revision_domain();
+    }
+    const Span<const double> budget=mode==2 ? Span<const double>{}
+        : Span<const double>{limits.data(),limits.size()};
+    detail::ScalarMassRemap::Report report;
+    status=remap.solve_target_species(fixture.equations,state,material,ctx,scratch,
+        diffusivity.view,{input.data(),input.size()},{},values,fixture.reductions,
+        report,mode!=1,nullptr,{},{},false,{},budget);
+    const bool expected=mode==0
+        ? status && report.provisional_target_species && report.iterations==1 &&
+          report.requested_residual_ratio<=1 &&
+          report.convergence_residual>detail::ScalarMassRemap::tolerance
+        : status.code==StatusCode::rejected_step &&
+          status.detail==detail::ScalarMassRemap::kTargetNonconverged;
+    if(!expected)std::cerr<<"FAIL: target species budget mode="<<mode
+        <<" status="<<unsigned(status.code)<<'/'<<status.detail
+        <<" iterations="<<report.iterations<<" relative="<<report.convergence_residual
+        <<" requested="<<report.requested_residual_ratio<<'\n';
+    passed &= expected;
+    for(int z=0;z<cells.z;++z)for(int y=0;y<cells.y;++y)for(int x=0;x<cells.x;++x) {
+      const Int3 c{x,y,z};
+      const double q=remap.target_species(1).unchecked(c,0);
+      passed &= q>=0 && q<=1e-20 &&
+          remap.target_species(0).unchecked(c,0)==.25 &&
+          input[1].unchecked(c,0)==1e-20 &&
+          accepted[1].view.unchecked(c,0)==1e-20;
+    }
+  }
+  return passed;
+}
+
 int main(int argc, char** argv) {
   if (MPI_Init(&argc,&argv) != MPI_SUCCESS) return 2;
-  int local=(run() && coupling_forcing_replay() && history_contract() && frozen_transport_pairing()) ? 1 : 0, global=0;
+  int local=(run() && coupling_forcing_replay() && history_contract() && frozen_transport_pairing() && target_species_budget()) ? 1 : 0, global=0;
   MPI_Allreduce(&local,&global,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
   MPI_Finalize();
   return global ? 0 : 1;

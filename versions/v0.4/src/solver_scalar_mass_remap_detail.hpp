@@ -855,6 +855,13 @@ class ScalarMassRemap {
       report.residual=global[0]; report.convergence_residual=global[2];
       report.requested_residual_ratio=global[3];
       if(report.convergence_residual<=tolerance && global[3]<=1.0) return {};
+      // An explicit outer equation budget is sufficient for an uncommitted
+      // coupling update. Requiring machine-relative trace closure as well
+      // can stall the bounded search on a negligible negative target. Keep
+      // the default/final solve strict; the caller independently audits the
+      // final conservative equations before accepting any physical state.
+      if (intermediate_coupling && report.provisional_target_species &&
+          residual_limits.size && iteration>0 && global[3]<=1.0) return {};
       // The caller's extra inner margin can be smaller than half one
       // represented composition ULP. Return this state as a provisional
       // guess only when every over-budget row is quantization-limited.

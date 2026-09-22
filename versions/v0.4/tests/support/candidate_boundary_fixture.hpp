@@ -78,6 +78,10 @@ struct CandidateBoundaryScratch {
 
 class CandidateBoundaryFixture {
  public:
+  ConstFaceFluxView committed_flux() const noexcept {
+    return committed_accepted;
+  }
+
   bool initialize(MPI_Comm communicator,
                   CandidateBoundaryFixtureSpec requested = {}) {
     diagnostic_step = 1U;
