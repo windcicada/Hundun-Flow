@@ -929,6 +929,30 @@ bool test_mixture_face_closure() {
       passed &= expect(bool(status) && close(smooth.diffusion,.5),
           "resolved upstream to FP64 plateau has a sign-stable common face coefficient");
     }
+  // The converse stencil also needs the zero-gradient limit. A near-pure
+  // component's upstream difference of one ULP can otherwise change every
+  // bulk scalar's shared diffusion by a finite fraction of the mass flux.
+  for(bool heat : {false,true}) {
+    const double base=heat ? 3784931. : .99999999999999967;
+    const double downstream=heat ? base-5e-7 : .99999999999996558;
+    for(unsigned axis=0;axis<3;++axis)for(double direction : {1.,-1.})
+      for(double upstream : {std::nextafter(base,0.),base,std::nextafter(base,INFINITY)}) {
+        for(int z=-2;z<cells.z+2;++z)for(int y=-2;y<cells.y+2;++y)
+          for(int x=-2;x<cells.x+2;++x) {
+            const int coordinate=axis==0 ? x : axis==1 ? y : z;
+            const int i=direction>0 ? coordinate : 5-coordinate;
+            first.view.unchecked({x,y,z},0)=i<=1 ? upstream : i==2 ? base : downstream;
+          }
+        const auto q=as_const(first.view);
+        const Span<const ConstFieldView> composition=heat
+            ? Span<const ConstFieldView>{} : Span<const ConstFieldView>{&q,1};
+        const auto status=prepare_cartesian_mixture_face(fixture.equations.kernels(),
+            composition,heat ? q : ConstFieldView{},static_cast<CartesianAxis>(axis),
+            {3,3,3},direction,0.,smooth);
+        passed &= expect(bool(status) && close(smooth.diffusion,.5),
+            "FP64 upstream plateau to resolved gradient has a stable common face coefficient");
+      }
+  }
   return passed;
 }
 

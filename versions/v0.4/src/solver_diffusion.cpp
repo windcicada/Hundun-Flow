@@ -2670,19 +2670,20 @@ Status prepare_cartesian_mixture_face(
             (lower ? 1.0-weight : weight)*std::abs(mass_rate));
       return true;
     }
-    // A resolved upstream slope can end on an FP64-flat middle pair. Its
-    // one-ULP sign otherwise flips the shared VLS coefficient between central
-    // and upwind, injecting finite diffusion changes into other scalars.
-    // Keep the zero-middle-gradient upwind limit across the same resolution
-    // band already used above for a completely flat coordinate.
-    if (std::abs(sample[2]-sample[1])<=roundoff) {
+    // Either slope can be FP64-flat while the other is resolved. Dividing
+    // a one-ULP upstream difference by a small middle difference also makes
+    // a noisy shared coefficient, which acts on every bulk scalar. Both
+    // zero-slope limits are upwind; apply the same coordinate resolution
+    // band used above before forming either gradient of the ratio.
+    const double upstream_difference=lower ? sample[1]-sample[0] : sample[3]-sample[2];
+    if (std::abs(sample[2]-sample[1])<=roundoff ||
+        std::abs(upstream_difference)<=roundoff) {
       conductance=std::max(conductance,
           (lower ? 1.0-weight : weight)*std::abs(mass_rate));
       return true;
     }
     const double middle = (sample[2]-sample[1])/distance[1];
-    const double upstream = lower ? (sample[1]-sample[0])/distance[0]
-                                  : (sample[3]-sample[2])/distance[2];
+    const double upstream = upstream_difference/(lower ? distance[0] : distance[2]);
     if (!std::isfinite(middle) || !std::isfinite(upstream)) return false;
     const double epsilon = std::max(1e-30,
         std::numeric_limits<double>::epsilon() *
