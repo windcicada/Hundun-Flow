@@ -3286,7 +3286,7 @@ struct ProductDriver::Impl {
   Status initialize_common_fields(
       const DriverInitialState& initial, double enthalpy,
       const ThermoState& thermo, const MolecularTransportState& transport,
-      double heat_capacity) noexcept;
+      double heat_capacity, bool seed_stochastic_fields = true) noexcept;
   Status rebuild_cold_velocity_dependents(double pressure_reference,
                                           bool restart,
                                           bool rebuild_esf_transport = false) noexcept;
@@ -6244,7 +6244,7 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
 Status ProductDriver::Impl::initialize_common_fields(
     const DriverInitialState& initial, double enthalpy,
     const ThermoState& thermo, const MolecularTransportState& transport,
-    double heat_capacity) noexcept {
+    double heat_capacity, bool seed_stochastic_fields) noexcept {
   CompiledCasePlan::Impl& product = *plan.implementation_;
   Status status;
   const std::array<StateRole, 3U> roles{{
@@ -6287,7 +6287,7 @@ Status ProductDriver::Impl::initialize_common_fields(
           role, product.fields.scalar_nonadvective_rates[index], field);
       if (status) fill_field(field, 0.0);
     }
-    if (status && product.esf.enabled()) {
+    if (status && product.esf.enabled() && seed_stochastic_fields) {
       std::array<FieldView, esf::maximum_fields> ensemble{};
       std::vector<ConstFieldView> mean_species;
       for (std::size_t s = 0; s < product.fields.scalars.size() && status;
@@ -8515,9 +8515,12 @@ Status ProductDriver::initialize_restart(
   MolecularTransportState common_transport;
   common_transport.viscosity = restored_thermo[0U][2U];
   common_transport.conductivity = restored_thermo[0U][3U];
+  // ESF initial offsets belong only to a fresh start.  Applying them to an
+  // arbitrary rank's first restored mean can create a negative placeholder
+  // species before the valid checkpoint fields are copied below.
   status = runtime.initialize_common_fields(
       restored_seed, enthalpy.values[0U], common_thermo, common_transport,
-      restored_thermo[0U][4U]);
+      restored_thermo[0U][4U], false);
   status = product.reductions.consensus(status);
   if (!status) return status;
 

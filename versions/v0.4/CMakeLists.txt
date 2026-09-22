@@ -430,6 +430,11 @@ add_executable(v04_pdf_import "${hundun_repository_root}/tools/v04_pdf_import.cp
 target_link_libraries(v04_pdf_import PRIVATE hundun_v04_core)
 target_include_directories(v04_pdf_import PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+# Frozen 624CF geometry audit, independent of field and parcel migration.
+add_executable(v04_624cf_geometry_audit
+  "${hundun_repository_root}/tools/v04_624cf_geometry_audit.cpp")
+target_link_libraries(v04_624cf_geometry_audit PRIVATE hundun_v04_core)
+
 if(HUNDUN_BUILD_TESTS)
   # Test-only hooks live in a separate core variant so they cannot alter the
   # production executable or its compile/link inputs.
