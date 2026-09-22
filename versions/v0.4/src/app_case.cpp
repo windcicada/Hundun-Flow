@@ -6,6 +6,7 @@
 #include "app_case_detail.hpp"
 #include "app_reaction_detail.hpp"
 #include "app_spray_detail.hpp"
+#include "mesh_stl_scan_detail.hpp"
 #include "physics_input_detail.hpp"
 #include "yyjson.h"
 
@@ -357,10 +358,9 @@ Status read_bounded_text(const UniqueFd& file, const struct stat& metadata,
 }
 
 Status hash_bounded_file(const UniqueFd& file, const struct stat& metadata,
-                         Hash64& hash) {
+                         std::uint64_t byte_limit, Hash64& hash) {
   if (metadata.st_size < 0 ||
-      static_cast<std::uint64_t>(metadata.st_size) >
-          detail::kMaxReferencedFileBytes) {
+      static_cast<std::uint64_t>(metadata.st_size) > byte_limit) {
     return invalid_case(detail_reference_too_large);
   }
 
@@ -379,7 +379,7 @@ Status hash_bounded_file(const UniqueFd& file, const struct stat& metadata,
       return {};
     }
     const auto unsigned_count = static_cast<std::uint64_t>(count);
-    if (unsigned_count > detail::kMaxReferencedFileBytes - total) {
+    if (unsigned_count > byte_limit - total) {
       return invalid_case(detail_reference_too_large);
     }
     total += unsigned_count;
@@ -3546,7 +3546,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
       }
       hash.text("data");
       hash.text(relative.generic_string());
-      const Status hashed = hash_bounded_file(descriptor, metadata, hash);
+      const Status hashed = hash_bounded_file(
+          descriptor, metadata, detail::kMaxReferencedFileBytes, hash);
       if (!hashed) {
         return hashed;
       }
@@ -3572,7 +3573,11 @@ Status compile_on_root(const fs::path& case_root, int rank,
       }
       hash.text("stl");
       hash.text(relative.generic_string());
-      const Status hashed = hash_bounded_file(descriptor, metadata, hash);
+      // Fingerprinting and the later STL parse must accept the same bounded
+      // input set.  Large ASCII STL files can exceed the generic data-file
+      // limit while remaining well inside the mesh parser's explicit budget.
+      const Status hashed = hash_bounded_file(
+          descriptor, metadata, detail::kMaxStlBytes, hash);
       if (!hashed) {
         return hashed;
       }
@@ -3625,7 +3630,8 @@ Status compile_on_root(const fs::path& case_root, int rank,
         if (!referenced_targets.insert(std::make_pair(metadata.st_dev, metadata.st_ino)).second)
           return invalid_case(detail_reference_path);
         hash.text(relative.generic_string());
-        const auto hashed = hash_bounded_file(descriptor, metadata, hash);
+        const auto hashed = hash_bounded_file(
+            descriptor, metadata, detail::kMaxReferencedFileBytes, hash);
         if (!hashed) return hashed;
       }
     }

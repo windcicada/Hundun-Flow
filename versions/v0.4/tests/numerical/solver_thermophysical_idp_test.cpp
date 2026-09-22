@@ -180,7 +180,8 @@ struct Fixture {
 bool make_fixture(Fixture& out, MPI_Comm communicator = MPI_COMM_SELF,
                   Int3 global_cells = {2, 2, 2},
                   bool isolate_internal_face = false,
-                  bool physical_x = false) {
+                  bool physical_x = false,
+                  bool second_independent_species = false) {
   const CartesianMeshSpec mesh = mesh_spec(global_cells);
   ValidatedModel model;
   model.mesh = mesh;
@@ -188,7 +189,9 @@ bool make_fixture(Fixture& out, MPI_Comm communicator = MPI_COMM_SELF,
   model.pressure_reference = PressureReferenceKind::closed_mass;
   model.transported_scalars = {
       {"species_a", TransportedScalarRole::species, 1.0, 1.0},
-      {"tracer", TransportedScalarRole::passive_scalar, 1.0, 1.0}};
+      {"tracer", second_independent_species ? TransportedScalarRole::species
+                                            : TransportedScalarRole::passive_scalar,
+       1.0, 1.0}};
   for (BoundaryFaceSpec& face : model.boundaries) {
     face.flow_kind = BoundaryKind::periodic;
     face.thermal_kind = BoundaryKind::none;
@@ -225,7 +228,10 @@ bool make_fixture(Fixture& out, MPI_Comm communicator = MPI_COMM_SELF,
     return false;
   }
 
-  const ThermophysicalSpec thermophysics = thermophysical_spec();
+  ThermophysicalSpec thermophysics = thermophysical_spec();
+  if (second_independent_species)
+    thermophysics.species.insert(thermophysics.species.begin() + 1,
+                                 species_spec("tracer", 2.0));
   if (!ThermodynamicsPlan::compile(
           thermophysics,
           {model.transported_scalars.data(), model.transported_scalars.size()},
@@ -243,7 +249,7 @@ bool make_fixture(Fixture& out, MPI_Comm communicator = MPI_COMM_SELF,
   }
   const std::array<ScalarEquationSpec, 2U> scalars{{
       {kSpecies, TransportedScalarRole::species, 1.0, 1.0},
-      {kPassive, TransportedScalarRole::passive_scalar, 1.0, 1.0},
+      {kPassive, model.transported_scalars[1U].role, 1.0, 1.0},
   }};
   EquationPlanSpec spec;
   spec.density = kDensity;
@@ -433,10 +439,11 @@ bool make_source_predictor_fixture(SourcePredictorFixture& out) {
   }
   const std::array<double, 1U> composition{
       SourcePredictorFixture::independent_species};
+  const std::array<double, 1U> passive{0.4};
   const std::array<IbmInterfaceInletState, 1U> inlet{{
       {source.global_link, out.source_mass_flux, velocity,
        SourcePredictorFixture::enthalpy,
-       {composition.data(), composition.size()}},
+       {composition.data(), composition.size()}, {passive.data(), passive.size()}},
   }};
   return static_cast<bool>(IbmEquationInterfacePlan::compile(
       out.base.equations.kernels(), out.topology, out.boundary,
@@ -1513,6 +1520,88 @@ bool test_physical_inflow_outflow_factors(Fixture& fixture,
                     paired_outflow < accepted_outflow &&
                     close(paired_outflow, expected_outflow, 2.0e-11),
                 "physical outflow uses its owner donor factor");
+}
+
+bool test_trace_species_admission(int size) {
+  Fixture fixture;
+  if (!expect(make_fixture(fixture, MPI_COMM_WORLD, {2 * size, 2, 2},
+                            false, false, true),
+              "two-independent-species predictor fixture compiles")) return false;
+  FluxHistory history;
+  ConstFaceFluxView previous_flux;
+  ConstFaceFluxView accepted_flux;
+  if (!expect(make_flux_history(fixture.patch.cells, history) &&
+                  commit_zero_flux(fixture.equations.kernels(), fixture.patch.cells,
+                                   history, previous_flux) &&
+                  commit_zero_flux(fixture.equations.kernels(), fixture.patch.cells,
+                                   history, accepted_flux),
+              "trace-species fixture publishes zero-flux histories")) return false;
+
+  bool passed = true;
+  for (const double trace : {3.0e-72, 1.0e-17, 1.0e-8, -3.0e-72}) {
+    for (const bool force_low : {false, true}) {
+      constexpr double h = 300000.0;
+      PredictorData data(fixture.patch.cells, h, h,
+                          force_low ? -2000000.0 : 0.0);
+      fill(data.species, 1.0);
+      fill(data.species_previous, 1.0);
+      fill(data.passive, trace);
+      fill(data.passive_previous, trace);
+      PredictorCall call = make_call(fixture, data, accepted_flux, previous_flux,
+                                     0x1d7091U, 999U);
+      const std::array<ConstFieldView, 2U> accepted{
+          call.species_accepted[0U], call.passive_accepted[0U]};
+      const std::array<ConstFieldView, 2U> previous{
+          call.species_previous[0U], call.passive_previous[0U]};
+      const std::array<PredictorRateHistory, 2U> rates{
+          call.species_rates[0U], call.passive_rates[0U]};
+      const std::array<ThermophysicalGhostHistory, 2U> ghosts{
+          call.species_ghosts[0U], call.passive_ghosts[0U]};
+      std::array<FieldView, 2U> high{
+          call.species_output[0U], call.passive_output[0U]};
+      std::array<FieldView, 2U> low{
+          call.low_species_output[0U], call.low_passive_output[0U]};
+      call.input.species_accepted = {accepted.data(), accepted.size()};
+      call.input.species_previous = {previous.data(), previous.size()};
+      call.input.species_nonadvective_rhs = {rates.data(), rates.size()};
+      call.input.species_ghosts = {ghosts.data(), ghosts.size()};
+      call.input.passive_scalars_accepted = {};
+      call.input.passive_scalars_previous = {};
+      call.input.passive_scalar_nonadvective_rhs = {};
+      call.input.passive_scalar_ghosts = {};
+      call.output.independent_species = {high.data(), high.size()};
+      call.output.low_order_independent_species = {low.data(), low.size()};
+      call.output.passive_scalars = {};
+      call.output.low_order_passive_scalars = {};
+      const std::array<double, 2U> fractions{1.0, trace};
+      ThermoState state;
+      const bool eos_admitted = static_cast<bool>(fixture.thermodynamics.evaluate(
+          101325.0, h, {fractions.data(), fractions.size()}, {}, state));
+      const Status status = fixture.equations.thermophysical_predictor().predict(
+          MPI_COMM_WORLD, Status{}, call.input, call.output, call.slow_path,
+          call.diagnostics, call.certificate);
+      if (eos_admitted) {
+        if (!status)
+          std::cerr << "trace=" << trace << " low=" << force_low << " status="
+                    << unsigned(status.code) << '/' << status.detail << " reason="
+                    << unsigned(call.diagnostics.failure.reason) << '\n';
+        passed &= expect(status && call.certificate.valid(),
+                         "predictor admits EOS-representable pure species with a trace");
+        if (status) {
+          const double actual = data.high_passive.view.unchecked({0,0,0}, 0U);
+          passed &= expect(data.high_species.view.unchecked({0,0,0}, 0U) == 1.0 &&
+                               actual > 0.0 && std::abs(actual / trace - 1.0) < 1.0e-12,
+                           "admission retains major and trace species without clipping");
+          passed &= expect(!force_low || call.diagnostics.low_state != ThermophysicalLowStateKind::none,
+                           "enthalpy source exercises the conservative low-order path");
+        }
+      } else {
+        passed &= expect(!status && call.diagnostics.failure.valid,
+                         "predictor still rejects negative or representably overfull composition");
+      }
+    }
+  }
+  return passed;
 }
 
 bool test_invalid_zero_outgoing_base(Fixture& fixture,
@@ -2888,7 +2977,8 @@ int main(int argc, char** argv) {
     passed &= test_physical_inflow_outflow_factors(
         physical_fixture, static_cast<std::uintptr_t>(0x1d7022U));
 
-  if (passed) passed &= test_prescribed_ibm_source_predictor();
+  if (passed) passed &= test_trace_species_admission(size);
+  passed &= test_prescribed_ibm_source_predictor();
 
   int local = passed ? 1 : 0;
   int global = 0;

@@ -829,8 +829,10 @@ Status ThermophysicalPredictorPlan::predict(
                   !std::isfinite(h)) {
                 return false;
               }
-              double dependent_density = rho;
-              long double fraction_sum=0.0L;
+              // Match ThermodynamicsPlan's represented double-precision sum.
+              // Subtracting species successively from rho falsely rejects a
+              // pure major species followed by a positive sub-ulp trace.
+              double independent_sum = 0.0;
               double lower = rho * dependent_enthalpy_minimum_;
               double upper = rho * dependent_enthalpy_maximum_;
               for (std::size_t index = 0U; index < species_count; ++index) {
@@ -846,8 +848,7 @@ Status ThermophysicalPredictorPlan::predict(
                     species_density < 0.0) {
                   return false;
                 }
-                dependent_density -= species_density;
-                fraction_sum+=value;
+                independent_sum += conserved_quantities ? species_density : value;
                 lower += species_density *
                          (species_enthalpy_minimum_[index] -
                           dependent_enthalpy_minimum_);
@@ -855,8 +856,8 @@ Status ThermophysicalPredictorPlan::predict(
                          (species_enthalpy_maximum_[index] -
                           dependent_enthalpy_maximum_);
               }
-              if (!conserved_quantities)
-                dependent_density=static_cast<double>(rho*(1.0L-fraction_sum));
+              const double dependent_density = conserved_quantities
+                  ? rho - independent_sum : rho * (1.0 - independent_sum);
               const double density_enthalpy =
                   conserved_quantities ? stored_h : rho * h;
               if (!std::isfinite(dependent_density) ||
@@ -895,8 +896,7 @@ Status ThermophysicalPredictorPlan::predict(
               const Int3 cell{x, y, z};
               const double rho = density.unchecked(cell, 0U);
               if (!std::isfinite(rho) || !(rho > 0.0)) return false;
-              double dependent_density = rho;
-              long double fraction_sum=0.0L;
+              double fraction_sum = 0.0;
               for (std::size_t index = 0U; index < species_count; ++index) {
                 const double value =
                     independent_species.data[index].unchecked(cell, 0U);
@@ -906,10 +906,9 @@ Status ThermophysicalPredictorPlan::predict(
                     species_density < 0.0) {
                   return false;
                 }
-                dependent_density -= species_density;
-                fraction_sum+=value;
+                fraction_sum += value;
               }
-              dependent_density=static_cast<double>(rho*(1.0L-fraction_sum));
+              const double dependent_density = rho * (1.0 - fraction_sum);
               if (!std::isfinite(dependent_density) ||
                   dependent_density < 0.0) {
                 return false;
@@ -993,7 +992,7 @@ Status ThermophysicalPredictorPlan::predict(
                 }
                 return;
               }
-              double dependent_density = rho;
+              double independent_sum = 0.0;
               double lower = rho * dependent_enthalpy_minimum_;
               double upper = rho * dependent_enthalpy_maximum_;
               for (std::size_t index = 0U; index < species_count; ++index) {
@@ -1031,7 +1030,7 @@ Status ThermophysicalPredictorPlan::predict(
                   }
                   return;
                 }
-                dependent_density -= species_density;
+                independent_sum += conserved_quantities ? species_density : value;
                 lower += species_density *
                          (species_enthalpy_minimum_[index] -
                           dependent_enthalpy_minimum_);
@@ -1039,6 +1038,8 @@ Status ThermophysicalPredictorPlan::predict(
                          (species_enthalpy_maximum_[index] -
                           dependent_enthalpy_maximum_);
               }
+              const double dependent_density = conserved_quantities
+                  ? rho - independent_sum : rho * (1.0 - independent_sum);
               if (!std::isfinite(dependent_density) ||
                   dependent_density < 0.0) {
                 mark_failure(
@@ -1728,7 +1729,7 @@ Status ThermophysicalPredictorPlan::predict(
           const double accepted = input.enthalpy_accepted.unchecked(cell, 0U);
           const double implicit =
               output.low_order_enthalpy_workspace.unchecked(cell, 0U);
-          double dependent_density = rho;
+          double fraction_sum = 0.0;
           double lower = rho * dependent_enthalpy_minimum_;
           double upper = rho * dependent_enthalpy_maximum_;
           for (std::size_t index = 0U; index < species_count; ++index) {
@@ -1736,7 +1737,7 @@ Status ThermophysicalPredictorPlan::predict(
                 output.low_order_independent_species.data[index].unchecked(
                     cell, 0U);
             const double species_density = rho * value;
-            dependent_density -= species_density;
+            fraction_sum += value;
             lower += species_density *
                      (species_enthalpy_minimum_[index] -
                       dependent_enthalpy_minimum_);
@@ -1744,6 +1745,7 @@ Status ThermophysicalPredictorPlan::predict(
                      (species_enthalpy_maximum_[index] -
                       dependent_enthalpy_maximum_);
           }
+          const double dependent_density = rho * (1.0 - fraction_sum);
           const double accepted_conserved = rho * accepted;
           const double implicit_conserved = rho * implicit;
           ThermophysicalAdmissibilityConstraint constraint =
@@ -1893,21 +1895,21 @@ Status ThermophysicalPredictorPlan::predict(
     // donor tuples are then convex-cone additions.
     const auto donor_intensive_admissible = [&](Int3 donor) noexcept {
       const double h = detail::scalar_upwind_donor(*boundary_,input.enthalpy_accepted,donor);
-      double dependent = 1.0;
+      double fraction_sum = 0.0;
       double lower = dependent_enthalpy_minimum_;
       double upper = dependent_enthalpy_maximum_;
       for (std::size_t index = 0U; index < species_count; ++index) {
         const double value =
             detail::scalar_upwind_donor(*boundary_,input.species_accepted.data[index],donor);
         if (!std::isfinite(value) || value < 0.0) return false;
-        dependent -= value;
+        fraction_sum += value;
         lower += value * (species_enthalpy_minimum_[index] -
                           dependent_enthalpy_minimum_);
         upper += value * (species_enthalpy_maximum_[index] -
                           dependent_enthalpy_maximum_);
       }
-      if (!std::isfinite(h) || !std::isfinite(dependent) ||
-          dependent < 0.0 || !std::isfinite(lower) ||
+      if (!std::isfinite(h) || !std::isfinite(fraction_sum) ||
+          fraction_sum > 1.0 || !std::isfinite(lower) ||
           !std::isfinite(upper) || h < lower || h > upper) {
         return false;
       }
@@ -2023,8 +2025,8 @@ Status ThermophysicalPredictorPlan::predict(
           };
 
           constrain_source(base_rho, base_rho, true);
-          double base_dependent = base_rho;
-          double full_dependent = base_rho;
+          double base_species_sum = 0.0;
+          double full_species_sum = 0.0;
           double base_lower = base_rho * dependent_enthalpy_minimum_;
           double full_lower = base_lower;
           double base_upper = base_rho * dependent_enthalpy_maximum_;
@@ -2038,8 +2040,8 @@ Status ThermophysicalPredictorPlan::predict(
                 input.species_previous.data[index],
                 input.species_nonadvective_rhs.data[index], cell);
             constrain_source(base_species, full_species, false);
-            base_dependent -= base_species;
-            full_dependent -= full_species;
+            base_species_sum += base_species;
+            full_species_sum += full_species;
             const double lower_delta = species_enthalpy_minimum_[index] -
                                        dependent_enthalpy_minimum_;
             const double upper_delta = species_enthalpy_maximum_[index] -
@@ -2049,7 +2051,8 @@ Status ThermophysicalPredictorPlan::predict(
             base_upper += base_species * upper_delta;
             full_upper += full_species * upper_delta;
           }
-          constrain_source(base_dependent, full_dependent, false);
+          constrain_source(base_rho - base_species_sum,
+                           base_rho - full_species_sum, false);
 
           const double base_enthalpy =
               output.low_order_enthalpy_workspace.unchecked(cell, 0U);
@@ -2211,8 +2214,8 @@ Status ThermophysicalPredictorPlan::predict(
             factor = std::min(factor, candidate);
           };
           constrain_factor(base_rho, base_rho - amount, true);
-          double base_dependent = base_rho;
-          double full_dependent = base_rho - amount;
+          double base_species_sum = 0.0;
+          double full_species_sum = 0.0;
           double base_lower = base_rho * dependent_enthalpy_minimum_;
           double full_lower =
               (base_rho - amount) * dependent_enthalpy_minimum_;
@@ -2230,8 +2233,8 @@ Status ThermophysicalPredictorPlan::predict(
             valid = valid && std::isfinite(y_n) && y_n >= 0.0;
             accepted_sum += y_n;
             constrain_factor(base_species, full_species, false);
-            base_dependent -= base_species;
-            full_dependent -= full_species;
+            base_species_sum += base_species;
+            full_species_sum += full_species;
             const double lower_delta = species_enthalpy_minimum_[index] -
                                        dependent_enthalpy_minimum_;
             const double upper_delta = species_enthalpy_maximum_[index] -
@@ -2243,7 +2246,8 @@ Status ThermophysicalPredictorPlan::predict(
           }
           valid = valid && std::isfinite(accepted_sum) &&
                   accepted_sum <= 1.0;
-          constrain_factor(base_dependent, full_dependent, false);
+          constrain_factor(base_rho - base_species_sum,
+                           (base_rho - amount) - full_species_sum, false);
           const double h_n = input.enthalpy_accepted.unchecked(cell, 0U);
           const double base_rho_h =
               output.low_order_enthalpy_workspace.unchecked(cell, 0U);
@@ -2592,8 +2596,8 @@ Status ThermophysicalPredictorPlan::predict(
                   std::max({1.0, std::abs(rho_low), std::abs(rho_high)}),
                   true,
                   ThermophysicalAdmissibilityConstraint::density, cell);
-        double dependent_low = rho_low;
-        double dependent_high = rho_high;
+        double species_sum_low = 0.0;
+        double species_sum_high = 0.0;
         double lower_low = rho_low * dependent_enthalpy_minimum_;
         double lower_high = rho_high * dependent_enthalpy_minimum_;
         double upper_low = rho_low * dependent_enthalpy_maximum_;
@@ -2616,8 +2620,8 @@ Status ThermophysicalPredictorPlan::predict(
                     false,
                     ThermophysicalAdmissibilityConstraint::independent_species,
                     cell);
-          dependent_low -= species_low;
-          dependent_high -= species_high;
+          species_sum_low += species_low;
+          species_sum_high += species_high;
           lower_low += species_low *
                        (species_enthalpy_minimum_[index] -
                         dependent_enthalpy_minimum_);
@@ -2631,6 +2635,8 @@ Status ThermophysicalPredictorPlan::predict(
                         (species_enthalpy_maximum_[index] -
                          dependent_enthalpy_maximum_);
         }
+        const double dependent_low = rho_low - species_sum_low;
+        const double dependent_high = rho_high - species_sum_high;
         constrain(dependent_low, dependent_high,
                   std::max({1.0, std::abs(rho_low), std::abs(rho_high),
                             std::abs(dependent_low),

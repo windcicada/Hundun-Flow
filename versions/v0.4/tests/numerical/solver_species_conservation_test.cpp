@@ -1184,6 +1184,32 @@ bool test_mixture_equation_faces() {
   const auto reference_diagonal=diagonal.bytes,reference_rhs=rhs.bytes,reference_residual=residual.bytes;
   const auto reference_x=ax.bytes,reference_y=ay.bytes,reference_z=az.bytes;
   const auto public_certificate=certificate;
+  // All histories use the same composition admitted by the thermodynamic
+  // authority, including a trace smaller than one ulp of the major species.
+  {
+    auto major=make_field(kSpecies,cells,1U,2U,590U);
+    auto trace=make_field(second.view.field,cells,1U,2U,591U);
+    fill_field(major,1.0);
+    fill_field(trace,1.0e-17);
+    const std::array<double,2U> fractions{1.0,1.0e-17};
+    ThermoState thermo;
+    passed &= expect(bool(fixture.thermodynamics.evaluate(101325.0,300000.0,
+        {fractions.data(),fractions.size()},{},thermo)),
+        "EOS admits the represented major-plus-trace assembly fixture");
+    const std::array<PrimitiveHistory,2U> trace_history{{
+        {as_const(major.view),as_const(major.view),as_const(major.view)},
+        {as_const(trace.view),as_const(trace.view),as_const(trace.view)}}};
+    state.independent_species={trace_history.data(),trace_history.size()};
+    for (std::size_t s=0; s<2; ++s) {
+      status=assemble_species(fixture.equations.species(),s,state,material,{},context,system,certificate);
+      passed &= expect(status && certificate.valid(),
+          "public species assembly admits EOS-representable trace in every history");
+    }
+    passed &= expect(major.view.unchecked({0,0,0},0U)==1.0 &&
+        trace.view.unchecked({0,0,0},0U)==1.0e-17,
+        "species assembly does not normalize the input composition");
+    state.independent_species={history.data(),history.size()};
+  }
   auto trial_a=make_field(kSpecies,cells,1,2,527U);
   std::copy(first.bytes.begin(),first.bytes.end(),trial_a.bytes.begin());
   trial_a.view.unchecked({3,3,3},0)=.625;
@@ -1771,6 +1797,14 @@ bool test_independent_species_closure() {
                    "dependent species is exactly one minus the independent sum");
   passed &= expect(close(closure.dependent_diffusive_flux, -1.8e-4),
                    "dependent diffusion flux is exactly minus the independent sum");
+  for (const std::array<double,3U> fractions :
+       {std::array<double,3U>{1.0,1.0e-17,3.0e-72},
+        std::array<double,3U>{3.0e-72,1.0e-17,1.0}}) {
+    passed &= expect(close_independent_species(
+        {fractions.data(),fractions.size()}, {}, closure) &&
+        closure.dependent_mass_fraction==0.0,
+        "composition closure uses the same represented sum as EOS in either species order");
+  }
 
   std::array<double, 2U> invalid_negative{-1.0e-12, 0.2};
   std::array<double, 2U> invalid_sum{0.8, 0.3};
@@ -2941,6 +2975,27 @@ bool test_cold_row_residual_precision() {
 }
 
 bool test_species_search_quantization() {
+  bool factor_passed=true;
+  for (const bool pure_major : {false,true}) for (const bool reverse : {false,true}) {
+    std::array<double,2> anchor{pure_major ? 1.0 : std::nextafter(1.0,0.0),
+                                pure_major ? 5.417e-20 : 1.0e-16};
+    std::array<double,2> proposal{anchor[0],pure_major ? 8.862e-20 : 1.5e-16};
+    if (reverse) {std::swap(anchor[0],anchor[1]);std::swap(proposal[0],proposal[1]);}
+    const double theta=detail::species_search_factor(anchor.size(),
+        [&](std::size_t s){return anchor[s];},[&](std::size_t s){return proposal[s];});
+    factor_passed &= expect(theta==1.0,
+        "nonlinear search retains a full EOS-admissible trace update");
+  }
+  for (const std::array<double,2> proposal :
+       {std::array<double,2>{.9,.3},std::array<double,2>{.8,-.1}}) {
+    const std::array<double,2> anchor{.7,.2};
+    const double theta=detail::species_search_factor(anchor.size(),
+        [&](std::size_t s){return anchor[s];},[&](std::size_t s){return proposal[s];});
+    const double a=anchor[0]+theta*(proposal[0]-anchor[0]);
+    const double b=anchor[1]+theta*(proposal[1]-anchor[1]);
+    factor_passed &= expect(theta>=0 && theta<1 && a>=0 && b>=0 && a+b<=1,
+        "nonlinear search still bounds negative and overfull proposals together");
+  }
   constexpr double midpoint_q=8.2308775753956881e-9;
   constexpr double midpoint_correction=8.2728821280182545e-25;
   const bool midpoint_pass=expect(
@@ -2979,7 +3034,7 @@ bool test_species_search_quantization() {
       !detail::species_search_quantized(trace,full_proposal,trace_diagonal,full_residual) &&
       std::abs(full_residual+trace_diagonal*(full_proposal-trace))<std::abs(full_residual),
       "full conservative trace row retains its represented improving direction");
-  return pass;
+  return pass && factor_passed;
 }
 
 int main(int argc, char** argv) {

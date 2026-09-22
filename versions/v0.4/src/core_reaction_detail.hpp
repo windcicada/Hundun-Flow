@@ -418,7 +418,9 @@ public:
       const double storage_density=state.density.trial.unchecked(cell,0);
       if (!(storage_density>0) || !std::isfinite(storage_density))
         return {StatusCode::numerical_failure,10241};
-      long double sum=0;
+      // Use the same represented composition as ThermodynamicsPlan and the
+      // species solve; an extended sum can reject a valid near-pure trace.
+      double sum=0;
       for(std::size_t s=0;s<species_.size();++s) {
         const double value=candidate.data[s].unchecked(cell,0);
         const long double transported=value;

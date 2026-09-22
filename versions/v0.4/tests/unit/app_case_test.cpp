@@ -5,6 +5,7 @@
 #include "hundun/v04_field.hpp"
 
 #include "app_case_detail.hpp"
+#include "mesh_stl_scan_detail.hpp"
 
 #include <mpi.h>
 
@@ -504,6 +505,20 @@ bool test_reference_runtime_axes_case() {
       status && model.mesh.runtime_faces[0U][1U] ==
                     static_cast<double>(static_cast<float>(0.1000000001)),
       "REFERENCE runtime axes wire carries float32-effective faces");
+  for (const std::string_view header :
+       {"COAST_RUNTIME_AXES", "Vendor_RUNTIME_AXES"}) {
+    std::string axes{kReferenceRuntimeAxes};
+    if (!expect(replace_once(axes, "RUNTIME_AXES", header),
+                "vendor-prefixed axes header fixture mutation"))
+      return false;
+    scratch.write("axes.dat", axes);
+    ValidatedModel prefixed;
+    passed &= expect(
+        compile(scratch.root(), prefixed) &&
+            prefixed.mesh.kind == GeometryKind::runtime_axes_v1 &&
+            prefixed.mesh.runtime_faces == model.mesh.runtime_faces,
+        std::string(header) + " preserves canonical runtime faces");
+  }
 
   constexpr std::string_view projected_mesh = R"json({
     "kind":"runtime_axes_v1","axes_file":"axes.dat",
@@ -716,8 +731,8 @@ bool reference_axes_rejects(std::string_view label, std::string_view axes,
 bool test_reference_runtime_axes_strictness_and_fingerprint() {
   bool passed = true;
   passed &= reference_axes_rejects(
-      "REFERENCE axes require exact header",
-      "NOT_RUNTIME_AXES 1 grid 2 2 1 x 3 0 .1 1 y 3 0 .4 1 z 2 0 1");
+      "REFERENCE axes reject unknown header suffix",
+      "RUNTIME_AXES_INVALID 1 grid 2 2 1 x 3 0 .1 1 y 3 0 .4 1 z 2 0 1");
   passed &= reference_axes_rejects(
       "REFERENCE axes require version one",
       "RUNTIME_AXES 2 grid 2 2 1 x 3 0 .1 1 y 3 0 .4 1 z 2 0 1");
@@ -1353,6 +1368,54 @@ bool test_case_and_reference_security() {
       !error && compile(thermophysics_alias.root(), model).code ==
                     StatusCode::invalid_case,
       "thermophysics and generic-data hard-link aliases are rejected");
+  return passed;
+}
+
+bool test_reference_size_budgets() {
+  ScratchCase scratch("reference-size-budgets");
+  scratch.write("thermophysics.d", kPlaceholderThermophysics);
+  scratch.write("body.stl", "");
+  const auto above_data_limit =
+      hundun::v04::detail::kMaxReferencedFileBytes + UINT64_C(1);
+  std::error_code error;
+  // Case admission fingerprints STL bytes; geometry parsing happens later.
+  // A sparse file exercises the byte budget without a large fixture/buffer.
+  fs::resize_file(scratch.root() / "body.stl", above_data_limit, error);
+  if (!expect(!error, "sparse STL size fixture is created")) return false;
+  std::string mesh{kUniformMesh};
+  if (!expect(replace_once(
+                  mesh, "\"immersed_boundary\":null",
+                  R"json("immersed_boundary":{"stl_file":"body.stl","fluid_side":"outside"})json"),
+              "STL size fixture references an immersed surface"))
+    return false;
+  scratch.write("case.json", case_json(mesh));
+  ValidatedModel model;
+  bool passed = expect(
+      static_cast<bool>(compile(scratch.root(), model)),
+      "STL fingerprint admits bytes above the generic reference limit");
+
+  fs::resize_file(scratch.root() / "body.stl",
+                  hundun::v04::detail::kMaxStlBytes + UINT64_C(1), error);
+  if (!expect(!error, "sparse STL exceeds the parser byte budget")) return false;
+  const Status large_stl = compile(scratch.root(), model);
+  passed &= expect(large_stl.code == StatusCode::invalid_case &&
+                       large_stl.detail == 11U,
+                   "STL fingerprint rejects bytes above the parser limit");
+
+  scratch.write("profile.d", "");
+  fs::resize_file(scratch.root() / "profile.d", above_data_limit, error);
+  if (!expect(!error, "sparse generic reference size fixture is created"))
+    return false;
+  mesh = kUniformMesh;
+  if (!expect(replace_once(mesh, "\"data_files\":[]",
+                          "\"data_files\":[\"profile.d\"]"),
+              "generic size fixture references a data file"))
+    return false;
+  scratch.write("case.json", case_json(mesh));
+  const Status large_data = compile(scratch.root(), model);
+  passed &= expect(large_data.code == StatusCode::invalid_case &&
+                       large_data.detail == 11U,
+                   "generic references retain their smaller byte limit");
   return passed;
 }
 
@@ -2370,6 +2433,7 @@ int main(int argc, char** argv) {
   passed &= test_thermophysics_schema();
   passed &= test_mesh_rejections();
   passed &= test_case_and_reference_security();
+  passed &= test_reference_size_budgets();
   passed &= test_wire_rejects_duplicate_data_paths();
   passed &= test_defaults_and_enums();
   passed &= test_cold_time_method();

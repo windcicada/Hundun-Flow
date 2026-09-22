@@ -311,10 +311,15 @@ int main() {
     std::cerr << "refinement status=" << unsigned(refined.status)
               << " time=" << refined.failure_time_s
               << " segment=" << refined.failure_segment << '\n';
+  if (refined.available &&
+      !(refined.attempts < 6 * refined.segment_count))
+    std::cerr << "adaptive continuation attempts=" << refined.attempts
+              << " segments=" << refined.segment_count << '\n';
   ok &= check(refined.available && refined.rejected_substeps > 0 &&
+                  refined.attempts < 6 * refined.segment_count &&
                   std::abs(refined.parcel.position_m[0] - 2.5) < .01,
-              "whole versus two half steps refines first-order state error "
-              "toward analytic x=2.5");
+              "whole versus two half steps retains the accepted local scale "
+              "while refining first-order state error toward analytic x=2.5");
   physics.bad_budget = true;
   in.minimum_substep_s = .05;
   const auto budget_failure = integrate_parcel_events(in);

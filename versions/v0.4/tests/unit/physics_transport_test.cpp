@@ -313,6 +313,52 @@ bool test_constant_and_wilke_transport() {
   return passed;
 }
 
+bool test_pure_species_trace_admission_matches_thermodynamics() {
+  bool passed = true;
+  for (bool sutherland : {false, true}) {
+    auto spec = two_species_spec(sutherland);
+    spec.species.push_back(spec.species.back());
+    spec.species.back().stable_name = "balance";
+    const std::array<TransportedScalarSpec, 2> scalars{{
+        {"light", TransportedScalarRole::species},
+        {"heavy", TransportedScalarRole::species}}};
+    ThermodynamicsPlan thermo;
+    TransportPlan transport;
+    if (!expect(bool(ThermodynamicsPlan::compile(
+                    spec, {scalars.data(), scalars.size()}, thermo)) &&
+                    bool(TransportPlan::compile(spec, thermo, transport)),
+                "three-species trace fixture compiles")) return false;
+    // A pure H2 cell in SJ_H2swirl retained a positive radical after chemistry,
+    // while its major species rounded to 1. Thermodynamics accepts this tuple.
+    // Keep the same represented simplex authority for molecular transport.
+    for (const std::array<double, 2> y : {
+             std::array<double, 2>{1.0, 3.3771649154643117e-73},
+             std::array<double, 2>{3.3771649154643117e-73, 1.0},
+             std::array<double, 2>{1.0, std::ldexp(1.0, -54)},
+             std::array<double, 2>{1.0, std::ldexp(1.0, -51)},
+             std::array<double, 2>{.8, .3},
+             std::array<double, 2>{-.001, .5}}) {
+      double h{}, cp{}, gas{};
+      const auto thermodynamic = thermo.mixture_enthalpy(
+          298.326, {y.data(), y.size()}, h, cp, gas);
+      MolecularTransportState state{7.25, 8.5};
+      const auto molecular = transport.evaluate(
+          298.326, {y.data(), y.size()}, state);
+      passed &= expect(bool(thermodynamic) == bool(molecular),
+                       "transport and thermodynamics admit the same trace tuple");
+      if (thermodynamic) {
+        passed &= expect(std::isfinite(state.viscosity) && state.viscosity > 0 &&
+                             std::isfinite(state.conductivity) && state.conductivity > 0,
+                         "accepted near-pure composition has finite transport");
+      } else {
+        passed &= expect(state.viscosity == 7.25 && state.conductivity == 8.5,
+                         "invalid simplex preserves transport output");
+      }
+    }
+  }
+  return passed;
+}
+
 bool test_sutherland_temperature_dependence() {
   bool passed = true;
   ThermophysicalSpec spec = two_species_spec(true);
@@ -1059,6 +1105,7 @@ int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   bool passed = true;
   passed &= test_constant_and_wilke_transport();
+  passed &= test_pure_species_trace_admission_matches_thermodynamics();
   passed &= test_sutherland_temperature_dependence();
   passed &= test_transport_rejects_mismatched_thermodynamics();
   passed &= test_nasa_air_oracle();
