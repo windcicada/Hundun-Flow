@@ -708,8 +708,10 @@ Status close_independent_species(Span<const double> independent,
         diffusive_fluxes.size != independent.size))) {
     return {StatusCode::invalid_plan, kScalarComposition};
   }
-  long double independent_sum = 0.0L;
-  long double independent_correction = 0.0L;
+  // The stored composition and ThermodynamicsPlan use a represented double
+  // sum. Extra precision here would reject their valid major-plus-trace
+  // endpoint. Keep compensated accumulation for the physical flux balance.
+  double independent_sum = 0.0;
   long double flux_sum = 0.0L;
   long double flux_correction = 0.0L;
   for (std::size_t index = 0U; index < independent.size; ++index) {
@@ -717,11 +719,7 @@ Status close_independent_species(Span<const double> independent,
     if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
       return {StatusCode::numerical_failure, kScalarComposition};
     }
-    const long double corrected =
-        static_cast<long double>(value) - independent_correction;
-    const long double next = independent_sum + corrected;
-    independent_correction = (next - independent_sum) - corrected;
-    independent_sum = next;
+    independent_sum += value;
     if (diffusive_fluxes.size != 0U) {
       const double flux = diffusive_fluxes.data[index];
       if (!std::isfinite(flux)) {
@@ -734,13 +732,13 @@ Status close_independent_species(Span<const double> independent,
       flux_sum = next_flux;
     }
   }
-  const long double dependent = 1.0L - independent_sum;
-  if (dependent < 0.0L || dependent > 1.0L ||
-      !std::isfinite(static_cast<double>(dependent)) ||
+  const double dependent = 1.0 - independent_sum;
+  if (dependent < 0.0 || dependent > 1.0 ||
+      !std::isfinite(dependent) ||
       !std::isfinite(static_cast<double>(flux_sum))) {
     return {StatusCode::numerical_failure, kScalarComposition};
   }
-  const SpeciesClosure candidate{static_cast<double>(dependent),
+  const SpeciesClosure candidate{dependent,
                                  -static_cast<double>(flux_sum)};
   if (!std::isfinite(candidate.dependent_mass_fraction) ||
       !std::isfinite(candidate.dependent_diffusive_flux)) {
@@ -888,9 +886,9 @@ Status assemble_species_impl(
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < end.x; ++x) {
         const Int3 cell{x, y, z};
-        long double trial_sum = 0.0L;
-        long double accepted_sum = 0.0L;
-        long double previous_sum = 0.0L;
+        double trial_sum = 0.0;
+        double accepted_sum = 0.0;
+        double previous_sum = 0.0;
         for (std::size_t independent = 0U;
              independent < state.independent_species.size; ++independent) {
           const PrimitiveHistory history =
@@ -908,8 +906,8 @@ Status assemble_species_impl(
           accepted_sum += accepted;
           previous_sum += previous;
         }
-        if ((!statistical && trial_sum > 1.0L) || accepted_sum > 1.0L ||
-            previous_sum > 1.0L) {
+        if ((!statistical && trial_sum > 1.0) || accepted_sum > 1.0 ||
+            previous_sum > 1.0) {
           return {StatusCode::numerical_failure, kScalarComposition};
         }
       }
