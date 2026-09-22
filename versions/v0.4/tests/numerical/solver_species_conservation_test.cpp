@@ -2975,6 +2975,27 @@ bool test_cold_row_residual_precision() {
 }
 
 bool test_species_search_quantization() {
+  bool factor_passed=true;
+  for (const bool pure_major : {false,true}) for (const bool reverse : {false,true}) {
+    std::array<double,2> anchor{pure_major ? 1.0 : std::nextafter(1.0,0.0),
+                                pure_major ? 5.417e-20 : 1.0e-16};
+    std::array<double,2> proposal{anchor[0],pure_major ? 8.862e-20 : 1.5e-16};
+    if (reverse) {std::swap(anchor[0],anchor[1]);std::swap(proposal[0],proposal[1]);}
+    const double theta=detail::species_search_factor(anchor.size(),
+        [&](std::size_t s){return anchor[s];},[&](std::size_t s){return proposal[s];});
+    factor_passed &= expect(theta==1.0,
+        "nonlinear search retains a full EOS-admissible trace update");
+  }
+  for (const std::array<double,2> proposal :
+       {std::array<double,2>{.9,.3},std::array<double,2>{.8,-.1}}) {
+    const std::array<double,2> anchor{.7,.2};
+    const double theta=detail::species_search_factor(anchor.size(),
+        [&](std::size_t s){return anchor[s];},[&](std::size_t s){return proposal[s];});
+    const double a=anchor[0]+theta*(proposal[0]-anchor[0]);
+    const double b=anchor[1]+theta*(proposal[1]-anchor[1]);
+    factor_passed &= expect(theta>=0 && theta<1 && a>=0 && b>=0 && a+b<=1,
+        "nonlinear search still bounds negative and overfull proposals together");
+  }
   constexpr double midpoint_q=8.2308775753956881e-9;
   constexpr double midpoint_correction=8.2728821280182545e-25;
   const bool midpoint_pass=expect(
@@ -3013,7 +3034,7 @@ bool test_species_search_quantization() {
       !detail::species_search_quantized(trace,full_proposal,trace_diagonal,full_residual) &&
       std::abs(full_residual+trace_diagonal*(full_proposal-trace))<std::abs(full_residual),
       "full conservative trace row retains its represented improving direction");
-  return pass;
+  return pass && factor_passed;
 }
 
 int main(int argc, char** argv) {

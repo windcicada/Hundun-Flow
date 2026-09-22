@@ -877,32 +877,9 @@ class ScalarMassRemap {
         const Int3 c{x,y,z};
         // Bound only the nonlinear search step. Do not clip/normalize the
         // physical solution or accept until its unmodified equations close.
-        double theta=1.0; long double sum=0.0L, delta_sum=0.0L;
-        for(const auto slot:species_indices_) {
-          const double q=views_[slot].unchecked(c,0U), delta=next_[slot*count_+i]-q;
-          sum+=q; delta_sum+=static_cast<long double>(next_[slot*count_+i])-q;
-          if(delta<0.0 && q+delta<0.0) theta=std::min(theta,0.9*q/(-delta));
-          if(delta>0.0 && q+delta>1.0) theta=std::min(theta,0.9*(1.0-q)/delta);
-        }
-        if(delta_sum>0.0L && sum+delta_sum>1.0L)
-          theta=std::min(theta,static_cast<double>(0.9L*(1.0L-sum)/delta_sum));
-        // Check the represented candidate, including rounding in each update.
-        // A sum of rounded deltas can hide an excess of half a double ULP
-        // when the dependent species is exactly zero. Search the common step
-        // length; the equation residual and the composition stay authoritative.
-        const auto admissible=[&](double step) {
-          long double total=0.0L;
-          for (const auto slot:species_indices_) {
-            const double q=views_[slot].unchecked(c,0U);
-            const double value=step==1.0 ? next_[slot*count_+i]
-                : q+step*(next_[slot*count_+i]-q);
-            if (!std::isfinite(value) || value<0.0 || value>1.0) return false;
-            total+=value;
-          }
-          return total<=1.0L;
-        };
-        for (unsigned search=0; !admissible(theta); ++search)
-          theta=search<64 ? 0.5*theta : 0.0;
+        const double theta=species_search_factor(species_indices_.size(),
+            [&](std::size_t s) {return views_[species_indices_[s]].unchecked(c,0U);},
+            [&](std::size_t s) {return next_[species_indices_[s]*count_+i];});
         for(const auto slot:species_indices_) {
           auto& q=views_[slot].unchecked(c,0U);
           q=theta==1.0 ? next_[slot*count_+i] : q+theta*(next_[slot*count_+i]-q);

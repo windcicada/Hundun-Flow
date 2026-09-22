@@ -71,6 +71,45 @@ inline double species_search_update(double value, double correction) noexcept {
   return value-correction;
 }
 
+// One common nonlinear search step preserves the complete composition. This
+// affects the uncommitted guess only; physical row residuals still decide
+// convergence and the driver still performs its final conservative audit.
+template <class Current, class Proposal>
+double species_search_factor(std::size_t count, const Current& current,
+    const Proposal& proposal) noexcept {
+  double theta=1.0;
+  double sum=0.0, proposal_sum=0.0;
+  long double delta_sum=0.0L;
+  for (std::size_t s=0; s<count; ++s) {
+    const double q=current(s), next=proposal(s), delta=next-q;
+    sum+=q;
+    proposal_sum+=next;
+    delta_sum+=static_cast<long double>(next)-q;
+    if(delta<0.0 && q+delta<0.0) theta=std::min(theta,0.9*q/(-delta));
+    if(delta>0.0 && q+delta>1.0) theta=std::min(theta,0.9*(1.0-q)/delta);
+  }
+  // Admission must use the same stored-double sum as EOS. An extended sum
+  // may place a valid near-pure state outside the simplex and suppress a
+  // resolvable trace update even though the physical row has not converged.
+  if(delta_sum>0.0L && proposal_sum>1.0)
+    theta=std::min(theta,static_cast<double>(0.9L*(1.0-sum)/delta_sum));
+  const auto admissible=[&](double step) {
+    double total=0.0;
+    for (std::size_t s=0; s<count; ++s) {
+      const double q=current(s), next=proposal(s);
+      const double value=step==1.0 ? next : q+step*(next-q);
+      if (!std::isfinite(value) || value<0.0 || value>1.0) return false;
+      total+=value;
+    }
+    return total<=1.0;
+  };
+  // A malformed anchor must not make a rank spin forever. Returning the
+  // unchanged guess leaves its rejection to the existing assembly audit.
+  for (unsigned search=0; search<65 && !admissible(theta); ++search)
+    theta=search<64 ? 0.5*theta : 0.0;
+  return std::max(0.0,theta);
+}
+
 // A private search may exhaust the represented value's half-ULP response.
 // This predicate concerns an uncommitted guess, separately from final audit.
 inline bool species_search_quantized(double value, double proposal,
