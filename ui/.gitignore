@@ -1,0 +1,6 @@
+node_modules/
+.venv/
+dist/
+*.tsbuildinfo
+__pycache__/
+.qa/

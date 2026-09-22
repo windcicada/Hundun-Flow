@@ -25,3 +25,4 @@ CONTRIBUTING.md export-ignore
 /examples/g -export-ignore
 /examples/cf -export-ignore
 /docs/release.md -export-ignore
+/docs/ui.md -export-ignore

@@ -166,6 +166,7 @@ mpirun -np 4 b3/versions/v0.4/hundun run fine \
 
 - [安装、运行与续算](docs/run.md)
 - [版本验收范围](docs/accept.md)
+- [本地计算工作台](docs/ui.md)：通过 `./ui/run` 打开真实算例监看、场数据截面、运行控制与报告导出。
 
 ## 许可证
 
