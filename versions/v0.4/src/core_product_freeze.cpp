@@ -9577,7 +9577,8 @@ Status ProductDriver::Impl::execute_attempt(
     accepted_source_effective = effective;
   }
   if (cold_method && product.reaction.enabled()) {
-    // Rebuild the explicit derivative from committed state on every attempt.
+    // Rebuild the source from committed state on every attempt. CN/BE PaSR
+    // freezes a finite-interval increment, recomputed for each attempted dt.
     // Endpoint preparation can partially overwrite this workspace before a
     // failed attempt rolls back its state layers. Outer solves and their final
     // equation audit share this accepted-state source until endpoint preparation.
@@ -9612,7 +9613,7 @@ Status ProductDriver::Impl::execute_attempt(
           product.equations.kernels(), product.layers, cells,
           {product.pressure_mg_cell_activity.data(),
            product.pressure_mg_cell_activity.size()},
-          time.accepted_step());
+          time.accepted_step(),time.time(),step.dt);
       });
     status = product.reductions.consensus(status);
     if (!status) {

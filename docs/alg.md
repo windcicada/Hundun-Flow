@@ -1906,3 +1906,10 @@ handled in the common runtime. See `pasr.md` for equations and compatibility,
 and `verification/2026-09-23-pasr.md` for reproduced failures and focused checks.
 This physical-model selection is not an ESF-equivalence or long-run acceptance
 claim; the original equation and conservation thresholds remain in force.
+
+CN/BE PaSR subsequently reproduced stiff instantaneous-source depletion in the
+physical species row. Its accepted-state finite-interval source now uses the
+COAST reaction-zone recombination idea, with unchanged timescale kappa and one
+interval call per active cell per attempt. The minimized rejection, independent
+oracle and rollback checks are recorded in
+`verification/2026-09-23-pasr-interval.md`; large-case throughput remains pending.

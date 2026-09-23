@@ -241,7 +241,7 @@ bool collective(bool okay) {
 
 bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
                       double initial_y = .25, bool cn = true, bool reverse = false,
-                      bool interval=false) {
+                      bool interval=false, bool stiff=false) {
   IsomerGas gas;
   gas.reverse = reverse;
   model.time.scheme = cn ? TimeScheme::cn_be : TimeScheme::backward_euler;
@@ -249,6 +249,10 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
   model.legacy_time_fingerprint = cn ? model.fingerprint + 1 : 0;
   model.reaction.mode = pasr ? ReactionMode::pasr_algebraic_v1 : ReactionMode::finite_rate_mean;
   model.reaction.mixing_c_z = .001;
+  if (stiff) {
+    model.time.initial_dt=model.time.minimum_dt=model.time.maximum_dt=1.;
+    model.reaction.mixing_c_z=1e-8;
+  }
   model.pressure_reference = PressureReferenceKind::boundary_absolute;
   if (cn) model.solver.cold_stopping = ColdStoppingSpec{1.0, 1e-7, 1e-10, 1e-10};
   else model.solver.cold_stopping.reset();
@@ -265,7 +269,12 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
   outlet.scalars[0].backflow_value = initial_y;
   CompiledCasePlan plan;
   ProductCouplingBindings bindings{&gas};
-  if(interval) { bindings.gas_advance=&gas; bindings.chemistry_identity=&gas.closure; }
+  if (cn && pasr) {
+    CompiledCasePlan missing_interval;
+    if (ProductCompiler::compile(MPI_COMM_WORLD,model,{},missing_interval,bindings))
+      return false;
+  }
+  if(interval || (pasr && cn)) { bindings.gas_advance=&gas; bindings.chemistry_identity=&gas.closure; }
   auto status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan, bindings);
   if (status && cn && pasr && !plan.summary().conservative_total_energy)
     status = {StatusCode::invalid_plan, 99003};
@@ -293,7 +302,8 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
       // Fail both accepted-state preparation and endpoint preparation after
       // one cell has overwritten its source. Each retry starts from this same
       // committed snapshot, including all method history and rate fields.
-      for (const auto failure_query : {UINT64_C(2), local_cells + 2}) {
+      const auto queries_per_cell=pasr && initial_y>0 ? 3U : 1U;
+      for (const auto failure_query : {UINT64_C(2), queries_per_cell*local_cells + 2}) {
         gas.queries = 0;
         gas.fail_at = rank == 0 ? failure_query : 0;
         DriverStepReport failed;
@@ -312,7 +322,7 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
           break;
         }
       }
-      if (status && interval) {
+      if (status && (interval || (pasr && initial_y>0))) {
         gas.fail_advance_at=rank==0 ? gas.advances+3 : 0;
         DriverStepReport failed;
         const auto failure=driver.advance({1,1,1,1,1},failed);
@@ -327,6 +337,7 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
       }
       if (!status) break;
     }
+    const auto advances_before=gas.advances;
     status = driver.advance({1, 1, 1, 1, 1}, report);
     RestartSnapshot state;
     if (status) status = driver.committed_restart_snapshot(state);
@@ -338,22 +349,32 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
     const auto cells = model.mesh.exact_cells;
     const double volume = (extent.x-lower.x)*(extent.y-lower.y)*(extent.z-lower.z) /
         (double(cells.x)*cells.y*cells.z);
-    const double tau_mix = .001 * std::pow(volume, 2.0/3.0) / (2*1e-5);
+    const double tau_mix = model.reaction.mixing_c_z * std::pow(volume, 2.0/3.0) / (2*1e-5);
     const double kappa = pasr ? .5/(.5+tau_mix) : 1.;
-    const double decay = interval ? std::exp(-2*model.time.initial_dt*step)
-        : std::pow(1 - 2*kappa*model.time.initial_dt, step);
+    const auto decay_at=[&](unsigned n) {
+      return interval ? std::exp(-2*model.time.initial_dt*n)
+          : cn && pasr ? std::pow(1+kappa*std::expm1(-2*model.time.initial_dt),n)
+          : std::pow(1-2*kappa*model.time.initial_dt,n);
+    };
+    const double decay = decay_at(step);
     const double expected = reverse ? 1 - (1 - initial_y)*decay : initial_y*decay;
     bool found = false;
+    std::uint64_t species_cells=0;
     for (std::size_t i = 0; i < state.fields.size; ++i) {
       const auto& f = state.fields.data[i];
       if (f.role != RestartFieldRole::independent_species) continue;
       found = true;
       const auto n = f.values.interior;
+      species_cells=std::uint64_t(n.x)*n.y*n.z;
       for (int z = 0; z < n.z; ++z)
         for (int y = 0; y < n.y; ++y)
           for (int x = 0; x < n.x; ++x)
             maximum_error = std::max(maximum_error,
                 std::abs(f.values.unchecked({x, y, z}, 0) - expected));
+    }
+    if (cn && pasr && gas.advances-advances_before != (initial_y>0 ? species_cells : 0)) {
+      status={StatusCode::numerical_failure,99006};
+      break;
     }
     if (!collective(found && report.accepted && report.piso.cold.active == cn &&
         state.step == step && report.conservation.valid &&
@@ -372,9 +393,7 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
         const auto& b=balance.species_balance[1];
         const auto& element=balance.element_balance[0];
         const double mass=a.current_inventory+b.current_inventory;
-        const double previous_decay=interval
-            ? std::exp(-2*model.time.initial_dt*(step-1))
-            : std::pow(1-2*kappa*model.time.initial_dt,step-1);
+        const double previous_decay=decay_at(step-1);
         const double previous=reverse
             ? 1-(1-initial_y)*previous_decay : initial_y*previous_decay;
         const double chemistry=mass*(expected-previous)/model.time.initial_dt;
@@ -452,7 +471,8 @@ bool cn_pasr_sgs_retry(ValidatedModel model, const std::filesystem::path& assets
   const auto create = [&](FaultGas& provider, ProductDriver& driver) {
     CompiledCasePlan plan;
     ProductCouplingBindings bindings{&provider};
-    if (interval) { bindings.gas_advance=&provider; bindings.chemistry_identity=&provider.backend.closure_identity(); }
+    bindings.gas_advance=&provider;
+    bindings.chemistry_identity=&provider.backend.closure_identity();
     auto status = ProductCompiler::compile(MPI_COMM_WORLD, model, assets, plan, bindings);
     if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
     if (status) status = driver.initialize(initial);
@@ -958,7 +978,8 @@ int main(int argc, char **argv) {
     model.reaction.mode = ReactionMode::finite_rate_mean;
     model.reaction.mechanism_sha256 = gas.gas_identity().mechanism_sha256;
     model.reaction.phase = gas.gas_identity().phase;
-    if (argc == 1 && (!cn_mean_reaction(model, rank, false,.25,true,false,true) ||
+    if (argc == 1 && (!cn_mean_reaction(model, rank, true,.25,true,false,false,true) ||
+        !cn_mean_reaction(model, rank, false,.25,true,false,true) ||
         !cn_mean_reaction(model, rank, false,0.,true,true,true) ||
         !cn_mean_reaction(model, rank, false, 1.) ||
         !cn_mean_reaction(model, rank, false, 0., true, true) ||

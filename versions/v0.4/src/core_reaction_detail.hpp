@@ -128,6 +128,9 @@ public:
     }
     interval_enabled_ = model.time.scheme == TimeScheme::cn_be &&
         mode_ == ReactionMode::finite_rate_mean && advance_provider_ != nullptr;
+    pasr_interval_enabled_ = model.time.scheme == TimeScheme::cn_be &&
+        mode_ == ReactionMode::pasr_algebraic_v1;
+    if (pasr_interval_enabled_ && advance_provider_ == nullptr) return invalid();
     response_enabled_ = interval_enabled_ && owned_provider_ &&
         model.reaction.representation == ReactionSpec::Representation::direct_cantera;
     // Reserve one tenth of the primitive composition coupling tolerance for
@@ -177,6 +180,7 @@ public:
     if (!gas.thermodynamic_model.empty()) string(gas.thermodynamic_model);
     integer(static_cast<unsigned>(model.reaction.mode));
     if (interval_enabled_) string("mean-transport-reactor-cnbe-v1");
+    if (pasr_interval_enabled_) string("pasr-accepted-interval-source-cnbe-v1");
     if (response_enabled_) {
       string("bounded-interval-response-reference-time-v2");
       for(double value : {response_relative_,response_absolute_,response_reference_time_}) {
@@ -643,9 +647,14 @@ public:
                  const EquationMaterialView &material,
                  const CartesianKernelPlan &kernels, StateLayers &layers,
                  Int3 cells, Span<const std::uint8_t> activity,
-                 std::uint64_t step) noexcept {
+                 std::uint64_t step, double start=0., double dt=0.) noexcept {
     if (!enabled() || esf_enabled())
       return {};
+    if (!std::isfinite(dt) || dt<0 || !std::isfinite(start) || start<0 ||
+        (dt>0 && !(start+dt>start))) return invalid();
+    if (pasr_interval_enabled_ && dt>0 &&
+        !portable::same_gas_identity(identity_,advance_provider_->gas_identity()))
+      return invalid();
     if (!portable::same_gas_identity(identity_, provider_->gas_identity()) ||
         state.independent_species.size != species_.size() ||
         (activity.size != 0 &&
@@ -790,6 +799,51 @@ public:
               return numerical();
             kappa = fraction.kappa;
           }
+          if (pasr_interval_enabled_ && dt>0 && kappa>0) {
+            // Integrate once from the accepted state, before fluid coupling.
+            // A convex PaSR increment cannot consume more than that state's
+            // inventory. Freezing an instantaneous stiff sink has no such
+            // property, even when kappa is a valid timescale fraction.
+            portable::GasAdvanceOutput advanced{{},final_y_.data(),
+                integrated_delta_.data(),y_.size()};
+            const auto result=advance_provider_->advance_gas({q,start,dt},advanced);
+            if(result!=portable::Status::success)
+              return {StatusCode::numerical_failure,10250U+std::uint32_t(result)};
+            if(advanced.final_mass_fractions!=final_y_.data() ||
+               advanced.integrated_species_density_delta_kg_per_m3!=integrated_delta_.data() ||
+               advanced.capacity!=y_.size() || advanced.completed_duration_s!=dt ||
+               advanced.final_sample.revision!=q.revision ||
+               advanced.final_sample.composition_fingerprint!=q.composition_fingerprint ||
+               !close(advanced.final_sample.pressure_pa,q.pressure_pa) ||
+               !close(advanced.final_sample.enthalpy_j_per_kg,q.enthalpy_j_per_kg) ||
+               !std::isfinite(advanced.integrated_heat_release_j_per_m3))
+              return {StatusCode::numerical_failure,10243};
+            double total=0., magnitude=0.;
+            for(std::size_t s=0;s<y_.size();++s) {
+              if(!std::isfinite(final_y_[s]) || final_y_[s]<0 || final_y_[s]>1)
+                return {StatusCode::numerical_failure,10244};
+              const double change=final_y_[s]-y_[s];
+              if(!close(out.sample.density_kg_per_m3*change,integrated_delta_[s]))
+                return {StatusCode::numerical_failure,10244};
+              const double delta=state.density.trial.unchecked(cell,0)*change;
+              rates_[s]=delta/dt;
+              if(!std::isfinite(rates_[s])) return numerical();
+              total+=delta; magnitude+=std::abs(delta);
+            }
+            if(std::abs(total)>1e-12+1e-10*magnitude)
+              return {StatusCode::numerical_failure,10245};
+            for(std::size_t e=0;e<identity_.element_names.size();++e) {
+              double defect=0., magnitude=0.;
+              for(std::size_t s=0;s<y_.size();++s) {
+                const double amount=(final_y_[s]-y_[s])*
+                    identity_.element_counts[s*identity_.element_names.size()+e]/
+                    identity_.molecular_weights_kg_per_kmol[s];
+                defect+=amount; magnitude+=std::abs(amount);
+              }
+              if(std::abs(defect)>1e-12+1e-10*magnitude)
+                return {StatusCode::numerical_failure,10246};
+            }
+          }
           for (std::size_t s = 0; s < species_.size(); ++s)
             outputs_[s].unchecked(cell, 0) = kappa * rates_[species_[s]];
         }
@@ -815,6 +869,7 @@ private:
   PlanFingerprint fold_identity_{};
   ReactionMode mode_{ReactionMode::none};
   bool interval_enabled_{};
+  bool pasr_interval_enabled_{};
   bool esf_sources_ready_{};
   bool response_enabled_{};
   double response_reference_time_{};
