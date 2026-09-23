@@ -384,13 +384,24 @@ struct MixtureFixture {
   std::array<ConstFieldView, 1U> species_views{};
   std::array<BoundaryGhostFieldAuthority, 3U> field_authority{};
 
-  bool initialize(bool compact_stencil = false, bool perry = false) {
+  bool initialize(bool compact_stencil = false, bool perry = false,
+                  bool resolved_patch = false) {
     CartesianGeometryPlan geometry;
     MeshPatch patch;
     FieldRegistry registry;
     SchemePlan schemes;
     TimeSchemePlan time;
     ValidatedModel model = mixture_boundary_model();
+    if (resolved_patch) {
+      auto& inlet = model.boundaries[0U];
+      inlet.flow_kind = BoundaryKind::mass_flow_inlet;
+      inlet.mass_flow_rate = 0.01;
+      inlet.direction = {1.0, 0.0, 0.0};
+      model.patch_inlets.emplace();
+      model.patch_inlets->labels_file = "labels.d";
+      model.patch_inlets->labels_fingerprint = 1U;
+      model.patch_inlets->patches = {{1, 0, false, inlet}};
+    }
     if (compact_stencil) {
       model.schemes.momentum = model.schemes.enthalpy =
           model.schemes.species = model.schemes.passive_scalar = ConvectionScheme::central2;
@@ -768,6 +779,71 @@ bool test_physical_inlet_face_keeps_discrete_mirror(bool compact_stencil = false
   passed &= expect(!rejected_mirror && !certificate.valid() &&
                    fixture.output[0].storage==density_before,
                    "physical-face mode rejects a corrupt Dirichlet mirror atomically");
+  return passed;
+}
+
+bool test_resolved_patch_inlet_uses_each_physical_face_state() {
+  MixtureFixture fixture;
+  if (!fixture.initialize(false, false, true)) return false;
+  const std::array<double, 1U> owner_y{0.8};
+  double owner_h=0.0, cp=0.0, gas=0.0;
+  bool passed=static_cast<bool>(fixture.thermodynamics.mixture_enthalpy(
+      650.0,{owner_y.data(),1U},owner_h,cp,gas));
+  std::fill(fixture.pressure.storage.begin(),fixture.pressure.storage.end(),0.0);
+  std::fill(fixture.enthalpy.storage.begin(),fixture.enthalpy.storage.end(),owner_h);
+  std::fill(fixture.species.storage.begin(),fixture.species.storage.end(),owner_y[0]);
+  std::fill(fixture.output[1].storage.begin(),fixture.output[1].storage.end(),650.0);
+  std::vector<double> values(fixture.boundary.resolved_scalar_count(),0.0);
+  const auto spans=fixture.boundary.spans();
+  const std::array<double,2U> face_y{0.35,0.6};
+  const std::array<double,2U> face_t{500.0,600.0};
+  std::array<double,2U> face_h{};
+  for (std::size_t y=0U;y<2U;++y)
+    passed &= static_cast<bool>(fixture.thermodynamics.mixture_enthalpy(
+        face_t[y],{&face_y[y],1U},face_h[y],cp,gas));
+  for (std::size_t index=0U;index<spans.size;++index) {
+    const auto& span=spans.data[index];
+    if (span.face!=CartesianFace::x_min ||
+        span.value_source!=BoundaryValueSource::resolved_scalar ||
+        (span.stage!=BoundaryStage::scalar &&
+         span.stage!=BoundaryStage::enthalpy)) continue;
+    for (std::size_t cell=0U;cell<span.resolved_stride;++cell)
+      values[span.resolved_begin+cell]=span.stage==BoundaryStage::scalar
+          ? face_y[cell%2U] : face_h[cell%2U];
+  }
+  FieldView y=fixture.species.view,h=fixture.enthalpy.view;
+  const BoundaryResolvedValues resolved{{values.data(),values.size()},{},{}};
+  passed &= static_cast<bool>(apply_boundary_ghosts(
+      BoundaryStage::scalar,fixture.boundary,{&y,1U},resolved));
+  passed &= static_cast<bool>(apply_boundary_ghosts(
+      BoundaryStage::enthalpy,fixture.boundary,{&h,1U},resolved));
+  passed &= expect(fixture.species.view.unchecked({-1,0,0},0U)<0.0,
+                   "resolved zero-side inlet mirror may leave the simplex");
+  auto input=fixture.input();
+  input.closure_kind=BoundaryThermophysicalClosureKind::physical_inlet_face;
+  BoundaryThermophysicalGhostCertificate certificate;
+  passed &= expect(static_cast<bool>(BoundaryThermophysicalFaceClosure::close(
+      fixture.boundary,fixture.thermodynamics,fixture.transport,input,
+      fixture.outputs(),ghost_context(fixture.boundary),certificate)),
+      "resolved inlet closes from its physical face trace");
+  for (int row=0;row<2;++row) {
+    ThermoState expected;
+    passed &= static_cast<bool>(fixture.thermodynamics.evaluate(
+        100000.0,face_h[row],{&face_y[row],1U},{},expected));
+    passed &= expect(near(fixture.output[0].view.unchecked({-1,row,0},0U),
+                          expected.rho,2e-11),
+                     "each resolved inlet cell retains its own EOS density");
+  }
+  const Status refreshed = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+      fixture.boundary,fixture.thermodynamics,fixture.transport,100000.0,
+      as_const(fixture.pressure.view),fixture.outputs(),{},
+      as_const(fixture.enthalpy.view),
+      {fixture.species_views.data(),fixture.species_views.size()});
+  if (!refreshed)
+    std::cerr << "resolved inlet refresh status=" << unsigned(refreshed.code)
+              << "/" << refreshed.detail << '\n';
+  passed &= expect(static_cast<bool>(refreshed),
+      "material refresh uses the resolved inlet face trace");
   return passed;
 }
 
@@ -1160,6 +1236,7 @@ int main(int argc, char **argv) {
       test_nasa_mixture_uses_fixed_ph_y() &&
       test_physical_inlet_face_keeps_discrete_mirror() &&
       test_physical_inlet_face_keeps_discrete_mirror(true) &&
+      test_resolved_patch_inlet_uses_each_physical_face_state() &&
       test_inlet_material_refresh_and_conservative_consumers() &&
       test_inlet_material_refresh_and_conservative_consumers(true) &&
       test_invalid_state_and_contract_are_atomic() &&

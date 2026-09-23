@@ -933,6 +933,14 @@ Status compile_local_plan(const ValidatedModel& model,
           (spec.flow_kind == BoundaryKind::pressure_outlet ||
            spec.flow_kind == BoundaryKind::nscbc_outlet) &&
           spec.allow_backflow;
+      const bool external_patch_inlet =
+          spec.flow_kind == BoundaryKind::mass_flow_inlet &&
+          model.patch_inlets &&
+          std::any_of(model.patch_inlets->patches.begin(),
+                      model.patch_inlets->patches.end(),
+                      [index](const PatchInletSpec& inlet) {
+                        return !inlet.immersed && inlet.face == index;
+                      });
       plan.scalar_backflow_targets[parameter] = scalar.backflow_value;
       const BoundaryRelation relation =
           conditional_backflow ? BoundaryRelation::convective
@@ -941,7 +949,8 @@ Status compile_local_plan(const ValidatedModel& model,
       if (conditional_backflow) {
         source = BoundaryValueSource::resolved_scalar;
       } else if (relation == BoundaryRelation::dirichlet) {
-        source = BoundaryValueSource::compiled_scalar;
+        source = external_patch_inlet ? BoundaryValueSource::resolved_scalar
+                                      : BoundaryValueSource::compiled_scalar;
       } else if (relation == BoundaryRelation::normal_gradient) {
         source = BoundaryValueSource::resolved_normal_gradient;
       } else if (relation == BoundaryRelation::convective) {

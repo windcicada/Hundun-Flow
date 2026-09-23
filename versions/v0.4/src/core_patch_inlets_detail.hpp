@@ -140,17 +140,14 @@ inline Status compile_patch_inlets(const ValidatedModel& model,
       return {StatusCode::invalid_plan, 15905U};
     if (!p.immersed) {
       const auto& parent = model.boundaries[p.face];
-      // The present outer scalar BC has one target per face. Fail closed for
-      // heterogeneous outer thermodynamic targets until that plan is extended.
-      if (parent.temperature != p.boundary.temperature ||
+      if (parent.flow_kind != BoundaryKind::mass_flow_inlet ||
           parent.thermal_kind != p.boundary.thermal_kind ||
           parent.scalars.size() != p.boundary.scalars.size())
         return {StatusCode::invalid_case, 15906U};
       for (const auto& scalar : p.boundary.scalars) {
         const auto found = std::find_if(parent.scalars.begin(), parent.scalars.end(),
             [&](const auto& value) { return value.stable_name == scalar.stable_name; });
-        if (found == parent.scalars.end() || found->kind != scalar.kind ||
-            found->value != scalar.value)
+        if (found == parent.scalars.end() || found->kind != scalar.kind)
           return {StatusCode::invalid_case, 15906U};
       }
       face_mass[p.face] += p.boundary.mass_flow_rate;
@@ -158,7 +155,8 @@ inline Status compile_patch_inlets(const ValidatedModel& model,
           static_cast<std::size_t>(local.cells.y) * local.cells.z :
           (p.face < 4U ? static_cast<std::size_t>(local.cells.x) * local.cells.z :
                         static_cast<std::size_t>(local.cells.x) * local.cells.y);
-      plan.face_patch[p.face].assign(face_cells, -1);
+      if (plan.face_patch[p.face].empty())
+        plan.face_patch[p.face].assign(face_cells, -1);
     } else if (topology == nullptr) {
       return {StatusCode::invalid_case, 15905U};
     }

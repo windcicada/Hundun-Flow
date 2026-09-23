@@ -60,16 +60,23 @@ int main(int argc, char** argv) {
   model.transported_scalars.push_back({"Z", TransportedScalarRole::passive_scalar});
   air.scalars.push_back({"Z", ScalarBoundaryKind::dirichlet, 0.0});
   model.boundaries[0] = air;
+  model.boundaries[0].mass_flow_rate = 0.013;
   BoundaryFaceSpec fuel = air;
   fuel.mass_flow_rate = 0.002;
   fuel.direction = {0,1,0};
   fuel.scalars[0].value = 1.0;
+  BoundaryFaceSpec second_outer = air;
+  second_outer.mass_flow_rate = 0.003;
+  second_outer.temperature = 310;
+  second_outer.scalars[0].value = 1.0;
   model.patch_inlets.emplace();
   model.patch_inlets->labels_file = "labels.d";
-  model.patch_inlets->patches = {{7,0,false,air},{11,2,true,fuel}};
+  model.patch_inlets->patches = {{7,0,false,air},{11,2,true,fuel},
+                                  {13,0,false,second_outer}};
   std::vector<std::int32_t> labels(static_cast<std::size_t>(n)*n*n, 0);
   labels[0] = 7;
   labels[static_cast<std::size_t>(n)] = 7;
+  labels[static_cast<std::size_t>(2*n)] = 13;
   const auto links = fixture.topology.links();
   const ImmersedLink* source = nullptr;
   for (std::size_t i = 0U; i < links.size; ++i)
@@ -95,7 +102,12 @@ int main(int argc, char** argv) {
           std::abs(state.face_mass_flux - 0.002) < 1e-18 && state.velocity.y > 0.0 &&
           state.enthalpy > 0.0, "fuel state and oriented exact mass source");
       ok &= check(plan.face_patch[0][0] == 0 && plan.face_patch[0][1] == 0 &&
-          plan.face_patch[0][2] == -1, "air support does not extend to unlabelled cells");
+          plan.face_patch[0][2] == 2 && plan.face_patch[0][3] == -1,
+          "two distinct external streams retain their face support");
+      ok &= check(plan.independent_species[0].empty() &&
+          plan.passive_scalars[0][0] == 0.0 && plan.passive_scalars[2][0] == 1.0 &&
+          plan.inlet_enthalpy[0] != plan.inlet_enthalpy[2],
+          "external streams keep distinct thermal and scalar targets");
     } else ok &= check(false, "fuel source not dropped");
     const auto identity = model.patch_inlets->labels_fingerprint;
     labels[0] = 0;
@@ -112,9 +124,9 @@ int main(int argc, char** argv) {
     labels[detail::patch_flat({n,n,n}, source->solid_global_index)] = -11;
     model.patch_inlets->labels_fingerprint = write_labels(root / "labels.d", labels);
     ok &= check(model.patch_inlets->labels_fingerprint == identity, "restored binary identity");
-    model.patch_inlets->patches[0].boundary.temperature = 300;
+    model.boundaries[0].flow_kind = BoundaryKind::no_slip_wall;
     ok &= check(!detail::compile_patch_inlets(model, root, fixture.geometry, fixture.patch,
-        &fixture.topology, thermo, rejected), "unsupported heterogeneous outer thermal target rejects");
+        &fixture.topology, thermo, rejected), "external patches require a mass-flow parent");
   }
   std::filesystem::remove(root / "labels.d");
   std::filesystem::remove(root);

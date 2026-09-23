@@ -2485,27 +2485,38 @@ Status resolve_static_boundary_values(
         const BoundaryFacePlan* face_plan = nullptr;
         const std::size_t face_index =
             static_cast<std::size_t>(span.face);
+        const auto& membership = patch_inlets.face_patch[face_index];
+        const bool external_patch_inlet = !membership.empty();
         const bool conditional_backflow =
             face_index < boundary_specs.size() &&
             boundary.face(span.face, face_plan) && face_plan != nullptr &&
             face_plan->flow_kind == BoundaryKind::pressure_outlet &&
             boundary_specs[face_index].allow_backflow;
         ConstFieldView transported_scalar;
+        std::size_t transported_index = 0U;
+        bool transported_species = true;
         for (std::size_t candidate = 0U; candidate < species.size;
              ++candidate)
           if (species.data[candidate].field == span.field) {
             transported_scalar = species.data[candidate];
+            transported_index = candidate;
             break;
           }
-        if (transported_scalar.base == nullptr)
+        if (transported_scalar.base == nullptr) {
+          transported_species = false;
           for (std::size_t candidate = 0U; candidate < passive.size;
                ++candidate)
             if (passive.data[candidate].field == span.field) {
               transported_scalar = passive.data[candidate];
+              transported_index = candidate;
               break;
             }
-        if (!conditional_backflow || transported_scalar.base == nullptr ||
-            span.parameter >= scalar_backflow_targets.size) {
+        }
+        if ((!conditional_backflow && !external_patch_inlet) ||
+            transported_scalar.base == nullptr ||
+            (conditional_backflow &&
+             span.parameter >= scalar_backflow_targets.size) ||
+            (external_patch_inlet && span.parameter >= scalar_targets.size)) {
           local = {StatusCode::invalid_plan, kProductBinding};
           break;
         }
@@ -2518,6 +2529,24 @@ Status resolve_static_boundary_values(
                 static_cast<std::size_t>(outer) *
                     span.tangent_inner_count +
                 inner;
+            if (external_patch_inlet) {
+              const auto patch_index = membership[face_cell];
+              if (patch_index < 0) {
+                scalars[begin + face_cell] =
+                    scalar_targets.data[span.parameter];
+              } else {
+                const std::size_t index = static_cast<std::size_t>(patch_index);
+                const auto& target = transported_species
+                    ? patch_inlets.independent_species[index]
+                    : patch_inlets.passive_scalars[index];
+                if (transported_index >= target.size()) {
+                  local = {StatusCode::invalid_plan, kProductBinding};
+                  break;
+                }
+                scalars[begin + face_cell] = target[transported_index];
+              }
+              continue;
+            }
             const Int3 owner = boundary_owner_cell(
                 span.face, boundary.local_cells(),
                 static_cast<std::int32_t>(inner),
@@ -2559,6 +2588,13 @@ Status resolve_static_boundary_values(
           const std::size_t face_cell =
               static_cast<std::size_t>(outer) * span.tangent_inner_count +
               inner;
+          const auto& membership = patch_inlets.face_patch[
+              static_cast<std::size_t>(span.face)];
+          if (!membership.empty() && membership[face_cell] >= 0) {
+            scalars[begin + face_cell] = patch_inlets.inlet_enthalpy[
+                static_cast<std::size_t>(membership[face_cell])];
+            continue;
+          }
           const Int3 owner = boundary_owner_cell(
               span.face, boundary.local_cells(),
               static_cast<std::int32_t>(inner),
@@ -5390,7 +5426,10 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         }
         external_patches.push_back({face, inlet.boundary.direction,
             inlet.boundary.mass_flow_rate,
-            {external_support[i].data(), external_support[i].size()}});
+            {external_support[i].data(), external_support[i].size()},
+            inlet.boundary.temperature,
+            {inlets.independent_species[i].data(),
+             inlets.independent_species[i].size()}});
       }
       return {};
     });

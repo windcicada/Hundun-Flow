@@ -368,14 +368,21 @@ Status evaluate_cell(
         const auto &span=spans.data[j];
         if (span.face!=inlet.face || span.stage!=BoundaryStage::scalar || span.field!=view.field) continue;
         if (span.relation!=BoundaryRelation::dirichlet ||
-            span.value_source!=BoundaryValueSource::compiled_scalar ||
+            (span.value_source!=BoundaryValueSource::compiled_scalar &&
+             span.value_source!=BoundaryValueSource::resolved_scalar) ||
             span.parameter>=boundary.scalar_targets().size)
           return {StatusCode::invalid_plan,kClosureInput};
-        const double target=boundary.scalar_targets().data[span.parameter];
-        if (view.unchecked(inlet.mirror,0U)!=2.0*target-composition[s]) {
-          return {StatusCode::numerical_failure,kClosureState};
+        if (span.value_source==BoundaryValueSource::compiled_scalar) {
+          const double target=boundary.scalar_targets().data[span.parameter];
+          if (view.unchecked(inlet.mirror,0U)!=2.0*target-composition[s])
+            return {StatusCode::numerical_failure,kClosureState};
+          composition[s]=target;
+        } else {
+          // A labelled external inlet has a distinct value on each face cell.
+          // Its authorized mirror and owner recover that physical trace.
+          composition[s]=0.5*view.unchecked(inlet.mirror,0U)+
+                         0.5*composition[s];
         }
-        composition[s]=target;
         found=true;
         break;
       }
@@ -447,7 +454,9 @@ bool BoundaryPlan::has_thermophysical_inlet_face(CartesianFace selected) const n
     for (const auto &span : spans_)
       if (span.face==selected && span.stage==BoundaryStage::scalar && span.field==field.field)
         found=span.relation==BoundaryRelation::dirichlet &&
-              span.value_source==BoundaryValueSource::compiled_scalar;
+              (span.value_source==BoundaryValueSource::compiled_scalar ||
+               (kind==BoundaryKind::mass_flow_inlet &&
+                span.value_source==BoundaryValueSource::resolved_scalar));
     if (!found) return false;
   }
   return true;
@@ -465,7 +474,22 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
       thermodynamics.independent_species_count()>kMaximumIndependentSpecies)
     return {StatusCode::invalid_plan,kClosureInput};
   const bool outlet_state = boundary.pressure_driven_backflow() && outlet_enthalpy.base;
-  if (outlet_state) {
+  bool resolved_inlet = false;
+  const auto boundary_spans = boundary.spans();
+  for (std::size_t index = 0U; index < boundary_spans.size; ++index) {
+    const auto& span = boundary_spans.data[index];
+    if (span.stage == BoundaryStage::scalar &&
+        span.value_source == BoundaryValueSource::resolved_scalar) {
+      const BoundaryFacePlan* face = nullptr;
+      if (boundary.face(span.face, face) && face && face->local_owner &&
+          face->flow_kind == BoundaryKind::mass_flow_inlet)
+        resolved_inlet = true;
+    }
+  }
+  // Early cold-start material seeding has no primitive trace yet. The later
+  // refresh uses the resolved patch values after scalar and h ghost filling.
+  const bool resolved_trace_state = resolved_inlet && outlet_enthalpy.base;
+  if (outlet_state || resolved_trace_state) {
     if (!valid_scalar_view(outlet_enthalpy, n, ghosts) ||
         outlet_species.size != thermodynamics.independent_species_count() ||
         (outlet_species.size && !outlet_species.data))
@@ -483,7 +507,7 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
     if (!valid_scalar_view(fields[i],n,ghosts) ||
         detail::field_views_overlap(pressure,as_const(fields[i])))
       return {StatusCode::invalid_plan,kClosureInput};
-    if (outlet_state) {
+    if (outlet_state || resolved_trace_state) {
       if (detail::field_views_overlap(outlet_enthalpy, as_const(fields[i])))
         return {StatusCode::invalid_plan, kClosureInput};
       for (std::size_t j = 0; j < outlet_species.size; ++j)
@@ -541,6 +565,7 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
         return Status{StatusCode::invalid_plan,kClosureInput};
       std::array<double,kMaximumIndependentSpecies> y{};
       std::size_t species=0U;
+      bool resolved_patch = false;
       const auto transported=boundary.transported_fields();
       const auto spans=boundary.spans();
       for (std::size_t f=0U;f<transported.size;++f) {
@@ -551,19 +576,37 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
           const auto &span=spans.data[j];
           if (span.face!=inlet.face || span.stage!=BoundaryStage::scalar || span.field!=transported.data[f].field) continue;
           if (span.parameter>=boundary.scalar_targets().size) return Status{StatusCode::invalid_plan,kClosureInput};
-          y[species++]=boundary.scalar_targets().data[span.parameter];
+          if (span.value_source == BoundaryValueSource::resolved_scalar &&
+              resolved_trace_state) {
+            if (outlet_species.size <= species)
+              return Status{StatusCode::invalid_plan,kClosureInput};
+            const auto view = outlet_species.data[species];
+            y[species] = 0.5*view.unchecked(inlet.mirror,0U)+
+                         0.5*view.unchecked(owner,0U);
+            resolved_patch = true;
+          } else {
+            y[species] = boundary.scalar_targets().data[span.parameter];
+          }
+          ++species;
           found=true;
           break;
         }
         if (!found) return Status{StatusCode::invalid_plan,kClosureInput};
       }
       if (species!=thermodynamics.independent_species_count()) return Status{StatusCode::invalid_plan,kClosureInput};
-      const double temperature=boundary.temperature_targets().data[face->flow_parameter];
+      double temperature=boundary.temperature_targets().data[face->flow_parameter];
       double h=0.0, cp=0.0, gas=0.0;
-      Status evaluated=thermodynamics.mixture_enthalpy(temperature,{y.data(),species},h,cp,gas);
+      Status evaluated{};
+      if (resolved_patch) {
+        h=0.5*outlet_enthalpy.unchecked(inlet.mirror,0U)+
+          0.5*outlet_enthalpy.unchecked(owner,0U);
+      } else {
+        evaluated=thermodynamics.mixture_enthalpy(temperature,{y.data(),species},h,cp,gas);
+      }
       ThermoState thermo;
       if (evaluated) evaluated=thermodynamics.evaluate(pressure_reference+pressure.unchecked(owner,0U),
           h,{y.data(),species},{},thermo);
+      if (evaluated && resolved_patch) temperature=thermo.temperature;
       MolecularTransportState molecular;
       if (evaluated) evaluated=transport.evaluate(temperature,{y.data(),species},molecular);
       if (!evaluated) return evaluated;

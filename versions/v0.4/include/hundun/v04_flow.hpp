@@ -3982,6 +3982,10 @@ struct PhysicalMassFlowPatch {
   Real3 direction{};
   double mass_flow_rate{};
   Span<const Int3> local_faces{};
+  // Optional patch-specific inlet state. Omitted by legacy single-state
+  // bindings; imported patch inlets provide both fields.
+  double temperature{};
+  Span<const double> independent_species{};
 };
 
 struct PressureEnergyCandidateBoundaryFinalizerBinding {

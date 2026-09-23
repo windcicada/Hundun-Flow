@@ -508,12 +508,20 @@ Status prepare_physical_boundary_flux(
                                      const BoundaryFacePlan& face_plan,
                                      Int3 owner, bool backflow,
                                      Real3 configured_velocity,
+                                     const PhysicalMassFlowPatch* patch,
                                      ThermoState& thermo) noexcept {
     if (face_plan.flow_parameter >= impl.boundary->parameter_count())
       return Status{StatusCode::invalid_plan,
                     kCandidateBoundaryFinalizer};
     for (std::size_t species = 0U;
          species < input.independent_species.size; ++species) {
+      if (patch != nullptr && patch->temperature > 0.0) {
+        if (patch->independent_species.size != input.independent_species.size)
+          return Status{StatusCode::invalid_plan,
+                        kCandidateBoundaryFinalizer};
+        impl.composition[species] = patch->independent_species.data[species];
+        continue;
+      }
       std::uint32_t parameter = 0U;
       if (!scalar_parameter(*impl.boundary, face,
                             input.independent_species.data[species].field,
@@ -525,9 +533,10 @@ Status prepare_physical_boundary_flux(
               ? impl.boundary->scalar_backflow_targets().data[parameter]
               : impl.boundary->scalar_targets().data[parameter];
     }
-    const double temperature =
-        backflow ? backflow_temperatures.data[face_plan.flow_parameter]
-                 : temperatures.data[face_plan.flow_parameter];
+    const double temperature = patch != nullptr && patch->temperature > 0.0
+        ? patch->temperature
+        : (backflow ? backflow_temperatures.data[face_plan.flow_parameter]
+                    : temperatures.data[face_plan.flow_parameter]);
     double enthalpy = 0.0;
     double cp = 0.0;
     double gas = 0.0;
@@ -603,7 +612,7 @@ Status prepare_physical_boundary_flux(
                 *impl.boundary, face_plan->flow_parameter, false, false);
             ThermoState thermo;
             local = configured_thermo(face, *face_plan, owner, false,
-                                      prescribed, thermo);
+                                      prescribed, nullptr, thermo);
             const double value =
                 local ? thermo.rho * component(prescribed, axis) * face_area
                       : 0.0;
@@ -631,7 +640,10 @@ Status prepare_physical_boundary_flux(
                 : impl.mass_flow_patches[patch_index].direction;
             ThermoState thermo;
             local = configured_thermo(face, *face_plan, owner, false,
-                                      direction, thermo);
+                                      direction,
+                                      patch_index < 0 ? nullptr
+                                          : &impl.mass_flow_patches[patch_index],
+                                      thermo);
             const double outward_component =
                 outward_sign(high) * component(direction, axis);
             const double capacity =
@@ -694,7 +706,7 @@ Status prepare_physical_boundary_flux(
               }
               ThermoState thermo;
               local = configured_thermo(face, *face_plan, owner, true,
-                                        prescribed, thermo);
+                                        prescribed, nullptr, thermo);
               const double value =
                   local ? thermo.rho * component(prescribed, axis) * face_area
                         : 0.0;
@@ -706,7 +718,7 @@ Status prepare_physical_boundary_flux(
               ThermoState replayed_thermo;
               if (local)
                 local = configured_thermo(face, *face_plan, owner, true,
-                                          prescribed, replayed_thermo);
+                                          prescribed, nullptr, replayed_thermo);
               const double replayed_value =
                   local ? replayed_thermo.rho * component(prescribed, axis) *
                               face_area
@@ -1019,6 +1031,12 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
       if (slot >= 6U || !finite_positive(p.mass_flow_rate) ||
           !std::isfinite(p.direction.x) || !std::isfinite(p.direction.y) ||
           !std::isfinite(p.direction.z) ||
+          (p.temperature != 0.0 &&
+           (!finite_positive(p.temperature) ||
+            p.independent_species.size !=
+                binding.thermodynamics->independent_species_count() ||
+            (p.independent_species.size != 0U &&
+             p.independent_species.data == nullptr))) ||
           (p.local_faces.size != 0U && p.local_faces.data == nullptr)) {
         local_valid = false;
         break;
@@ -1037,6 +1055,15 @@ Status PressureEnergyCandidateBoundaryFinalizer::bind(
       patch_collective = mix(patch_collective, double_bits(p.direction.x));
       patch_collective = mix(patch_collective, double_bits(p.direction.y));
       patch_collective = mix(patch_collective, double_bits(p.direction.z));
+      patch_collective = mix(patch_collective, double_bits(p.temperature));
+      patch_collective = mix(patch_collective, p.independent_species.size);
+      for (std::size_t species = 0U; species < p.independent_species.size;
+           ++species) {
+        if (!std::isfinite(p.independent_species.data[species]))
+          local_valid = false;
+        patch_collective = mix(patch_collective,
+                               double_bits(p.independent_species.data[species]));
+      }
     }
   if (local_valid)
     for (std::size_t slot = 0U; slot < 6U; ++slot) {
