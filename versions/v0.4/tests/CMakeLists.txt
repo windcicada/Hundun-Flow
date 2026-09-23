@@ -2866,3 +2866,12 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
       "$<TARGET_FILE:v04_kerosene_esf_test>")
   set_tests_properties(v04_hot_cli PROPERTIES TIMEOUT 180 PROCESSORS 4 RUN_SERIAL TRUE)
 endif()
+
+add_executable(v04_striped_batch_mpi_test mpi/striped_batch_mpi_test.cpp)
+target_link_libraries(v04_striped_batch_mpi_test PRIVATE hundun_v04_test_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_striped_batch_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_striped_batch_mpi_test>" ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(v04_striped_batch_mpi_${rank_count} PROPERTIES TIMEOUT 30 PROCESSORS "${rank_count}")
+endforeach()

@@ -5862,6 +5862,9 @@ Status ProductCompiler::compile(MPI_Comm communicator,
   }
   status = product_collective_status(communicator, status);
   if (!status) return status;
+  status = candidate->reaction.prepare_distribution(communicator,
+      std::size_t(candidate->patch.cells.x)*candidate->patch.cells.y*candidate->patch.cells.z);
+  if(!status)return status;
   candidate->phases[8U] = ProductFreezePhase::validation;
   candidate->phases[9U] = ProductFreezePhase::sealed;
   candidate->summary.unity_lewis_enthalpy = candidate->unity_lewis_enthalpy;
@@ -13454,7 +13457,7 @@ Status ProductDriver::Impl::execute_attempt(
                 {species_trial.data(),species_trial.size()}, cells,
                 {product.pressure_mg_cell_activity.data(),product.pressure_mg_cell_activity.size()},
                 time.time(),step.dt,step.accepted_step,step.generation,
-                change,internal_steps);
+                change,internal_steps,communicator);
             });
             status=product.reductions.consensus(status);
             double elapsed=MPI_Wtime()-reaction_begin, maximum_elapsed{};

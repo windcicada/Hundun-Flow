@@ -1885,3 +1885,14 @@ ESF／PaSR 公共混合状态及其余 P0–P6 项目继续按阶段验收；当
 JR 的第 32012 步起点经四步原生恢复到达 32016，自适应 dt
 序列与 JK 一致，完整场和方法历史比较的最大归一化差为
 6.62648e-11（门槛 1e-9）。该节点作为本轮运行版本发布依据之一。
+
+### Mean interval chemistry: independent MPI task distribution
+
+The built-in Cantera CN/BE mean-reaction route distributes independent cell
+intervals cyclically across MPI ranks, then restores responses to their original
+cells. This changes task placement only: PH/Y inputs, chemistry tolerances,
+fluid decomposition and final conservative audits remain unchanged. External
+providers keep their rank-local call order. Workspaces are reserved at freeze;
+preparation and provider errors are collective before response publication.
+See `verification/2026-09-23-mean-reaction-balance.md` for focused MPI tests,
+bitwise restart comparison and the measured performance scope.

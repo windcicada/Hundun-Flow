@@ -2,6 +2,7 @@
 #pragma once
 #include "app_reaction_detail.hpp"
 #include "core_response.hpp"
+#include "core_striped_batch.hpp"
 #include "hundun/v04_product.hpp"
 #include "models_chemistry_adapter_detail.hpp"
 #include "solver_cartesian_detail.hpp"
@@ -278,7 +279,17 @@ public:
     return owned_provider_ ? "analytic_isomer" : "external";
   }
   std::size_t interval_workspace_bytes() const noexcept {
-    return sizeof(double)*(interval_h_.capacity()+interval_p_.capacity()+interval_density_.capacity()) + response_.bytes();
+    return sizeof(double)*(interval_h_.capacity()+interval_p_.capacity()+interval_density_.capacity()) + response_.bytes() + batch_.bytes() + sizeof(double)*(batch_input_.capacity()+batch_output_.capacity());
+  }
+  Status prepare_distribution(MPI_Comm comm,std::size_t cells) noexcept {
+    if(!response_enabled_)return {};
+    int ranks{};if(MPI_Comm_size(comm,&ranks)!=MPI_SUCCESS)return {StatusCode::mpi_failure,10360};
+    if(ranks==1)return {};
+    auto status=batch_.prepare(comm,cells,3+y_.size(),10+2*y_.size());
+    if(!status)return status;
+    try {batch_input_.reserve(cells*(3+y_.size()));batch_output_.reserve(cells*(10+2*y_.size()));}
+    catch(const std::bad_alloc&){status={StatusCode::allocation_failure,10360};}
+    return StripedBatch::agree(comm,status);
   }
   double interval_response_tolerance() const noexcept { return response_enabled_ ? response_relative_ : 0.0; }
   double interval_response_absolute_tolerance() const noexcept { return response_enabled_ ? response_absolute_ : 0.0; }
@@ -395,9 +406,15 @@ public:
       const ThermodynamicsPlan& thermo, StateLayers& layers,
       Span<const FieldView> candidate, Int3 cells, Span<const std::uint8_t> activity,
       double start, double dt, RevisionToken step, RevisionToken generation,
-      double& maximum_change, std::uint64_t& chemistry_steps) noexcept {
+      double& maximum_change, std::uint64_t& chemistry_steps, MPI_Comm comm) noexcept {
     maximum_change=0; chemistry_steps=0;
     response_error_=0; response_reused_=0;
+    int ranks{};
+    if(MPI_Comm_size(comm,&ranks)!=MPI_SUCCESS)return {StatusCode::mpi_failure,10360};
+    // Caller-owned providers may have rank-local state; only independently
+    // reset built-in Cantera intervals use the distributed route.
+    const bool balanced=response_enabled_ && ranks>1;
+    auto ready=[&]()->Status {
     if (!interval_enabled_ || candidate.size != species_.size() ||
         !candidate.data || !(dt>0) || !std::isfinite(dt) ||
         !std::isfinite(start) || start<0 || !(start+dt>start) ||
@@ -411,11 +428,12 @@ public:
       if (!status) return status;
       views_[s].explicit_source_density=as_const(outputs_[s]);
     }
-    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
-      const Int3 cell{x,y,z};
-      const auto flat=(std::size_t(z)*cells.y+y)*cells.x+x;
-      if(activity.size && activity.data[flat]==0) continue;
-      const double storage_density=state.density.trial.unchecked(cell,0);
+      return {};
+    }();
+    if(balanced)ready=StripedBatch::agree(comm,ready);
+    if(!ready)return ready;
+    auto prepare_cell = [&](Int3 cell, portable::GasQuery& query, ThermoState& transported, double& storage_density)->Status {
+      storage_density=state.density.trial.unchecked(cell,0);
       if (!(storage_density>0) || !std::isfinite(storage_density))
         return {StatusCode::numerical_failure,10241};
       // Use the same represented composition as ThermodynamicsPlan and the
@@ -432,22 +450,68 @@ public:
       }
       if(sum>1) return {StatusCode::rejected_step,10242};
       y_[dependent_]=double(1-sum);
-      portable::GasQuery query{{step,generation,1},identity_.composition_fingerprint,
+      query={{step,generation,1},identity_.composition_fingerprint,
           portable::GasStateCoordinates::pressure_enthalpy,
           state.eos_pressure(state.pressure_reference,state.pressure_perturbation.trial.unchecked(cell,0)),
           state.enthalpy.trial.unchecked(cell,0),0,y_.data(),y_.size()};
-      interval_density_[flat]=storage_density;
-      interval_h_[flat]=query.enthalpy_j_per_kg;
-      interval_p_[flat]=query.pressure_pa;
-      ThermoState transported;
       auto status=thermo.evaluate(query.pressure_pa,query.enthalpy_j_per_kg,
           {independent_.data(),independent_.size()},{},transported);
       if(!status) return status;
       query.temperature_k=transported.temperature;
+      return {};
+    };
+    std::size_t response_index{};
+    if(balanced) {
+      Status ready;
+      batch_input_.clear();
+      try {
+        for(int z=0;z<cells.z && ready;++z)for(int y=0;y<cells.y && ready;++y)for(int x=0;x<cells.x && ready;++x) {
+          const auto flat=(std::size_t(z)*cells.y+y)*cells.x+x;
+          if(activity.size && activity.data[flat]==0)continue;
+          portable::GasQuery q;ThermoState t;double rho{};
+          ready=prepare_cell({x,y,z},q,t,rho);if(!ready)break;
+          batch_input_.insert(batch_input_.end(),{q.pressure_pa,q.enthalpy_j_per_kg,q.temperature_k});
+          batch_input_.insert(batch_input_.end(),y_.begin(),y_.end());
+        }
+      }catch(const std::bad_alloc&){ready={StatusCode::allocation_failure,10360};}
+      ready=StripedBatch::agree(comm,ready);if(!ready)return ready;
+      ready=batch_.run(comm,batch_input_,3+y_.size(),10+2*y_.size(),batch_output_,
+        [&](const double* in,double* out)->Status {
+          portable::GasQuery q{{step,generation,1},identity_.composition_fingerprint,
+            portable::GasStateCoordinates::pressure_enthalpy,in[0],in[1],in[2],in+3,y_.size()};
+          portable::GasAdvanceOutput o{{},out+10,out+10+y_.size(),y_.size()};
+          const auto result=advance_provider_->advance_gas({q,start,dt},o);
+          if(result!=portable::Status::success)return {StatusCode::numerical_failure,10250U+std::uint32_t(result)};
+          if(o.final_mass_fractions!=out+10 || o.integrated_species_density_delta_kg_per_m3!=out+10+y_.size() ||
+             o.capacity!=y_.size() || o.final_sample.revision!=q.revision ||
+             o.final_sample.composition_fingerprint!=q.composition_fingerprint)return {StatusCode::numerical_failure,10243};
+          out[0]=o.completed_duration_s;out[1]=o.internal_step_count;out[2]=o.integrated_heat_release_j_per_m3;
+          const auto& t=o.final_sample;
+          out[3]=t.pressure_pa;out[4]=t.temperature_k;out[5]=t.density_kg_per_m3;out[6]=t.enthalpy_j_per_kg;
+          out[7]=t.cp_j_per_kg_k;out[8]=t.viscosity_pa_s;out[9]=t.conductivity_w_per_m_k;
+          return {};
+        });
+      if(!ready)return ready;
+    }
+    for(int z=0;z<cells.z;++z) for(int y=0;y<cells.y;++y) for(int x=0;x<cells.x;++x) {
+      const Int3 cell{x,y,z};
+      const auto flat=(std::size_t(z)*cells.y+y)*cells.x+x;
+      if(activity.size && activity.data[flat]==0) continue;
+      portable::GasQuery query;ThermoState transported;double storage_density{};
+      auto status=prepare_cell(cell,query,transported,storage_density);if(!status)return status;
+      interval_density_[flat]=storage_density;interval_h_[flat]=query.enthalpy_j_per_kg;interval_p_[flat]=query.pressure_pa;
       portable::GasAdvanceOutput output{{},final_y_.data(),integrated_delta_.data(),y_.size()};
+      if(balanced) {
+        const double* in=batch_output_.data()+response_index++*(10+2*y_.size());
+        output.completed_duration_s=in[0];output.internal_step_count=static_cast<std::uint32_t>(in[1]);
+        output.integrated_heat_release_j_per_m3=in[2];
+        output.final_sample={query.revision,query.composition_fingerprint,in[3],in[4],in[5],in[6],in[7],in[8],in[9]};
+        std::copy_n(in+10,y_.size(),final_y_.data());std::copy_n(in+10+y_.size(),y_.size(),integrated_delta_.data());
+      } else {
       const auto result=advance_provider_->advance_gas({query,start,dt},output);
       if(result!=portable::Status::success)
         return {StatusCode::numerical_failure,10250U+std::uint32_t(result)};
+      }
       const auto close=[](double a,double b) {
         return std::isfinite(a)&&std::isfinite(b)&&
             std::abs(a-b)<=1e-8*std::max({1.,std::abs(a),std::abs(b)});
@@ -768,5 +832,7 @@ private:
   std::vector<double> final_y_, integrated_delta_, interval_h_, interval_p_, interval_density_;
   std::vector<FieldView> outputs_;
   std::vector<EquationContributionView> views_;
+  StripedBatch batch_;
+  std::vector<double> batch_input_,batch_output_;
 };
 } // namespace hundun::v04::detail
