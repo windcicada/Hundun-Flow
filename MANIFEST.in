@@ -1,0 +1,6 @@
+recursive-include app/web *
+include LICENSE NOTICE README.md THIRD_PARTY.md tools.py
+include ui/*.tsx ui/*.ts ui/*.css ui/*.html ui/*.json ui/*.mjs ui/run
+recursive-include ui/public *
+recursive-include docs *.md *.txt *.tsv
+recursive-include tests *.py

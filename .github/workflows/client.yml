@@ -1,0 +1,47 @@
+name: Client
+on:
+  push:
+    branches: [client]
+  pull_request:
+    branches: [client]
+  workflow_dispatch:
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: python -m pip install -e . build
+      - run: npm ci --prefix ui
+      - run: python -m unittest tests.test_client tests.test_agent tests.test_plot -v
+      - if: runner.os == 'Linux'
+        run: python -m unittest tests.test_api tests.test_ssh -v
+      - run: python tools.py build
+      - shell: bash
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+      - run: hundun-client --version
+      - run: python tests/package.py
+      - run: npx --prefix ui playwright install chromium
+      - name: Browser and standalone startup
+        shell: bash
+        run: |
+          hundun-client serve --port 8766 --state check/ci > client.log 2>&1 &
+          python -c "import time,urllib.request; time.sleep(5); print(urllib.request.urlopen('http://127.0.0.1:8766/api/health').status)"
+          node ui/test_client.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-${{ matrix.os }}
+          path: |
+            dist/
+            check/browser/
+            client.log

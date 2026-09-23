@@ -1,7 +1,0 @@
-{
-  "role": "native model demonstration",
-  "reference": "GTMC",
-  "geometry": "model check fixture",
-  "source": "versions/v0.4/tests/fixtures/jl4-flow",
-  "time_step_s": 6.556990428113616e-07
-}

@@ -258,7 +258,7 @@ export default function App() {
     [cases, setCases] = useState<CaseItem[]>([]),
     [health, setHealth] = useState<Health | null>(null);
   const [selected, setSelected] = useState(
-      () => localStorage.getItem("hundun.run.v1") || "",
+      () => localStorage.getItem("hundun.run.v1." + (localStorage.getItem("hundun.host") || "local")) || "",
     ),
     [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState(""),
@@ -329,7 +329,7 @@ export default function App() {
     setDetail(null);
     setArtifact(null);
     if (!selected) return;
-    localStorage.setItem("hundun.run.v1", selected);
+    localStorage.setItem("hundun.run.v1." + (localStorage.getItem("hundun.host") || "local"), selected);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let alive = true;
@@ -542,7 +542,7 @@ export default function App() {
           </div>
           <div className="host-state">
             <span className={connected ? "dot green" : "dot"} />
-            本机计算节点
+            {localStorage.getItem("hundun.host.name") || "本机"}
             <span className="host-divider" />
             {active} 个运行中
           </div>

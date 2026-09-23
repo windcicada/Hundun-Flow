@@ -1,3 +1,0 @@
-HUNDUN_SOURCE_ARCHIVE_V1
-commit=$Format:%H$
-tree=$Format:%T$

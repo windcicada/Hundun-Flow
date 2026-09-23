@@ -1,0 +1,255 @@
+.client-tools {
+  position: fixed;
+  right: 24px;
+  bottom: 18px;
+  z-index: 25;
+  display: flex;
+  gap: 6px;
+  padding: 7px;
+  background: #fff;
+  border: 1px solid #dce5ed;
+  border-radius: 14px;
+  box-shadow: 0 6px 24px #17324a1a;
+  align-items: center;
+}
+.client-tools label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding-left: 7px;
+}
+.client-tools select {
+  max-width: 135px;
+  border: 0;
+  background: transparent;
+}
+.client-tools button,
+.client-panel button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid #d7e2eb;
+  background: #fff;
+  color: #244256;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.client-tools .ai-open,
+.client-compose button {
+  background: #007fa4;
+  color: #fff;
+  border-color: #007fa4;
+}
+.client-panel button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.client-shade {
+  position: fixed;
+  inset: 0;
+  background: #071c3440;
+  backdrop-filter: blur(2px);
+  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+}
+.client-panel {
+  width: min(590px, 100%);
+  height: 100dvh;
+  background: #f9fbfd;
+  box-shadow: -8px 0 48px #102e4420;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.client-panel > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 22px 24px;
+  background: white;
+  border-bottom: 1px solid #e2e9ef;
+}
+.client-panel h2 {
+  font-size: 24px;
+  margin: 4px 0;
+}
+.client-panel small {
+  font-size: 11px;
+  color: #718397;
+  letter-spacing: 0.4px;
+}
+.client-scroll {
+  padding: 22px 26px;
+  overflow-y: auto;
+  flex: 1;
+}
+.client-panel p {
+  font-size: 13px;
+  color: #677c8d;
+  line-height: 1.7;
+}
+.client-panel h3 {
+  font-size: 16px;
+  margin: 20px 0 12px;
+}
+.client-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #3c546a;
+  margin: 12px 0;
+}
+.client-panel input,
+.client-panel textarea,
+.client-panel select {
+  font: inherit;
+  border: 1px solid #d7e2eb;
+  border-radius: 7px;
+  background: white;
+  padding: 10px;
+  color: #16384e;
+  max-width: 100%;
+  min-width: 0;
+}
+.client-panel textarea {
+  resize: vertical;
+}
+.client-grid {
+  display: flex;
+  gap: 12px;
+}
+.client-grid > * {
+  flex: 1;
+  min-width: 0;
+}
+.client-actions {
+  display: flex;
+  gap: 10px;
+  margin: 16px 0;
+}
+.client-panel pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  max-height: 280px;
+  overflow: auto;
+  background: #eef3f7;
+  padding: 12px;
+  border-radius: 6px;
+}
+.client-panel summary {
+  cursor: pointer;
+  font-size: 12px;
+  margin: 10px 0;
+  color: #42728e;
+}
+.client-error,
+.client-notice {
+  padding: 12px 24px;
+  margin: 0;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+}
+.client-panel .client-error {
+  background: #fff0ed;
+  color: #a73e2a;
+}
+.client-panel .client-notice {
+  background: #e4f7f0;
+  color: #176949;
+}
+.client-row {
+  width: 100%;
+  text-align: left;
+  justify-content: space-between !important;
+  margin: 4px 0;
+  font-size: 12px;
+}
+.client-row small {
+  display: block;
+  margin: 4px 0;
+}
+.client-taskbar {
+  display: flex;
+  gap: 8px;
+  padding: 14px 24px;
+}
+.client-taskbar select {
+  flex: 1;
+}
+.client-taskinfo {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0 24px 14px;
+  font-size: 12px;
+  border-bottom: 1px solid #e2e9ef;
+}
+.client-taskinfo button {
+  min-height: 28px;
+  font-size: 11px;
+}
+.client-events {
+  overflow-y: auto;
+  flex: 1;
+  padding: 14px 24px;
+}
+.client-events article {
+  padding: 13px 0;
+  border-bottom: 1px solid #e4eaf0;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.client-events article small {
+  display: block;
+  margin-bottom: 4px;
+}
+.client-welcome {
+  margin: 45px 10px;
+  color: #007fa4;
+}
+.client-compose {
+  padding: 12px 24px 20px;
+  border-top: 1px solid #e2e9ef;
+  background: white;
+}
+.client-compose textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+}
+.client-compose .client-grid label {
+  margin-top: 0;
+}
+.page-content {
+  padding-bottom: 90px !important;
+}
+@media (max-width: 650px) {
+  .client-tools {
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    justify-content: space-between;
+  }
+  .client-tools select {
+    max-width: 85px;
+  }
+  .client-tools button {
+    padding: 7px;
+  }
+  .client-scroll {
+    padding: 15px;
+  }
+  .client-panel > header {
+    padding: 15px;
+  }
+}

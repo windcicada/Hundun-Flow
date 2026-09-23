@@ -3,7 +3,7 @@ export async function api<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  const response = await fetch("/api" + path, {
+  const response = await fetch("/api" + path + (path.includes("?") ? "&" : "?") + "host_id=" + encodeURIComponent(localStorage.getItem("hundun.host") || "local"), {
     signal,
     ...(body === undefined
       ? {}

@@ -1,9 +1,0 @@
-{
-  "role": "native model demonstration",
-  "reference": "624CF",
-  "geometry": "model check fixture",
-  "source": "b3/versions/v0.4/tests/fixed-tcr",
-  "time_step_s": 4.1968579012063856e-07,
-  "source_grid_scan_axis": "z",
-  "thermodynamic_pressure_pa": 790216.58
-}
