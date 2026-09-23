@@ -285,9 +285,16 @@ Status reconstruct(const Header &h, const ThermodynamicsPlan &thermo,
     if (!status)
       return status;
     double conductivity = 0, gamma = 0;
-    status = transport.effective_enthalpy_transport(
-        molecular.viscosity, molecular.viscosity, state.cp, conductivity,
-        gamma);
+    if (transport.has_effective_enthalpy_transport()) {
+      status = transport.effective_enthalpy_transport(
+          molecular.viscosity, molecular.viscosity, state.cp, conductivity,
+          gamma);
+    } else {
+      // Mean-only transports use the molecular mixture conductivity at the
+      // prescribed quiescent start, where the SGS contribution vanishes.
+      conductivity = molecular.conductivity;
+      gamma = conductivity / state.cp;
+    }
     if (!status)
       return status;
     b.cache[4 * i] = gamma;
@@ -332,7 +339,7 @@ double flux(const Header &h, const CartesianGeometryPlan &g, const Block &b,
 }
 Status fill(const Header &h, const RestartExpected &e,
             const CartesianGeometryPlan &g, const Block &b,
-            RestartImage &image) {
+            bool expect_stochastic_fields, RestartImage &image) {
   image.global_cells = e.global_cells;
   image.patch = e.target_patch;
   image.plan = e.plan;
@@ -423,7 +430,9 @@ Status fill(const Header &h, const RestartExpected &e,
       ++stochastic;
     image.fields.push_back(std::move(out));
   }
-  if (scalar != h.ns - 1 || stochastic != h.nf || passive!=h.passive_names.size())
+  if (scalar != h.ns - 1 ||
+      stochastic != (expect_stochastic_fields ? h.nf : 0U) ||
+      passive != h.passive_names.size())
     return invalid(24108);
   for (unsigned a = 0; a < 3; ++a) {
     auto ext = c;
@@ -509,7 +518,7 @@ int run(const char *case_root, const char *transfer, const char *output,
     return 3;
   ValidatedModel model;
   auto s = CaseCompiler::load_and_compile(comm, case_root, model);
-  if (s && (!model.reaction.esf || model.reaction.esf->fields != h.nf ||
+  if (s && ((model.reaction.esf && model.reaction.esf->fields != h.nf) ||
             model.transported_scalars.size() != h.ns - 1 + h.passive_names.size() ||
             model.thermophysics.species.size() != h.ns))
     s = invalid(24110);
@@ -665,7 +674,8 @@ int run(const char *case_root, const char *transfer, const char *output,
   RestartImage image;
   if (s)
     s = local_stage(comm,
-                    [&] { return fill(h, expected, geometry, b, image); });
+                    [&] { return fill(h, expected, geometry, b,
+                                     model.reaction.esf.has_value(), image); });
   if(s && initialize_model_history) s=local_stage(comm,[&]() -> Status {
     std::size_t cells=0;
     if(!checked_product(image.patch.cells,cells) || !expected.cell_record_identity) return invalid(24114);
