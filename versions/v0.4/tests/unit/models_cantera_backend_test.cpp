@@ -596,7 +596,10 @@ void test_ph_temperature_representation() {
   // B's enthalpy zero is near 200.454 K. A temperature ULP changes h by
   // more than the absolute PH gate: arbitrary small h need not be exactly
   // representable by a double temperature, even for constant heat capacity.
-  for (double target : {0., 1e-8, -1e-8, 1.4960475865133063, -2.}) {
+  // The final two targets exercise a within-gate neighbour that does not
+  // bracket the root, and a represented plateau before the root bracket.
+  for (double target : {0., 1e-8, -1e-8, 1.4960475865133063, -2.,
+                        -8.2525990572493395, -1.9982685840734642}) {
     for (double seed : {200., 1000., 4999.}) {
       q.coordinates = portable::GasStateCoordinates::pressure_enthalpy;
       q.temperature_k = seed;

@@ -261,16 +261,24 @@ double solve_pressure_enthalpy(Cantera::ThermoPhase& thermo,double target,double
       throw std::runtime_error("invalid PH correction");
     thermo.setState_TP(temperature,pressure);
   }
-  const double enthalpy=thermo.enthalpy_mass();
-  const double residual=target-enthalpy;
+  double enthalpy=thermo.enthalpy_mass();
+  double residual=target-enthalpy;
   if(std::isfinite(residual) && std::abs(residual)<=tolerance)return enthalpy;
-  const double temperature=thermo.temperature(),cp=thermo.cp_mass();
-  const double adjacent=std::nextafter(temperature,residual>0?
-      std::numeric_limits<double>::infinity():0.);
-  if(std::isfinite(residual) && std::isfinite(cp) && cp>0 &&
-      std::isfinite(adjacent) && adjacent>0 && adjacent!=temperature) {
+  double temperature=thermo.temperature(),cp=thermo.cp_mass();
+  // Cancellation in h(T) can leave adjacent temperatures on the same
+  // represented enthalpy plateau. Walk a bounded number of neighbours;
+  // only the original absolute gate or an adjacent, cp-consistent bracket
+  // can finish the solve. A wider interval does not relax either gate.
+  for(unsigned neighbour=0;neighbour<8;++neighbour) {
+    const double adjacent=std::nextafter(temperature,residual>0?
+        std::numeric_limits<double>::infinity():0.);
+    if(!std::isfinite(residual) || !std::isfinite(cp) || cp<=0 ||
+        !std::isfinite(adjacent) || adjacent<=0 || adjacent==temperature) break;
     thermo.setState_TP(adjacent,pressure);
     const double next_h=thermo.enthalpy_mass(),next_residual=target-next_h;
+    // A neighbour can satisfy the original gate without crossing the root.
+    if(std::isfinite(next_residual) && std::abs(next_residual)<=tolerance)
+      return next_h;
     const double next_cp=thermo.cp_mass();
     const double span=std::abs(next_h-enthalpy);
     const double roundoff_span=8*(std::max(cp,next_cp)*std::abs(adjacent-temperature));
@@ -284,6 +292,8 @@ double solve_pressure_enthalpy(Cantera::ThermoPhase& thermo,double target,double
         thermo.setState_TP(temperature,pressure);
       return target;
     }
+    if(bracket) break; // A discontinuous crossing is not a PH solution.
+    temperature=adjacent;enthalpy=next_h;residual=next_residual;cp=next_cp;
   }
   throw std::runtime_error("PH correction residual exceeds query tolerance");
 }
