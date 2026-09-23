@@ -457,6 +457,62 @@ Status fill(const Header &h, const RestartExpected &e,
   }
   return {};
 }
+Status validate_imported_inlet_flux(MPI_Comm communicator,
+                                    const ValidatedModel& model,
+                                    const RestartImage& image) noexcept {
+  std::array<double, 6U> local{}, global{};
+  const Status valid = local_stage(communicator, [&]() -> Status {
+    const Int3 cells = image.patch.cells;
+    const Int3 begin = image.patch.begin;
+    const Int3 extent = image.global_cells;
+    for (std::size_t face = 0U; face < 6U; ++face) {
+      const auto& boundary = model.boundaries[face];
+      if (boundary.flow_kind != BoundaryKind::mass_flow_inlet) continue;
+      if (!(boundary.mass_flow_rate > 0.0) ||
+          !std::isfinite(boundary.mass_flow_rate)) return invalid(24117);
+      const unsigned axis = static_cast<unsigned>(face / 2U);
+      const bool high = (face & 1U) != 0U;
+      const int start = axis == 0U ? begin.x : axis == 1U ? begin.y : begin.z;
+      const int count = axis == 0U ? cells.x : axis == 1U ? cells.y : cells.z;
+      const int whole = axis == 0U ? extent.x : axis == 1U ? extent.y : extent.z;
+      if (high ? start + count != whole : start != 0) continue;
+      const Int3 shape{cells.x + (axis == 0U), cells.y + (axis == 1U),
+                       cells.z + (axis == 2U)};
+      std::size_t expected = 0U;
+      if (!checked_product(shape, expected) ||
+          image.final_mass_flux[axis].size() != expected) return invalid(24117);
+      const int normal = high ? count : 0;
+      for (int z = 0; z < shape.z; ++z)
+        for (int y = 0; y < shape.y; ++y)
+          for (int x = 0; x < shape.x; ++x) {
+            if ((axis == 0U ? x : axis == 1U ? y : z) != normal) continue;
+            const std::size_t flat = static_cast<std::size_t>(x) +
+                static_cast<std::size_t>(shape.x) *
+                    (static_cast<std::size_t>(y) +
+                     static_cast<std::size_t>(shape.y) * z);
+            const double inward = (high ? -1.0 : 1.0) *
+                image.final_mass_flux[axis][flat];
+            if (!std::isfinite(inward) || inward < -1e-12)
+              return invalid(24117);
+            local[face] += inward;
+          }
+    }
+    return {};
+  });
+  if (!valid) return valid;
+  if (MPI_Allreduce(local.data(), global.data(), static_cast<int>(global.size()),
+                    MPI_DOUBLE, MPI_SUM, communicator) != MPI_SUCCESS)
+    return {StatusCode::mpi_failure, kCollective};
+  for (std::size_t face = 0U; face < 6U; ++face) {
+    const auto& boundary = model.boundaries[face];
+    if (boundary.flow_kind != BoundaryKind::mass_flow_inlet) continue;
+    const double target = boundary.mass_flow_rate;
+    if (!std::isfinite(global[face]) ||
+        std::abs(global[face] - target) >
+            std::max(1e-12, 1e-6 * target)) return invalid(24117);
+  }
+  return {};
+}
 Status exact_physical_fields(const RestartImage &image,
                              const RestartSnapshot &snapshot) {
   if (image.fields.size() != snapshot.fields.size)
@@ -698,6 +754,11 @@ int run(const char *case_root, const char *transfer, const char *output,
     return {};
   });
   if (!stage("image", s))
+    return 6;
+  // A transfer's cell velocity is the candidate face-flux history. A native
+  // restart continues that history, so reject an inlet whose imported flux
+  // does not deliver its configured mass before publishing the checkpoint.
+  if (!stage("inlet_flux", validate_imported_inlet_flux(comm, model, image)))
     return 6;
   b = Block{};
   s = driver.initialize_restart(image, RestartStorageCompatibility::strict,
