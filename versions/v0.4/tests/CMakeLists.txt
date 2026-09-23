@@ -9,6 +9,18 @@ add_test(NAME v04_input_catalog
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/input_test.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/input.py")
 set_tests_properties(v04_input_catalog PROPERTIES TIMEOUT 15)
+add_test(NAME v04_reaction_selection
+  COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/reaction_selection_test.py"
+    "$<TARGET_FILE:hundun>")
+set_tests_properties(v04_reaction_selection PROPERTIES TIMEOUT 90 PROCESSORS 1)
+if(HUNDUN_ENABLE_REACTING_CANTERA)
+  add_test(NAME v04_pasr_pure
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/pasr_pure_test.py" "$<TARGET_FILE:hundun>")
+  set_tests_properties(v04_pasr_pure PROPERTIES TIMEOUT 90 PROCESSORS 1)
+endif()
+
 add_executable(v04_models_tcr_dynamic_test unit/models_tcr_dynamic_test.cpp)
 target_include_directories(v04_models_tcr_dynamic_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(v04_models_tcr_dynamic_test PRIVATE hundun_v04_core)

@@ -4713,12 +4713,12 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         : candidate->esf.enabled() ? candidate->reaction.fingerprint()
                                    : 0U;
     equation_spec.physical_inlet_material = true;
-    // CN/BE interval and stochastic chemistry share the conservative energy row already
+    // CN/BE mean, PaSR and stochastic chemistry share the conservative energy row already
     // used by cold flow: h - p/rho + |U|^2/2. Its kinetic storage/flux matches
     // the accepted velocity even during strong heat-driven acceleration.
     equation_spec.conservative_total_energy = (!candidate->spray.enabled() || cold_model) &&
         (!candidate->reaction.enabled() || candidate->reaction.interval_enabled() ||
-         (cold_model && candidate->esf.implicit_transport()));
+         (cold_model && (candidate->reaction.mixing_enabled() || candidate->esf.implicit_transport())));
     equation_spec.density = candidate->fields.rho;
     equation_spec.velocity = candidate->fields.velocity;
     equation_spec.pressure_perturbation = candidate->fields.pressure;
@@ -15677,7 +15677,8 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status)
             return status;
           double balance_s = MPI_Wtime() - balance_begin, max_balance_s{};
-          if(product.reaction.interval_enabled() && !product.spray.enabled()) {
+          if((product.reaction.interval_enabled() || product.reaction.mixing_enabled()) &&
+             !product.spray.enabled()) {
             using Ledger=detail::CompositionBalanceLedger;
             Ledger mean_ledger;
             status=mean_ledger.initialize(product.reaction.gas_identity(),
@@ -15699,8 +15700,8 @@ Status ProductDriver::Impl::execute_attempt(
               for(std::size_t j=0;j<species_trial.size();++j) {
                 mean_ledger.add_storage(j,volume,before,after,
                     species_history[j].accepted.unchecked(c,0),species_trial[j].unchecked(c,0));
-                // The terminal species audit has reweighted the actual
-                // integrated chemistry to this final density. Do not infer
+                // Record the actual registered source: reweighted interval
+                // chemistry or the accepted-state PaSR source. Do not infer
                 // chemistry or transport from a residual closure identity.
                 mean_ledger.add(j,Ledger::chemistry,static_cast<long double>(volume)*
                     chemistry.data[j].explicit_source_density.unchecked(c,0));
@@ -15716,12 +15717,13 @@ Status ProductDriver::Impl::execute_attempt(
                 gamma.unchecked(c,0)=mu/spec.molecular_schmidt+
                     std::max(0.,effective_viscosity.unchecked(c,0)-mu)/spec.turbulent_schmidt;
               }
-              // BE transport precedes the interval reactor. Export its
-              // actual face operator at the final mass flux, using the
-              // retained pre-reaction composition and the same IBM faces.
-              // The terminal row coefficients are dead scratch at this point.
+              // The interval reactor retains a pre-reaction transport state;
+              // frozen PaSR uses the final species in its BE equation. Export
+              // that same equation's face operator and IBM faces. The terminal
+              // row coefficients are dead scratch at this point.
               status=form_cartesian_mixture_transport_flux(product.equations.kernels(),
-                  mixture_faces,as_const(gamma),cold_final_flux,scalar_remap->target_species(j),
+                  mixture_faces,as_const(gamma),cold_final_flux,
+                  product.reaction.interval_enabled() ? scalar_remap->target_species(j) : as_const(species_trial[j]),
                   {x_coefficient,y_coefficient,z_coefficient});
               if(status && product.ibm_equations)
                 status=detail::IbmScalarTransport::constrain_flux(*product.ibm_equations,

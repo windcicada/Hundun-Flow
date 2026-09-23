@@ -44,6 +44,17 @@ bool test_scalar_dissipation_mixing_time() {
 }
 
 bool test_pasr_fraction_exact_limits() {
+  const auto stagnant = evaluate_mixing_time({.01, 0., 0., .7, 1.});
+  const auto unmixed = evaluate_pasr_reacting_fraction(stagnant.tau_mix_s, 2.);
+  if (!expect(stagnant.succeeded() && std::isinf(stagnant.tau_mix_s) &&
+              unmixed.status == PasrReactingFractionStatus::success && unmixed.kappa == 0.,
+              "pure-species zero diffusion has infinite mixing time and zero reacting fraction")) return false;
+  const auto trace = evaluate_pasr_reacting_fraction(
+      MixingTimeInput{.01, 1e-320, 0., .7, 1.}, 1e100);
+  const double expected_trace = static_cast<double>(2.L * double(1e-320) * 1e100L / .0001L);
+  if (!expect(trace.status == PasrReactingFractionStatus::success &&
+              trace.kappa > 0. && std::abs(trace.kappa / expected_trace - 1.) < 1e-14,
+              "subnormal diffusion preserves a representable tiny reacting fraction")) return false;
   const PasrReactingFractionReport off =
       evaluate_pasr_reacting_fraction(2.0, 0.0);
   const PasrReactingFractionReport finite_rate =
@@ -366,6 +377,7 @@ bool test_failures_never_expose_partial_candidate() {
   CombustionClosureConfig no_diffusivity = pasr_config();
   no_diffusivity.mixing_time.molecular_diffusivity_m2_per_s = 0.0;
   no_diffusivity.mixing_time.turbulent_kinematic_viscosity_m2_per_s = 0.0;
+  no_diffusivity.mixing_time.c_z = 0.0; // Undefined 0/0, unlike finite-Cz no mixing.
   FakeChemistry mixing_backend(identity);
   FakeRateQuery unused_rates(identity.fingerprint);
   const CombustionClosureReport mixing_failure = evaluate_combustion_closure(

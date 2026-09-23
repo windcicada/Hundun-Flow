@@ -904,21 +904,37 @@ bool parse_time_object(yyjson_val* value, TimeControlSpec& out) noexcept {
 }
 
 bool parse_esf(yyjson_val* value, EsfSpec& out) {
-  if (!object_has_exact_keys(value, {"fields", "seed", "initial_species_offsets", "tcr"}) ||
-      !parse_uint32(yyjson_obj_get(value, "fields"), out.fields)) return false;
+  // A single thermochemical field selects PaSR before the validated model is
+  // built. It never enters the even-field stochastic storage or RNG machinery.
+  out.fields = 1;
+  if (!value) return true;
+  if (!yyjson_is_obj(value)) return false;
+  std::size_t known_keys = 0;
+  for (const char* key : {"fields", "seed", "initial_species_offsets", "tcr"})
+    known_keys += yyjson_obj_get(value, key) != nullptr;
+  if (yyjson_obj_size(value) != known_keys) return false;
+  if (auto* fields = yyjson_obj_get(value, "fields"))
+    if (!parse_uint32(fields, out.fields)) return false;
   auto* seed = yyjson_obj_get(value, "seed");
   auto* offsets = yyjson_obj_get(value, "initial_species_offsets");
-  if (!yyjson_is_uint(seed) || !yyjson_is_arr(offsets) || yyjson_arr_size(offsets) > 1024) return false;
-  out.seed = yyjson_get_uint(seed);
-  for (std::size_t i = 0; i < yyjson_arr_size(offsets); ++i) {
+  if ((seed && !yyjson_is_uint(seed)) ||
+      (offsets && (!yyjson_is_arr(offsets) || yyjson_arr_size(offsets) > 1024))) return false;
+  if (seed) out.seed = yyjson_get_uint(seed);
+  for (std::size_t i = 0; offsets && i < yyjson_arr_size(offsets); ++i) {
     double v{};
     if (!finite_real(yyjson_arr_get(offsets, i), v)) return false;
     out.initial_species_offsets.push_back(v);
   }
+  const auto valid_uncontrolled = [&] {
+    return out.fields == 1 ? out.initial_species_offsets.empty()
+                           : detail::valid_esf_spec(out);
+  };
   auto* tcr = yyjson_obj_get(value, "tcr");
+  if (!tcr) return valid_uncontrolled();
   const auto mode = string_value(tcr, "mode");
   if (!mode) return false;
-  if (*mode == "off") return object_has_exact_keys(tcr, {"mode"}) && detail::valid_esf_spec(out);
+  if (*mode == "off") return object_has_exact_keys(tcr, {"mode"}) && valid_uncontrolled();
+  if (out.fields == 1) return false;
   if (*mode == "shadow") out.tcr.mode = TcrMode::shadow;
   else if (*mode == "experimental") out.tcr.mode = TcrMode::experimental;
   else if (*mode == "validated") out.tcr.mode = TcrMode::validated;
@@ -1051,8 +1067,9 @@ bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
   const auto representation = string_value(value, "representation");
   const auto sha = string_value(value, "mechanism_sha256");
   const auto phase = string_value(value, "phase");
-  if (!model || !representation || !sha || !phase) return false;
-  if (*model == "finite_rate_mean") out.mode = ReactionMode::finite_rate_mean;
+  if ((!model && yyjson_obj_get(value, "model")) || !representation || !sha || !phase) return false;
+  if (!model || *model == "auto") out.mode = ReactionMode::esf_tpdf;
+  else if (*model == "finite_rate_mean") out.mode = ReactionMode::finite_rate_mean;
   else if (*model == "pasr_algebraic_v1") out.mode = ReactionMode::pasr_algebraic_v1;
   else if (*model == "esf_tpdf") out.mode = ReactionMode::esf_tpdf;
   else return false;
@@ -1060,7 +1077,10 @@ bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
   out.phase.assign(phase->data(), phase->size());
   const bool pasr = out.mode == ReactionMode::pasr_algebraic_v1;
   const bool esf = out.mode == ReactionMode::esf_tpdf;
-  const std::size_t keys = esf ? 8U : pasr ? 7U : 6U;
+  auto* ensemble = yyjson_obj_get(value, "ensemble");
+  auto* mixing = yyjson_obj_get(value, "mixing");
+  const std::size_t keys = 6U - std::size_t(!model) +
+      std::size_t(pasr || (esf && mixing)) + std::size_t(esf && ensemble);
   if (*representation == "analytic_isomer") {
     out.representation = ReactionSpec::Representation::analytic_isomer;
     if (yyjson_obj_size(value) != keys ||
@@ -1077,15 +1097,18 @@ bool parse_reaction(yyjson_val* value, ReactionSpec& out) {
         !parse_uint32(yyjson_obj_get(solver, "maximum_internal_steps"), out.maximum_internal_steps)) return false;
     out.mechanism_file = std::string(*file);
   } else return false;
-  if (pasr || esf) {
-    auto* mixing = yyjson_obj_get(value, "mixing");
+  if (pasr || (esf && mixing)) {
     if (!object_has_exact_keys(mixing, {"c_z", "turbulent_schmidt"}) ||
         !finite_real(yyjson_obj_get(mixing, "c_z"), out.mixing_c_z) ||
         !finite_real(yyjson_obj_get(mixing, "turbulent_schmidt"), out.turbulent_schmidt)) return false;
   }
   if (esf) {
     out.esf.emplace();
-    if (!parse_esf(yyjson_obj_get(value, "ensemble"), *out.esf)) return false;
+    if (!parse_esf(ensemble, *out.esf)) return false;
+    if (out.esf->fields == 1) {
+      out.mode = ReactionMode::pasr_algebraic_v1;
+      out.esf.reset();
+    }
   }
   return detail::valid_reaction_spec(out);
 }

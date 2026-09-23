@@ -37,7 +37,7 @@ struct MixingTimeReport {
   double turbulent_schmidt{};
   double turbulent_diffusivity_m2_per_s{};
   double c_z{};
-  double tau_mix_s{};
+  double tau_mix_s{}; // +infinity for no mixing or a finite time beyond FP64.
 
   [[nodiscard]] bool succeeded() const noexcept {
     return status == MixingTimeStatus::success;
@@ -218,6 +218,10 @@ struct PasrReactingFractionReport {
 [[nodiscard]] PasrReactingFractionReport
 evaluate_pasr_reacting_fraction(double tau_mix_s,
                                 double tau_chem_s) noexcept;
+// Retains the dimensionless ratio when a finite mixing time exceeds FP64.
+[[nodiscard]] PasrReactingFractionReport
+evaluate_pasr_reacting_fraction(const MixingTimeInput& input,
+                                 double tau_chem_s) noexcept;
 
 struct CombustionCandidate {
   bool available{};

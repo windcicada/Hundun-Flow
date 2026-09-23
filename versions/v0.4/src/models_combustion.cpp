@@ -42,15 +42,27 @@ MixingTimeReport evaluate_mixing_time(const MixingTimeInput& input) noexcept {
       input.molecular_diffusivity_m2_per_s +
       report.turbulent_diffusivity_m2_per_s;
   if (!std::isfinite(report.turbulent_diffusivity_m2_per_s) ||
-      !std::isfinite(total_diffusivity) || !(total_diffusivity > 0.0)) {
+      !std::isfinite(total_diffusivity)) {
     report.status = MixingTimeStatus::timescale_unavailable;
     report.turbulent_diffusivity_m2_per_s = 0.0;
+    return report;
+  }
+  // Pure-species mixture-averaged diffusion can be exactly zero. With no
+  // eddy diffusion, the LES mixing time has the well-defined +infinity limit.
+  // Preserve it explicitly; no diffusivity floor or chemical-rate cutoff.
+  if (total_diffusivity == 0.0) {
+    if (input.c_z == 0.0) {
+      report.status = MixingTimeStatus::timescale_unavailable;
+      return report;
+    }
+    report.tau_mix_s = std::numeric_limits<double>::infinity();
+    report.status = MixingTimeStatus::success;
     return report;
   }
   report.tau_mix_s =
       input.c_z * input.filter_width_m * input.filter_width_m /
       (2.0 * total_diffusivity);
-  if (!std::isfinite(report.tau_mix_s) || report.tau_mix_s < 0.0) {
+  if (std::isnan(report.tau_mix_s) || report.tau_mix_s < 0.0) {
     report.status = MixingTimeStatus::timescale_unavailable;
     report.tau_mix_s = 0.0;
     return report;
@@ -414,12 +426,16 @@ chemistry_identity_fingerprint(const ChemistryIdentity& identity) noexcept {
 PasrReactingFractionReport evaluate_pasr_reacting_fraction(
     double tau_mix_s, double tau_chem_s) noexcept {
   PasrReactingFractionReport report;
-  if (!std::isfinite(tau_mix_s) || tau_mix_s < 0.0 ||
+  if (std::isnan(tau_mix_s) || tau_mix_s < 0.0 ||
       !std::isfinite(tau_chem_s) || tau_chem_s < 0.0) {
     return report;
   }
   report.tau_mix_s = tau_mix_s;
   report.tau_chem_s = tau_chem_s;
+  if (std::isinf(tau_mix_s)) {
+    report.status = PasrReactingFractionStatus::success;
+    return report; // kappa=0 for finite chemical time and no mixing.
+  }
   const double denominator = tau_chem_s + tau_mix_s;
   if (!std::isfinite(denominator) || !(denominator > 0.0)) {
     report.status = PasrReactingFractionStatus::timescale_unavailable;
@@ -435,6 +451,29 @@ PasrReactingFractionReport evaluate_pasr_reacting_fraction(
     return report;
   }
   report.status = PasrReactingFractionStatus::success;
+  return report;
+}
+
+PasrReactingFractionReport evaluate_pasr_reacting_fraction(
+    const MixingTimeInput& input, double tau_chem_s) noexcept {
+  const auto mixing = evaluate_mixing_time(input);
+  if (!mixing.succeeded()) return {};
+  auto report = evaluate_pasr_reacting_fraction(mixing.tau_mix_s, tau_chem_s);
+  if (report.status != PasrReactingFractionStatus::success ||
+      !std::isinf(mixing.tau_mix_s)) return report;
+  // Subnormal trace-species diffusivities can give a finite mixing time beyond
+  // FP64 range. Evaluate the dimensionless ratio without storing that time;
+  // preserve representable tiny kappa instead of imposing a diffusion floor.
+  const long double diffusivity =
+      static_cast<long double>(input.molecular_diffusivity_m2_per_s) +
+      static_cast<long double>(input.turbulent_kinematic_viscosity_m2_per_s) /
+          input.turbulent_schmidt;
+  const long double chemical = 2 * diffusivity * tau_chem_s;
+  const long double mixing_scale = static_cast<long double>(input.c_z) *
+      input.filter_width_m * input.filter_width_m;
+  report.kappa_raw = report.kappa = static_cast<double>(chemical / (chemical + mixing_scale));
+  if (!std::isfinite(report.kappa) || report.kappa < 0 || report.kappa > 1)
+    return {};
   return report;
 }
 
@@ -578,8 +617,7 @@ CombustionClosureReport evaluate_combustion_closure(
     return report;
   }
   const PasrReactingFractionReport fraction =
-      evaluate_pasr_reacting_fraction(mixing.tau_mix_s,
-                                      chemical.tau_chem_s);
+      evaluate_pasr_reacting_fraction(config.mixing_time, chemical.tau_chem_s);
   if (fraction.status != PasrReactingFractionStatus::success) {
     report.status = CombustionClosureStatus::chemical_timescale_unavailable;
     return report;

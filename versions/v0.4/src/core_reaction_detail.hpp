@@ -781,14 +781,10 @@ public:
               continue;
             }
             if (consumption <= 0) return numerical();
-            const auto mixing = combustion::evaluate_mixing_time(
+            const auto fraction = combustion::evaluate_pasr_reacting_fraction(
                 {std::cbrt(detail::cell_volume(kernels, cell)), diffusion,
                  (mu_eff - mu) / out.sample.density_kg_per_m3,
-                 turbulent_schmidt_, mixing_c_z_});
-            if (!mixing.succeeded())
-              return numerical();
-            const auto fraction = combustion::evaluate_pasr_reacting_fraction(
-                mixing.tau_mix_s, consumed_density / consumption);
+                 turbulent_schmidt_, mixing_c_z_}, consumed_density / consumption);
             if (fraction.status !=
                 combustion::PasrReactingFractionStatus::success)
               return numerical();

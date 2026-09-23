@@ -1896,3 +1896,13 @@ providers keep their rank-local call order. Workspaces are reserved at freeze;
 preparation and provider errors are collective before response publication.
 See `verification/2026-09-23-mean-reaction-balance.md` for focused MPI tests,
 bitwise restart comparison and the measured performance scope.
+
+### Single-field timescale PaSR
+
+The requested default of one thermochemical field selects the existing algebraic
+PaSR closure; its reacting fraction uses chemical and mixing times, not TCR.
+Pure-species diffusion limits and the CN/BE total-energy/composition audit are
+handled in the common runtime. See `pasr.md` for equations and compatibility,
+and `verification/2026-09-23-pasr.md` for reproduced failures and focused checks.
+This physical-model selection is not an ESF-equivalence or long-run acceptance
+claim; the original equation and conservation thresholds remain in force.

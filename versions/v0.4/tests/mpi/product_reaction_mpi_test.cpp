@@ -267,6 +267,8 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
   ProductCouplingBindings bindings{&gas};
   if(interval) { bindings.gas_advance=&gas; bindings.chemistry_identity=&gas.closure; }
   auto status = ProductCompiler::compile(MPI_COMM_WORLD, model, {}, plan, bindings);
+  if (status && cn && pasr && !plan.summary().conservative_total_energy)
+    status = {StatusCode::invalid_plan, 99003};
   ProductDriver driver;
   if (status) status = ProductDriver::create(MPI_COMM_WORLD, std::move(plan), driver);
   DriverInitialState initial;
@@ -359,7 +361,7 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
       status = {StatusCode::numerical_failure, 99001};
       break;
     }
-    if (interval && cn) {
+    if ((interval || pasr) && cn) {
       const auto& balance=report.conservation;
       bool budget=balance.composition_valid && balance.composition_revision!=0 &&
           balance.composition_duration==model.time.initial_dt &&
@@ -370,15 +372,17 @@ bool cn_mean_reaction(ValidatedModel model, int rank, bool pasr = false,
         const auto& b=balance.species_balance[1];
         const auto& element=balance.element_balance[0];
         const double mass=a.current_inventory+b.current_inventory;
+        const double previous_decay=interval
+            ? std::exp(-2*model.time.initial_dt*(step-1))
+            : std::pow(1-2*kappa*model.time.initial_dt,step-1);
         const double previous=reverse
-            ? 1-(1-initial_y)*std::exp(-2*model.time.initial_dt*(step-1))
-            : initial_y*std::exp(-2*model.time.initial_dt*(step-1));
+            ? 1-(1-initial_y)*previous_decay : initial_y*previous_decay;
         const double chemistry=mass*(expected-previous)/model.time.initial_dt;
         const double tolerance=2e-9*std::max(1.,std::abs(chemistry));
         budget=a.name=="A" && b.name=="B" && element.name=="X" && mass>0 &&
             std::abs(a.current_inventory/mass-expected)<2e-9 &&
             std::abs(a.accepted_inventory/mass-previous)<2e-9 &&
-            (reverse ? a.chemistry_source>0 : a.chemistry_source<0) &&
+            (chemistry==0 ? a.chemistry_source==0 : reverse ? a.chemistry_source>0 : a.chemistry_source<0) &&
             std::abs(a.chemistry_source-chemistry)<tolerance &&
             std::abs(a.chemistry_source+b.chemistry_source)<tolerance &&
             std::abs(a.defect)<tolerance && std::abs(b.defect)<tolerance &&

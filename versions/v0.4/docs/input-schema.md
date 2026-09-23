@@ -652,3 +652,13 @@ identity, while any typed setting or referenced-byte change does.
 `FieldRegistry::freeze()` publishes one immutable field schema after all
 capabilities register. No case-input compilation freezes this registry early;
 the production bundle compiler owns the single freeze point.
+
+## Default reaction selection
+
+For a configured reaction, omitted `model` or `model: auto` selects by
+`ensemble.fields` (default 1): one field uses `pasr_algebraic_v1`; an even
+count from 2 through 64 uses `esf_tpdf`. The `esf_tpdf` input spelling also
+accepts this single-field dispatch. Single-field input rejects nonempty
+species offsets and enabled TCR. Explicit `finite_rate_mean` remains available.
+See [PaSR defaults and equations](../../../docs/pasr.md) for complete controls,
+normalization, method identity and the zero-diffusivity limit.
