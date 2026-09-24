@@ -18,7 +18,7 @@
 
 namespace hundun::v04 {
 
-namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; class StatisticalFaceBasis; }
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; class StatisticalFaceBasis; class SpeciesCompositionBatch; }
 
 class IbmEquationInterfacePlan;
 class EBTopology;
@@ -1292,6 +1292,12 @@ class SpeciesEquationPlan {
       const EquationMaterialView&, Span<const EquationContributionView>,
       const EquationAssemblyContext&, EquationSystemView,
       EquationAssemblyCertificate&, bool, bool, bool, bool, bool) noexcept;
+  friend Status assemble_species_impl(
+      const SpeciesEquationPlan&, std::size_t, const EquationStateView&,
+      const EquationMaterialView&, Span<const EquationContributionView>,
+      const EquationAssemblyContext&, EquationSystemView,
+      EquationAssemblyCertificate&, bool, bool, bool, bool, bool,
+      const detail::SpeciesCompositionBatch*) noexcept;
   friend Status evaluate_thermophysical_rates(
       const EquationPlanSet&, const ThermophysicalRateInput&,
       ThermophysicalRateOutput, ThermophysicalRateCertificate&) noexcept;

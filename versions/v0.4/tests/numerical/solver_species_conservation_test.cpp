@@ -2426,6 +2426,61 @@ bool test_production_species_and_passive_assembly() {
       output_is(diagonal,rhs,residual,91.0),
       "private density rows cannot bypass final authority through target scope");
   context.scope=saved_scope;
+  detail::SpeciesCompositionBatch batch;
+  const KernelBox box{{0,0,0},cells};
+  passed &= expect(bool(batch.prepare(fixture.equations.species(),state,box)) &&
+      batch.matches(fixture.equations.species(),state,box),
+      "composition batch validates the frozen complete history tuple");
+  reset_outputs();
+  passed &= expect(bool(detail::assemble_species_coupling_rows(
+      fixture.equations.species(),0,state,material,context,system)),
+      "uncached reference rows assemble");
+  const auto expected_diagonal=diagonal.bytes, expected_rhs=rhs.bytes,
+             expected_residual=residual.bytes;
+  const auto expected_x=ax.bytes,expected_y=ay.bytes,expected_z=az.bytes;
+  reset_outputs();
+  passed &= expect(bool(detail::assemble_species_coupling_rows(
+      fixture.equations.species(),0,state,material,context,system,{},&batch)) &&
+      diagonal.bytes==expected_diagonal && rhs.bytes==expected_rhs &&
+      residual.bytes==expected_residual && ax.bytes==expected_x &&
+      ay.bytes==expected_y && az.bytes==expected_z,
+      "batched validation preserves all assembled coefficients bitwise");
+  reset_outputs();
+  auto aliased_system=system;aliased_system.diagonal=species.view;
+  passed &= expect(detail::assemble_species_coupling_rows(
+      fixture.equations.species(),0,state,material,context,aliased_system,{},&batch)
+        .code==StatusCode::invalid_plan && output_is(diagonal,rhs,residual,91),
+      "batch admission rejects output aliases before writing borrowed composition");
+  auto changed_history=species_history;
+  auto changed_state=state;
+  changed_state.independent_species={&changed_history,1};
+  reset_outputs();
+  for(unsigned layer=0;layer<3;++layer) {
+    changed_history=species_history;
+    auto& view=layer==0 ? changed_history.trial : layer==1 ?
+        changed_history.accepted : changed_history.previous;
+    ++view.revision;
+    const Int3 last{cells.x-1,cells.y-1,cells.z-1};
+    const double saved=species.view.unchecked(last,0);
+    species.view.unchecked(last,0)=std::numeric_limits<double>::quiet_NaN();
+    passed &= expect(!batch.matches(fixture.equations.species(),changed_state,box) &&
+        detail::assemble_species_coupling_rows(fixture.equations.species(),0,
+          changed_state,material,context,system,{},&batch).code==StatusCode::numerical_failure &&
+        output_is(diagonal,rhs,residual,91) && faces_are(ax,ay,az,91),
+        "changed trial/accepted/previous revision revalidates and rejects atomically");
+    species.view.unchecked(last,0)=saved;
+  }
+  auto changed_box=box;--changed_box.cells.x;
+  passed &= expect(!batch.matches(fixture.equations.species(),state,changed_box),
+      "composition proof is bounded to its validated box");
+  changed_history=species_history;
+  ++changed_history.trial.storage_identity;
+  passed &= expect(!batch.matches(fixture.equations.species(),changed_state,box),
+      "composition proof cannot cross storage identity");
+  species.view.unchecked({1,1,1},0)=1.01;
+  passed &= expect(!batch.prepare(fixture.equations.species(),state,box) &&
+      !batch.matches(fixture.equations.species(),state,box),
+      "failed prepare invalidates the previous composition proof");
   species.view.unchecked({1, 1, 1}, 0U) = 1.01;
   passed &= expect(assemble_species(fixture.equations.species(), 0U, state,
                                     material, {}, context, system, rejected)
@@ -3159,6 +3214,10 @@ int main(int argc, char** argv) {
     const bool passed=cold_scalar_row_probe();
     MPI_Finalize();
     return passed ? 0 : 1;
+  }
+  if (argc==2 && std::string_view(argv[1])=="--composition-batch") {
+    const bool passed=test_production_species_and_passive_assembly();
+    MPI_Finalize();return passed ? 0 : 1;
   }
   bool passed = test_mixture_bound_repair();
   passed &= test_independent_species_closure();

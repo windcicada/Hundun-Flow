@@ -164,6 +164,28 @@ Status assemble_species_guess(const SpeciesEquationPlan& plan,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system, EquationAssemblyCertificate& certificate) noexcept;
 
+// One frozen tuple of trial/accepted/previous compositions. The owner must
+// keep all borrowed fields immutable until invalidate() or destruction. Rebuild
+// after every iterate/halo update; no proof survives a scalar solve or retry.
+// Material, source, flux, alias and final-conservation checks remain per row.
+class SpeciesCompositionBatch {
+ public:
+  SpeciesCompositionBatch() = default;
+  SpeciesCompositionBatch(const SpeciesCompositionBatch&) = delete;
+  SpeciesCompositionBatch& operator=(const SpeciesCompositionBatch&) = delete;
+  Status prepare(const SpeciesEquationPlan&, const EquationStateView&,
+                 KernelBox) noexcept;
+  void invalidate() noexcept { plan_ = nullptr; }
+  bool outputs_disjoint(EquationSystemView) const noexcept;
+  bool matches(const SpeciesEquationPlan&, const EquationStateView&,
+               KernelBox) const noexcept;
+ private:
+  const SpeciesEquationPlan* plan_{};
+  PlanFingerprint fingerprint_{};
+  KernelBox box_{};
+  std::vector<PrimitiveHistory> histories_;
+};
+
 // Private nonlinear solve rows, divided by cell volume BEFORE subtracting
 // their terms, to avoid integral underflow for representable trace species.
 // Accepts only the same full-domain provisional-guess or certified-final
@@ -174,7 +196,8 @@ Status assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system,
-    Span<const EquationContributionView> sources = {}) noexcept;
+    Span<const EquationContributionView> sources = {},
+    const SpeciesCompositionBatch* composition = nullptr) noexcept;
 
 // Re-evaluate the current species equation using system.diagonal prepared by
 // assemble_species_coupling_rows. The private caller holds density, material,
@@ -184,6 +207,7 @@ Status assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system,
-    Span<const EquationContributionView> sources = {}) noexcept;
+    Span<const EquationContributionView> sources = {},
+    const SpeciesCompositionBatch* composition = nullptr) noexcept;
 
 } // namespace hundun::v04::detail

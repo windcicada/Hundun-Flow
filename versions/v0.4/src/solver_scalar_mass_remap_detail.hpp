@@ -630,6 +630,10 @@ class ScalarMassRemap {
       if(!status) return status;
       for(std::size_t s=0U;s<species.size();++s)
         target_species_history_[s].trial=as_const(views_[species_indices_[s]]);
+      SpeciesCompositionBatch composition;
+      status=composition.prepare(species,state,context.box);
+      status=reductions.consensus(status);
+      if(!status)return status;
       double maximum[5]{}; // relative, absolute, converged, requested ratio, unresolved row
       if (thermo) std::fill(enthalpy_residual.data,
           enthalpy_residual.data+enthalpy_residual.size,0.0);
@@ -661,7 +665,7 @@ class ScalarMassRemap {
         // flux remain fixed; each new solve rebuilds the diagonal at iteration 0.
         if (local && iteration == 0U) {
           local = assemble_species_coupling_rows(species, s, state, material,
-                                                 context, scratch, sources);
+                                                 context, scratch, sources, &composition);
           std::size_t cell_index = s * count_;
           for (int z = 0; z < cells_.z && local; ++z)
             for (int y = 0; y < cells_.y; ++y)
@@ -676,7 +680,7 @@ class ScalarMassRemap {
                 scratch.diagonal.unchecked({x, y, z}, 0U) =
                     target_species_diagonal_[cell_index];
           local = assemble_species_coupling_residual(species, s, state, material,
-                                                     context, scratch, sources);
+                                                     context, scratch, sources, &composition);
         }
         if (local && continuity_reduced) {
           std::size_t index{};
@@ -842,6 +846,7 @@ class ScalarMassRemap {
               next_[slot*count_+i]=value;
             }
       }
+      composition.invalidate(); // The bounded update below may change the tuple.
       double global[5]{};
       status=reductions.checked_max({maximum,5U},{global,5U},local);
       if(!status) return status;

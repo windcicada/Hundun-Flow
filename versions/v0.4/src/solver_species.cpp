@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 
 namespace hundun::v04 {
 namespace {
@@ -245,6 +246,62 @@ Status fill_face_coefficients(const CartesianKernelPlan& kernels,
           return {StatusCode::numerical_failure, kScalarNumerical};
         }
         output.unchecked(face) = coefficient;
+      }
+    }
+  }
+  return {};
+}
+
+Status validate_species_composition(const SpeciesEquationPlan& plan,
+    const EquationStateView& state, KernelBox box, bool statistical) noexcept {
+  if (plan.fingerprint()==0 || state.independent_species.size!=plan.size() ||
+      (plan.size() && !state.independent_species.data) ||
+      !detail::valid_kernel_box(box,plan.cells()))
+    return {StatusCode::invalid_plan,kScalarAssembly};
+  for (std::size_t independent = 0U;
+       independent < state.independent_species.size; ++independent) {
+    if (independent >= plan.size() ||
+        !compatible_history(state.independent_species.data[independent],
+                            plan.cells(), plan.spec(independent)->field,
+                            plan.convection() == ConvectionScheme::central2
+                                ? 1U
+                                : 2U)) {
+      return {StatusCode::invalid_plan, kScalarAssembly};
+    }
+  }
+  // Accepted histories always satisfy the N-1 composition contract. A
+  // statistical component correction may temporarily cross the simplex;
+  // its enclosing tuple transaction owns the complete candidate audit.
+  const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
+                 box.begin.z + box.cells.z};
+  for (std::int32_t z = box.begin.z; z < end.z; ++z) {
+    for (std::int32_t y = box.begin.y; y < end.y; ++y) {
+      for (std::int32_t x = box.begin.x; x < end.x; ++x) {
+        const Int3 cell{x, y, z};
+        double trial_sum = 0.0;
+        double accepted_sum = 0.0;
+        double previous_sum = 0.0;
+        for (std::size_t independent = 0U;
+             independent < state.independent_species.size; ++independent) {
+          const PrimitiveHistory history =
+              state.independent_species.data[independent];
+          const double trial = history.trial.unchecked(cell, 0U);
+          const double accepted = history.accepted.unchecked(cell, 0U);
+          const double previous = history.previous.unchecked(cell, 0U);
+          if (!std::isfinite(trial) || !std::isfinite(accepted) ||
+              !std::isfinite(previous) || (!statistical && (trial < 0.0 || trial > 1.0)) ||
+              accepted < 0.0 || accepted > 1.0 || previous < 0.0 ||
+              previous > 1.0) {
+            return {StatusCode::numerical_failure, kScalarComposition};
+          }
+          trial_sum += trial;
+          accepted_sum += accepted;
+          previous_sum += previous;
+        }
+        if ((!statistical && trial_sum > 1.0) || accepted_sum > 1.0 ||
+            previous_sum > 1.0) {
+          return {StatusCode::numerical_failure, kScalarComposition};
+        }
       }
     }
   }
@@ -837,7 +894,7 @@ Status assemble_species_impl(
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial,
     bool initial_guess, bool density_units, bool retain_diagonal,
-    bool statistical) noexcept {
+    bool statistical, const detail::SpeciesCompositionBatch* composition) noexcept {
   if (plan.kernels_ == nullptr ||
       (statistical && (initial_guess || density_units || retain_diagonal ||
                        allow_partial || context.reaction_endpoint.base)) ||
@@ -866,52 +923,13 @@ Status assemble_species_impl(
   if (!detail::valid_kernel_box(box, plan.cells_)) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
-  for (std::size_t independent = 0U;
-       independent < state.independent_species.size; ++independent) {
-    if (independent >= plan.specs_.size() ||
-        !compatible_history(state.independent_species.data[independent],
-                            plan.cells_, plan.specs_[independent].field,
-                            plan.convection_ == ConvectionScheme::central2
-                                ? 1U
-                                : 2U)) {
-      return {StatusCode::invalid_plan, kScalarAssembly};
-    }
-  }
-  // Accepted histories always satisfy the N-1 composition contract. A
-  // statistical component correction may temporarily cross the simplex;
-  // its enclosing tuple transaction owns the complete candidate audit.
-  const Int3 end{box.begin.x + box.cells.x, box.begin.y + box.cells.y,
-                 box.begin.z + box.cells.z};
-  for (std::int32_t z = box.begin.z; z < end.z; ++z) {
-    for (std::int32_t y = box.begin.y; y < end.y; ++y) {
-      for (std::int32_t x = box.begin.x; x < end.x; ++x) {
-        const Int3 cell{x, y, z};
-        double trial_sum = 0.0;
-        double accepted_sum = 0.0;
-        double previous_sum = 0.0;
-        for (std::size_t independent = 0U;
-             independent < state.independent_species.size; ++independent) {
-          const PrimitiveHistory history =
-              state.independent_species.data[independent];
-          const double trial = history.trial.unchecked(cell, 0U);
-          const double accepted = history.accepted.unchecked(cell, 0U);
-          const double previous = history.previous.unchecked(cell, 0U);
-          if (!std::isfinite(trial) || !std::isfinite(accepted) ||
-              !std::isfinite(previous) || (!statistical && (trial < 0.0 || trial > 1.0)) ||
-              accepted < 0.0 || accepted > 1.0 || previous < 0.0 ||
-              previous > 1.0) {
-            return {StatusCode::numerical_failure, kScalarComposition};
-          }
-          trial_sum += trial;
-          accepted_sum += accepted;
-          previous_sum += previous;
-        }
-        if ((!statistical && trial_sum > 1.0) || accepted_sum > 1.0 ||
-            previous_sum > 1.0) {
-          return {StatusCode::numerical_failure, kScalarComposition};
-        }
-      }
-    }
+  const bool shared_composition = !statistical && composition &&
+      composition->matches(plan,state,box);
+  if (shared_composition && !composition->outputs_disjoint(system))
+    return {StatusCode::invalid_plan,kScalarAssembly};
+  if (!shared_composition) {
+    const auto checked=validate_species_composition(plan,state,box,statistical);
+    if (!checked) return checked;
   }
   const IbmInterfaceInletField inlet_field{
       IbmInterfaceInletFieldKind::independent_species, species};
@@ -929,6 +947,18 @@ Status assemble_species_impl(
       state.independent_species.data[species],
       state, plan.unity_lewis_total_enthalpy_ ? material.enthalpy_diffusivity : material.scalar_mass_diffusivity.data[species], contributions,
       context, system, certificate, allow_partial, &inlet_field, density_units, retain_diagonal);
+}
+
+Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
+    const EquationStateView& state, const EquationMaterialView& material,
+    Span<const EquationContributionView> contributions,
+    const EquationAssemblyContext& context, EquationSystemView system,
+    EquationAssemblyCertificate& certificate, bool allow_partial,
+    bool initial_guess, bool density_units, bool retain_diagonal,
+    bool statistical) noexcept {
+  return assemble_species_impl(plan,species,state,material,contributions,context,
+      system,certificate,allow_partial,initial_guess,density_units,retain_diagonal,
+      statistical,nullptr);
 }
 
 Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
@@ -1053,6 +1083,53 @@ Status assemble_tile(
   return epoch.record(box, plan.cells(), candidate);
 }
 
+Status detail::SpeciesCompositionBatch::prepare(const SpeciesEquationPlan& plan,
+    const EquationStateView& state, KernelBox box) noexcept {
+  plan_=nullptr;
+  box=resolved_box(box,plan.cells());
+  const auto checked=validate_species_composition(plan,state,box,false);
+  if(!checked)return checked;
+  try {
+    histories_.clear();
+    if (state.independent_species.size)
+      histories_.assign(state.independent_species.data,
+          state.independent_species.data+state.independent_species.size);
+  }
+  catch(const std::bad_alloc&) { return {StatusCode::allocation_failure,kScalarAssembly}; }
+  box_=box;plan_=&plan;fingerprint_=plan.fingerprint();
+  return {};
+}
+
+bool detail::SpeciesCompositionBatch::outputs_disjoint(
+    EquationSystemView system) const noexcept {
+  for (const auto& history : histories_)
+    for (const auto view : {history.trial,history.accepted,history.previous})
+      if (detail::output_aliases_input(view,system,true)) return false;
+  return true;
+}
+
+bool detail::SpeciesCompositionBatch::matches(const SpeciesEquationPlan& plan,
+    const EquationStateView& state, KernelBox box) const noexcept {
+  if(plan_!=&plan || fingerprint_!=plan.fingerprint() ||
+      !same_cells(box.begin,box_.begin) || !same_cells(box.cells,box_.cells) ||
+      histories_.size()!=state.independent_species.size ||
+      (histories_.size() && !state.independent_species.data))return false;
+  const auto same=[](ConstFieldView a,ConstFieldView b) noexcept {
+    return a.base==b.base && same_cells(a.interior,b.interior) &&
+      same_cells(a.ghosts,b.ghosts) && a.components==b.components &&
+      a.stride_y==b.stride_y && a.stride_z==b.stride_z &&
+      a.component_stride==b.component_stride && a.replica==b.replica &&
+      a.field==b.field && a.revision==b.revision &&
+      a.storage_identity==b.storage_identity && a.revision_domain==b.revision_domain;
+  };
+  for(std::size_t s=0;s<histories_.size();++s) {
+    const auto& a=histories_[s];const auto& b=state.independent_species.data[s];
+    if(!same(a.trial,b.trial) || !same(a.accepted,b.accepted) ||
+       !same(a.previous,b.previous))return false;
+  }
+  return true;
+}
+
 Status detail::assemble_species_guess(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
@@ -1067,7 +1144,8 @@ Status detail::assemble_species_guess(const SpeciesEquationPlan& plan,
 Status detail::assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
-    EquationSystemView system, Span<const EquationContributionView> sources) noexcept {
+    EquationSystemView system, Span<const EquationContributionView> sources,
+    const detail::SpeciesCompositionBatch* composition) noexcept {
   if(context.contribution_stage==0U ||
       !detail::full_equation_box(resolved_box(context.box,plan.cells()),plan.cells()) ||
       (context.scope!=EquationAssemblyScope::momentum_predictor &&
@@ -1075,13 +1153,14 @@ Status detail::assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     return {StatusCode::invalid_plan,kScalarAssembly};
   EquationAssemblyCertificate local_certificate;
   return assemble_species_impl(plan,species,state,material,sources,context,system,
-      local_certificate,false,context.scope==EquationAssemblyScope::momentum_predictor,true);
+      local_certificate,false,context.scope==EquationAssemblyScope::momentum_predictor,true,false,false,composition);
 }
 
 Status detail::assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
-    EquationSystemView system, Span<const EquationContributionView> sources) noexcept {
+    EquationSystemView system, Span<const EquationContributionView> sources,
+    const detail::SpeciesCompositionBatch* composition) noexcept {
   if (context.contribution_stage == 0U ||
       !detail::full_equation_box(resolved_box(context.box, plan.cells()), plan.cells()) ||
       (context.scope != EquationAssemblyScope::momentum_predictor &&
@@ -1090,7 +1169,7 @@ Status detail::assemble_species_coupling_residual(const SpeciesEquationPlan& pla
   EquationAssemblyCertificate certificate;
   return assemble_species_impl(plan, species, state, material, sources, context,
       system, certificate, false,
-      context.scope == EquationAssemblyScope::momentum_predictor, true, true);
+      context.scope == EquationAssemblyScope::momentum_predictor, true,true,false,composition);
 }
 
 Status assemble_species(
