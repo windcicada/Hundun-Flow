@@ -316,6 +316,12 @@ foreach(rank_count IN ITEMS 1 2 4)
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>" ${MPIEXEC_POSTFLAGS})
   set_tests_properties(v04_product_allocation_failure_mpi_${rank_count} PROPERTIES
     PROCESSORS "${rank_count}" TIMEOUT 30)
+  add_test(NAME v04_product_arena_budget_mpi_${rank_count}
+    COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+            ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>"
+            ${MPIEXEC_POSTFLAGS} --arena-budget)
+  set_tests_properties(v04_product_arena_budget_mpi_${rank_count} PROPERTIES
+    PROCESSORS "${rank_count}" TIMEOUT 30 LABELS "allocation_audit")
   add_test(NAME v04_restart_writer_allocations_mpi_${rank_count}
     COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
             ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_product_allocation_failure_mpi_test>"

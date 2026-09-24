@@ -599,6 +599,48 @@ int main(int argc, char** argv) {
   int rank = 0, ranks = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  if (argc > 1 && std::strcmp(argv[1], "--arena-budget") == 0) {
+    int passed = 0;
+    {
+      auto model = test::product_model({16, 16, 16});
+      model.time.scheme = TimeScheme::cn_be;
+      model.legacy_time_fingerprint = model.fingerprint + 1U;
+      model.solver.coupling = CouplingKind::outer_corrected;
+      model.solver.cold_stopping = ColdStoppingSpec{1.0, 1e-7, 1e-10, 1e-10};
+      model.solver.pressure.algorithm = LinearAlgorithm::fgmres;
+      model.turbulence = TurbulenceKind::none;
+      model.pressure_reference = PressureReferenceKind::boundary_absolute;
+      model.boundaries[0].flow_kind = BoundaryKind::no_slip_wall;
+      model.boundaries[0].thermal_kind = BoundaryKind::adiabatic_wall;
+      model.boundaries[1].flow_kind = BoundaryKind::pressure_outlet;
+      model.boundaries[1].pressure = 101325.0;
+      model.boundaries[1].allow_backflow = false;
+      CompiledCasePlan plan;
+      const Status initial =
+          ProductCompiler::compile(MPI_COMM_WORLD, model, ".", plan);
+      const auto fingerprint = plan.fingerprint();
+      // Even seven owned primitive components exceed this budget at 1/2/4
+      // ranks. No optional model is needed to make the arena cost memory.
+      model.mesh.limits.max_memory_bytes_per_rank = UINT64_C(32768);
+      CompiledCasePlan limited_plan;
+      const Status limited =
+          ProductCompiler::compile(MPI_COMM_WORLD, model, ".", limited_plan);
+      passed = initial && limited.code == StatusCode::allocation_failure &&
+               limited_plan.fingerprint() == 0U &&
+               plan.fingerprint() == fingerprint;
+      model.mesh.limits.max_memory_bytes_per_rank = UINT64_C(1073741824);
+      CompiledCasePlan retry_plan;
+      const Status retry =
+          ProductCompiler::compile(MPI_COMM_WORLD, model, ".", retry_plan);
+      passed &= static_cast<bool>(retry);
+      if (rank == 0)
+        std::cout << "arena budget status=" << unsigned(limited.code) << '/'
+                  << limited.detail << " retry=" << bool(retry) << '\n';
+    }
+    MPI_Allreduce(MPI_IN_PLACE, &passed, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Finalize();
+    return passed ? 0 : 1;
+  }
   if (argc > 1 && std::strcmp(argv[1], "--writer-allocations") == 0) {
     const bool passed = writer_allocations(
         rank, ranks, argc > 2 ? std::strtol(argv[2], nullptr, 10) : 0,

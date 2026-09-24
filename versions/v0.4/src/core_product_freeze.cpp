@@ -4517,9 +4517,8 @@ Status ProductCompiler::compile(MPI_Comm communicator,
         !detail::product_checked_multiply(local_cells,sizeof(detail::ColdPressureRow)+sizeof(double),
             candidate->summary.passive_workspace_bytes))
       return Status{StatusCode::allocation_failure,kProductAllocation};
-    if (status && (candidate->spray.enabled() || candidate->esf.enabled() ||
-                   candidate->summary.derived_output_bytes != 0U || candidate->summary.iccg_workspace_bytes != 0U ||
-                   candidate->summary.passive_workspace_bytes != 0U)) {
+    // The arena consumes memory even when every optional payload is empty.
+    if (status) {
       const auto limit = model.mesh.limits.max_memory_bytes_per_rank;
       std::size_t model_bytes = 0U;
       if (!detail::product_checked_add(candidate->spray.owned_bytes(),
