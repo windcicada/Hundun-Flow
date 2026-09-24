@@ -2650,7 +2650,8 @@ target_link_libraries(v04_momentum_correction_test PRIVATE hundun_v04_core MPI::
 foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_momentum_correction_mpi_${rank_count}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
-      "$<TARGET_FILE:v04_momentum_correction_test>"
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_momentum_correction_test>"
+      ${MPIEXEC_POSTFLAGS}
       "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/momentum-correction")
   set_tests_properties(v04_momentum_correction_mpi_${rank_count} PROPERTIES
     PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
