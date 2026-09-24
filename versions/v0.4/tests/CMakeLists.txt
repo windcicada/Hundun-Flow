@@ -2645,6 +2645,16 @@ add_executable(v04_esf_implicit_test mpi/esf_implicit_test.cpp)
 add_executable(v04_esf_energy_test mpi/esf_energy_test.cpp)
 add_executable(v04_cold_pressure_audit_test mpi/cold_pressure_audit_test.cpp)
 target_link_libraries(v04_cold_pressure_audit_test PRIVATE hundun_v04_core MPI::MPI_C)
+add_executable(v04_momentum_correction_test mpi/momentum_correction_test.cpp)
+target_link_libraries(v04_momentum_correction_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_momentum_correction_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      "$<TARGET_FILE:v04_momentum_correction_test>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/momentum-correction")
+  set_tests_properties(v04_momentum_correction_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
 foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_cold_pressure_audit_mpi_${rank_count}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}

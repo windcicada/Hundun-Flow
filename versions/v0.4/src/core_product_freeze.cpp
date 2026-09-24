@@ -13972,6 +13972,26 @@ Status ProductDriver::Impl::execute_attempt(
                   pressure_correction.unchecked({x, y, z}, 0) =
                       trial_velocity.unchecked({x, y, z}, component);
                 }
+            // Solve A*delta_u = b-A*u. Scaling the inner tolerance by the
+            // complete momentum RHS can accept a small but unresolved velocity
+            // defect without an iteration. Keep the configured controls and
+            // apply them to the correction equation instead.
+            if (!dual_esf) {
+              FieldView correction_seed = pressure_correction;
+              // Same halo-compatible view used by the terminal momentum audit.
+              correction_seed.field = product.fields.krylov_vectors;
+              probe_status = op.residual(correction_seed, pressure_rhs);
+              probe_status = product.reductions.consensus(probe_status);
+              if (!probe_status)
+                return probe_status;
+              for (int z = 0; z < cells.z; ++z)
+                for (int y = 0; y < cells.y; ++y)
+                  for (int x = 0; x < cells.x; ++x) {
+                    const Int3 c{x, y, z};
+                    pressure_rhs.unchecked(c, 0) = -pressure_rhs.unchecked(c, 0);
+                    pressure_correction.unchecked(c, 0) = 0.0;
+                  }
+            }
             // The selected Krylov solver owns its true-residual evaluations.
             // The independent terminal audit checks the final coupled state.
             const auto momentum_control=dual_esf
@@ -13995,10 +14015,11 @@ Status ProductDriver::Impl::execute_attempt(
               std::fprintf(
                   stdout,
                   "cold_momentum_solve component=%u status=%u/%u iterations=%u "
-                  "solve_setup_s=%.17g initial=%.17g final=%.17g\n",
+                  "solve_setup_s=%.17g initial=%.17g final=%.17g rhs_basis=%s\n",
                   component, unsigned(probe_status.code), probe_status.detail,
                   solved.iterations, max_elapsed, solved.initial_true_residual,
-                  solved.final_true_residual);
+                  solved.final_true_residual,
+                  dual_esf ? "total_velocity" : "velocity_correction");
             if (!probe_status)
               return probe_status;
             index = 0;
@@ -14006,7 +14027,10 @@ Status ProductDriver::Impl::execute_attempt(
               for (int y = 0; y < cells.y; ++y)
                 for (int x = 0; x < cells.x; ++x, ++index) {
                   Int3 c{x, y, z};
-                  const double v = pressure_correction.unchecked(c, 0);
+                  const double v = dual_esf
+                      ? pressure_correction.unchecked(c, 0)
+                      : pressure_correction.unchecked(c, 0) +
+                            trial_velocity.unchecked(c, component);
                   max_delta = std::max(
                       max_delta,
                       std::abs(v - trial_velocity.unchecked(c, component)));

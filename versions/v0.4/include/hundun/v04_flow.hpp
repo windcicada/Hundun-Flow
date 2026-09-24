@@ -2649,6 +2649,9 @@ struct ColdCouplingReport {
   std::uint64_t pressure_iterations{};
   std::uint64_t enthalpy_iterations{};
   std::uint64_t species_iterations{};
+  // Inner linear-system metrics, not the final coupled momentum audit.
+  // CN/BE non-dual momentum reports the velocity-correction system; the
+  // reference dual-state ESF path reports the total-velocity system.
   std::array<LinearSolveResult, 3U> final_momentum{};
   LinearSolveResult final_pressure{};
   LinearSolveResult final_enthalpy{};
