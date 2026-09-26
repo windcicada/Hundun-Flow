@@ -10,6 +10,7 @@
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
 #include "solver_shared_faces_detail.hpp"
+#include "solver_diffusion_faces_detail.hpp"
 #include "hundun/v04_ibm.hpp"
 
 #include <algorithm>
@@ -2814,7 +2815,8 @@ Status mixture_transport_face_rate(const CartesianKernelPlan& plan,
     const std::array<ConstFaceFieldView,3>& faces,
     const std::array<ConstFaceFieldView,3>& extra, ConstFieldView q,
     std::uint8_t component, ConstFieldView physical,
-    CartesianAxis axis, Int3 face, double& value) noexcept {
+    CartesianAxis axis, Int3 face, double& value,
+    const detail::ScalarDiffusionFaces* cached=nullptr) noexcept {
   const auto a = static_cast<unsigned>(axis);
   auto left = face;
   (a == 0 ? left.x : a == 1 ? left.y : left.z)--;
@@ -2824,7 +2826,8 @@ Status mixture_transport_face_rate(const CartesianKernelPlan& plan,
   const double gamma = extra[a].unchecked(face);
   const double mass = faces[a].unchecked(face);
   if (physical.base) {
-    const double diffusion = detail::positive_transmissibility(plan,physical,axis,face);
+    const double diffusion = cached ? cached->face(a,face)
+        : detail::positive_transmissibility(plan,physical,axis,face);
     if (!std::isfinite(diffusion) || diffusion < 0.0)
       return {StatusCode::numerical_failure,kTransportNumerical};
     const double total = diffusion + gamma;
@@ -2843,7 +2846,7 @@ Status mixture_transport_face_rate(const CartesianKernelPlan& plan,
 Status mixture_divergence(
     const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
     ConstFaceFluxView flux, const KernelInvocation& invocation,
-    ConstFieldView physical) noexcept {
+    ConstFieldView physical,const detail::ScalarDiffusionFaces* cached=nullptr) noexcept {
   const auto cells = plan.cells();
   if (plan.fingerprint() == 0U || mixture.linearization == 0U ||
       mixture.face_flux != flux.revision ||
@@ -2879,7 +2882,7 @@ Status mixture_divergence(
   const auto status=detail::shared_cell_faces(cells,invocation.box,{},
       [&](CartesianAxis axis,Int3 face,double& value) -> Status {
         return mixture_transport_face_rate(plan,faces,extra,q,
-            invocation.read_component_begin,physical,axis,face,value);
+            invocation.read_component_begin,physical,axis,face,value,cached);
       },
       [&](Int3 c,const std::array<double,6>& values) -> Status {
         long double divergence{};
@@ -2907,6 +2910,13 @@ Status cartesian_mixture_transport(
     const KernelInvocation& invocation) noexcept {
   if (!mass_diffusivity.base) return {StatusCode::invalid_plan,kTransportKernel};
   return mixture_divergence(plan,mixture,flux,invocation,mass_diffusivity);
+}
+
+Status detail::cached_mixture_transport(const CartesianKernelPlan& plan,
+    const MixtureTransportFaces& mixture,const ScalarDiffusionFaces& cached,
+    ConstFaceFluxView flux,const KernelInvocation& invocation) noexcept {
+  if(!cached.matches(plan,cached.material()))return {StatusCode::invalid_plan,kTransportKernel};
+  return mixture_divergence(plan,mixture,flux,invocation,cached.material(),&cached);
 }
 
 Status form_cartesian_mixture_transport_flux(

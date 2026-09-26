@@ -18,7 +18,7 @@
 
 namespace hundun::v04 {
 
-namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; class StatisticalFaceBasis; class SpeciesCompositionBatch; }
+namespace detail { class MixtureEnthalpyDiffusion; class MixtureEnthalpyConvection; class PressureEnergyCoupledSchur; class StatisticalEnthalpy; class StatisticalFaceBasis; class SpeciesCompositionBatch; class ScalarDiffusionFaces; }
 
 class IbmEquationInterfacePlan;
 class EBTopology;
@@ -272,6 +272,8 @@ struct EquationAssemblyContext {
   const ScalarMidpointView* scalar_midpoint{};
   // Internal, sweep-scoped reuse of the statistical diffusion face basis.
   detail::StatisticalFaceBasis* statistical_face_basis{};
+  // Internal immutable material snapshot, rebuilt for each outer scalar solve.
+  const detail::ScalarDiffusionFaces* scalar_diffusion_faces{};
 };
 
 struct EquationSystemView {

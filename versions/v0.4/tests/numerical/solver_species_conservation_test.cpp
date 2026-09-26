@@ -5,6 +5,7 @@
 #include "../../src/solver_species_guess_detail.hpp"
 #include "../../src/solver_ibm_scalar_transport_detail.hpp"
 #include "../../src/solver_cold.hpp"
+#include "../../src/solver_diffusion_faces_detail.hpp"
 #include "../../src/solver_mixture_rows_detail.hpp"
 #include "../../src/solver_mixture_bound_detail.hpp"
 #include "../../src/solver_mixture_step_detail.hpp"
@@ -1202,6 +1203,10 @@ bool test_mixture_equation_faces() {
   auto ay=make_face_field(CartesianAxis::y,cells,9402U);
   auto az=make_face_field(CartesianAxis::z,cells,9403U);
   bool passed=true;
+  detail::ScalarDiffusionFaces cached;
+  status=cached.allocate(cells);
+  if(status)status=cached.prepare(fixture.equations.kernels(),as_const(gamma.view));
+  if(!expect(bool(status),"frozen component diffusion prepares"))return false;
   for (std::size_t s=0; s<2; ++s) {
     EquationAssemblyCertificate certificate;
     status=assemble_species(fixture.equations.species(),s,state,material,{},context,
@@ -1212,6 +1217,30 @@ bool test_mixture_equation_faces() {
               << " conductance=" << D << '\n';
     passed &= expect(bool(status) && close(r,s==0 ? .2 : .1) && close(D,.5),
                      "production residual and matrix use the common REFERENCE face conductance");
+    const auto expected_diagonal=diagonal.bytes, expected_rhs=rhs.bytes, expected_residual=residual.bytes;
+    const auto expected_x=ax.bytes, expected_y=ay.bytes, expected_z=az.bytes;
+    auto cached_context=context;
+    cached_context.scalar_diffusion_faces=&cached;
+    // The component's material is frozen even while the shared fill workspace
+    // is reused for another Schmidt coefficient. Equation values stay exact.
+    fill_field(gamma,9e-6);
+    auto cached_material=material;
+    const std::array<ConstFieldView,2> owned_gamma{cached.material(),cached.material()};
+    cached_material.scalar_mass_diffusivity={owned_gamma.data(),owned_gamma.size()};
+    cached_material.enthalpy_diffusivity=cached.material(); // This fixture uses unity Lewis.
+    status=assemble_species(fixture.equations.species(),s,state,cached_material,{},cached_context,
+        {diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view},certificate);
+    passed &= expect(bool(status) && diagonal.bytes==expected_diagonal && rhs.bytes==expected_rhs &&
+        residual.bytes==expected_residual && ax.bytes==expected_x && ay.bytes==expected_y && az.bytes==expected_z,
+        "frozen material preserves complete species rows despite scratch reuse");
+    // A cache cannot certify an unrelated coefficient view, even when it has
+    // the same field/revision labels. Reject without touching caller outputs.
+    status=assemble_species(fixture.equations.species(),s,state,material,{},cached_context,
+        {diagonal.view,rhs.view,residual.view,ax.view,ay.view,az.view},certificate);
+    passed &= expect(!status && diagonal.bytes==expected_diagonal && rhs.bytes==expected_rhs &&
+        residual.bytes==expected_residual && ax.bytes==expected_x && ay.bytes==expected_y && az.bytes==expected_z,
+        "stale diffusion authority fails without changing equation outputs");
+    fill_field(gamma,1e-6);
   }
   auto h=make_field(kEnthalpy,cells,1U,2U,520U);
   auto correction_context=context;

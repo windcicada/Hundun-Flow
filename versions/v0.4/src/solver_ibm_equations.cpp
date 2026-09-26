@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Developed by WANG YUDONG | Email: wangyudong@buaa.edu.cn | Github/Wechat: windcicada | Year.M: 2026.09
 
+#include "solver_diffusion_faces_detail.hpp"
 #include "hundun/v04_ibm.hpp"
 #include "hundun/v04_flow.hpp"
 
@@ -2517,11 +2518,13 @@ Status IbmEquationInterfacePlan::correct_zero_normal_diffusion(
 }
 
 double detail::IbmScalarTransport::diffusion_diagonal(
-    const IbmEquationInterfacePlan& plan,ConstFieldView gamma,Int3 cell) noexcept {
+    const IbmEquationInterfacePlan& plan,ConstFieldView gamma,Int3 cell,
+    const ScalarDiffusionFaces* cached) noexcept {
   const auto& kernels=*plan.kernels_;
   const Int3 n=kernels.cells();
   const auto i=std::size_t(cell.x)+std::size_t(n.x)*(std::size_t(cell.y)+std::size_t(n.y)*cell.z);
   const auto blocked=plan.scalar_blocked_faces_[i];
+  if(cached)return cached->diagonal(cell,blocked);
   if(blocked==0U) return detail::diffusion_diagonal(kernels,gamma,cell);
   double sum=0.0;
   for(unsigned d=0U;d<6U;++d) {

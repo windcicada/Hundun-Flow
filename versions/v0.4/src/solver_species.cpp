@@ -8,6 +8,7 @@
 #include "solver_cartesian_detail.hpp"
 #include "solver_equation_detail.hpp"
 #include "solver_species_guess_detail.hpp"
+#include "solver_diffusion_faces_detail.hpp"
 #include "solver_ibm_scalar_transport_detail.hpp"
 #include "solver_mixture_transport_detail.hpp"
 #include "solver_statistical_detail.hpp"
@@ -323,6 +324,10 @@ Status assemble_transport(
     const EnthalpyEquationPlan* statistical_enthalpy=nullptr) noexcept {
   const auto* mixture = (spec.role == TransportedScalarRole::species || statistical_enthalpy)
       ? context.mixture_transport : nullptr;
+  const auto* cached=context.scalar_diffusion_faces;
+  if(cached && (!mixture || !cached->matches(kernels,diffusivity) ||
+      !detail::full_equation_box(resolved_box(context.box,cells),cells)))
+    return {StatusCode::invalid_plan,kScalarAssembly};
   auto* basis=context.statistical_face_basis;
   // Only the complete frozen statistical operator admits shared face storage.
   if(basis && (retain_diagonal || density_units || context.scalar_midpoint ||
@@ -423,8 +428,8 @@ Status assemble_transport(
         }
         double diffusion_diagonal =
             retain_diagonal ? 0.0 : context.immersed_interface != nullptr
-            ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
-            :
+            ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell,cached)
+            : cached ? cached->diagonal(cell) :
             detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, cell) +
             detail::positive_transmissibility(kernels, diffusivity,
@@ -491,7 +496,8 @@ Status assemble_transport(
                                     0U, 0U, 1U, context.face_flux,
                                     context.counters};
   Status evaluated = mixture
-      ? cartesian_mixture_transport(kernels,*mixture,diffusivity,
+      ? cached ? detail::cached_mixture_transport(kernels,*mixture,*cached,context.mass_flux,invocation)
+          : cartesian_mixture_transport(kernels,*mixture,diffusivity,
                                     context.mass_flux,invocation)
       : context.scope == EquationAssemblyScope::final_conservative
           ? cartesian_convection(kernels, convection, context.mass_flux,
@@ -557,8 +563,8 @@ Status assemble_transport(
         const double volume = detail::cell_volume(kernels, cell);
         double diffusion_diagonal =
             retain_diagonal ? 0.0 : context.immersed_interface != nullptr
-            ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell)
-            :
+            ? detail::IbmScalarTransport::diffusion_diagonal(*context.immersed_interface,diffusivity,cell,cached)
+            : cached ? cached->diagonal(cell) :
             detail::positive_transmissibility(kernels, diffusivity,
                                       CartesianAxis::x, cell) +
             detail::positive_transmissibility(kernels, diffusivity,
@@ -652,7 +658,8 @@ Status assemble_transport(
     }
   }
 
-  if (!reuse_faces && !retain_diagonal && system.x_coefficient.base != nullptr) {
+  if (cached && !reuse_faces && !retain_diagonal && system.x_coefficient.base)cached->copy_faces(system);
+  if (!cached && !reuse_faces && !retain_diagonal && system.x_coefficient.base != nullptr) {
     evaluated = fill_face_coefficients<CartesianAxis::x>(
         kernels, diffusivity, box, system.x_coefficient);
     if (evaluated) {

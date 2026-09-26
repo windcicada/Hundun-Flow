@@ -32,7 +32,7 @@ class IbmScalarTransport {
   static Status diffusion(const IbmEquationInterfacePlan& plan,ConstFieldView q,
       ConstFieldView gamma,KernelBox box,FieldView rate) noexcept;
   static double diffusion_diagonal(const IbmEquationInterfacePlan& plan,
-      ConstFieldView gamma,Int3 cell) noexcept;
+      ConstFieldView gamma,Int3 cell,const ScalarDiffusionFaces* cached=nullptr) noexcept;
   // The assembler supplies its physical residual and masked diffusion
   // diagonal. Freeze solid corrections and remove their stored face edges.
   static Status constrain_rows(const IbmEquationInterfacePlan& plan,

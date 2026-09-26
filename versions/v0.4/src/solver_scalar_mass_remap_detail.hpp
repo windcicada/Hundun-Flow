@@ -8,6 +8,7 @@
 #include "solver_species_guess_detail.hpp"
 #include "solver_y_history.hpp"
 #include "solver_cold.hpp"
+#include "solver_diffusion_faces_detail.hpp"
 
 #include <memory>
 #include "solver_cartesian_detail.hpp"
@@ -127,6 +128,11 @@ class ScalarMassRemap {
       target_species_history_.resize(species_indices_.size());
       target_species_diffusivity_.resize(species_indices_.size());
       target_species_diagonal_.resize(species_indices_.size() * count_);
+      target_diffusion_faces_.resize(species_indices_.size());
+      for(auto& cache:target_diffusion_faces_) {
+        cache=std::make_unique<ScalarDiffusionFaces>();
+        auto prepared=cache->allocate(cells_);if(!prepared)return prepared;
+      }
       if (target_solver_ == SpeciesCouplingSolver::dilu) {
         target_species_rows_.resize(species_indices_.size());
         target_species_dilu_.reserve(species_indices_.size());
@@ -215,6 +221,12 @@ class ScalarMassRemap {
     };
     add(mass_); add(quantity_); add(next_); add(storage_);
     add(species_indices_); add(target_species_history_); add(target_species_diffusivity_); add(target_species_diagonal_);
+    add(target_diffusion_faces_);
+    for(const auto& cache:target_diffusion_faces_) {
+      if(!cache)continue;
+      const auto owned=sizeof(ScalarDiffusionFaces)+cache->owned_payload_bytes();
+      bytes=owned>UINT64_MAX-bytes ? UINT64_MAX : bytes+owned;
+    }
     add(target_species_rows_);
     add(target_species_dilu_);
     for (const auto& rows : target_species_rows_) add(rows);
@@ -618,6 +630,8 @@ class ScalarMassRemap {
     scratch.y_coefficient=predictor_flux_.y;
     scratch.z_coefficient=predictor_flux_.z;
     const std::array<ConstFaceFieldView,3U> flux{context.mass_flux.x,context.mass_flux.y,context.mass_flux.z};
+    const bool cache_diffusion=context.mixture_transport &&
+        !equations.enthalpy().unity_lewis_total_enthalpy();
     const unsigned passive_iterations=report.iterations;
     for(unsigned iteration=0U;iteration<128U;++iteration) {
       for(auto& v:views_) ++v.revision;
@@ -647,7 +661,7 @@ class ScalarMassRemap {
         }
         // Same molecular/turbulent Schmidt coefficient as the persisted
         // physical species rate. Only face slabs are stencil consumers.
-        for(int z=-1;z<=cells_.z && local;++z)
+        if(iteration==0U || !cache_diffusion)for(int z=-1;z<=cells_.z && local;++z)
           for(int y=-1;y<=cells_.y && local;++y)
             for(int x=-1;x<=cells_.x;++x) {
               if((x<0 || x>=cells_.x)+(y<0 || y>=cells_.y)+(z<0 || z>=cells_.z)>1) continue;
@@ -661,6 +675,12 @@ class ScalarMassRemap {
               }
               diffusivity.unchecked(c,0U)=gamma;
             }
+        if(local && cache_diffusion) {
+          auto& cache=*target_diffusion_faces_[s];
+          if(iteration==0U)local=cache.prepare(kernels,as_const(diffusivity));
+          target_species_diffusivity_[s]=cache.material();
+          context.scalar_diffusion_faces=&cache;
+        }
         // Only q changes in this inner solve. Density, diffusivity, time and
         // flux remain fixed; each new solve rebuilds the diagonal at iteration 0.
         if (local && iteration == 0U) {
@@ -976,6 +996,7 @@ class ScalarMassRemap {
   std::vector<double> mass_, quantity_, next_;
   std::vector<double> bounds_local_, bounds_global_;
   std::vector<double> target_species_diagonal_;
+  std::vector<std::unique_ptr<ScalarDiffusionFaces>> target_diffusion_faces_;
   SpeciesCouplingSolver target_solver_{SpeciesCouplingSolver::diagonal};
   std::vector<std::vector<ColdPressureRow>> target_species_rows_;
   std::vector<std::unique_ptr<ColdPressureDilu>> target_species_dilu_;
