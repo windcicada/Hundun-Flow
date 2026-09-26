@@ -13604,7 +13604,11 @@ Status ProductDriver::Impl::execute_attempt(
                         {x + product.patch.begin.x, y + product.patch.begin.y,
                          z + product.patch.begin.z}))
                   continue;
-                if (energy_pass == 0) {
+                // A mixture's h/Y solve just refreshed these derivatives in
+                // refresh_scalar_thermodynamics. Energy assembly reads that
+                // same state without changing rho, h or composition. Reuse
+                // its EOS result; the species-free branch has no such refresh.
+                if (energy_pass == 0 && species_trial.empty()) {
                   for (std::size_t isp = 0; isp < species_trial.size(); ++isp)
                     species_values[isp] = species_trial[isp].unchecked(c, 0);
                   CoupledThermoState refreshed_thermo;
