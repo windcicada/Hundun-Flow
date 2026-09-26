@@ -2656,6 +2656,18 @@ foreach(rank_count IN ITEMS 1 2 4)
   set_tests_properties(v04_momentum_correction_mpi_${rank_count} PROPERTIES
     PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
 endforeach()
+
+add_executable(v04_mixture_audit_test mpi/mixture_audit_test.cpp)
+target_link_libraries(v04_mixture_audit_test PRIVATE hundun_v04_core MPI::MPI_C)
+foreach(rank_count IN ITEMS 1 2 4)
+  add_test(NAME v04_mixture_audit_mpi_${rank_count}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}
+      ${MPIEXEC_PREFLAGS} "$<TARGET_FILE:v04_mixture_audit_test>"
+      ${MPIEXEC_POSTFLAGS}
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/momentum-correction")
+  set_tests_properties(v04_mixture_audit_mpi_${rank_count} PROPERTIES
+    PROCESSORS ${rank_count} RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
 foreach(rank_count IN ITEMS 1 2 4)
   add_test(NAME v04_cold_pressure_audit_mpi_${rank_count}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${rank_count}

@@ -14742,10 +14742,14 @@ Status ProductDriver::Impl::execute_attempt(
           predicted_energy*=energy_screen/previous_energy_screen;
         previous_energy_screen=energy_screen;
         // Fixed reference scheduling always audits the requested endpoint.
-        // Earlier audits retain endpoint closures required by reacting fields.
+        // A composition-coupled temperature guess solves R_E - sum(h_s R_Ys),
+        // not R_E alone. Its pre-correction energy residual can stagnate until
+        // the terminal audit requests full conservative h/Y rows. Every mixture
+        // must reach that audit; using this guess as its gate creates a cycle.
         if (dual_esf ? cold_outer + 1U == outer_limit :
             ((product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) ||
-             product.reaction.interval_enabled() || predicted_energy < energy_audit_target())) {
+             product.reaction.interval_enabled() || !mixture_energy_residual.empty() ||
+             predicted_energy < energy_audit_target())) {
           if (outer_rank == 0)
             std::fprintf(
                 stdout,
