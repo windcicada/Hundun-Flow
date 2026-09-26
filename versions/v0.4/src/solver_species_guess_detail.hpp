@@ -65,10 +65,15 @@ class SpeciesCouplingForcing {
 };
 
 // A single FP64 subtraction preserves a direction just beyond half an ULP.
-// An intermediate extended-precision subtraction can round that direction
-// to the midpoint before conversion back to the stored FP64 composition.
+// Project this private proposal onto the component bounds before the common
+// simplex search. A negligible negative trace would otherwise freeze bulk
+// corrections, either exactly at zero or through vanishing step lengths.
+// Physical rows and acceptance residuals remain unchanged: an infeasible
+// physical solution is still rejected, never clipped into acceptance.
 inline double species_search_update(double value, double correction) noexcept {
-  return value-correction;
+  const double proposal=value-correction;
+  if (std::isfinite(proposal)) return std::max(0.0,std::min(1.0,proposal));
+  return proposal;
 }
 
 // One common nonlinear search step preserves the complete composition. This

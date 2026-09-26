@@ -12944,6 +12944,10 @@ Status ProductDriver::Impl::execute_attempt(
               as_const(molecular_viscosity),as_const(effective_viscosity),minimum_diffusivity);
           mixture_diffusivity=as_const(minimum_diffusivity);
         }
+        // All mean scalars are implicit here. Like the random-field path,
+        // retain the zero-gradient VLS constraint: an absent species still
+        // couples to neighbouring rows and must not permit a central negative
+        // off-diagonal or switch the shared bulk transport between sweeps.
         if (prepared_faces) prepared_faces=prepare_cartesian_mixture_transport(
             product.equations.kernels(),
             {mixture_species.data(),mixture_species.size()},
@@ -12951,7 +12955,8 @@ Status ProductDriver::Impl::execute_attempt(
                 as_const(pressure_energy_candidate_enthalpy),
             mixture_diffusivity,flux,
             mixture_workspace,++mixture_iteration,mixture_faces,
-            product.ibm_equations ? &*product.ibm_equations : nullptr);
+            product.ibm_equations ? &*product.ibm_equations : nullptr,
+            MixtureFlatStencilPolicy::upwind_constraint);
         return product.reductions.consensus(prepared_faces);
       };
       bool reference_momentum_tvd{};
@@ -14932,17 +14937,18 @@ Status ProductDriver::Impl::execute_attempt(
             }
             break;
           }
-          // A failed final momentum equation already rejects this outer
-          // candidate. REFERENCE's max-norm stopping cannot accept it, so avoid
-          // assembling E/Y solely to rediscover that same rejection. The
-          // accepted path still performs the complete independent audit.
+          // A failed momentum row rejects this candidate, but a coupled
+          // mixture still needs the E/Y audit to request its full conservative
+          // scalar rows. Skipping it can repeat the temperature guess forever:
+          // its unresolved composition then keeps the momentum gate open.
+          // Only an uncoupled material can skip E/Y solely on momentum.
           const double momentum_gate_local[3]{reference_local[0], final_local[0], final_local[5]};
           double momentum_gate[3]{};
           status = product.reductions.checked_max({momentum_gate_local, 3U}, {momentum_gate, 3U});
           if (!status) return status;
           const double momentum_gate_residual = reference_stopping ? momentum_gate[0] : momentum_gate[1];
           const double momentum_gate_tolerance = reference_stopping ? product.cold_stopping->momentum : 1e-10;
-          if (!dual_esf && !audit_negative &&
+          if (!dual_esf && !audit_negative && mixture_energy_residual.empty() &&
               !(product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) &&
               momentum_gate[2] == 0.0 &&
               momentum_gate_residual >= momentum_gate_tolerance) {

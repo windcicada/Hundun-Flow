@@ -3114,6 +3114,24 @@ bool test_cold_row_residual_precision() {
 
 bool test_species_search_quantization() {
   bool factor_passed=true;
+  // An outward trace direction at Y=0 must not freeze an unrelated bulk
+  // correction. The final unmodified trace residual still decides acceptance.
+  for (const double trace : {0., 1e-160}) for (const bool reverse : {false, true}) {
+    std::array<double,2> anchor{.233, trace}, correction{1e-8, 1e-23}, proposal{};
+    if(reverse) { std::swap(anchor[0],anchor[1]);std::swap(correction[0],correction[1]); }
+    for(std::size_t s=0;s<anchor.size();++s)
+      proposal[s]=detail::species_search_update(anchor[s],correction[s]);
+    const double theta=detail::species_search_factor(anchor.size(),
+        [&](std::size_t s){return anchor[s];},[&](std::size_t s){return proposal[s];});
+    factor_passed &= expect(theta==1.0 && proposal[reverse ? 0 : 1]==0. &&
+        proposal[reverse ? 1 : 0]==.233-1e-8,
+        "active trace bound preserves the independently resolvable bulk direction");
+  }
+  factor_passed &= expect(detail::species_search_update(1.,-1e-8)==1. &&
+      detail::species_search_update(0.,-1e-8)==1e-8 &&
+      detail::species_search_update(1.,1e-8)==1.-1e-8 &&
+      !std::isfinite(detail::species_search_update(0.,std::numeric_limits<double>::infinity())),
+      "active bounds retain inward directions and do not hide nonfinite proposals");
   for (const bool pure_major : {false,true}) for (const bool reverse : {false,true}) {
     std::array<double,2> anchor{pure_major ? 1.0 : std::nextafter(1.0,0.0),
                                 pure_major ? 5.417e-20 : 1.0e-16};
