@@ -256,34 +256,52 @@ Int3 axis_offset(Int3 value, std::size_t axis, std::int32_t offset) noexcept {
   return value;
 }
 
-double face_cross_traction(const CartesianKernelPlan& kernels,
-                           ConstFieldView gradient,
-                           ConstFieldView viscosity, std::size_t axis,
-                           Int3 face,
-                           std::uint8_t momentum_component) noexcept {
-  return detail::viscous_cross_traction(kernels, gradient, viscosity, axis,
-                                         face, momentum_component);
+std::array<double, 3> face_cross_traction(
+    const CartesianKernelPlan& kernels, ConstFieldView gradient,
+    ConstFieldView viscosity, std::size_t axis, Int3 face) noexcept {
+  const Int3 left = axis_offset(face, axis, -1);
+  const auto normal = axis == 0 ? face.x : axis == 1 ? face.y : face.z;
+  const bool uniform = kernels.geometry_kind() == GeometryKind::uniform;
+  const double mu_face = uniform
+      ? detail::metric_interpolate_material_face<true>(kernels, axis, normal,
+            viscosity.unchecked(left, 0U), viscosity.unchecked(face, 0U))
+      : detail::metric_interpolate_material_face<false>(kernels, axis, normal,
+            viscosity.unchecked(left, 0U), viscosity.unchecked(face, 0U));
+  const auto interpolate_gradient = [&](std::uint8_t c) noexcept {
+    return uniform
+        ? detail::metric_interpolate_face<true>(kernels, axis, normal,
+              gradient.unchecked(left, c), gradient.unchecked(face, c))
+        : detail::metric_interpolate_face<false>(kernels, axis, normal,
+              gradient.unchecked(left, c), gradient.unchecked(face, c));
+  };
+  const double divergence = interpolate_gradient(0U) +
+                            interpolate_gradient(4U) + interpolate_gradient(8U);
+  std::array<double, 3> result;
+  for (std::uint8_t c = 0; c < 3; ++c) {
+    const double transpose = interpolate_gradient(3U * axis + c);
+    result[c] = mu_face * (transpose - (axis == c ? (2.0 / 3.0) * divergence : 0.0));
+  }
+  return result;
 }
 
-double cross_stress_cell_integral(const CartesianKernelPlan& kernels,
-                                  ConstFieldView gradient,
-                                  ConstFieldView viscosity, Int3 cell,
-                                  std::uint8_t component) noexcept {
-  double integral = 0.0;
+std::array<double, 3> cross_stress_cell_integrals(
+    const CartesianKernelPlan& kernels, ConstFieldView gradient,
+    ConstFieldView viscosity, Int3 cell) noexcept {
+  // Share material and trace interpolation across the three components,
+  // retaining each component's original axis accumulation order.
+  std::array<double, 3> integral{};
   for (std::size_t axis = 0U; axis < 3U; ++axis) {
     const Int3 plus = axis_offset(cell, axis, 1);
-    const double plus_traction =
-        face_cross_traction(kernels, gradient, viscosity, axis, plus,
-                            component);
-    const double minus_traction =
-        face_cross_traction(kernels, gradient, viscosity, axis, cell,
-                            component);
-    integral += plus_traction *
-                    detail::face_area(kernels,
-                                      static_cast<CartesianAxis>(axis), plus) -
-                minus_traction *
-                    detail::face_area(kernels,
-                                      static_cast<CartesianAxis>(axis), cell);
+    const auto plus_traction =
+        face_cross_traction(kernels, gradient, viscosity, axis, plus);
+    const auto minus_traction =
+        face_cross_traction(kernels, gradient, viscosity, axis, cell);
+    const double plus_area = detail::face_area(kernels,
+        static_cast<CartesianAxis>(axis), plus);
+    const double minus_area = detail::face_area(kernels,
+        static_cast<CartesianAxis>(axis), cell);
+    for (std::uint8_t c = 0; c < 3; ++c)
+      integral[c] += plus_traction[c] * plus_area - minus_traction[c] * minus_area;
   }
   return integral;
 }
@@ -873,8 +891,11 @@ Status assemble_momentum_impl(
         const double rho = state.density.trial.unchecked(cell, 0U);
         const double rho_n = state.density.accepted.unchecked(cell, 0U);
         const double rho_nm1 = state.density.previous.unchecked(cell, 0U);
-        const double diffusion = detail::diffusion_diagonal(
+        const auto diffusion_faces = detail::diffusion_cell_faces(
             *plan.kernels_, material.effective_viscosity, cell);
+        const double diffusion = diffusion_faces[0] + diffusion_faces[1] +
+            diffusion_faces[2] + diffusion_faces[3] + diffusion_faces[4] +
+            diffusion_faces[5];
         if (!std::isfinite(rho) || !std::isfinite(rho_n) ||
             !std::isfinite(rho_nm1) || rho <= 0.0 || rho_n <= 0.0 ||
             rho_nm1 <= 0.0 || !std::isfinite(diffusion) ||
@@ -893,6 +914,8 @@ Status assemble_momentum_impl(
                 2U))) {
           return {StatusCode::numerical_failure, kMomentumNumerical};
         }
+        const auto cross_integrals = cross_stress_cell_integrals(
+            *plan.kernels_, velocity_gradient, material.effective_viscosity, cell);
         for (std::uint8_t component = 0U; component < 3U; ++component) {
           if (!std::isfinite(state.velocity.trial.unchecked(cell, component)) ||
               !std::isfinite(
@@ -926,11 +949,8 @@ Status assemble_momentum_impl(
               *plan.kernels_, state.pressure_perturbation.trial, cell, 0U,
               component);
           const double laplacian = detail::negative_diffusion_operator(
-              *plan.kernels_, material.effective_viscosity,
-              state.velocity.trial, cell, component);
-          const double cross_integral = cross_stress_cell_integral(
-              *plan.kernels_, velocity_gradient,
-              material.effective_viscosity, cell, component);
+              diffusion_faces, state.velocity.trial, cell, component);
+          const double cross_integral = cross_integrals[component];
           const double volume = detail::cell_volume(*plan.kernels_, cell);
           const double residual =
               (unsteady + pressure - source + sink * velocity) * volume +
@@ -998,12 +1018,17 @@ Status assemble_momentum_impl(
         const double rho_n = state.density.accepted.unchecked(cell, 0U);
         const double rho_nm1 = state.density.previous.unchecked(cell, 0U);
         const double volume = detail::cell_volume(*plan.kernels_, cell);
-        const double diffusion_diagonal = detail::diffusion_diagonal(
+        const auto diffusion_faces = detail::diffusion_cell_faces(
             *plan.kernels_, material.effective_viscosity, cell);
+        const double diffusion_diagonal = diffusion_faces[0] + diffusion_faces[1] +
+            diffusion_faces[2] + diffusion_faces[3] + diffusion_faces[4] +
+            diffusion_faces[5];
         const double convective_diagonal =
             linear && context.scope == EquationAssemblyScope::momentum_predictor
                 ? outgoing_mass_coefficient(context.mass_flux, cell)
                 : 0.0;
+        const auto cross_integrals = cross_stress_cell_integrals(
+            *plan.kernels_, velocity_gradient, material.effective_viscosity, cell);
         for (std::uint8_t component = 0U; component < 3U; ++component) {
           const double velocity =
               state.velocity.trial.unchecked(cell, component);
@@ -1017,11 +1042,8 @@ Status assemble_momentum_impl(
               *plan.kernels_, state.pressure_perturbation.trial, cell, 0U,
               component);
           const double laplacian = detail::negative_diffusion_operator(
-              *plan.kernels_, material.effective_viscosity,
-              state.velocity.trial, cell, component);
-          const double cross_integral = cross_stress_cell_integral(
-              *plan.kernels_, velocity_gradient,
-              material.effective_viscosity, cell, component);
+              diffusion_faces, state.velocity.trial, cell, component);
+          const double cross_integral = cross_integrals[component];
           double source = 0.0;
           double sink = 0.0;
           for (std::size_t index = 0U; index < contributions.size; ++index) {

@@ -450,6 +450,34 @@ inline double negative_diffusion_operator(
                                         component));
 }
 
+// All components of a vector equation share the scalar face material. Keep
+// the six-term accumulation identical to the scalar operator above.
+inline std::array<double, 6> diffusion_cell_faces(
+    const CartesianKernelPlan& kernels, ConstFieldView coefficient,
+    Int3 cell) noexcept {
+  return {
+      positive_transmissibility(kernels, coefficient, CartesianAxis::x, cell),
+      positive_transmissibility(kernels, coefficient, CartesianAxis::x,
+                               {cell.x + 1, cell.y, cell.z}),
+      positive_transmissibility(kernels, coefficient, CartesianAxis::y, cell),
+      positive_transmissibility(kernels, coefficient, CartesianAxis::y,
+                               {cell.x, cell.y + 1, cell.z}),
+      positive_transmissibility(kernels, coefficient, CartesianAxis::z, cell),
+      positive_transmissibility(kernels, coefficient, CartesianAxis::z,
+                               {cell.x, cell.y, cell.z + 1})};
+}
+
+inline double negative_diffusion_operator(const std::array<double, 6>& faces,
+    ConstFieldView field, Int3 cell, std::uint8_t component) noexcept {
+  const double centre = field.unchecked(cell, component);
+  return faces[0] * (centre - field.unchecked({cell.x - 1, cell.y, cell.z}, component)) +
+         faces[1] * (centre - field.unchecked({cell.x + 1, cell.y, cell.z}, component)) +
+         faces[2] * (centre - field.unchecked({cell.x, cell.y - 1, cell.z}, component)) +
+         faces[3] * (centre - field.unchecked({cell.x, cell.y + 1, cell.z}, component)) +
+         faces[4] * (centre - field.unchecked({cell.x, cell.y, cell.z - 1}, component)) +
+         faces[5] * (centre - field.unchecked({cell.x, cell.y, cell.z + 1}, component));
+}
+
 template <CartesianAxis Axis>
 Status fill_equation_face_coefficients(const CartesianKernelPlan& kernels,
                                        ConstFieldView coefficient,
