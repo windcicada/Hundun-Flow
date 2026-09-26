@@ -834,11 +834,13 @@ bool test_resolved_patch_inlet_uses_each_physical_face_state() {
                           expected.rho,2e-11),
                      "each resolved inlet cell retains its own EOS density");
   }
+  std::vector<double> workspace(9U * fixture.pressure.storage.size());
   const Status refreshed = BoundaryThermophysicalFaceClosure::refresh_inlet_material(
       fixture.boundary,fixture.thermodynamics,fixture.transport,100000.0,
       as_const(fixture.pressure.view),fixture.outputs(),{},
       as_const(fixture.enthalpy.view),
-      {fixture.species_views.data(),fixture.species_views.size()});
+      {fixture.species_views.data(),fixture.species_views.size()},
+      {workspace.data(),workspace.size()});
   if (!refreshed)
     std::cerr << "resolved inlet refresh status=" << unsigned(refreshed.code)
               << "/" << refreshed.detail << '\n';
@@ -909,6 +911,141 @@ bool test_inlet_material_refresh_and_conservative_consumers(bool perry = false) 
       as_const(fixture.pressure.view),outputs,effective.view) &&
       temperature_before==fixture.output[1].storage && viscosity_before==effective.storage,
       "invalid physical pressure fails atomically without relaxing EOS");
+  return passed;
+}
+
+bool test_surface_workspace() {
+  MixtureFixture fixture;
+  if (!fixture.initialize()) return false;
+  const std::array<double, 1> fractions{0.35};
+  for (std::size_t i = 0; i < fixture.enthalpy.storage.size(); ++i) {
+    double h{}, cp{}, gas{};
+    if (!fixture.thermodynamics.mixture_enthalpy(i % 2 ? 650. : 1400.,
+          {fractions.data(), fractions.size()}, h, cp, gas)) return false;
+    fixture.enthalpy.storage[i] = h;
+    fixture.pressure.storage[i] = 1325. + double(i);
+    fixture.species.storage[i] = fractions[0];
+  }
+  BoundaryThermophysicalGhostCertificate certificate;
+  const auto close = [&](Span<double> work) {
+    return BoundaryThermophysicalFaceClosure::close(fixture.boundary,
+        fixture.thermodynamics, fixture.transport, fixture.input(),
+        fixture.outputs(), ghost_context(fixture.boundary), certificate, work);
+  };
+  if (!close({})) return false;
+  std::array<std::vector<double>, 8> expected;
+  for (std::size_t i = 0; i < expected.size(); ++i)
+    expected[i] = fixture.output[i].storage;
+  const auto unchanged = [&]() {
+    for (std::size_t i = 0; i < expected.size(); ++i)
+      if (expected[i] != fixture.output[i].storage) return false;
+    return true;
+  };
+  std::vector<double> workspace(8 * fixture.pressure.storage.size());
+  bool passed = true;
+  for (const auto size : {workspace.size(), std::size_t{1}}) {
+    for (auto& field : fixture.output)
+      for (int z = -kGhosts; z < kCells.z + kGhosts; ++z)
+        for (int y = -kGhosts; y < kCells.y + kGhosts; ++y)
+          for (int x = -kGhosts; x < kCells.x + kGhosts; ++x)
+            if (x < 0 || x >= kCells.x || y < 0 || y >= kCells.y ||
+                z < 0 || z >= kCells.z)
+              field.view.unchecked({x,y,z}, 0) = kSentinel;
+    Status status;
+    std::size_t allocations{};
+    {
+      allocation_observer::Guard guard;
+      status = close({workspace.data(), size});
+      allocations = allocation_observer::count.load(std::memory_order_relaxed);
+    }
+    passed &= expect(status && certificate.valid() && unchanged() && allocations == 0,
+        "staged and undersized-workspace closures preserve all values without allocation");
+  }
+  const Int3 last{kCells.x - 1, kCells.y - 1, kCells.z + kGhosts - 1};
+  const double saved = fixture.enthalpy.view.unchecked(last, 0);
+  fixture.enthalpy.view.unchecked(last, 0) = std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(!close({workspace.data(), workspace.size()}) &&
+      unchanged() && !certificate.valid(),
+      "staged final-ghost failure leaves every physical output unchanged");
+  fixture.enthalpy.view.unchecked(last, 0) = saved;
+  for (const auto span : {Span<double>{fixture.pressure.storage.data(),
+                                     fixture.pressure.storage.size()},
+                         Span<double>{fixture.output[0].storage.data(),
+                                     fixture.output[0].storage.size()},
+                         Span<double>{nullptr, workspace.size()},
+                         Span<double>{workspace.data(),
+                                      std::numeric_limits<std::size_t>::max()}})
+    passed &= expect(close(span).code == StatusCode::invalid_plan &&
+        unchanged() && !certificate.valid(),
+        "surface workspace rejects aliases and invalid storage ranges");
+  return passed;
+}
+
+bool test_material_surface_workspace() {
+  MixtureFixture fixture;
+  if (!fixture.initialize(false, true)) return false;
+  for (std::size_t i = 0; i < fixture.enthalpy.storage.size(); ++i) {
+    const double y = i % 2 ? 0.15 : 0.6;
+    double h{}, cp{}, gas{};
+    if (!fixture.thermodynamics.mixture_enthalpy(i % 2 ? 650. : 1400.,
+          {&y, 1U}, h, cp, gas)) return false;
+    fixture.enthalpy.storage[i] = h;
+    fixture.pressure.storage[i] = 1325. + double(i);
+    fixture.species.storage[i] = y;
+  }
+  std::fill(fixture.output[1].storage.begin(), fixture.output[1].storage.end(), 650.);
+  std::fill(fixture.output[5].storage.begin(), fixture.output[5].storage.end(), 2e-5);
+  OwnedField effective = make_field(88U, 91U, 300U);
+  std::fill(effective.storage.begin(), effective.storage.end(), 5e-5);
+  std::array<std::vector<double>, 8> initial, expected;
+  for (std::size_t i = 0; i < initial.size(); ++i)
+    initial[i] = fixture.output[i].storage;
+  const auto initial_effective = effective.storage;
+  const auto refresh = [&](Span<double> work) {
+    return BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+        fixture.boundary, fixture.thermodynamics, fixture.transport, 100000.,
+        as_const(fixture.pressure.view), fixture.outputs(), effective.view,
+        as_const(fixture.enthalpy.view),
+        {fixture.species_views.data(), fixture.species_views.size()}, work);
+  };
+  if (!refresh({})) return expect(false, "uncached inlet/outlet material reference succeeds");
+  for (std::size_t i = 0; i < expected.size(); ++i)
+    expected[i] = fixture.output[i].storage;
+  const auto expected_effective = effective.storage;
+  const auto unchanged = [&]() {
+    for (std::size_t i = 0; i < expected.size(); ++i)
+      if (expected[i] != fixture.output[i].storage) return false;
+    return effective.storage == expected_effective;
+  };
+  std::vector<double> workspace(9U * fixture.pressure.storage.size());
+  bool passed = true;
+  for (const auto size : {workspace.size(), std::size_t{1}}) {
+    for (std::size_t i = 0; i < initial.size(); ++i)
+      std::copy(initial[i].begin(), initial[i].end(), fixture.output[i].storage.begin());
+    std::copy(initial_effective.begin(), initial_effective.end(), effective.storage.begin());
+    Status status;
+    std::size_t allocations{};
+    {
+      allocation_observer::Guard guard;
+      status = refresh({workspace.data(), size});
+      allocations = allocation_observer::count.load(std::memory_order_relaxed);
+    }
+    passed &= expect(status && unchanged() && allocations == 0,
+        "staged inlet/outlet material and small-scratch fallback are bitwise equal without allocation");
+  }
+  const Int3 late_outlet{kCells.x, kCells.y - 1, kCells.z - 1};
+  const double saved = fixture.enthalpy.view.unchecked(late_outlet, 0);
+  fixture.enthalpy.view.unchecked(late_outlet, 0) = std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(!refresh({workspace.data(), workspace.size()}) && unchanged(),
+      "invalid outlet trace cannot partially publish staged inlet or SGS material");
+  fixture.enthalpy.view.unchecked(late_outlet, 0) = saved;
+  for (const auto span : {Span<double>{fixture.enthalpy.storage.data(), fixture.enthalpy.storage.size()},
+                         Span<double>{fixture.species.storage.data(), fixture.species.storage.size()},
+                         Span<double>{effective.storage.data(), effective.storage.size()},
+                         Span<double>{nullptr, workspace.size()},
+                         Span<double>{workspace.data(), std::numeric_limits<std::size_t>::max()}})
+    passed &= expect(refresh(span).code == StatusCode::invalid_plan && unchanged(),
+        "material workspace rejects aliases and invalid storage ranges before publication");
   return passed;
 }
 
@@ -1149,10 +1286,11 @@ bool test_mpi_and_periodic_ghosts_remain_halo_owned(int rank, int size) {
   const BoundaryThermophysicalGhostOutput output{
       outputs[0U].view, outputs[1U].view, outputs[2U].view, outputs[3U].view,
       outputs[4U].view, outputs[5U].view, outputs[6U].view, outputs[7U].view};
+  std::vector<double> workspace(8U * pressure.storage.size());
   BoundaryThermophysicalGhostCertificate certificate;
   const Status status = BoundaryThermophysicalFaceClosure::close(
       boundary, thermodynamics, transport, input, output,
-      ghost_context(boundary), certificate);
+      ghost_context(boundary), certificate, {workspace.data(), workspace.size()});
   passed &=
       expect(static_cast<bool>(status) && certificate.valid(),
              "2-rank physical closure succeeds with a certificate");
@@ -1234,6 +1372,8 @@ int main(int argc, char **argv) {
   const bool passed =
       test_constant_cp_physical_ghost_closure() &&
       test_nasa_mixture_uses_fixed_ph_y() &&
+      test_surface_workspace() &&
+      test_material_surface_workspace() &&
       test_physical_inlet_face_keeps_discrete_mirror() &&
       test_physical_inlet_face_keeps_discrete_mirror(true) &&
       test_resolved_patch_inlet_uses_each_physical_face_state() &&

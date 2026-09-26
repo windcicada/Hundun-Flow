@@ -12059,6 +12059,22 @@ Status ProductDriver::Impl::execute_attempt(
   // the next continuity and energy residual consumes before asking the
   // coupler for HbyA/phiHbyA.  Effective thermal fields are published only
   // after the resulting velocity ghosts have refreshed turbulence.
+  Span<double> boundary_thermo_workspace;
+  if (status && cold_method) {
+    // CN never enters the pressure-energy candidate search below. Borrow its
+    // compiled gradient storage while closing physical ghosts; the existing
+    // owned-memory budget already includes this buffer.
+    FieldView scratch;
+    status = runtime_write_view(product.fields.pressure_energy_candidate_velocity_gradient,
+                                scratch);
+    detail::FieldStorageInterval interval;
+    if (status && !detail::field_storage_interval(scratch, interval))
+      status = {StatusCode::invalid_plan, kProductBinding};
+    if (status)
+      boundary_thermo_workspace = {reinterpret_cast<double*>(interval.begin),
+          (interval.end - interval.begin) / sizeof(double)};
+  }
+  status = product.reductions.consensus(status);
   bool cold_freeze_sgs = false;
   const auto refresh_coupled_state = [&](
       StageId halo_stage, BoundaryThermophysicalGhostPhase phase,
@@ -12159,7 +12175,7 @@ Status ProductDriver::Impl::execute_attempt(
               {step.generation, product.geometry.fingerprint(),
                pressure_reference_certificate.pressure_reference,
                product.boundary.revision(), phase},
-              candidate);
+              candidate, boundary_thermo_workspace);
           if (refreshed) boundary_thermo_certificate = candidate;
         }
       }
@@ -12206,7 +12222,8 @@ Status ProductDriver::Impl::execute_attempt(
           attempt_pressure_reference, as_const(trial_pressure),
           {{}, {}, {}, {}, {}, molecular_viscosity, conductivity,
            enthalpy_diffusivity}, effective_viscosity,
-          as_const(trial_enthalpy), {species_accepted.data(), species_accepted.size()});
+          as_const(trial_enthalpy), {species_accepted.data(), species_accepted.size()},
+          boundary_thermo_workspace);
     refreshed = product.reductions.consensus(refreshed);
     if (!refreshed) return refreshed;
     // Publish the final viscosity, not the value preceding this turbulence

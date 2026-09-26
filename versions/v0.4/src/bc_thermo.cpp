@@ -468,6 +468,18 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
     ConstFieldView pressure,const BoundaryThermophysicalGhostOutput &output,
     FieldView effective, ConstFieldView outlet_enthalpy,
     Span<const ConstFieldView> outlet_species) noexcept {
+  return refresh_inlet_material(boundary, thermodynamics, transport,
+      pressure_reference, pressure, output, effective, outlet_enthalpy,
+      outlet_species, {});
+}
+
+Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+    const BoundaryPlan &boundary,const ThermodynamicsPlan &thermodynamics,
+    const TransportPlan &transport,double pressure_reference,
+    ConstFieldView pressure,const BoundaryThermophysicalGhostOutput &output,
+    FieldView effective, ConstFieldView outlet_enthalpy,
+    Span<const ConstFieldView> outlet_species,
+    Span<double> surface_workspace) noexcept {
   const Int3 n=boundary.local_cells(), ghosts=pressure.ghosts;
   if (!finite_positive(pressure_reference) || !valid_scalar_view(pressure,n,ghosts) ||
       thermodynamics.fingerprint()==0U || transport.fingerprint()==0U ||
@@ -522,11 +534,58 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
     return {StatusCode::invalid_plan,kClosureInput};
   std::array<bool,6U> physical{};
   if (!physical_faces(boundary,physical)) return {StatusCode::invalid_plan,kClosureInput};
+  std::size_t surface_count{};
+  if (surface_workspace.size) {
+    const auto aliases = [&](ConstFieldView view) noexcept {
+      return detail::field_view_overlaps_storage(view, surface_workspace.data,
+                                                surface_workspace.size);
+    };
+    if (aliases(pressure)) return {StatusCode::invalid_plan, kClosureInput};
+    for (const auto field : fields)
+      if (field.base && aliases(as_const(field)))
+        return {StatusCode::invalid_plan, kClosureInput};
+    if (outlet_state || resolved_trace_state) {
+      if (aliases(outlet_enthalpy)) return {StatusCode::invalid_plan, kClosureInput};
+      for (std::size_t i = 0; i < outlet_species.size; ++i)
+        if (aliases(outlet_species.data[i]))
+          return {StatusCode::invalid_plan, kClosureInput};
+    }
+    for_each_physical_ghost(n, ghosts, physical, [&](Int3 cell) noexcept {
+      if (inlet_face_cell(boundary,
+          BoundaryThermophysicalClosureKind::physical_inlet_face,
+          cell, n, outlet_state).selected) ++surface_count;
+      return Status{};
+    });
+  }
+  const bool staged = surface_count > 0 &&
+      surface_count <= surface_workspace.size / fields.size();
   // The first pass validates the whole surface before any output is changed.
   for (unsigned pass=0U;pass<2U;++pass) {
+    std::size_t surface_index{};
     const Status status=for_each_physical_ghost(n,ghosts,physical,[&](Int3 cell) noexcept {
       const auto inlet=inlet_face_cell(boundary,BoundaryThermophysicalClosureKind::physical_inlet_face,cell,n,outlet_state);
       if (!inlet.selected) return Status{};
+      if (pass && staged) {
+        for (std::size_t i = 0; i < fields.size(); ++i)
+          if (fields[i].base)
+            fields[i].unchecked(cell, 0) =
+                surface_workspace.data[surface_index * fields.size() + i];
+        ++surface_index;
+        return Status{};
+      }
+      const auto publish = [&](const std::array<double, 9>& values) noexcept {
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+          if (!std::isfinite(values[i]))
+            return Status{StatusCode::numerical_failure, kClosureState};
+          if (pass && fields[i].base) fields[i].unchecked(cell, 0) = values[i];
+        }
+        if (staged) {
+          std::copy(values.begin(), values.end(),
+              surface_workspace.data + surface_index * fields.size());
+          ++surface_index;
+        }
+        return Status{};
+      };
       const auto owner=inlet.owner;
       if (owner.x<0 || owner.y<0 || owner.z<0 || owner.x>=n.x || owner.y>=n.y || owner.z>=n.z)
         return Status{StatusCode::invalid_plan,kClosureInput};
@@ -552,12 +611,9 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
               material[2], material[6], material[7]);
           if (!status) return status;
         }
-        for (std::size_t i = 0; i < fields.size(); ++i) {
-          const double value = i < material.size() ? material[i] : mu_effective;
-          if (!std::isfinite(value)) return Status{StatusCode::numerical_failure, kClosureState};
-          if (pass && fields[i].base) fields[i].unchecked(cell, 0) = value;
-        }
-        return Status{};
+        return publish({material[0], material[1], material[2], material[3],
+                        material[4], material[5], material[6], material[7],
+                        mu_effective});
       }
       const BoundaryFacePlan *face=nullptr;
       if (!boundary.face(inlet.face,face) || face==nullptr ||
@@ -627,13 +683,8 @@ Status BoundaryThermophysicalFaceClosure::refresh_inlet_material(
         evaluated=transport.effective_enthalpy_transport(molecular.viscosity,mu_effective,thermo.cp,k,gamma);
         if (!evaluated) return evaluated;
       }
-      const std::array<double,9U> values{thermo.rho,t_stencil,thermo.cp,thermo.drho_dp_hY,
-          thermo.drho_dh_pY,molecular.viscosity,k,gamma,mu_effective};
-      for (std::size_t i=0U;i<fields.size();++i) {
-        if (!std::isfinite(values[i])) return Status{StatusCode::numerical_failure,kClosureState};
-        if (pass!=0U && fields[i].base!=nullptr) fields[i].unchecked(cell,0U)=values[i];
-      }
-      return Status{};
+      return publish({thermo.rho,t_stencil,thermo.cp,thermo.drho_dp_hY,
+          thermo.drho_dh_pY,molecular.viscosity,k,gamma,mu_effective});
     });
     if (!status) return status;
   }
@@ -699,6 +750,17 @@ Status BoundaryThermophysicalFaceClosure::close(
     const BoundaryPlan &boundary, const ThermodynamicsPlan &thermodynamics,
     const TransportPlan &transport,
     const BoundaryThermophysicalGhostInput &input,
+    const BoundaryThermophysicalGhostOutput &output,
+    BoundaryThermophysicalGhostContext context,
+    BoundaryThermophysicalGhostCertificate &certificate) noexcept {
+  return close(boundary, thermodynamics, transport, input, output, context,
+               certificate, {});
+}
+
+Status BoundaryThermophysicalFaceClosure::close(
+    const BoundaryPlan &boundary, const ThermodynamicsPlan &thermodynamics,
+    const TransportPlan &transport,
+    const BoundaryThermophysicalGhostInput &input,
     const BoundaryThermophysicalGhostOutput &output) noexcept {
   constexpr std::size_t kMaximumAuthorityFields =
       kMaximumIndependentSpecies + 2U;
@@ -746,7 +808,8 @@ Status BoundaryThermophysicalFaceClosure::close(
     const BoundaryThermophysicalGhostInput &input,
     const BoundaryThermophysicalGhostOutput &output,
     BoundaryThermophysicalGhostContext context,
-    BoundaryThermophysicalGhostCertificate &certificate) noexcept {
+    BoundaryThermophysicalGhostCertificate &certificate,
+    Span<double> surface_workspace) noexcept {
   certificate = {};
   const BoundaryThermophysicalGhostAuthority authority = input.authority;
   const Int3 interior = boundary.local_cells();
@@ -865,22 +928,60 @@ Status BoundaryThermophysicalFaceClosure::close(
     return {StatusCode::invalid_plan, kClosureInput};
 
   std::array<double, kMaximumIndependentSpecies> composition{};
+  // Keep the validated surface results until publication. Inputs and outputs
+  // are disjoint, so recomputing EOS/transport in the write pass would repeat
+  // exactly the same work. The surface-only staging preserves all-or-nothing
+  // output and certificate publication, including a failure at the last ghost.
+  std::size_t surface_count{};
+  if (surface_workspace.size) {
+    const auto aliases = [&](ConstFieldView view) noexcept {
+      return detail::field_view_overlaps_storage(view, surface_workspace.data,
+                                                surface_workspace.size);
+    };
+    if (aliases(input.pressure_perturbation) || aliases(input.enthalpy))
+      return {StatusCode::invalid_plan, kClosureInput};
+    for (const auto view : outputs)
+      if (aliases(as_const(view))) return {StatusCode::invalid_plan, kClosureInput};
+    for (std::size_t j = 0; j < input.independent_species.size; ++j)
+      if (aliases(input.independent_species.data[j]))
+        return {StatusCode::invalid_plan, kClosureInput};
+    for_each_physical_ghost(interior, ghosts, physical, [&](Int3) noexcept {
+      ++surface_count;
+      return Status{};
+    });
+  }
+  const bool staged = surface_count > 0 &&
+      surface_count <= surface_workspace.size / kOutputCount;
   std::array<double, kOutputCount> values{};
+  std::size_t surface_index{};
   Status pass = for_each_physical_ghost(
       interior, ghosts, physical, [&](Int3 cell) noexcept {
-        return evaluate_cell(boundary, thermodynamics, transport, input, cell,
-                             composition, values);
+        const auto status = evaluate_cell(boundary, thermodynamics, transport,
+                                          input, cell, composition, values);
+        if (status && staged) {
+          std::copy(values.begin(), values.end(),
+                    surface_workspace.data + surface_index * kOutputCount);
+          ++surface_index;
+        }
+        return status;
       });
   if (!pass) return pass;
   const BoundaryThermophysicalGhostBinding binding{
       input.pressure_reference, input.pressure_perturbation, input.enthalpy,
       input.independent_species, as_const(output.density), input.closure_kind};
   ThermophysicalGhostDigests digests;
+  surface_index = 0U;
   pass = for_each_physical_ghost(
       interior, ghosts, physical, [&](Int3 cell) noexcept {
-        const Status status = evaluate_cell(boundary, thermodynamics, transport, input,
-                                            cell, composition, values);
-        if (!status) return status;
+        if (staged) {
+          std::copy_n(surface_workspace.data + surface_index * kOutputCount,
+                      kOutputCount, values.begin());
+          ++surface_index;
+        } else {
+          const auto status = evaluate_cell(boundary, thermodynamics, transport,
+                                            input, cell, composition, values);
+          if (!status) return status;
+        }
         for (std::size_t field = 0U; field < outputs.size(); ++field) {
           outputs[field].unchecked(cell, 0U) = values[field];
         }

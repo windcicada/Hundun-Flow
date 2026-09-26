@@ -565,6 +565,17 @@ class BoundaryThermophysicalFaceClosure {
       const BoundaryThermophysicalGhostOutput& output,
       FieldView effective_viscosity = {}, ConstFieldView outlet_enthalpy = {},
       Span<const ConstFieldView> outlet_species = {}) noexcept;
+  // Disjoint scratch retains nine doubles per selected inlet/outlet ghost.
+  // Empty or insufficient scratch preserves the original two-pass path.
+  // Scratch may change on failure; output publication remains atomic.
+  static Status refresh_inlet_material(
+      const BoundaryPlan& boundary, const ThermodynamicsPlan& thermodynamics,
+      const TransportPlan& transport, double pressure_reference,
+      ConstFieldView pressure_perturbation,
+      const BoundaryThermophysicalGhostOutput& output,
+      FieldView effective_viscosity, ConstFieldView outlet_enthalpy,
+      Span<const ConstFieldView> outlet_species,
+      Span<double> surface_workspace) noexcept;
   // Compatibility entry point for the original four-field authority.  It
   // performs the same numeric closure but deliberately publishes no reusable
   // physical-ghost certificate.
@@ -582,6 +593,19 @@ class BoundaryThermophysicalFaceClosure {
                       const BoundaryThermophysicalGhostOutput& output,
                       BoundaryThermophysicalGhostContext context,
                       BoundaryThermophysicalGhostCertificate& certificate)
+      noexcept;
+
+  // Optional disjoint scratch retains eight doubles per physical ghost.
+  // An empty or smaller span uses the allocation-free two-evaluation path.
+  // Scratch may change on failure; physical outputs remain atomic.
+  static Status close(const BoundaryPlan& boundary,
+                      const ThermodynamicsPlan& thermodynamics,
+                      const TransportPlan& transport,
+                      const BoundaryThermophysicalGhostInput& input,
+                      const BoundaryThermophysicalGhostOutput& output,
+                      BoundaryThermophysicalGhostContext context,
+                      BoundaryThermophysicalGhostCertificate& certificate,
+                      Span<double> surface_workspace)
       noexcept;
 };
 
