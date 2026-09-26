@@ -2846,7 +2846,8 @@ Status mixture_transport_face_rate(const CartesianKernelPlan& plan,
 Status mixture_divergence(
     const CartesianKernelPlan& plan, const MixtureTransportFaces& mixture,
     ConstFaceFluxView flux, const KernelInvocation& invocation,
-    ConstFieldView physical,const detail::ScalarDiffusionFaces* cached=nullptr) noexcept {
+    ConstFieldView physical,const detail::ScalarDiffusionFaces* cached=nullptr,
+    Span<const std::uint8_t> activity={}) noexcept {
   const auto cells = plan.cells();
   if (plan.fingerprint() == 0U || mixture.linearization == 0U ||
       mixture.face_flux != flux.revision ||
@@ -2855,7 +2856,9 @@ Status mixture_divergence(
       !detail::valid_kernel_box(invocation.box,cells) ||
       invocation.reads.size != 1U || invocation.reads.data == nullptr ||
       invocation.writes.size != 1U || invocation.writes.data == nullptr ||
-      invocation.component_count != 1U)
+      invocation.component_count != 1U ||
+      (activity.size && (!activity.data ||
+          activity.size != std::size_t(cells.x)*cells.y*cells.z)))
     return {StatusCode::invalid_plan,kTransportKernel};
   const auto q = invocation.reads.data[0];
   const auto result = invocation.writes.data[0];
@@ -2879,7 +2882,18 @@ Status mixture_divergence(
         physical.base ? 36U : 24U,1U);
     if (!counted) return counted;
   }
-  const auto status=detail::shared_cell_faces(cells,invocation.box,{},
+  // Solid rows have an identity constraint rather than a transport equation.
+  // Clear their reused scratch explicitly; the shared-face cache invalidates
+  // at inactive cells, keeping every fluid-side evaluation unchanged.
+  if(activity.size) {
+    const auto box=invocation.box;
+    for(int z=box.begin.z;z<box.begin.z+box.cells.z;++z)
+      for(int y=box.begin.y;y<box.begin.y+box.cells.y;++y)
+        for(int x=box.begin.x;x<box.begin.x+box.cells.x;++x)
+          if(activity.data[(std::size_t(z)*cells.y+y)*cells.x+x]==0U)
+            result.unchecked({x,y,z},invocation.write_component_begin)=0.0;
+  }
+  const auto status=detail::shared_cell_faces(cells,invocation.box,activity,
       [&](CartesianAxis axis,Int3 face,double& value) -> Status {
         return mixture_transport_face_rate(plan,faces,extra,q,
             invocation.read_component_begin,physical,axis,face,value,cached);
@@ -2914,9 +2928,10 @@ Status cartesian_mixture_transport(
 
 Status detail::cached_mixture_transport(const CartesianKernelPlan& plan,
     const MixtureTransportFaces& mixture,const ScalarDiffusionFaces& cached,
-    ConstFaceFluxView flux,const KernelInvocation& invocation) noexcept {
+    ConstFaceFluxView flux,const KernelInvocation& invocation,
+    Span<const std::uint8_t> activity) noexcept {
   if(!cached.matches(plan,cached.material()))return {StatusCode::invalid_plan,kTransportKernel};
-  return mixture_divergence(plan,mixture,flux,invocation,cached.material(),&cached);
+  return mixture_divergence(plan,mixture,flux,invocation,cached.material(),&cached,activity);
 }
 
 Status form_cartesian_mixture_transport_flux(

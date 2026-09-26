@@ -1664,6 +1664,47 @@ bool test_ibm_species_matrix(bool passive = false, bool periodic = false) {
         "IBM complete transport retains fluid diffusion and wall impermeability");
   };
   passed &= check_wall_transport();
+  {
+    // Exercise the complete frozen-material IBM assembly with nonconstant
+    // composition, cut faces and stale output scratch, including periodic
+    // solids. Every stored row/face must match the uncached physical path.
+    auto mixture_context=context;
+    mixture_context.mixture_transport=&mixture;
+    status=detail::assemble_species_coupling_rows(fixture.equations.species(),0,
+        state,material,mixture_context,system);
+    if(!expect(bool(status),"IBM mixture reference rows assemble"))return false;
+    const auto expected_diagonal=diagonal.bytes, expected_rhs=rhs.bytes,
+        expected_residual=residual.bytes, expected_x=ax.bytes,
+        expected_y=ay.bytes, expected_z=az.bytes;
+    detail::ScalarDiffusionFaces cached;
+    status=cached.allocate(cells);
+    if(status)status=cached.prepare(fixture.equations.kernels(),d);
+    const auto frozen=cached.material();
+    auto cached_material=material;
+    cached_material.scalar_mass_diffusivity={&frozen,1};
+    mixture_context.scalar_diffusion_faces=&cached;
+    fill_field(diagonal,7.0);fill_field(rhs,8.0);fill_field(residual,9.0);
+    if(status)status=detail::assemble_species_coupling_rows(fixture.equations.species(),0,
+        state,cached_material,mixture_context,system);
+    passed &= expect(bool(status) && diagonal.bytes==expected_diagonal && rhs.bytes==expected_rhs &&
+        residual.bytes==expected_residual && ax.bytes==expected_x && ay.bytes==expected_y && az.bytes==expected_z,
+        "frozen IBM mixture rows preserve fluid values and reset solid scratch exactly");
+    KernelInvocation call{{&fraction,1},{&residual.view,1},{{0,0,0},cells},
+                          0,0,1,flux.revision};
+    status=cartesian_mixture_transport(fixture.equations.kernels(),mixture,d,as_const(flux),call);
+    const auto full_rate=residual.bytes;
+    if(status)status=detail::cached_mixture_transport(fixture.equations.kernels(),mixture,
+        cached,as_const(flux),call,region);
+    bool same=bool(status);
+    for(std::size_t i=0;i<region.size;++i)
+      same &= residual.bytes[i]==(region.data[i] ? full_rate[i] : 0.0);
+    passed &= expect(same,"active transport preserves fluid faces and clears all inactive rates");
+    const auto masked_rate=residual.bytes;
+    status=detail::cached_mixture_transport(fixture.equations.kernels(),mixture,
+        cached,as_const(flux),call,{region.data,region.size-1});
+    passed &= expect(!status && residual.bytes==masked_rate,
+        "invalid activity extent rejects before transport output changes");
+  }
   // The REFERENCE selector's downstream fallback reaches the solid placeholder.
   // Fluid-face coefficients must stay invariant under changes to that state.
   for(int z=0;z<n;++z) for(int y=0;y<n;++y) for(int x=0;x<n;++x)

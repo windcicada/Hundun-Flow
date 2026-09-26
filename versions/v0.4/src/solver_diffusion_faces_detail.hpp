@@ -80,5 +80,6 @@ class ScalarDiffusionFaces {
 };
 
 Status cached_mixture_transport(const CartesianKernelPlan&,const MixtureTransportFaces&,
-    const ScalarDiffusionFaces&,ConstFaceFluxView,const KernelInvocation&) noexcept;
+    const ScalarDiffusionFaces&,ConstFaceFluxView,const KernelInvocation&,
+    Span<const std::uint8_t> activity={}) noexcept;
 } // namespace hundun::v04::detail

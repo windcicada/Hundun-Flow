@@ -325,6 +325,14 @@ Status assemble_transport(
   const auto* mixture = (spec.role == TransportedScalarRole::species || statistical_enthalpy)
       ? context.mixture_transport : nullptr;
   const auto* cached=context.scalar_diffusion_faces;
+  const auto activity=context.immersed_interface
+      ? context.immersed_interface->cell_activity() : Span<const std::uint8_t>{};
+  if(context.immersed_interface && (!context.immersed_interface->fingerprint() ||
+      !activity.data || activity.size!=std::size_t(cells.x)*cells.y*cells.z))
+    return {StatusCode::invalid_plan,kScalarAssembly};
+  const auto active=[&](Int3 c) noexcept {
+    return !activity.size || activity.data[(std::size_t(c.z)*cells.y+c.y)*cells.x+c.x]!=0U;
+  };
   if(cached && (!mixture || !cached->matches(kernels,diffusivity) ||
       !detail::full_equation_box(resolved_box(context.box,cells),cells)))
     return {StatusCode::invalid_plan,kScalarAssembly};
@@ -496,7 +504,7 @@ Status assemble_transport(
                                     0U, 0U, 1U, context.face_flux,
                                     context.counters};
   Status evaluated = mixture
-      ? cached ? detail::cached_mixture_transport(kernels,*mixture,*cached,context.mass_flux,invocation)
+      ? cached ? detail::cached_mixture_transport(kernels,*mixture,*cached,context.mass_flux,invocation,activity)
           : cartesian_mixture_transport(kernels,*mixture,diffusivity,
                                     context.mass_flux,invocation)
       : context.scope == EquationAssemblyScope::final_conservative
@@ -531,6 +539,11 @@ Status assemble_transport(
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < end.x; ++x) {
         const Int3 cell{x, y, z};
+        if(!active(cell)) {
+          system.diagonal.unchecked(cell,0U)=1.0;
+          system.rhs.unchecked(cell,0U)=scalar.trial.unchecked(cell,0U);
+          continue;
+        }
         const double rho_trial = state.density.trial.unchecked(cell, 0U);
         const double rho_accepted =
             state.density.accepted.unchecked(cell, 0U);
@@ -641,6 +654,10 @@ Status assemble_transport(
     for (std::int32_t y = box.begin.y; y < end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < end.x; ++x) {
         const Int3 cell{x, y, z};
+        if(!active(cell)) {
+          system.residual.unchecked(cell,0U)=0.0;
+          continue;
+        }
         const double volume = detail::cell_volume(kernels, cell);
         const double residual =
             system.rhs.unchecked(cell, 0U) -
