@@ -19,6 +19,12 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
     COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/integration/pasr_pure_test.py" "$<TARGET_FILE:hundun>")
   set_tests_properties(v04_pasr_pure PROPERTIES TIMEOUT 90 PROCESSORS 1)
+  add_test(NAME v04_pasr_distribution
+    COMMAND "${HUNDUN_V04_PYTHON_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/integration/pasr_distribution_test.py"
+      "$<TARGET_FILE:hundun>" "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}"
+      "${MPIEXEC_PREFLAGS}" "${MPIEXEC_POSTFLAGS}")
+  set_tests_properties(v04_pasr_distribution PROPERTIES TIMEOUT 180 PROCESSORS 4 RUN_SERIAL TRUE)
 endif()
 
 add_executable(v04_models_tcr_dynamic_test unit/models_tcr_dynamic_test.cpp)

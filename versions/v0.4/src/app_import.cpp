@@ -228,13 +228,21 @@ Status reconstruct(const Header &h, const ThermodynamicsPlan &thermo,
   std::vector<double> solid(h.ns, 0);
   const auto oxygen = std::find(h.names.begin(), h.names.end(), "O2");
   const auto nitrogen = std::find(h.names.begin(), h.names.end(), "N2");
-  if (oxygen == h.names.end() || nitrogen == h.names.end())
-    return invalid();
-  // Match the native material's air definition; solid rows carry a valid 295 K
-  // state.
-  solid[oxygen - h.names.begin()] =
-      .21 * 31.998 / (.21 * 31.998 + .79 * 28.014);
-  solid[nitrogen - h.names.begin()] = 1 - solid[oxygen - h.names.begin()];
+  // Solid placeholders need a valid material state, even for mechanisms
+  // without air species. Prefer the existing air convention where available;
+  // otherwise use the target's dependent species. Fluid rows are untouched.
+  if (oxygen != h.names.end() && nitrogen != h.names.end()) {
+    solid[oxygen - h.names.begin()] =
+        .21 * 31.998 / (.21 * 31.998 + .79 * 28.014);
+    solid[nitrogen - h.names.begin()] = 1 - solid[oxygen - h.names.begin()];
+  } else {
+    for (std::size_t species = 0; species < h.ns; ++species)
+      if (std::find(h.independent.begin(), h.independent.end(), species) ==
+          h.independent.end()) {
+        solid[species] = 1.0;
+        break;
+      }
+  }
   std::vector<double> independent(h.independent.size());
   for (std::size_t s = 0; s < independent.size(); ++s)
     independent[s] = solid[h.independent[s]];
