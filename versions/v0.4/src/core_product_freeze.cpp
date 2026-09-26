@@ -14941,14 +14941,18 @@ Status ProductDriver::Impl::execute_attempt(
           // mixture still needs the E/Y audit to request its full conservative
           // scalar rows. Skipping it can repeat the temperature guess forever:
           // its unresolved composition then keeps the momentum gate open.
-          // Only an uncoupled material can skip E/Y solely on momentum.
+          // Once both requests are retained, a failed momentum row can skip
+          // the repeated E/Y audit. The first mixture audit must still run,
+          // and every candidate that can be accepted receives the full audit.
           const double momentum_gate_local[3]{reference_local[0], final_local[0], final_local[5]};
           double momentum_gate[3]{};
           status = product.reductions.checked_max({momentum_gate_local, 3U}, {momentum_gate, 3U});
           if (!status) return status;
           const double momentum_gate_residual = reference_stopping ? momentum_gate[0] : momentum_gate[1];
           const double momentum_gate_tolerance = reference_stopping ? product.cold_stopping->momentum : 1e-10;
-          if (!dual_esf && !audit_negative && mixture_energy_residual.empty() &&
+          const bool scalar_requests_retained = mixture_energy_residual.empty() ||
+              (conservative_energy_requested && !species_residual_limits.empty());
+          if (!dual_esf && !audit_negative && scalar_requests_retained &&
               !(product.reference_outer_iterations != 0U && cold_outer + 1U == outer_limit) &&
               momentum_gate[2] == 0.0 &&
               momentum_gate_residual >= momentum_gate_tolerance) {
