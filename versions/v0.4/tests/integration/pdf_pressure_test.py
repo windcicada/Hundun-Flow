@@ -37,13 +37,13 @@ for name,y in zip(species,fractions):
 def pack(path,values):
     path.write_bytes(struct.pack('<'+'d'*len(values),*values))
 
-def transfer(name,pressure,eos_pressure):
+def transfer(name,pressure,eos_pressure,fields=2):
     root=work/name;root.mkdir()
-    (root/'state.txt').write_text('HUNDUN_PDF_TRANSFER 1\n8 8 8 17 .001 1e-5 100000 2 7\n'+' '.join(species)+'\n')
+    (root/'state.txt').write_text('HUNDUN_PDF_TRANSFER 1\n8 8 8 17 .001 1e-5 100000 %d 7\n'%fields+' '.join(species)+'\n')
     pack(root/'flow.f64',[value for i in range(512) for value in (0.,0.,0.,pressure(i))])
     pack(root/'rho_ref.f64',[eos_pressure(i)/(gas*temperature) for i in range(512)])
     (root/'fluid.u8').write_bytes(bytes([1])*512)
-    for f in range(2):pack(root/('pdf%d.f64'%f),(fractions+[h])*512)
+    for f in range(fields):pack(root/('pdf%d.f64'%f),(fractions+[h])*512)
     return root
 
 def hashes(root):
@@ -181,6 +181,33 @@ pressure_records(root,positive)
 assert coupled_audit['pressure_model']=='coupled_eos'
 assert coupled_audit['thermodynamic_pressure_pa'] is None
 assert abs(coupled_audit['relative_mass_change'])<1e-12
+# A single thermochemical field belongs to mean chemistry, not the paired
+# stochastic ensemble. Exercise the public bridge and native BE recovery.
+single=transfer('single',lambda i:100000.,lambda i:100000.,fields=1)
+run(single,'single-esf',2,False,native=True,failure='case status=1/24110')
+saved_reaction=model['reaction']
+for mode in ('finite_rate_mean','auto'):
+    reaction=dict(saved_reaction,model=mode)
+    reaction.pop('ensemble')
+    if mode=='auto':reaction['ensemble']={'fields':1}
+    else:reaction.pop('mixing')
+    model['reaction']=reaction
+    (work/'case.json').write_text(json.dumps(model))
+    single_seed,single_audit=run(single,'single-'+mode,2,native=True)
+    pressure_records(single_seed,lambda i:100000.)
+    assert abs(single_audit['relative_mass_change'])<1e-12
+    single_run=work.with_name(work.name+'-single-resume-'+mode)
+    if single_run.exists():shutil.rmtree(single_run)
+    result=subprocess.run(list(map(str,[mpi,'--oversubscribe','--bind-to','none','-n',4,
+        application,'run',work,'--output',single_run,'--steps',1,'--restart',single_seed,
+        '--output-interval',0,'--restart-interval',1])),stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,universal_newlines=True)
+    assert result.returncode==0,result.stdout[-12000:]
+    single_generation=single_run/'Restart'/(single_run/'Restart/current').read_text().strip()
+    single_header=struct.unpack_from('<8sIIiiiQQQdddQQI',(single_generation/'manifest.bin').read_bytes())
+    assert single_header[12]==18 and abs(single_header[9]-.00101)<1e-16
+model['reaction']=saved_reaction
+(work/'case.json').write_text(json.dumps(model))
 solid=transfer('solid',positive,positive)
 (solid/'fluid.u8').write_bytes(bytes(512))
 run(solid,'empty',2,False,native=True,failure='inventory status=1/24113')

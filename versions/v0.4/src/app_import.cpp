@@ -124,7 +124,10 @@ Status read_header(const std::filesystem::path &root, Header &h) {
       h.time >> h.dt >> h.pressure >> h.nf >> h.ns;
   std::size_t count = 0;
   if (!in || magic != "HUNDUN_PDF_TRANSFER" || (version != 1 && version != 2) ||
-      !checked_product(h.cells, count) || !esf::valid_field_count(h.nf) ||
+      !checked_product(h.cells, count) ||
+      // One field is a mean finite-rate/PaSR state. Paired stochastic field
+      // counts remain unchanged and are checked against the target case below.
+      (h.nf != 1 && !esf::valid_field_count(h.nf)) ||
       h.ns < 2 || h.ns > 64 || h.step == 0 || !std::isfinite(h.time) ||
       h.time < 0 || !std::isfinite(h.dt) || h.dt <= 0 ||
       !std::isfinite(h.pressure) || h.pressure <= 0)
