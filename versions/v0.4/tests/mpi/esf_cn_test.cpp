@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <string_view>
 #include <mpi.h>
 #include <unistd.h>
 #include <vector>
@@ -31,18 +32,20 @@ std::vector<double> values(const RestartSnapshot& state) {
         result.push_back(v.unchecked({x,y,z}));
   return result;
 }
-bool run(const std::filesystem::path& assets,const std::filesystem::path& restart,int rank,bool backflow=false) {
+bool run(const std::filesystem::path& assets,const std::filesystem::path& restart,int rank,bool backflow=false,bool pasr=false) {
   ValidatedModel model;
   auto status=CaseCompiler::load_and_compile(MPI_COMM_WORLD,assets,model);
   if(!all(bool(status)))return false;
   model.time.scheme=TimeScheme::cn_be;model.solver.coupling=CouplingKind::outer_corrected;
   model.pressure_reference=PressureReferenceKind::boundary_absolute;
+  const double initial_temperature=pasr ? 1200. : 300.;
+  if(pasr) {model.reaction.mode=ReactionMode::pasr_algebraic_v1;model.reaction.esf.reset();}
   model.legacy_time_fingerprint=model.fingerprint;
   model.fingerprint^=0x434e455346484541ULL;
   model.boundaries[2].flow_kind=BoundaryKind::symmetry;
   model.boundaries[2].scalars={{"A",ScalarBoundaryKind::zero_gradient}};
   auto& outlet=model.boundaries[3];outlet.flow_kind=BoundaryKind::pressure_outlet;
-  outlet.pressure=101325;outlet.allow_backflow=true;outlet.backflow_temperature=300;
+  outlet.pressure=101325;outlet.allow_backflow=true;outlet.backflow_temperature=initial_temperature;
   outlet.scalars={{"A",ScalarBoundaryKind::zero_gradient}};
   outlet.scalars[0].backflow_kind=ScalarBoundaryKind::dirichlet;outlet.scalars[0].backflow_value=backflow ? 0. : .25;
   const auto create=[&](ProductDriver& driver) {
@@ -52,7 +55,7 @@ bool run(const std::filesystem::path& assets,const std::filesystem::path& restar
     return s;
   };
   ProductDriver driver;status=create(driver);
-  DriverInitialState initial;initial.pressure_reference=101325;initial.temperature=300;
+  DriverInitialState initial;initial.pressure_reference=101325;initial.temperature=initial_temperature;
   if(backflow)initial.velocity.y=-.01;
   double fraction=.25;initial.transported_scalars={&fraction,1};
   if(status)status=driver.initialize(initial);
@@ -67,7 +70,11 @@ bool run(const std::filesystem::path& assets,const std::filesystem::path& restar
     const double mass=std::abs(c.mass_balance_defect)/std::max({1.,std::abs(c.mass_bdf_rate),std::abs(c.mass_outflow)});
     const double energy=std::abs(c.total_energy_balance_defect)/std::max({1.,std::abs(c.total_energy_bdf_rate),std::abs(c.enthalpy_outflow),std::abs(c.kinetic_energy_outflow)});
     max_mass=std::max(max_mass,mass);max_energy=std::max(max_energy,energy);
-    bool okay=s && report.accepted && c.valid && mass<1e-6 && energy<1e-6;
+    // The COAST split has lagged pressure work; its raw total-energy
+    // defect is a splitting diagnostic, not a monolithic equation residual.
+    // This regression checks hot state/restart determinism and continuity.
+    bool okay=s && report.accepted && c.valid && mass<1e-6 &&
+        (pasr ? std::isfinite(energy) && report.piso.cold.outer_iterations==2 : energy<1e-6);
     if(rank==0)std::cout<<std::setprecision(17)<<"CN_heat backflow="<<backflow<<" step="<<report.accepted_step
       <<" status="<<unsigned(s.code)<<'/'<<s.detail<<" stage="<<report.failed_stage
       <<" accepted="<<report.accepted<<" mass="<<mass<<" energy="<<energy<<" passed="<<okay<<'\n';
@@ -99,7 +106,7 @@ bool run(const std::filesystem::path& assets,const std::filesystem::path& restar
   MPI_Allreduce(MPI_IN_PLACE,&ymin,1,MPI_DOUBLE,MPI_MIN,MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE,&ymax,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
   if(rank==0)std::cout<<"CN_heat physical Tmin="<<tmin<<" Tmax="<<tmax<<" Ymin="<<ymin<<" Ymax="<<ymax<<'\n';
-  if(!all(tmin>300 && tmax<301 && ymin>.249 && ymax<.25))return false;
+  if(!all(tmin>initial_temperature && tmax<initial_temperature+1 && ymin>.249 && ymax<.25))return false;
   const auto saved=values(state);
   status=RestartWriter::write(MPI_COMM_WORLD,restart,state);
   ProductDriver restored;if(status)status=create(restored);
@@ -111,7 +118,7 @@ bool run(const std::filesystem::path& assets,const std::filesystem::path& restar
   // A signed field0 tuple represents a distinct pressure-density state.
   // Restore it with the physical ensemble unchanged and inspect the public
   // density/temperature fields, independently of a subsequent time step.
-  {
+  if(!pasr) {
     auto split=image;
     for(auto* level:{&split.fields,&split.previous_fields})
       for(auto& field:*level)if(field.role==RestartFieldRole::stochastic_auxiliary)
@@ -176,8 +183,9 @@ int main(int argc,char** argv) {
   MPI_Init(&argc,&argv);int rank{};MPI_Comm_rank(MPI_COMM_WORLD,&rank);
   int id=int(getpid());MPI_Bcast(&id,1,MPI_INT,0,MPI_COMM_WORLD);
   const auto restart=std::filesystem::temp_directory_path()/("hf-cn-"+std::to_string(id));
-  bool okay=argc==2 && run(argv[1],restart,rank);
-  if(okay)okay=run(argv[1],restart,rank,true);
+  const bool pasr=argc==3 && std::string_view(argv[2])=="--pasr";
+  bool okay=(argc==2 || pasr) && run(argv[1],restart,rank,false,pasr);
+  if(okay)okay=run(argv[1],restart,rank,true,pasr);
   MPI_Barrier(MPI_COMM_WORLD);
   if(rank==0)std::filesystem::remove_all(restart);
   MPI_Finalize();return okay?0:1;

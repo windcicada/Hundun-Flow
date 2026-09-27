@@ -10,8 +10,8 @@
 #include <stdexcept>
 namespace hundun::v04::esf::detail {
 namespace {
-std::size_t checked_capacity(std::size_t species, std::size_t fields) {
-  if (species == 0 || !valid_field_count(fields) ||
+std::size_t checked_capacity(std::size_t species, std::size_t fields, bool deterministic) {
+  if (species == 0 || !(deterministic ? fields==1 : valid_field_count(fields)) ||
       species > std::numeric_limits<std::size_t>::max() / fields / sizeof(double) - 1)
     throw std::invalid_argument("invalid ESF prepared species capacity");
   return species;
@@ -123,7 +123,7 @@ DualStateReport dual_state_moments(const DualStateRequest& q,
   }
   const auto ns=a.species,n=a.fields;
   if (!ns || ns>std::numeric_limits<std::size_t>::max()/(maximum_fields*sizeof(double))-1 ||
-      !valid_field_count(n) || b.fields!=1 || b.species!=ns ||
+      !(n==1 || valid_field_count(n)) || b.fields!=1 || b.species!=ns ||
       !a.values || !b.values || !q.stochastic_densities_kg_per_m3 ||
       !out.physical_mean || !out.physical_variance ||
       !std::isfinite(q.auxiliary_density_kg_per_m3) ||
@@ -350,8 +350,8 @@ StochasticSourceReport stochastic_source(const StochasticSourceRequest& q,
   report.status=portable::Status::success;
   return report;
 }
-Workspace::Workspace(std::size_t ns, std::size_t fields)
-    : capacity_(checked_capacity(ns, fields)), field_capacity_(fields),
+Workspace::Workspace(std::size_t ns, std::size_t fields, bool deterministic)
+    : deterministic_(deterministic), capacity_(checked_capacity(ns, fields, deterministic)), field_capacity_(fields),
       wiener_(fields), final_densities_(fields), candidate_(fields * (ns + 1)),
       transported_(fields * (ns + 1)), means_(ns + 1), variances_(ns + 1),
       next_y_(ns), species_delta_(ns), mean_species_delta_(ns), mean_fraction_delta_(ns) {}
@@ -491,7 +491,7 @@ Report Workspace::recenter(const View& input,const double* target) noexcept {
   }
   const auto ns=input.species,n=input.fields,stride=ns+1;
   if(ns>capacity_ || n>field_capacity_) {report.status=portable::Status::capacity_exceeded;return report;}
-  if(!ns || !valid_field_count(n) || !input.values || !target ||
+  if(!ns || !valid_population(n) || !input.values || !target ||
       !fraction_tuple(target,ns) || !std::isfinite(target[ns])) return report;
   for(std::size_t f=0;f<n;++f)
     if(!fraction_tuple(input.values+f*stride,ns) ||
@@ -559,7 +559,7 @@ Report Workspace::react(const ReactionRequest &q,
     r.status = portable::Status::capacity_exceeded;
     return r;
   }
-  if (ns == 0 || !valid_field_count(n) || !a.values || !q.chemistry_identity ||
+  if (ns == 0 || !valid_population(n) || !a.values || !q.chemistry_identity ||
       !q.gas_identity || !q.pressures_pa || !q.initial_densities_kg_per_m3 ||
       !std::isfinite(q.start_time_s) || q.start_time_s < 0 ||
       !std::isfinite(q.duration_s) || q.duration_s <= 0 ||

@@ -296,12 +296,25 @@ void test_frozen_material_solution() {
   d[0]=h[0]=rates[0]=-123.;
   HUNDUN_CHECK(gas->query_sample(q,sample)==portable::Status::success);
   HUNDUN_CHECK(d[0]==-123. && h[0]==-123. && rates[0]==-123.);
+  const auto full_sample=sample.sample;
+  HUNDUN_CHECK(gas->query_thermo(q,sample)==portable::Status::success);
+  HUNDUN_CHECK(sample.sample.pressure_pa==full_sample.pressure_pa);
+  HUNDUN_CHECK(sample.sample.temperature_k==full_sample.temperature_k);
+  HUNDUN_CHECK(sample.sample.density_kg_per_m3==full_sample.density_kg_per_m3);
+  HUNDUN_CHECK(sample.sample.enthalpy_j_per_kg==full_sample.enthalpy_j_per_kg);
+  HUNDUN_CHECK(sample.sample.cp_j_per_kg_k==full_sample.cp_j_per_kg_k);
+  HUNDUN_CHECK(sample.sample.viscosity_pa_s==0. && sample.sample.conductivity_w_per_m_k==0.);
+  HUNDUN_CHECK(d[0]==-123. && h[0]==-123. && rates[0]==-123.);
+  HUNDUN_CHECK(gas->query_sample(q,sample)==portable::Status::success);
+  HUNDUN_CHECK(sample.sample.viscosity_pa_s==full_sample.viscosity_pa_s);
+  HUNDUN_CHECK(sample.sample.conductivity_w_per_m_k==full_sample.conductivity_w_per_m_k);
 }
 
 void test_interval_call_order(bool reference=false,bool frozen=false) {
   using namespace hundun::v04;
   auto c = config();
   if(reference)c.chemistry={0.,1e-10,5000,true,frozen};
+  else c.chemistry.frozen_material_interval=frozen;
   auto runtime = std::make_shared<chemistry::CanteraBackendRuntime>(c);
   chemistry::CanteraWorkspacePool pool(runtime, 1);
   auto gas = chemistry::make_cantera_backend(c, pool);
@@ -650,6 +663,7 @@ int main(int argc, char **argv) {
     test_interval_call_order();
     test_interval_call_order(true);
     test_interval_call_order(true,true);
+    test_interval_call_order(false,true);
     test_autonomous_interval_epoch();
     test_interval_budget_preserves_output();
     test_continuous_nasa_and_identity(argv[2]);

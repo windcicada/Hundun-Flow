@@ -844,8 +844,8 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
   } catch (const std::bad_alloc&) {
     return {StatusCode::allocation_failure, kProductRegistration};
   }
-  if (model.reaction.esf.has_value()) {
-    const auto count = model.reaction.esf->fields;
+  if (model.reaction.esf.has_value() || detail::split_pasr(model)) {
+    const auto count = model.reaction.esf ? model.reaction.esf->fields : 1U;
     const auto components = model.thermophysics.species.size() + 1U;
     if (components > UINT8_MAX || 5U + fields.scalars.size() + count > 64U)
       return {StatusCode::invalid_plan, kProductRegistration};
@@ -886,7 +886,7 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     if (!status)
       return status;
   }
-  if (model.reaction.esf || model.spray) {
+  if (model.reaction.esf || detail::split_pasr(model) || model.spray) {
     if (status)
       status = require(registry, "coupled_mass_source", 1U, 0U,
                        fields.coupled_mass_source);
@@ -902,7 +902,7 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     if (!status)
       return status;
   }
-  if (model.spray && model.reaction.esf) {
+  if (model.spray && (model.reaction.esf || detail::split_pasr(model))) {
     const auto scalar = [&](const std::string &name, std::uint8_t components,
                             std::uint8_t width, FieldId &id) {
       return require(registry, name.c_str(), components, width, id);
@@ -939,7 +939,7 @@ Status register_fields(FieldRegistry& registry, ProductFields& fields,
     if (!status)
       return status;
   }
-  if (model.reaction.esf) {
+  if (model.reaction.esf || detail::split_pasr(model)) {
     status = require(registry, "esf_auxiliary", fields.esf_components, 0,
                      fields.esf_auxiliary);
     if (!status) return status;
@@ -4067,7 +4067,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
       candidate->krylov_requirements);
   if (status) {
     if (piso_spec.pressure_algorithm == LinearAlgorithm::fgmres &&
-        (model.reaction.mode!=ReactionMode::esf_tpdf || candidate->krylov_requirements.vector_slots>=11)) {
+        ((model.reaction.mode!=ReactionMode::esf_tpdf && !detail::split_pasr(model)) || candidate->krylov_requirements.vector_slots>=11)) {
       // Preserve the accepted default identity and layout.  Momentum and the
       // enthalpy endpoint have always shared this storage sequentially with
       // pressure and use at most twelve configured FGMRES directions.
@@ -5069,7 +5069,7 @@ Status ProductCompiler::compile(MPI_Comm communicator,
     status = SolverWorkspace::bind(candidate->auxiliary_krylov_requirements,
                                    krylov_vectors, krylov_scalars,
                                    candidate->auxiliary_krylov_workspace);
-  if (status && model.reaction.mode==ReactionMode::esf_tpdf) {
+  if (status && (model.reaction.mode==ReactionMode::esf_tpdf || detail::split_pasr(model))) {
     LinearWorkspaceRequirements transport_requirements;
     status=make_linear_workspace_requirements(LinearAlgorithm::bicgstab,
         candidate->patch.cells,krylov_ghosts,0,ReductionMode::mpi_allreduce,1U,
@@ -9606,7 +9606,7 @@ Status ProductDriver::Impl::execute_attempt(
       status = product.reaction.clear_interval(product.layers, cells);
     else if (status)
       status = detail::measure_elapsed(physics_nanoseconds[0U],
-          product.reaction.enabled() && !product.reaction.esf_enabled(), [&]() noexcept {
+          product.reaction.enabled() && !product.reaction.transport_reaction_enabled(), [&]() noexcept {
         return product.reaction.prepare(
           accepted_state, product.thermodynamics, accepted_material,
           product.equations.kernels(), product.layers, cells,
@@ -10107,7 +10107,7 @@ Status ProductDriver::Impl::execute_attempt(
       return exchange_frame(frame,closed);
     };
     copy_tuple(as_const(old),mean);
-    for(std::size_t field=0;field<=nf;++field) {
+    for(std::size_t field=product.esf.deterministic() ? 1 : 0;field<=nf;++field) {
       closing_field=field;closing_sweep=0;
       auto current=field==0 ? mean : iterate;
       const auto accepted=field==0 ? as_const(old) : accepted_fields[field-1];
@@ -10222,8 +10222,12 @@ Status ProductDriver::Impl::execute_attempt(
                 step.generation,product.geometry.fingerprint(),workspace.fingerprint(),
                 detail::product_mix(detail::product_mix(UINT64_C(0x53544154494d5031),step.generation),1+sweep)};
             pc.reset_identity(identity);
+            const double tolerance=product.esf.deterministic()
+                ? (product.cold_stopping ? (heat ? product.cold_stopping->enthalpy : product.cold_stopping->species) : 1e-6)
+                : 1e-4;
+            const unsigned maximum_iterations=product.esf.deterministic() ? 50 : 10;
             detail::ScalarCorrectionRuntime runtime{rows,pc,product.krylov_halo,workspace,product.reductions,
-                identity,{1e-4*reference_scale[c],0.,10,11,0,true,true,true},&pdf_work};
+                identity,{tolerance*reference_scale[c],0.,maximum_iterations,maximum_iterations+1,0,true,true,true},&pdf_work};
             detail::FrozenScalarProblem problem{product.equations.kernels(),product.boundary,
                 heat ? BoundaryStage::enthalpy : BoundaryStage::scalar,
                 heat ? product.schemes.enthalpy() : product.schemes.species(),
@@ -10233,6 +10237,8 @@ Status ProductDriver::Impl::execute_attempt(
             pdf_caps+=solved.termination==LinearTermination::maximum_iterations;
             pdf_maximum=std::max(pdf_maximum,solved.final_true_residual/reference_scale[c]);
             s=solved.status;if(!s)return s;
+            if(product.esf.deterministic() && solved.final_true_residual>tolerance*reference_scale[c])
+              return Status{StatusCode::numerical_failure,10232};
           }
           pdf_face_reuses+=face_basis.reuses;
           context.statistical_face_basis=nullptr;
@@ -10291,7 +10297,10 @@ Status ProductDriver::Impl::execute_attempt(
         mean=current;
         s=copy_interior(as_const(current),esf_auxiliary);
       }
-      else {iterate=current;s=copy_interior(as_const(current),esf_trial[field-1]);}
+      else {
+        iterate=current;s=copy_interior(as_const(current),esf_trial[field-1]);
+        if(s && product.esf.deterministic())s=copy_interior(as_const(current),esf_auxiliary);
+      }
       s=product.reductions.consensus(s);if(!s)return s;
     }
     s=detail::report_scalar_work("pdf",pdf_work,communicator);
@@ -10300,7 +10309,7 @@ Status ProductDriver::Impl::execute_attempt(
     s=product.reductions.checked_max({pdf_local,2},{pdf_global,2});if(!s)return s;
     int pdf_rank{};MPI_Comm_rank(communicator,&pdf_rank);
     if(pdf_rank==0)std::fprintf(stdout,"transport_basis face_reuses=%llu\n",pdf_face_reuses);
-    if(pdf_rank==0)std::fprintf(stdout,"esf_transport_control calls=%u iterations=%u capped=%u maximum_residual=%.17g seconds=%.17g solver=bicgstab_dilu maxit=10 tolerance=1e-4 sweeps=2\n",
+    if(pdf_rank==0)std::fprintf(stdout,"esf_transport_control calls=%u iterations=%u capped=%u maximum_residual=%.17g seconds=%.17g solver=bicgstab_dilu sweeps=2\n",
         pdf_calls,pdf_iterations,pdf_caps,pdf_global[1],pdf_global[0]);
     if(product.summary.coupling==CouplingKind::outer_corrected) {
       // Freeze the realized ensemble transport source before chemistry.
@@ -10430,6 +10439,7 @@ Status ProductDriver::Impl::execute_attempt(
           {esf_trial.data(),product.fields.esf_fields.size()},esf_auxiliary);
     if(status && product.esf.implicit_transport())status=solve_esf_transport();
     if(status && product.esf.implicit_transport())status=product.esf.finish_implicit_transport(
+        product.equations.kernels(),product.spray.enabled() ? as_const(post_cache) : esf_transport,
         product.reaction,product.thermodynamics,{esf_trial.data(),product.fields.esf_fields.size()},
         pressure_history.accepted,pressure_reference,time.time(),step.dt,step.accepted_step,step.generation);
     status = product.reductions.consensus(status);
@@ -13095,11 +13105,12 @@ Status ProductDriver::Impl::execute_attempt(
               global[reference_count], int(reference_momentum_tvd));
         reference_momentum_scale=std::max(1e-15,std::hypot(global[0],global[1],global[2]))/
             (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
+        quiescent_reference_pending = (reference_stopping || product.esf.deterministic()) &&
+            std::hypot(global[0],global[1],global[2])<=1e-15;
         if (reference_stopping) {
           const double reference_time = product.cold_stopping->reference_time;
           report.cold.momentum_reference_scale =
               std::max(1e-15, std::hypot(global[0], global[1], global[2])) / reference_time;
-          quiescent_reference_pending = std::hypot(global[0], global[1], global[2]) <= 1e-15;
           report.cold.enthalpy_reference_scale = std::max(1e-15, global[3]) / reference_time;
           report.cold.species_reference_scales.resize(species_history.size() + 1U);
           for (std::size_t j = 0; j < report.cold.species_reference_scales.size(); ++j)
@@ -14028,8 +14039,10 @@ Status ProductDriver::Impl::execute_attempt(
             }
             // The selected Krylov solver owns its true-residual evaluations.
             // The independent terminal audit checks the final coupled state.
+            const double momentum_tolerance=product.esf.deterministic()
+                ? (product.cold_stopping ? product.cold_stopping->momentum : 1e-6) : 1e-4;
             const auto momentum_control=dual_esf
-                ? LinearSolveControl{1e-4*reference_momentum_scale,0.,50,51,0,true,true,true}
+                ? LinearSolveControl{momentum_tolerance*reference_momentum_scale,0.,product.esf.deterministic() ? 100U : 50U,product.esf.deterministic() ? 101U : 51U,0,true,true,true}
                 : equation_solve;
             const LinearSolveInvocation momentum_call{as_const(pressure_rhs),pressure_correction,
                 identity,momentum_control};
@@ -14040,6 +14053,9 @@ Status ProductDriver::Impl::execute_attempt(
             report.cold.momentum_iterations += solved.iterations;
             report.cold.final_momentum[component] = solved;
             probe_status = solved.status;
+            if(probe_status && product.esf.deterministic() &&
+                solved.final_true_residual>solved.true_residual_limit)
+              probe_status={StatusCode::numerical_failure,17816};
             const double elapsed = MPI_Wtime() - solve_begin;
             total_solve += elapsed;
             double max_elapsed{};
@@ -14157,7 +14173,18 @@ Status ProductDriver::Impl::execute_attempt(
             if(!probe_status)return probe_status;
             const double scale=std::sqrt(global[0]/global[1])/
                 (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
-            pressure_control={1e-4*scale,0.,500,501,0,true,true,true};
+            if(product.esf.deterministic()) {
+              // Retain the configured precision and iteration budget under
+              // COAST's density/reference-time normalization. A hard-coded
+              // 1e-4 can silently skip a real thermal expansion correction.
+              pressure_control.absolute_tolerance=std::max(pressure_control.absolute_tolerance,
+                  pressure_control.relative_tolerance*scale);
+              pressure_control.relative_tolerance=0.;
+              pressure_control.restart=0;
+              pressure_control.maximum_norm=true;
+              pressure_control.accept_iteration_limit=true;
+              pressure_control.bounded_recurrence=true;
+            } else pressure_control={1e-4*scale,0.,500,501,0,true,true,true};
           }
           double original_l2_limit = 1.;
           detail::ColdPressureOperator op(use_iccg ? scaled_rows : rows, cells,
@@ -14375,6 +14402,9 @@ Status ProductDriver::Impl::execute_attempt(
               solved.final_convergence_metric,solved.convergence_limit,solved.true_residual_limit);
 
           probe_status = solved.status;
+          if(probe_status && product.esf.deterministic() &&
+              solved.final_true_residual>solved.true_residual_limit)
+            probe_status={StatusCode::numerical_failure,17816};
           FieldView dp = pressure_correction;
           dp.field = product.fields.krylov_vectors;
           HaloTicket ticket;
@@ -14715,7 +14745,9 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status) return status;
           const double magnitude = std::hypot(global_momentum[0], global_momentum[1], global_momentum[2]);
           if (magnitude > 1e-15) {
-            report.cold.momentum_reference_scale = magnitude / product.cold_stopping->reference_time;
+            reference_momentum_scale = magnitude /
+                (product.cold_stopping ? product.cold_stopping->reference_time : step.dt);
+            report.cold.momentum_reference_scale = reference_momentum_scale;
             report.cold.momentum_reference_from_corrector = true;
             quiescent_reference_pending = false;
           }
@@ -15744,7 +15776,7 @@ Status ProductDriver::Impl::execute_attempt(
           if (!status)
             return status;
           double balance_s = MPI_Wtime() - balance_begin, max_balance_s{};
-          if((product.reaction.interval_enabled() || product.reaction.mixing_enabled()) &&
+          if(!dual_esf && (product.reaction.interval_enabled() || product.reaction.mixing_enabled()) &&
              !product.spray.enabled()) {
             using Ledger=detail::CompositionBalanceLedger;
             Ledger mean_ledger;
@@ -15844,7 +15876,12 @@ Status ProductDriver::Impl::execute_attempt(
                   species.name.c_str(),species.defect,species.relative_defect,
                   species.storage_roundoff_bound,int(species.roundoff_applied),
                   static_cast<unsigned long long>(conservation.composition_revision));
-              if(!dual_esf && !Ledger::admissible(species))
+              if(outer_rank==0 && product.esf.deterministic())std::fprintf(stdout,
+                  "split_species_balance species=%s advective=%.17g density_update=%.17g transport_residual=%.17g unexplained=%.17g step_committed=0\n",
+                  species.name.c_str(),species.advective_conversion,species.density_update,
+                  species.transport_equation_residual,species.unexplained_defect);
+              if(product.esf.deterministic() ? !Ledger::split_admissible(species) :
+                  (!dual_esf && !Ledger::admissible(species)))
                 status={StatusCode::numerical_failure,17861};
             }
             if(status)for(const auto& element:conservation.element_balance) {
@@ -15853,7 +15890,8 @@ Status ProductDriver::Impl::execute_attempt(
                   element.name.c_str(),element.defect,element.relative_defect,
                   element.storage_roundoff_bound,int(element.roundoff_applied),
                   static_cast<unsigned long long>(conservation.composition_revision));
-              if(!dual_esf && !Ledger::admissible(element))
+              if(product.esf.deterministic() ? !Ledger::split_admissible(element) :
+                  (!dual_esf && !Ledger::admissible(element)))
                 status={StatusCode::numerical_failure,17861};
             }
             status=product.reductions.consensus(status);if(!status)return status;
@@ -16393,7 +16431,7 @@ Status ProductDriver::Impl::execute_attempt(
             attempt_stage = 62U;
           if (status)
             status = detail::measure_elapsed(physics_nanoseconds[0U],
-                product.reaction.enabled() && !product.reaction.esf_enabled(), [&]() noexcept {
+                product.reaction.enabled() && !product.reaction.transport_reaction_enabled(), [&]() noexcept {
               return product.reaction.prepare(
                 equation_state, product.thermodynamics, material,
                 product.equations.kernels(), product.layers, cells,
@@ -22019,7 +22057,7 @@ Status ProductDriver::Impl::execute_attempt(
   if (status) attempt_stage = 62U;
   if (status)
     status = detail::measure_elapsed(physics_nanoseconds[0U],
-        product.reaction.enabled() && !product.reaction.esf_enabled(), [&]() noexcept {
+        product.reaction.enabled() && !product.reaction.transport_reaction_enabled(), [&]() noexcept {
       return product.reaction.prepare(equation_state, product.thermodynamics,
         material, product.equations.kernels(), product.layers, cells,
         {product.pressure_mg_cell_activity.data(), product.pressure_mg_cell_activity.size()}, step.accepted_step);

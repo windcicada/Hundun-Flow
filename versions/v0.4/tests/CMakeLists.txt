@@ -2375,6 +2375,12 @@ if(HUNDUN_ENABLE_REACTING_CANTERA)
         "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-cantera-esf")
     set_tests_properties(v04_esf_cn_heat_mpi_${rank_count}
       PROPERTIES TIMEOUT 120 PROCESSORS ${rank_count} RUN_SERIAL TRUE)
+    add_test(NAME v04_pasr_cn_restart_mpi_${rank_count}
+      COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
+        "$<TARGET_FILE:v04_esf_cn_test>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reacting-cantera-esf" "--pasr")
+    set_tests_properties(v04_pasr_cn_restart_mpi_${rank_count}
+      PROPERTIES TIMEOUT 120 PROCESSORS ${rank_count} RUN_SERIAL TRUE)
   endforeach()
   foreach(rank_count IN ITEMS 1 2 4)
     add_test(NAME v04_product_cantera_case_mpi_${rank_count}
@@ -2723,7 +2729,7 @@ foreach(rank_count IN ITEMS 1 2 4)
       "$<TARGET_FILE:v04_esf_implicit_test>")
   set_tests_properties(v04_esf_implicit_mpi_${rank_count}
     PROPERTIES PROCESSORS "${rank_count}" TIMEOUT 120 RUN_SERIAL TRUE)
-  foreach(pressure_mode IN ITEMS pressure pressure-history reacting-cn)
+  foreach(pressure_mode IN ITEMS pressure pressure-history reacting-cn pasr-cn)
     add_test(NAME v04_esf_${pressure_mode}_mpi_${rank_count}
       COMMAND "${MPIEXEC_EXECUTABLE}" "${MPIEXEC_NUMPROC_FLAG}" "${rank_count}"
         "$<TARGET_FILE:v04_esf_implicit_test>" "--${pressure_mode}")

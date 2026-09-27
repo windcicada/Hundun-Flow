@@ -15,7 +15,7 @@ class FrozenMolar final : public Cantera::FuncEval {
 public:
   FrozenMolar(Cantera::ThermoPhase& phase, Cantera::Kinetics& kinetics)
       : phase_(phase), kinetics_(kinetics), solver_(Cantera::newIntegrator("CVODE")),
-        initial_(phase.nSpecies()), fractions_(phase.nSpecies()), weights_(phase.molecularWeights()) {
+        initial_(phase.nSpecies()), fractions_(phase.nSpecies()), weights_(phase.molecularWeights()), tolerances_(phase.nSpecies()) {
     jl4_=phase.name()=="jl4";
     for(std::size_t i=0;i<neq();++i)signed_.push_back(phase.speciesName(i)=="CH4" || phase.speciesName(i)=="H2");
     solver_->setMethod(Cantera::BDF_Method);
@@ -23,7 +23,19 @@ public:
     solver_->setTolerances(0.,1e-10);
     suppressErrors(true);
   }
-  void integrate(double duration,int max_steps,std::vector<double>& output) {
+  void integrate(double duration,int max_steps,double relative,double absolute,
+      bool molar_reference,std::vector<double>& output) {
+    // Ordinary PaSR controls are mass-fraction tolerances. Transform each
+    // absolute tolerance to the integrated Y/W coordinate; do not replace a
+    // user's requested accuracy with REFERENCE's looser molar threshold.
+    if(relative!=relative_ || absolute!=absolute_ || molar_reference!=reference_) {
+      if(molar_reference)solver_->setTolerances(relative,absolute);
+      else {
+        for(std::size_t i=0;i<neq();++i)tolerances_[i]=absolute/weights_[i];
+        solver_->setTolerances(relative,neq(),tolerances_.data());
+      }
+      relative_=relative;absolute_=absolute;reference_=molar_reference;
+    }
     temperature_=phase_.temperature();density_=phase_.density();
     phase_.getMassFractions(fractions_.data());
     for(std::size_t i=0;i<neq();++i)initial_[i]=fractions_[i]/weights_[i];
@@ -47,7 +59,9 @@ private:
   Cantera::ThermoPhase& phase_;
   Cantera::Kinetics& kinetics_;
   std::unique_ptr<Cantera::Integrator> solver_;
-  std::vector<double> initial_,fractions_,weights_;
+  std::vector<double> initial_,fractions_,weights_,tolerances_;
+  double relative_{-1.},absolute_{-1.};
+  bool reference_{};
   double temperature_{},density_{};
   bool initialized_{},jl4_{};
   std::vector<bool> signed_;

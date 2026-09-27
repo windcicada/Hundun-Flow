@@ -172,7 +172,7 @@ struct ReactionRequest {
 };
 class Workspace {
 public:
-  explicit Workspace(std::size_t species_capacity, std::size_t field_capacity = 4);
+  explicit Workspace(std::size_t species_capacity, std::size_t field_capacity = 4, bool deterministic = false);
   std::uint64_t owned_bytes() const noexcept {
     std::uint64_t bytes = sizeof(*this);
     for (const auto *v : {&candidate_, &transported_, &means_, &variances_,
@@ -196,6 +196,10 @@ public:
   }
 
 private:
+  bool deterministic_{};
+  bool valid_population(std::size_t n) const noexcept {
+    return deterministic_ ? n==1 : valid_field_count(n);
+  }
   std::uint64_t generation_{};
   std::size_t capacity_{}, field_capacity_{};
   std::vector<std::array<double, 3>> wiener_;

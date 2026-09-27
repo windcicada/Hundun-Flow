@@ -563,8 +563,11 @@ CanteraBackend::query_gas(const portable::GasQuery &q,
 portable::Status CanteraBackend::query_sample(const portable::GasQuery &q,portable::GasQueryOutput &out) noexcept {
   return query_impl(q,out,false);
 }
+portable::Status CanteraBackend::query_thermo(const portable::GasQuery &q,portable::GasQueryOutput &out) noexcept {
+  return query_impl(q,out,false,false);
+}
 portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
-    portable::GasQueryOutput &out,bool complete) noexcept {
+    portable::GasQueryOutput &out,bool complete,bool transport) noexcept {
   out.sample = {};
   if (impl_->pool_lifetime.expired())
     return portable::Status::unavailable;
@@ -624,8 +627,8 @@ portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
                                thermo.density(),
                                resolved_enthalpy,
                                thermo.cp_mass(),
-                               w.transport->viscosity(),
-                               w.transport->thermalConductivity()};
+                               transport ? w.transport->viscosity() : 0.,
+                               transport ? w.transport->thermalConductivity() : 0.};
     if (!std::isfinite(sample.temperature_k) ||
         sample.temperature_k < minimum ||
         sample.temperature_k > maximum)
@@ -634,9 +637,9 @@ portable::Status CanteraBackend::query_impl(const portable::GasQuery &q,
         sample.density_kg_per_m3 <= 0 ||
         !std::isfinite(sample.enthalpy_j_per_kg) ||
         !std::isfinite(sample.cp_j_per_kg_k) || sample.cp_j_per_kg_k <= 0 ||
-        !std::isfinite(sample.viscosity_pa_s) || sample.viscosity_pa_s <= 0 ||
+        (transport && (!std::isfinite(sample.viscosity_pa_s) || sample.viscosity_pa_s <= 0 ||
         !std::isfinite(sample.conductivity_w_per_m_k) ||
-        sample.conductivity_w_per_m_k <= 0)
+        sample.conductivity_w_per_m_k <= 0)))
       return portable::Status::provider_failure;
     if (std::abs(sample.pressure_pa - q.pressure_pa) >
             1e-12 * std::max(1., q.pressure_pa) ||
@@ -762,7 +765,8 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
           count = w.kerosene->steps();
         } else if(impl_->controls.frozen_material_interval) {
           integration_started=true;
-          w.molar->integrate(r.duration_s,impl_->controls.maximum_internal_steps-total_steps,w.advance_fractions);
+          w.molar->integrate(r.duration_s,impl_->controls.maximum_internal_steps-total_steps,
+              relative_tolerance,absolute_tolerance,impl_->controls.molar_reference_controls,w.advance_fractions);
           count=w.molar->steps();
         } else {
           // Independent cell intervals share storage, not reactor volume history.
@@ -803,7 +807,10 @@ CanteraBackend::advance_gas(const portable::GasAdvanceQuery &r,
         steps = static_cast<std::uint32_t>(count);
         total_steps += steps;
         steps_recorded = true;
-        if (!impl_->controls.molar_reference_controls && !w.kerosene && std::abs(w.thermo->enthalpy_mass() - r.state.enthalpy_j_per_kg) >
+        // A frozen-T reactor intentionally carries sensible/formation imbalance
+        // until the final PH closure below. Only the coupled thermal reactor
+        // must already conserve enthalpy at this intermediate boundary.
+        if (!impl_->controls.molar_reference_controls && !impl_->controls.frozen_material_interval && !w.kerosene && std::abs(w.thermo->enthalpy_mass() - r.state.enthalpy_j_per_kg) >
             1e-8 * std::max(1., std::abs(r.state.enthalpy_j_per_kg))) {
           return portable::Status::conservation_failure;
         }
@@ -1104,8 +1111,7 @@ make_cantera_backend(const CanteraBackendConfig &config,
                      CanteraWorkspacePool &pool) {
   // The donor obtained these checks from its case schema. This independent
   // backend has no schema caller, so reject controls before claiming a lane.
-  if ((config.chemistry.frozen_material_interval && !config.chemistry.molar_reference_controls) ||
-      !std::isfinite(config.chemistry.relative_tolerance) ||
+  if (!std::isfinite(config.chemistry.relative_tolerance) ||
       (config.chemistry.relative_tolerance < 0.0 ||
        (config.chemistry.relative_tolerance == 0.0 && !config.chemistry.molar_reference_controls)) ||
       !std::isfinite(config.chemistry.absolute_tolerance) ||

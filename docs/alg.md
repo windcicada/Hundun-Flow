@@ -1913,3 +1913,21 @@ COAST reaction-zone recombination idea, with unchanged timescale kappa and one
 interval call per active cell per attempt. The minimized rejection, independent
 oracle and rollback checks are recorded in
 `verification/2026-09-23-pasr-interval.md`; large-case throughput remains pending.
+
+
+### COAST 分步单场 PaSR 接入（验收中）
+
+2026-09-27 按用户要求，将无喷雾 CN/BE/outer_corrected 的单场 PaSR 接入
+公共“两次输运校正、一次反应、两次流动校正”路径。κ 使用输运后的
+时间尺度，Cantera 在冻结 T/ρ 下积分摩尔量并保留配置的质量分数容差。
+该替换更新方法和 Restart 身份；旧平均源历史不兼容。阶段线性残差、
+原始全域收支和分裂项分别报告，详细定义见 `pasr.md`。
+
+独立输运/反应顺序测试、热态恢复、真实网格时间步细化和同模型性能
+比较分别验收。源码接线和短步提速不等同于完整方法或长测通过。
+
+独立离散输运/反应顺序、MPI 4 热态恢复、输入规范化与纯组分恢复检查
+已通过。单场同 PH/Y 原生 EOS 复用的实场全检查点对照逐位一致。
+实际网格连续/恢复的物理场比较通过，但焓历史率尚未通过既定严格
+门槛；时间细化呈收敛趋势，尚未完成同模型 COAST 精度/性能验收。
+候选方法不作为已验收的发布或长测程序。

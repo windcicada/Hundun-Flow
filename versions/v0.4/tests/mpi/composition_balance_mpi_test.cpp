@@ -101,12 +101,15 @@ int main(int argc,char** argv) {
     HUNDUN_CHECK_NEAR(report.species_balance[0].defect,1.,1e-14);
     HUNDUN_CHECK_NEAR(report.species_balance[0].unexplained_defect,0.,1e-14);
     HUNDUN_CHECK(!Ledger::admissible(report.species_balance[0]));
+    HUNDUN_CHECK(Ledger::split_admissible(report.species_balance[0]));
     split.add(0,Ledger::chemistry,1e-3/ranks);
     HUNDUN_CHECK(split.finish(reductions,report));
     HUNDUN_CHECK_NEAR(report.species_balance[0].unexplained_defect,-1e-3,1e-14);
+    HUNDUN_CHECK(!Ledger::split_admissible(report.species_balance[0]));
     split.add(0,Ledger::chemistry,-2e-3/ranks);
     HUNDUN_CHECK(split.finish(reductions,report));
     HUNDUN_CHECK_NEAR(report.species_balance[0].unexplained_defect,1e-3,1e-14);
+    HUNDUN_CHECK(!Ledger::split_admissible(report.species_balance[0]));
     if(rank==0)quiet.add_storage(0,-1,rho,rho,.232,.232);
     HUNDUN_CHECK(quiet.finish(reductions,report).code==StatusCode::numerical_failure);
     if(!rank)std::cout << "composition_balance ranks=" << ranks << " species=3 elements=2 closure=passed candidate_replace=passed rejection=atomic\n";

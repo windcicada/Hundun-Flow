@@ -7,6 +7,15 @@
 #include <limits>
 
 namespace hundun::v04::detail {
+// A deterministic PaSR tuple uses the same transport/reactor split as the
+// stochastic population, without stochastic forcing or IEM self-relaxation.
+inline bool split_pasr(const ValidatedModel& model) noexcept {
+  return model.reaction.mode==ReactionMode::pasr_algebraic_v1 &&
+      !model.spray.has_value() &&
+      model.time.scheme==TimeScheme::cn_be &&
+      effective_coupling(model.time.scheme,model.solver.coupling)==CouplingKind::outer_corrected;
+}
+
 inline bool valid_esf_spec(const EsfSpec& e) {
   if (!esf::valid_field_count(e.fields) || e.initial_species_offsets.size() > 1024)
     return false;

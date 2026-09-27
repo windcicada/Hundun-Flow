@@ -3,6 +3,7 @@
 // Current-state PDF bridge. Missing temporal histories are explicitly rebuilt.
 #include "hundun/v04_app.hpp"
 #include "app_import_detail.hpp"
+#include "app_reaction_detail.hpp"
 #include "core_tcr_dyn711_history_detail.hpp"
 #include "core_tcr_dynamic_history_detail.hpp"
 #include "esf_count_detail.hpp"
@@ -586,6 +587,7 @@ int run(const char *case_root, const char *transfer, const char *output,
   ValidatedModel model;
   auto s = CaseCompiler::load_and_compile(comm, case_root, model);
   if (s && ((model.reaction.esf && model.reaction.esf->fields != h.nf) ||
+            (hundun::v04::detail::split_pasr(model) && h.nf!=1) ||
             model.transported_scalars.size() != h.ns - 1 + h.passive_names.size() ||
             model.thermophysics.species.size() != h.ns))
     s = invalid(24110);
@@ -742,7 +744,7 @@ int run(const char *case_root, const char *transfer, const char *output,
   if (s)
     s = local_stage(comm,
                     [&] { return fill(h, expected, geometry, b,
-                                     model.reaction.esf.has_value(), image); });
+                                     model.reaction.esf.has_value() || hundun::v04::detail::split_pasr(model), image); });
   if(s && initialize_model_history) s=local_stage(comm,[&]() -> Status {
     std::size_t cells=0;
     if(!checked_product(image.patch.cells,cells) || !expected.cell_record_identity) return invalid(24114);

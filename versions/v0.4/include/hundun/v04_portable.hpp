@@ -107,6 +107,12 @@ public:
   virtual Status query_sample(const GasQuery& q, GasQueryOutput& out) noexcept {
     return query_gas(q,out);
   }
+  // Thermodynamic closure only: transport coefficients and array contents
+  // are unspecified and must not be consumed. Specialized providers may omit
+  // transport entirely; the fallback preserves existing provider behavior.
+  virtual Status query_thermo(const GasQuery& q, GasQueryOutput& out) noexcept {
+    return query_sample(q,out);
+  }
 };
 
 struct GasAdvanceQuery {

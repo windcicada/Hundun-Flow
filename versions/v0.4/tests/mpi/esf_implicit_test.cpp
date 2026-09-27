@@ -13,9 +13,10 @@
 using namespace hundun::v04;
 namespace {
 constexpr int nx=12;
-constexpr double dt=.02, speed=.2, mu=.03, pressure=1e5, temperature=300;
+constexpr double dt=.02, speed=.2, mu=.03, pressure=1e5;
+double temperature=300;
 constexpr double mw=28.96546, cp=3.5*kUniversalGasConstant/mw;
-constexpr double rho=pressure*mw/(kUniversalGasConstant*temperature);
+double rho=pressure*mw/(kUniversalGasConstant*temperature);
 constexpr double dx=2./nx, gamma=mu/.7, volume=1./(nx*4*4);
 using Row=std::array<double,nx>;
 using Matrix=std::array<Row,nx>;
@@ -83,15 +84,24 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
         q.pressure_pa*mw/(kUniversalGasConstant*t),cp*t,cp,mu,gamma*cp};
     for(unsigned s=0;s<3;++s) {
       out.diffusivities_m2_per_s[s]=gamma/rho;out.species_enthalpies_j_per_kg[s]=cp*t;
-      out.net_mass_rates_kg_per_m3_s[s]=0;
+      out.net_mass_rates_kg_per_m3_s[s]=fields==1 && reacting ?
+          (s==0 ? -1. : s==1 ? 1. : 0.)*2*out.sample.density_kg_per_m3*q.mass_fractions[0] : 0;
     }
     return portable::Status::success;
   }
   portable::Status advance_gas(const portable::GasAdvanceQuery& q,portable::GasAdvanceOutput& out) noexcept override {
     const unsigned f=calls%fields,x=(calls/fields)%local_nx+begin_x;
     ++calls;
-    implicit_error=std::max(implicit_error,std::abs(q.state.mass_fractions[0]-implicit[f][x]));
-    legacy_error=std::max(legacy_error,std::abs(q.state.mass_fractions[0]-legacy[f][x]));
+    // Chemistry tasks are striped across MPI ranks. Match the independent
+    // global oracle rather than assuming execution stays on the cell owner.
+    double implicit_delta=std::abs(q.state.mass_fractions[0]-implicit[f][x]);
+    double legacy_delta=std::abs(q.state.mass_fractions[0]-legacy[f][x]);
+    if(fields==1)for(int j=0;j<nx;++j) {
+      implicit_delta=std::min(implicit_delta,std::abs(q.state.mass_fractions[0]-implicit[0][j]));
+      legacy_delta=std::min(legacy_delta,std::abs(q.state.mass_fractions[0]-legacy[0][j]));
+    }
+    implicit_error=std::max(implicit_error,implicit_delta);
+    legacy_error=std::max(legacy_error,legacy_delta);
     tuple_error=std::max({tuple_error,std::abs(q.state.mass_fractions[0]+q.state.mass_fractions[1]-.7),
         std::abs(q.state.mass_fractions[2]-.3),std::abs(q.state.enthalpy_j_per_kg/(cp*temperature)-(pressure_case ? expected_h[f][x] : 1))});
     double d[3],h[3],w[3];portable::GasQueryOutput sample{{},d,h,w,3};
@@ -105,16 +115,16 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
   }
   bool reference(std::uint64_t seed,std::uint64_t step) {
     std::vector<std::array<double,3>> increments(fields);
-    const auto w=esf::detail::balanced_wiener(fields,dt,{seed,step,1,0,0,1},
+    const auto w=fields==1 ? portable::Status::success : esf::detail::balanced_wiener(fields,dt,{seed,step,1,0,0,1},
         increments.data(),increments.size());
     if(w!=portable::Status::success)return false;
-    const double beta=mu/std::pow(volume,2./3.),mix=dt*beta/rho;
-    Row old_mean{};for(int i=0;i<nx;++i)old_mean[i]=reacting ? .3 : mean_a(i);
+    const double beta=mu/std::pow(volume,2./3.),mix=fields==1 ? 0. : dt*beta/rho;
+    Row old_mean{};for(int i=0;i<nx;++i)old_mean[i]=reacting && fields>1 ? .3 : mean_a(i);
     const Row transported_mean=solve(matrix(0),old_mean);
     implicit.resize(fields);legacy.resize(fields);
     std::vector<Row> moved(fields),rhs(fields),unmixed(fields),noise(fields);
     for(unsigned f=0;f<fields;++f) {
-      Row old{};for(int i=0;i<nx;++i)old[i]=reacting ? .3+offset(f,fields) : field_a(i,f,fields);
+      Row old{};for(int i=0;i<nx;++i)old[i]=reacting && fields>1 ? .3+offset(f,fields) : field_a(i,f,fields);
       const double lo=*std::min_element(old.begin(),old.end()),hi=*std::max_element(old.begin(),old.end());
       for(int i=0;i<nx;++i) {
         const double gradient=(old[(i+1)%nx]-old[(i+nx-1)%nx])/(2*dx);
@@ -152,7 +162,7 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
       for(int i=0;i<nx;++i) {
         const double split=transported_mean[i]+std::exp(-mix)*(unmixed[f][i]-transported_mean[i]);
         split_gap=std::max(split_gap,std::abs(split-implicit[f][i]));
-        wrong_mean_rhs[i]=(reacting ? .3+offset(f,fields) : field_a(i,f,fields))+noise[f][i]+mix*noisy_mean[i];
+        wrong_mean_rhs[i]=(reacting && fields>1 ? .3+offset(f,fields) : field_a(i,f,fields))+noise[f][i]+mix*noisy_mean[i];
         second_rhs[i]=implicit[f][i]+noise[f][i]+mix*second_mean[i];
       }
       const Row wrong_mean=solve(matrix(mix),wrong_mean_rhs),second=solve(matrix(mix),second_rhs);
@@ -166,6 +176,11 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
       for(int x=0;x<nx;++x)for(unsigned f=0;f<fields;++f)
         rhs[x]+=std::expm1(-2*dt)*implicit[f][x]/fields;
       expected_mean=solve(matrix(0),rhs);
+      if(fields==1) {
+        // Independent tau_chem=1/2, tau_mix=Delta^2/(2 D), C_Z=1.
+        const double kappa=.5/(.5+std::pow(volume,2./3.)/(2*gamma/rho));
+        for(int x=0;x<nx;++x)expected_mean[x]=implicit[0][x]*(1+kappa*std::expm1(-2*dt));
+      }
     }
     if(pressure_case) {
       Row old{},work{},rhs{};
@@ -191,7 +206,7 @@ class Gas final : public portable::GasQueryProvider, public portable::GasAdvance
         expected_h[f]=solve(matrix(mix),rhs);
       }
     }
-    return matrix_error<1e-13 && (reacting || (split_gap>1e-8 && mean_gap>1e-8 && history_gap>1e-8));
+    return matrix_error<1e-13 && (fields==1 || reacting || (split_gap>1e-8 && mean_gap>1e-8 && history_gap>1e-8));
   }
 };
 
@@ -204,7 +219,7 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
     model.legacy_time_fingerprint=model.fingerprint+1;
   }
   model.turbulence=TurbulenceKind::none;
-  if(reacting) {
+  if(reacting || fields==1) {
     model.boundaries[2].flow_kind=BoundaryKind::symmetry;
     model.boundaries[2].scalars={{"A",ScalarBoundaryKind::zero_gradient},{"B",ScalarBoundaryKind::zero_gradient}};
     auto& outlet=model.boundaries[3];outlet.flow_kind=BoundaryKind::pressure_outlet;
@@ -226,6 +241,7 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
   model.transported_scalars={{"A",TransportedScalarRole::species,.7,.7},{"B",TransportedScalarRole::species,.7,.7}};
   model.reaction.mode=ReactionMode::esf_tpdf;model.reaction.mechanism_sha256=gas.identity.mechanism_sha256;
   model.reaction.phase=gas.identity.phase;model.reaction.esf=EsfSpec{};model.reaction.esf->fields=fields;
+  if(fields==1) {model.solver.cold_stopping=ColdStoppingSpec{dt,1e-10,1e-12,1e-12};model.reaction.mode=ReactionMode::pasr_algebraic_v1;model.reaction.esf.reset();}
   CompiledCasePlan plan;auto status=ProductCompiler::compile(MPI_COMM_WORLD,model,{},plan,{&gas,&gas,&gas.closure});
   std::vector<FieldId> transport_work;
   if(status) {
@@ -278,7 +294,7 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
   start.plan=expected.plan;start.schema=expected.schema;start.geometry=expected.geometry;
   start.dt=dt;start.step=4;start.controller_state=1;start.pressure_reference=pressure;start.backward_euler_recovery=true;
   const auto n=start.patch.cells;gas.local_nx=n.x;gas.begin_x=start.patch.begin.x;
-  if(!gas.reference(model.reaction.esf->seed,start.step))return false;
+  if(!gas.reference(model.reaction.esf ? model.reaction.esf->seed : 0,start.step))return false;
   unsigned independent=0,field_index=0;
   for(std::size_t f=0;f<expected.fields.size;++f) {
     const auto& spec=expected.fields.data[f];RestartImageField field;
@@ -293,13 +309,13 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
         field.values[i]=pressure*Gas::pressure_amplitude*cosine(gx);
       if(spec.role==RestartFieldRole::enthalpy)field.values[i]=cp*temperature*
           (1+(pressure_case ? Gas::pressure_amplitude*cosine(gx) : 0));
-      if(spec.role==RestartFieldRole::independent_species)field.values[i]=independent==0 ? (reacting ? .3 : mean_a(gx)) : .7-(reacting ? .3 : mean_a(gx));
+      if(spec.role==RestartFieldRole::independent_species)field.values[i]=independent==0 ? (reacting && fields>1 ? .3 : mean_a(gx)) : .7-(reacting && fields>1 ? .3 : mean_a(gx));
       if(spec.role==RestartFieldRole::stochastic_field) {
-        const double a=reacting ? .3+offset(field_index,fields) : field_a(gx,field_index,fields);
+        const double a=reacting && fields>1 ? .3+offset(field_index,fields) : field_a(gx,field_index,fields);
         field.values[i]=a;field.values[i+1]=.7-a;field.values[i+2]=.3;field.values[i+3]=cp*temperature*(1+(pressure_case ? Gas::pressure_amplitude*cosine(gx) : 0));
       }
       if(spec.role==RestartFieldRole::stochastic_auxiliary) {
-        const double a=reacting ? .3 : mean_a(gx);
+        const double a=reacting && fields>1 ? .3 : mean_a(gx);
         field.values[i]=a;field.values[i+1]=.7-a;field.values[i+2]=.3;
         field.values[i+3]=cp*temperature*(1+(pressure_case ? Gas::pressure_amplitude*cosine(gx) : 0));
       }
@@ -350,8 +366,12 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
       const auto& field=accepted.accepted_rate_fields.data[i];
       if(field.role!=RestartFieldRole::scalar_nonadvective_rate)continue;
       ++rate_fields;
-      for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x)
-        stored_rate_error=std::max(stored_rate_error,std::abs(field.values.unchecked({x,y,z},0)));
+      for(int z=0;z<n.z;++z)for(int y=0;y<n.y;++y)for(int x=0;x<n.x;++x) {
+        const int gx=x+start.patch.begin.x;
+        const double expected_rate=fields==1 ? (rate_fields==1 ? 1. : -1.)*gamma*
+            (gas.expected_mean[(gx+1)%nx]-2*gas.expected_mean[gx]+gas.expected_mean[(gx+nx-1)%nx])/(dx*dx) : 0.;
+        stored_rate_error=std::max(stored_rate_error,std::abs(field.values.unchecked({x,y,z},0)-expected_rate));
+      }
     }
     if(rate_fields!=2)stored_rate_error=1;
     MPI_Allreduce(MPI_IN_PLACE,&mean_error,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
@@ -366,7 +386,7 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
   unsigned minimum=evaluations,maximum=evaluations;
   MPI_Allreduce(MPI_IN_PLACE,&minimum,1,MPI_UNSIGNED,MPI_MIN,MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE,&maximum,1,MPI_UNSIGNED,MPI_MAX,MPI_COMM_WORLD);
-  int okay=status && report.accepted && gas.calls%batch==0 && minimum==maximum &&
+  int okay=status && report.accepted && (fields!=1 || report.piso.cold.outer_iterations==2) && gas.calls%batch==0 && minimum==maximum &&
       ((pressure_case || reacting) ? evaluations>=1 : evaluations==1) && mean_error<2e-12 && stored_rate_error<2e-12 &&
       errors[require_implicit ? 0 : 1]<2e-12 && errors[3]<2e-12;
   MPI_Allreduce(MPI_IN_PLACE,&okay,1,MPI_INT,MPI_MIN,MPI_COMM_WORLD);
@@ -387,6 +407,12 @@ int main(int argc,char** argv) {
   const bool cn=reacting || (argc==2 && std::string_view(argv[1])=="--pressure-cn");
   const bool pressure_history=(cn && !reacting) || (argc==2 && std::string_view(argv[1])=="--pressure-history");
   const bool pressure_case=pressure_history || (argc==2 && std::string_view(argv[1])=="--pressure");
+  if(argc==2 && std::string_view(argv[1])=="--pasr-cn") {
+    temperature=1200;rho=pressure*mw/(kUniversalGasConstant*temperature);
+    bool passed=run(1,true,false,false,true,false);
+    passed=run(1,true,false,false,true,true)&&passed;
+    MPI_Finalize();return passed ? 0 : 1;
+  }
   bool passed=run(2,implicit,pressure_case,pressure_history,cn,reacting);
   passed=run(4,implicit,pressure_case,pressure_history,cn,reacting)&&passed;
   MPI_Finalize();return passed ? 0 : 1;

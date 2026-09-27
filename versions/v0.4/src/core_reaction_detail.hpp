@@ -41,6 +41,7 @@ public:
         model.reaction.mode != ReactionMode::esf_tpdf)
       return invalid();
     mode_ = model.reaction.mode;
+    split_pasr_ = split_pasr(model);
     mixing_c_z_ = model.reaction.mixing_c_z;
     turbulent_schmidt_ = model.reaction.turbulent_schmidt;
     if (bindings.gas_query == nullptr) {
@@ -65,6 +66,7 @@ public:
                             r.phase};
         config.chemistry = {r.relative_tolerance, r.absolute_tolerance,
                             int(r.maximum_internal_steps),r.mode==ReactionMode::esf_tpdf};
+        if(split_pasr_)config.chemistry.frozen_material_interval=true;
         if(config.chemistry.molar_reference_controls) {
           config.chemistry.frozen_material_interval=true;
           config.chemistry.relative_tolerance=0.;
@@ -182,7 +184,7 @@ public:
     if (!gas.thermodynamic_model.empty()) string(gas.thermodynamic_model);
     integer(static_cast<unsigned>(model.reaction.mode));
     if (interval_enabled_) string("mean-transport-reactor-cnbe-v1");
-    if (pasr_interval_enabled_) string("pasr-accepted-interval-source-cnbe-v1");
+    if (pasr_interval_enabled_) string(split_pasr_ ? "pasr-transport-reactor-flow-cnbe-v1;frozen-T-rho-configured-mass-tolerances" : "pasr-accepted-interval-source-cnbe-v1");
     if (response_enabled_) {
       string("bounded-interval-response-reference-time-v2");
       for(double value : {response_relative_,response_absolute_,response_reference_time_}) {
@@ -289,7 +291,7 @@ public:
   }
   Status prepare_distribution(MPI_Comm comm,std::size_t cells) noexcept {
     source_comm_=MPI_COMM_NULL;
-    const bool pasr=pasr_interval_enabled_ && owned_provider_ && cantera_representation_;
+    const bool pasr=pasr_interval_enabled_ && !split_pasr_ && owned_provider_ && cantera_representation_;
     if(!response_enabled_ && !pasr)return {};
     int ranks{};if(MPI_Comm_size(comm,&ranks)!=MPI_SUCCESS)return {StatusCode::mpi_failure,10360};
     if(ranks==1)return {};
@@ -311,6 +313,7 @@ public:
     return mode_ == ReactionMode::pasr_algebraic_v1;
   }
   bool esf_enabled() const noexcept { return mode_ == ReactionMode::esf_tpdf; }
+  bool transport_reaction_enabled() const noexcept { return esf_enabled() || split_pasr_; }
   portable::GasQueryProvider *gas_query() const noexcept { return provider_; }
   portable::GasAdvanceProvider *gas_advance() const noexcept {
     return advance_provider_;
@@ -357,16 +360,16 @@ public:
       auto &v = views_[i];
       v.conserved_quantity = conserved.data[i];
       v.explicit_source_field = source.data[i];
-      v.stage = esf_enabled() ? 2U : 1U;
+      v.stage = transport_reaction_enabled() ? 2U : 1U;
       v.units.si_exponents = {1, -3, -1, 0, 0, 0, 0};
-      v.capability = esf_enabled() ? ContributionCapability::reacting
+      v.capability = transport_reaction_enabled() ? ContributionCapability::reacting
                                    : ContributionCapability::chemistry;
       v.source_identity = fingerprint_;
     }
     return {};
   }
   Span<const EquationContributionView> contributions() const noexcept {
-    return esf_enabled() ? Span<const EquationContributionView>{}
+    return transport_reaction_enabled() ? Span<const EquationContributionView>{}
                          : Span<const EquationContributionView>{views_.data(),
                                                                 views_.size()};
   }
@@ -374,14 +377,14 @@ public:
   // as a current-step source. Stored EX2 rates keep using contributions(),
   // which excludes this interval source from the transport history.
   Span<const EquationContributionView> coupling_contributions() const noexcept {
-    return esf_enabled() && !esf_sources_ready_ ? Span<const EquationContributionView>{}
+    return transport_reaction_enabled() && !esf_sources_ready_ ? Span<const EquationContributionView>{}
         : Span<const EquationContributionView>{views_.data(),views_.size()};
   }
   StageId coupling_source_stage() const noexcept {
-    return esf_enabled() ? 2U : enabled() ? 1U : 177U;
+    return transport_reaction_enabled() ? 2U : enabled() ? 1U : 177U;
   }
   Status publish_esf_sources(Span<const FieldView> sources) noexcept {
-    if (!esf_enabled() || sources.size!=views_.size() || !sources.data) return invalid();
+    if (!transport_reaction_enabled() || sources.size!=views_.size() || !sources.data) return invalid();
     for(std::size_t s=0;s<sources.size;++s) {
       const auto& field=sources.data[s];
       if(field.field!=views_[s].explicit_source_field || !field.base ||
@@ -656,7 +659,7 @@ public:
                  const CartesianKernelPlan &kernels, StateLayers &layers,
                  Int3 cells, Span<const std::uint8_t> activity,
                  std::uint64_t step, double start=0., double dt=0.) noexcept {
-    if (!enabled() || esf_enabled())
+    if (!enabled() || transport_reaction_enabled())
       return {};
     const bool balanced=dt>0 && source_comm_!=MPI_COMM_NULL;
     auto ready=[&]() -> Status {
@@ -919,6 +922,7 @@ private:
   ReactionMode mode_{ReactionMode::none};
   bool interval_enabled_{};
   bool pasr_interval_enabled_{};
+  bool split_pasr_{};
   bool esf_sources_ready_{};
   bool response_enabled_{};
   bool cantera_representation_{};

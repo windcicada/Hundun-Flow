@@ -69,6 +69,23 @@ class CompositionBalanceLedger {
         std::isfinite(row.storage_roundoff_bound) && row.storage_roundoff_bound>=0 &&
         (row.relative_defect<1e-6 || std::abs(row.defect)<=row.storage_roundoff_bound);
   }
+  // COAST advances rho_old DY/Dt before the flow density correction. Its
+  // discrete balance includes independently accumulated advective conversion
+  // and density-update terms. Keep the raw conservative defect visible; only
+  // the unexplained remainder is an equation failure for this split method.
+  // The transport stage separately checks its true linear residual.
+  static bool split_admissible(const DriverCompositionBalance& row) noexcept {
+    if(!std::isfinite(row.unexplained_defect) || !std::isfinite(row.storage_roundoff_bound) ||
+        row.storage_roundoff_bound<0)return false;
+    double scale=1e-30;
+    for(double value : {row.temporal_rate,row.transport_outflow,row.pressure_outflow,
+        row.noise_source,row.mixing_source,row.chemistry_source,row.advective_conversion,
+        row.density_update,row.transport_equation_residual}) {
+      if(!std::isfinite(value))return false;
+      scale=std::max(scale,std::abs(value));
+    }
+    return std::abs(row.unexplained_defect)<=row.storage_roundoff_bound+1e-6*scale;
+  }
   void freeze_transport(std::size_t independent, long double value) noexcept {
     add(independent, transport, value / fields_);
     ++transport_counts_[mapping_[independent]];
