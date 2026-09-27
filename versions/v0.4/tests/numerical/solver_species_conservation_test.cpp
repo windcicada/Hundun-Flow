@@ -1689,6 +1689,18 @@ bool test_ibm_species_matrix(bool passive = false, bool periodic = false) {
     passed &= expect(bool(status) && diagonal.bytes==expected_diagonal && rhs.bytes==expected_rhs &&
         residual.bytes==expected_residual && ax.bytes==expected_x && ay.bytes==expected_y && az.bytes==expected_z,
         "frozen IBM mixture rows preserve fluid values and reset solid scratch exactly");
+    // Residual-only assembly borrows the retained diagonal, but must not
+    // rewrite the caller's face workspace, including immersed cut faces.
+    std::fill(ax.bytes.begin(),ax.bytes.end(),91.0);
+    std::fill(ay.bytes.begin(),ay.bytes.end(),91.0);
+    std::fill(az.bytes.begin(),az.bytes.end(),91.0);
+    fill_field(rhs,8.0);fill_field(residual,9.0);
+    status=detail::assemble_species_coupling_residual(fixture.equations.species(),0,
+        state,cached_material,mixture_context,system);
+    passed &= expect(bool(status) && diagonal.bytes==expected_diagonal &&
+        rhs.bytes==expected_rhs && residual.bytes==expected_residual &&
+        faces_are(ax,ay,az,91.0),
+        "retained IBM scalar rows preserve all face workspace and reset inactive cells");
     KernelInvocation call{{&fraction,1},{&residual.view,1},{{0,0,0},cells},
                           0,0,1,flux.revision};
     status=cartesian_mixture_transport(fixture.equations.kernels(),mixture,d,as_const(flux),call);

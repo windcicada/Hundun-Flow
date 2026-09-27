@@ -734,9 +734,14 @@ Status assemble_transport(
     assembled_state=hash_mix(assembled_state,context.reaction_endpoint.revision_domain);
   }
   if (context.immersed_interface != nullptr) {
-    evaluated=detail::IbmScalarTransport::constrain_rows(
-        *context.immersed_interface,scalar.trial,box,system);
-    if(!evaluated) return evaluated;
+    // The residual path has already restored every inactive cell row and
+    // validated the IBM binding during transport. Its face workspace is
+    // borrowed unchanged; only a fresh matrix assembly constrains cut links.
+    if(!retain_diagonal) {
+      evaluated=detail::IbmScalarTransport::constrain_rows(
+          *context.immersed_interface,scalar.trial,box,system);
+      if(!evaluated) return evaluated;
+    }
     assembled_state = context.immersed_interface->constrain_certificate(
         assembled_state, scalar.trial.revision, diffusivity.revision);
     if (assembled_state == 0U)
