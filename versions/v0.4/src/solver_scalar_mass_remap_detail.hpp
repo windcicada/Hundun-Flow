@@ -128,6 +128,7 @@ class ScalarMassRemap {
       target_species_history_.resize(species_indices_.size());
       target_species_diffusivity_.resize(species_indices_.size());
       target_species_diagonal_.resize(species_indices_.size() * count_);
+      target_species_validation_.resize(species_indices_.size());
       target_diffusion_faces_.resize(species_indices_.size());
       for(auto& cache:target_diffusion_faces_) {
         cache=std::make_unique<ScalarDiffusionFaces>();
@@ -221,7 +222,7 @@ class ScalarMassRemap {
     };
     add(mass_); add(quantity_); add(next_); add(storage_);
     add(species_indices_); add(target_species_history_); add(target_species_diffusivity_); add(target_species_diagonal_);
-    add(target_diffusion_faces_);
+    add(target_diffusion_faces_); add(target_species_validation_);
     for(const auto& cache:target_diffusion_faces_) {
       if(!cache)continue;
       const auto owned=sizeof(ScalarDiffusionFaces)+cache->owned_payload_bytes();
@@ -633,6 +634,8 @@ class ScalarMassRemap {
     const bool cache_diffusion=context.mixture_transport &&
         !equations.enthalpy().unity_lewis_total_enthalpy();
     const unsigned passive_iterations=report.iterations;
+    std::fill(target_species_validation_.begin(),target_species_validation_.end(),
+              SpeciesFrozenValidation{});
     for(unsigned iteration=0U;iteration<128U;++iteration) {
       for(auto& v:views_) ++v.revision;
       HaloTicket ticket;
@@ -685,7 +688,7 @@ class ScalarMassRemap {
         // flux remain fixed; each new solve rebuilds the diagonal at iteration 0.
         if (local && iteration == 0U) {
           local = assemble_species_coupling_rows(species, s, state, material,
-                                                 context, scratch, sources, &composition);
+              context, scratch, sources, &composition, &target_species_validation_[s]);
           std::size_t cell_index = s * count_;
           for (int z = 0; z < cells_.z && local; ++z)
             for (int y = 0; y < cells_.y; ++y)
@@ -700,7 +703,7 @@ class ScalarMassRemap {
                 scratch.diagonal.unchecked({x, y, z}, 0U) =
                     target_species_diagonal_[cell_index];
           local = assemble_species_coupling_residual(species, s, state, material,
-                                                     context, scratch, sources, &composition);
+              context, scratch, sources, &composition, &target_species_validation_[s]);
         }
         if (local && continuity_reduced) {
           std::size_t index{};
@@ -832,7 +835,8 @@ class ScalarMassRemap {
                 enthalpy_residual.data[i]+=difference*residual;
               }
               const double diagonal=species_coupling_search_diagonal(kernels,
-                  species.convection(),context.mass_flux,c,scratch.diagonal.unchecked(c,0U));
+                  species.convection(),context.mass_flux,c,
+                  scratch.diagonal.unchecked(c,0U));
               const long double scale=std::abs(static_cast<long double>(diagonal)*q)+
                   std::abs(static_cast<long double>(diagonal)*q-residual);
               const long double floor=0.5L*diagonal*std::numeric_limits<double>::denorm_min();
@@ -996,6 +1000,7 @@ class ScalarMassRemap {
   std::vector<double> mass_, quantity_, next_;
   std::vector<double> bounds_local_, bounds_global_;
   std::vector<double> target_species_diagonal_;
+  std::vector<SpeciesFrozenValidation> target_species_validation_;
   std::vector<std::unique_ptr<ScalarDiffusionFaces>> target_diffusion_faces_;
   SpeciesCouplingSolver target_solver_{SpeciesCouplingSolver::diagonal};
   std::vector<std::vector<ColdPressureRow>> target_species_rows_;

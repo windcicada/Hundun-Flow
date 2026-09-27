@@ -172,7 +172,7 @@ Status assemble_species_guess(const SpeciesEquationPlan& plan,
 // One frozen tuple of trial/accepted/previous compositions. The owner must
 // keep all borrowed fields immutable until invalidate() or destruction. Rebuild
 // after every iterate/halo update; no proof survives a scalar solve or retry.
-// Material, source, flux, alias and final-conservation checks remain per row.
+// The assembler owns material, source, flux, alias and conservation checks.
 class SpeciesCompositionBatch {
  public:
   SpeciesCompositionBatch() = default;
@@ -191,6 +191,19 @@ class SpeciesCompositionBatch {
   std::vector<PrimitiveHistory> histories_;
 };
 
+// One species within one frozen nonlinear solve. Only its trial composition
+// may change; density/history/source/flux/material and the retained diagonal
+// remain owned and immutable by the caller. Never carry this across a solve,
+// outer correction or retry. The assembler alone can publish a validation.
+class SpeciesFrozenValidation {
+ public:
+  std::uint64_t validation_passes() const noexcept { return passes_; }
+ private:
+  friend struct SpeciesPreflightAccess;
+  PlanFingerprint binding_{};
+  std::uint64_t passes_{};
+};
+
 // Private nonlinear solve rows, divided by cell volume BEFORE subtracting
 // their terms, to avoid integral underflow for representable trace species.
 // Accepts only the same full-domain provisional-guess or certified-final
@@ -202,7 +215,8 @@ Status assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system,
     Span<const EquationContributionView> sources = {},
-    const SpeciesCompositionBatch* composition = nullptr) noexcept;
+    const SpeciesCompositionBatch* composition = nullptr,
+    SpeciesFrozenValidation* frozen = nullptr) noexcept;
 
 // Re-evaluate the current species equation using system.diagonal prepared by
 // assemble_species_coupling_rows. The private caller holds density, material,
@@ -213,6 +227,7 @@ Status assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system,
     Span<const EquationContributionView> sources = {},
-    const SpeciesCompositionBatch* composition = nullptr) noexcept;
+    const SpeciesCompositionBatch* composition = nullptr,
+    SpeciesFrozenValidation* frozen = nullptr) noexcept;
 
 } // namespace hundun::v04::detail

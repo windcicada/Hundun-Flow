@@ -2527,6 +2527,95 @@ bool test_production_species_and_passive_assembly() {
       residual.bytes==expected_residual && ax.bytes==expected_x &&
       ay.bytes==expected_y && az.bytes==expected_z,
       "batched validation preserves all assembled coefficients bitwise");
+  detail::SpeciesFrozenValidation frozen;
+  passed &= expect(bool(detail::assemble_species_coupling_rows(
+      fixture.equations.species(),0,state,material,context,system,{},&batch,&frozen)),
+      "frozen scalar validation starts from complete physical rows");
+  passed &= expect(bool(detail::assemble_species_coupling_residual(
+      fixture.equations.species(),0,state,material,context,system,{},&batch,&frozen)) &&
+      frozen.validation_passes()==1 && diagonal.bytes==expected_diagonal &&
+      rhs.bytes==expected_rhs && residual.bytes==expected_residual,
+      "frozen scalar residual reuses one full validation without changing arithmetic");
+  // The iterate changes while accepted/previous history remains frozen.
+  auto iterate=make_field(species.view.field,cells,1,2,19001);
+  fill_field(iterate,0.2);
+  auto iterate_history=species_history;
+  iterate_history.trial=as_const(iterate.view);
+  auto iterate_state=state;
+  iterate_state.independent_species={&iterate_history,1};
+  detail::SpeciesFrozenValidation iterate_frozen;
+  passed &= expect(bool(batch.prepare(fixture.equations.species(),iterate_state,box)) &&
+      bool(detail::assemble_species_coupling_rows(fixture.equations.species(),0,
+          iterate_state,material,context,system,{},&batch,&iterate_frozen)),
+      "changing-iterate validation freezes its original inputs");
+  for(double value:{0.25,1e-280,0.0,1.0}) {
+    fill_field(iterate,value);++iterate_history.trial.revision;
+    passed &= expect(bool(batch.prepare(fixture.equations.species(),iterate_state,box)) &&
+        bool(detail::assemble_species_coupling_residual(fixture.equations.species(),0,
+            iterate_state,material,context,system,{},&batch,&iterate_frozen)),
+        "fresh composition proof permits a changed bounded iterate");
+    const auto cached_diagonal=diagonal.bytes,cached_rhs=rhs.bytes,cached_residual=residual.bytes;
+    passed &= expect(bool(detail::assemble_species_coupling_residual(fixture.equations.species(),0,
+        iterate_state,material,context,system)) && iterate_frozen.validation_passes()==1 &&
+        diagonal.bytes==cached_diagonal && rhs.bytes==cached_rhs && residual.bytes==cached_residual,
+        "frozen-input reuse preserves zero, trace and pure-species residuals bitwise");
+  }
+  for(unsigned dependency=0;dependency<7;++dependency) {
+    auto changed=iterate_state;auto changed_history=iterate_history;
+    changed.independent_species={&changed_history,1};
+    auto changed_context=context;auto changed_material=material;
+    auto changed_diffusivities=diffusivities;
+    auto changed_system=system;
+    detail::SpeciesFrozenValidation bound;
+    passed &= expect(bool(batch.prepare(fixture.equations.species(),changed,box)) &&
+        bool(detail::assemble_species_coupling_rows(fixture.equations.species(),0,
+            changed,changed_material,changed_context,changed_system,{},&batch,&bound)),
+        "dependency-change reference assembles");
+    switch(dependency) {
+      case 0: ++changed.density.trial.revision; break;
+      case 1: ++changed.density.accepted.revision; break;
+      case 2: ++changed.density.previous.revision; break;
+      case 3: ++changed_history.accepted.revision; break;
+      case 4: ++changed_context.time; break;
+      case 5:
+        ++changed_diffusivities[0].revision;
+        changed_material.scalar_mass_diffusivity={changed_diffusivities.data(),changed_diffusivities.size()};
+        break;
+      default: ++changed_system.diagonal.revision; break;
+    }
+    passed &= expect(bool(batch.prepare(fixture.equations.species(),changed,box)) &&
+        bool(detail::assemble_species_coupling_residual(fixture.equations.species(),0,
+            changed,changed_material,changed_context,changed_system,{},&batch,&bound)) &&
+        bound.validation_passes()==2,
+        "a changed frozen input or retained workspace invalidates scalar preflight reuse");
+  }
+  passed &= expect(bool(batch.prepare(fixture.equations.species(),iterate_state,box)),
+      "restore iterate proof after dependency checks");
+  // A new density epoch must run the original preflight before any writes.
+  auto bad_density_state=iterate_state;++bad_density_state.density.trial.revision;
+  const Int3 last_density{cells.x-1,cells.y-1,cells.z-1};
+  const double saved_density=rho.view.unchecked(last_density,0);
+  rho.view.unchecked(last_density,0)=-1;reset_outputs();
+  passed &= expect(detail::assemble_species_coupling_residual(fixture.equations.species(),0,
+      bad_density_state,material,context,system,{},&batch,&iterate_frozen).code==StatusCode::numerical_failure &&
+      iterate_frozen.validation_passes()==2 && output_is(diagonal,rhs,residual,91) && faces_are(ax,ay,az,91),
+      "changed frozen density invalidates reuse and fails before writes");
+  rho.view.unchecked(last_density,0)=saved_density;
+  // No reusable range proof is admitted close to floating-point overflow.
+  const auto saved_density_bytes=rho.bytes;
+  fill_field(rho,1e8);
+  auto extreme=context;extreme.dt=1e-300;extreme.bdf={1e300,-1e300,0,1};
+  detail::SpeciesFrozenValidation extreme_frozen;
+  passed &= expect(bool(batch.prepare(fixture.equations.species(),state,box)) &&
+      bool(detail::assemble_species_coupling_rows(fixture.equations.species(),0,
+          state,material,extreme,system,{},&batch,&extreme_frozen)) &&
+      bool(detail::assemble_species_coupling_residual(fixture.equations.species(),0,
+          state,material,extreme,system,{},&batch,&extreme_frozen)) &&
+      extreme_frozen.validation_passes()==2,
+      "overflow-sensitive storage retains complete per-iterate validation");
+  rho.bytes=saved_density_bytes;
+  passed &= expect(bool(batch.prepare(fixture.equations.species(),state,box)),
+      "composition proof restored for remaining alias and failure checks");
   reset_outputs();
   auto aliased_system=system;aliased_system.diagonal=species.view;
   passed &= expect(detail::assemble_species_coupling_rows(

@@ -19,10 +19,26 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 
 namespace hundun::v04 {
+namespace detail {
+struct SpeciesPreflightAccess {
+  static bool matches(const SpeciesFrozenValidation& value,
+                      PlanFingerprint binding) noexcept {
+    return binding && value.binding_==binding;
+  }
+  static void publish(SpeciesFrozenValidation& value,
+                      PlanFingerprint binding) noexcept {
+    value.binding_=binding;
+  }
+  static void begin(SpeciesFrozenValidation& value) noexcept {
+    value.binding_=0; ++value.passes_;
+  }
+};
+}
 namespace {
 
 constexpr std::uint32_t kScalarPlan = 1451U;
@@ -218,6 +234,64 @@ RevisionToken scalar_state_revision(const EquationStateView& state,
   return hash == 0U ? RevisionToken{1U} : hash;
 }
 
+// Bind the validation to the immutable inputs of one scalar solve. A new
+// composition batch checks the changing q at every iterate; only its trial
+// revision is omitted here. Layout, all other histories and numeric epochs
+// remain part of the key, even when fields reuse the same backing allocation.
+PlanFingerprint frozen_species_binding(PlanFingerprint plan,
+    PrimitiveHistory scalar, const EquationStateView& state,
+    ConstFieldView diffusivity, Span<const EquationContributionView> sources,
+    const EquationAssemblyContext& context, EquationSystemView system) noexcept {
+  if (context.scalar_midpoint || context.reaction_endpoint.base ||
+      context.bdf.order!=1U || context.bdf.a2!=0.0 ||
+      context.bdf.a0<=0.0 || context.bdf.a1!=-context.bdf.a0) return 0;
+  auto key=plan;
+  const auto add=[&](std::uint64_t value) { key=hash_mix(key,value); };
+  const auto number=[&](double value) {
+    std::uint64_t bits{}; std::memcpy(&bits,&value,sizeof(bits)); add(bits);
+  };
+  const auto field=[&](ConstFieldView v, bool trial=false) {
+    add(reinterpret_cast<std::uintptr_t>(v.base));
+    add(v.interior.x);add(v.interior.y);add(v.interior.z);
+    add(v.ghosts.x);add(v.ghosts.y);add(v.ghosts.z);
+    add(v.stride_y);add(v.stride_z);add(v.component_stride);add(v.components);
+    add(static_cast<std::uint64_t>(v.replica));add(v.field);
+    add(trial ? 0 : v.revision);add(v.storage_identity);add(v.revision_domain);
+  };
+  const auto face=[&](ConstFaceFieldView v) {
+    add(reinterpret_cast<std::uintptr_t>(v.base));
+    add(v.extents.x);add(v.extents.y);add(v.extents.z);
+    add(v.stride_y);add(v.stride_z);add(static_cast<unsigned>(v.axis));
+    add(v.storage_identity);add(v.revision_domain);
+  };
+  field(scalar.trial,true);field(scalar.accepted);field(scalar.previous);
+  field(state.density.trial);field(state.density.accepted);field(state.density.previous);
+  field(diffusivity);field(as_const(system.diagonal));
+  face(context.mass_flux.x);face(context.mass_flux.y);face(context.mass_flux.z);
+  add(context.mass_flux.revision);add(context.time);add(context.geometry);
+  add(context.boundary);add(context.thermo);add(context.transport);
+  add(context.face_flux);add(context.contribution_stage);add(context.additional_contribution_stage);
+  add(static_cast<unsigned>(context.scope));add(context.provisional_mass_flux);
+  add(context.box.begin.x);add(context.box.begin.y);add(context.box.begin.z);
+  add(context.box.cells.x);add(context.box.cells.y);add(context.box.cells.z);
+  number(context.dt);number(context.bdf.a0);number(context.bdf.a1);
+  add(reinterpret_cast<std::uintptr_t>(context.scalar_diffusion_faces));
+  add(reinterpret_cast<std::uintptr_t>(context.immersed_interface));
+  if(context.immersed_interface)add(context.immersed_interface->fingerprint());
+  add(reinterpret_cast<std::uintptr_t>(context.mixture_transport));
+  if(context.mixture_transport) {
+    const auto& m=*context.mixture_transport;
+    face(m.x);face(m.y);face(m.z);add(m.face_flux);add(m.linearization);
+  }
+  add(sources.size);
+  for(std::size_t i=0;i<sources.size;++i) {
+    const auto& source=sources.data[i];
+    field(source.explicit_source_density);add(source.has_implicit_sink);
+    if(source.has_implicit_sink)field(source.implicit_sink_density);
+  }
+  return key ? key : 1;
+}
+
 template <CartesianAxis Axis>
 Status fill_face_coefficients(const CartesianKernelPlan& kernels,
                               ConstFieldView diffusivity, KernelBox box,
@@ -321,7 +395,8 @@ Status assemble_transport(
     EquationAssemblyCertificate& certificate, bool allow_partial,
     const IbmInterfaceInletField* inlet_field, bool density_units=false,
     bool retain_diagonal=false,
-    const EnthalpyEquationPlan* statistical_enthalpy=nullptr) noexcept {
+    const EnthalpyEquationPlan* statistical_enthalpy=nullptr,
+    detail::SpeciesFrozenValidation* frozen=nullptr) noexcept {
   const auto* mixture = (spec.role == TransportedScalarRole::species || statistical_enthalpy)
       ? context.mixture_transport : nullptr;
   const auto* cached=context.scalar_diffusion_faces;
@@ -363,7 +438,6 @@ Status assemble_transport(
       !compatible_history(scalar, cells, spec.field, required_ghosts) ||
       !valid_scalar_context(kernels, context, box) ||
       (!allow_partial && !detail::full_equation_box(box, cells)) ||
-      !detail::finite_face_flux(context.mass_flux, box) ||
       !detail::finite_face_neighbour_slabs(scalar.trial, box, 0U, 1U,
                                            required_ghosts) ||
       !valid_material(diffusivity, cells) || !valid_system(system, cells) ||
@@ -372,6 +446,12 @@ Status assemble_transport(
       detail::output_aliases_flux(system, true, context.mass_flux)) {
     return {StatusCode::invalid_plan, kScalarAssembly};
   }
+  const auto frozen_binding=frozen ? frozen_species_binding(fingerprint,scalar,
+      state,diffusivity,contributions,context,system) : 0;
+  const bool reuse_preflight=retain_diagonal && frozen &&
+      detail::SpeciesPreflightAccess::matches(*frozen,frozen_binding);
+  if (!reuse_preflight && !detail::finite_face_flux(context.mass_flux,box))
+    return {StatusCode::invalid_plan,kScalarAssembly};
   if (context.scalar_midpoint &&
       (spec.role != TransportedScalarRole::passive_scalar || density_units ||
        retain_diagonal || statistical_enthalpy || context.reaction_endpoint.base ||
@@ -405,11 +485,15 @@ Status assemble_transport(
     }
   }
 
+  if (frozen && !reuse_preflight) detail::SpeciesPreflightAccess::begin(*frozen);
+  const bool capture_preflight=frozen_binding && !retain_diagonal;
+  double density_jump_bound{}, accepted_density_bound{}, source_bound{}, sink_bound{}, volume_bound{};
   // The per-cell pass below validates every quantity needed by the kernels
   // and assembly before any caller-owned output is modified.
   const Int3 validation_end{
       box.begin.x + box.cells.x, box.begin.y + box.cells.y,
       box.begin.z + box.cells.z};
+  if (!reuse_preflight)
   for (std::int32_t z = box.begin.z; z < validation_end.z; ++z) {
     for (std::int32_t y = box.begin.y; y < validation_end.y; ++y) {
       for (std::int32_t x = box.begin.x; x < validation_end.x; ++x) {
@@ -485,6 +569,13 @@ Status assemble_transport(
             : reaction_storage-explicit_source;
         const double non_diffusive_without_convection =
             (unsteady + source_balance + implicit_sink * spatial.unchecked(cell,0U)) * volume;
+        if (capture_preflight) {
+          density_jump_bound=std::max(density_jump_bound,std::abs(rho_trial-rho_accepted));
+          accepted_density_bound=std::max(accepted_density_bound,rho_accepted);
+          source_bound=std::max(source_bound,std::abs(explicit_source));
+          sink_bound=std::max(sink_bound,implicit_sink);
+          volume_bound=std::max(volume_bound,std::abs(volume));
+        }
         if (!finite_positive(diagonal) ||
             !std::isfinite(non_diffusive_without_convection)) {
           return {StatusCode::numerical_failure, kScalarNumerical};
@@ -749,6 +840,17 @@ Status assemble_transport(
   }
   certificate = {fingerprint, context.scope, context.time, context.geometry,
                  context.face_flux, assembled_state, context.dt};
+  if (capture_preflight) {
+    // The composition batch guarantees q and its histories lie in [0,1].
+    // This conservative bound proves that every later BE storage/source
+    // preflight remains finite, including its integral intermediate. Near
+    // overflow, retain the original complete validation on every call.
+    const long double bound=(static_cast<long double>(context.bdf.a0)*
+        (static_cast<long double>(density_jump_bound)+accepted_density_bound)+
+        source_bound+sink_bound)*std::max(1.0,volume_bound);
+    if (std::isfinite(bound) && bound<std::numeric_limits<double>::max()/8.0L)
+      detail::SpeciesPreflightAccess::publish(*frozen,frozen_binding);
+  }
   if(basis)basis->publish(face_key);
   return {};
 }
@@ -923,7 +1025,8 @@ Status assemble_species_impl(
     const EquationAssemblyContext& context, EquationSystemView system,
     EquationAssemblyCertificate& certificate, bool allow_partial,
     bool initial_guess, bool density_units, bool retain_diagonal,
-    bool statistical, const detail::SpeciesCompositionBatch* composition) noexcept {
+    bool statistical, const detail::SpeciesCompositionBatch* composition,
+    detail::SpeciesFrozenValidation* frozen) noexcept {
   if (plan.kernels_ == nullptr ||
       (statistical && (initial_guess || density_units || retain_diagonal ||
                        allow_partial || context.reaction_endpoint.base)) ||
@@ -975,7 +1078,8 @@ Status assemble_species_impl(
                 plan.contribution_counts_[species]},
       state.independent_species.data[species],
       state, plan.unity_lewis_total_enthalpy_ ? material.enthalpy_diffusivity : material.scalar_mass_diffusivity.data[species], contributions,
-      context, system, certificate, allow_partial, &inlet_field, density_units, retain_diagonal);
+      context, system, certificate, allow_partial, &inlet_field, density_units, retain_diagonal,
+      nullptr, shared_composition ? frozen : nullptr);
 }
 
 Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
@@ -987,7 +1091,7 @@ Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t specie
     bool statistical) noexcept {
   return assemble_species_impl(plan,species,state,material,contributions,context,
       system,certificate,allow_partial,initial_guess,density_units,retain_diagonal,
-      statistical,nullptr);
+      statistical,nullptr,nullptr);
 }
 
 Status assemble_species_impl(const SpeciesEquationPlan& plan, std::size_t species,
@@ -1174,7 +1278,8 @@ Status detail::assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system, Span<const EquationContributionView> sources,
-    const detail::SpeciesCompositionBatch* composition) noexcept {
+    const detail::SpeciesCompositionBatch* composition,
+    detail::SpeciesFrozenValidation* frozen) noexcept {
   if(context.contribution_stage==0U ||
       !detail::full_equation_box(resolved_box(context.box,plan.cells()),plan.cells()) ||
       (context.scope!=EquationAssemblyScope::momentum_predictor &&
@@ -1182,14 +1287,15 @@ Status detail::assemble_species_coupling_rows(const SpeciesEquationPlan& plan,
     return {StatusCode::invalid_plan,kScalarAssembly};
   EquationAssemblyCertificate local_certificate;
   return assemble_species_impl(plan,species,state,material,sources,context,system,
-      local_certificate,false,context.scope==EquationAssemblyScope::momentum_predictor,true,false,false,composition);
+      local_certificate,false,context.scope==EquationAssemblyScope::momentum_predictor,true,false,false,composition,frozen);
 }
 
 Status detail::assemble_species_coupling_residual(const SpeciesEquationPlan& plan,
     std::size_t species, const EquationStateView& state,
     const EquationMaterialView& material, const EquationAssemblyContext& context,
     EquationSystemView system, Span<const EquationContributionView> sources,
-    const detail::SpeciesCompositionBatch* composition) noexcept {
+    const detail::SpeciesCompositionBatch* composition,
+    detail::SpeciesFrozenValidation* frozen) noexcept {
   if (context.contribution_stage == 0U ||
       !detail::full_equation_box(resolved_box(context.box, plan.cells()), plan.cells()) ||
       (context.scope != EquationAssemblyScope::momentum_predictor &&
@@ -1198,7 +1304,7 @@ Status detail::assemble_species_coupling_residual(const SpeciesEquationPlan& pla
   EquationAssemblyCertificate certificate;
   return assemble_species_impl(plan, species, state, material, sources, context,
       system, certificate, false,
-      context.scope == EquationAssemblyScope::momentum_predictor, true,true,false,composition);
+      context.scope == EquationAssemblyScope::momentum_predictor, true,true,false,composition,frozen);
 }
 
 Status assemble_species(
