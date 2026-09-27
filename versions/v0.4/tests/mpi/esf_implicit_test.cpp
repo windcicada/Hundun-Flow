@@ -320,6 +320,7 @@ bool run(unsigned fields,bool require_implicit,bool pressure_case=false,bool pre
         field.values[i+3]=cp*temperature*(1+(pressure_case ? Gas::pressure_amplitude*cosine(gx) : 0));
       }
       if(spec.role==RestartFieldRole::stochastic_transport) {field.values[i]=gamma;field.values[i+2]=mu;}
+      if(spec.role==RestartFieldRole::carrier_density)field.values[i]=rho;
     }
     if(spec.role==RestartFieldRole::independent_species)++independent;
     if(spec.role==RestartFieldRole::stochastic_field)++field_index;

@@ -572,6 +572,7 @@ bool valid_field_catalog(Span<const RestartFieldView> fields,
   bool enthalpy = false;
   bool enthalpy_rate = false;
   bool auxiliary = false;
+  bool density = false;
   for (std::size_t index = 0U; index < fields.size; ++index) {
     const RestartFieldView& field = fields.data[index];
     detail::FieldStorageInterval interval{};
@@ -597,6 +598,10 @@ bool valid_field_catalog(Span<const RestartFieldView> fields,
       case RestartFieldRole::enthalpy:
         if (rates || enthalpy || field.values.components != 1U) return false;
         enthalpy = true;
+        break;
+      case RestartFieldRole::carrier_density:
+        if (rates || density || field.values.components != 1U) return false;
+        density = true;
         break;
       case RestartFieldRole::independent_species:
       case RestartFieldRole::transported_scalar:
@@ -841,7 +846,8 @@ bool decode_common(Decoder& decoder, std::uint32_t version,
              static_cast<std::uint8_t>(RestartFieldRole::stochastic_field) &&
          role != static_cast<std::uint8_t>(
                      RestartFieldRole::stochastic_transport) &&
-         role != static_cast<std::uint8_t>(RestartFieldRole::stochastic_auxiliary)) ||
+         role != static_cast<std::uint8_t>(RestartFieldRole::stochastic_auxiliary) &&
+         role != static_cast<std::uint8_t>(RestartFieldRole::carrier_density)) ||
         field.components == 0U) {
       return false;
     }

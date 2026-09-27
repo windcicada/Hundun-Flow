@@ -97,6 +97,7 @@ public:
         sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5 + (deterministic_ ? 1 : 0)) +
         spec_.fields*sizeof(portable::GasSample) +
         (spec_.fields+1)*(sizeof(portable::GasSample)+(ns_+2)*sizeof(double)) +
+        (deterministic_ ? (spec_.fields+1)*sizeof(ThermoState) : 0) +
         (spec_.tcr.mode!=TcrMode::experimental || dynamic_tcr() ? 2*sizeof(ColdPressureRow)+sizeof(double) : 0) +
         (dyn711() ? 2*(sizeof(tcr::detail::Dyn711RateState)*ns_+40+40*ns_)+
              8*(2*ns_+3)+ns_+2 : dynamic_tcr() ? 32 * (5*ns_+3) + 48 :
@@ -274,7 +275,7 @@ public:
                                const ProductReactionSources &gas,
                                const ThermodynamicsPlan &thermo,
                                portable::Revision revision) noexcept {
-    if (fields.size() != start + spec_.fields + 2 ||
+    if (fields.size() != start + spec_.fields + 2 + (deterministic_ ? 1U : 0U) ||
         mean_species.size != ns_ - 1)
       return invalid();
     std::fill(means_.begin(), means_.end(), 0.0);
@@ -310,7 +311,7 @@ public:
         !std::isfinite(cache.values[4 * cell + 3]) ||
         cache.values[4 * cell + 3] < 0)
       return numerical();
-    const auto& auxiliary=fields.back();
+    const auto& auxiliary=fields[start+spec_.fields+1];
     if (auxiliary.role!=RestartFieldRole::stochastic_auxiliary ||
         auxiliary.components!=stride_ || auxiliary.values.size()!=count_*stride_)
       return invalid();

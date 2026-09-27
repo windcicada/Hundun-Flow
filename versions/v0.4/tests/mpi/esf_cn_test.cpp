@@ -112,6 +112,18 @@ bool run(const std::filesystem::path& assets,const std::filesystem::path& restar
   ProductDriver restored;if(status)status=create(restored);
   RestartExpected expected;if(status)status=restored.restart_expected(expected);
   RestartImage image;if(status)status=RestartReader::load(MPI_COMM_WORLD,restart,expected,image);
+  if(status && pasr) {
+    auto malformed=image;bool found=false;
+    for(auto& field:malformed.fields)if(field.role==RestartFieldRole::carrier_density) {
+      found=true;field.values[0]*=1.01;
+    }
+    if(!all(found))return false;
+    ProductDriver probe;auto s=create(probe);
+    if(!all(bool(s)))return false;
+    s=probe.initialize_restart(malformed);
+    RestartSnapshot untouched;
+    if(!all(!s && !probe.committed_restart_snapshot(untouched)))return false;
+  }
   if(status)status=restored.initialize_restart(image);
   if(status)status=restored.committed_restart_snapshot(state);
   if(!all(bool(status) && saved==values(state)))return false;

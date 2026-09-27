@@ -431,6 +431,10 @@ Status fill(const Header &h, const RestartExpected &e,
               return invalid();
             std::copy_n(b.cache.data() + 4 * i, 4, v);
             break;
+          case RestartFieldRole::carrier_density:
+            if(d.components!=1)return invalid();
+            *v=b.density[i];
+            break;
           default:
             return invalid(24108);
           }
@@ -526,13 +530,15 @@ Status validate_imported_inlet_flux(MPI_Comm communicator,
   return {};
 }
 Status exact_physical_fields(const RestartImage &image,
-                             const RestartSnapshot &snapshot) {
+                             const RestartSnapshot &snapshot,
+                             bool rebuilt_material=false) {
   if (image.fields.size() != snapshot.fields.size)
     return invalid(24109);
   for (std::size_t f = 0; f < image.fields.size(); ++f) {
     const auto &field = image.fields[f];
     const auto view = snapshot.fields.data[f].values;
-    if (field.role == RestartFieldRole::stochastic_transport)
+    if (rebuilt_material && (field.role == RestartFieldRole::stochastic_transport ||
+        field.role == RestartFieldRole::carrier_density))
       continue;
     if (field.role != snapshot.fields.data[f].role ||
         field.components != view.components)
@@ -781,7 +787,7 @@ int run(const char *case_root, const char *transfer, const char *output,
   RestartSnapshot snapshot;
   s = driver.committed_restart_snapshot(snapshot);
   if (s)
-    s = exact_physical_fields(image, snapshot);
+    s = exact_physical_fields(image, snapshot, true);
   if (!stage("physical_fields", s))
     return 7;
   // V1 explicitly marks absent history; the next native step recovers with BE.
@@ -807,11 +813,7 @@ int run(const char *case_root, const char *transfer, const char *output,
     s = invalid(24109);
   if (s && initialize_model_history && back.cell_records!=image.cell_records)
     s = invalid(24109);
-  for (std::size_t f = 0; s && f < image.fields.size(); ++f) {
-    if (image.fields[f].role != RestartFieldRole::stochastic_transport &&
-        back.fields[f].values != image.fields[f].values)
-      s = invalid(24109);
-  }
+  if(s)s=exact_physical_fields(back,snapshot);
   if (!stage("readback", s))
     return 9;
   driver = ProductDriver{};

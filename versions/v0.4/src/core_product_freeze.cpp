@@ -6026,7 +6026,8 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
                                       - candidate->output_sgs.size());
       const auto primary_count = 3U + product.fields.scalars.size() +
                                  product.fields.esf_fields.size() +
-                                 (product.fields.esf_fields.empty() ? 0U : 2U);
+                                 (product.fields.esf_fields.empty() ? 0U : 2U) +
+                                 (product.esf.deterministic() ? 1U : 0U);
       candidate->restart_fields.resize(primary_count);
       candidate->restart_previous_fields.resize(primary_count);
       candidate->restart_expected_fields.resize(primary_count);
@@ -6062,6 +6063,9 @@ Status ProductDriver::create(MPI_Comm communicator, CompiledCasePlan&& plan,
         candidate->restart_expected_fields[esf_slot++] = {
             RestartFieldRole::stochastic_auxiliary, product.fields.esf_auxiliary,
             product.fields.esf_components};
+      if (product.esf.deterministic())
+        candidate->restart_expected_fields[esf_slot++] = {
+            RestartFieldRole::carrier_density, product.fields.rho, 1U};
       candidate->restart_expected_rate_fields[0U] = {
           RestartFieldRole::enthalpy_nonadvective_rate,
           product.fields.enthalpy_nonadvective_rate, 1U};
@@ -8461,7 +8465,7 @@ Status ProductDriver::initialize_restart(
               double psi = thermo.drho_dp_hY, chi = thermo.drho_dh_pY;
               if (fluid && product.esf.implicit_transport() &&
                   product.summary.coupling == CouplingKind::outer_corrected) {
-                const auto& auxiliary = fields.back();
+                const auto& auxiliary = fields[3U+product.fields.scalars.size()+product.fields.esf_fields.size()+1U];
                 const std::size_t stride = product.reaction.species_indices().size + 2U;
                 esf::detail::AuxiliaryPressureState selected;
                 level_status = product.esf.auxiliary_pressure(
@@ -8473,6 +8477,24 @@ Status ProductDriver::initialize_restart(
                 density = selected.density_kg_per_m3;
                 psi = selected.density_pressure_derivative;
                 chi = selected.density_enthalpy_derivative;
+              }
+              if (product.esf.deterministic()) {
+                // Pressure correction advances the carrier density. EOS
+                // reconstruction is mathematically redundant but can lose
+                // its last bits and change the next frozen transport row.
+                // Validate the stored state against EOS, then retain it.
+                const auto& stored=fields.back();
+                const double restored=stored.values[cell];
+                const bool reconstruct_carrier=method_recovery && !complete_source_history;
+                if(stored.role!=RestartFieldRole::carrier_density || stored.components!=1 ||
+                    !std::isfinite(restored) || restored<=0 ||
+                    (!reconstruct_carrier && fluid &&
+                     std::abs(restored-density)>detail::kColdEosRoundoff*density)) {
+                  level_status={StatusCode::numerical_failure,kProductInput};break;
+                }
+                // A foreign primitive-state import explicitly constructs its
+                // missing method state once; native continuation retains it.
+                if(!reconstruct_carrier)density=restored;
               }
               states[cell] = {
                   density, thermo.temperature, transport.viscosity,
@@ -22956,6 +22978,9 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
     status = append(RestartFieldRole::stochastic_auxiliary,
                     product.fields.esf_auxiliary, StateRole::accepted_n,
                     runtime.restart_fields, index);
+  if (status && product.esf.deterministic())
+    status = append(RestartFieldRole::carrier_density, product.fields.rho,
+                    StateRole::accepted_n, runtime.restart_fields, index);
   index = 0U;
   if (status)
     status = append(RestartFieldRole::velocity, product.fields.velocity,
@@ -22994,6 +23019,9 @@ Status ProductDriver::committed_restart_snapshot(RestartSnapshot& out) noexcept 
     status = append(RestartFieldRole::stochastic_auxiliary,
                     product.fields.esf_auxiliary, StateRole::accepted_n_minus_one,
                     runtime.restart_previous_fields, index);
+  if (status && product.esf.deterministic())
+    status = append(RestartFieldRole::carrier_density, product.fields.rho,
+                    StateRole::accepted_n_minus_one, runtime.restart_previous_fields, index);
   index = 0U;
   if (status)
     status = append(RestartFieldRole::enthalpy_nonadvective_rate,

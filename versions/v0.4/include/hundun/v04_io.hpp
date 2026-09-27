@@ -106,7 +106,8 @@ enum class RestartFieldRole : std::uint8_t {
   scalar_nonadvective_rate,
   stochastic_field,
   stochastic_transport,
-  stochastic_auxiliary
+  stochastic_auxiliary,
+  carrier_density // Pressure-corrected transport density; not an EOS warm start.
 };
 
 struct RestartFieldView {
