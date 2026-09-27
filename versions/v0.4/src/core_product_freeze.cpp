@@ -12075,11 +12075,19 @@ Status ProductDriver::Impl::execute_attempt(
           (interval.end - interval.begin) / sizeof(double)};
   }
   status = product.reductions.consensus(status);
+  const std::size_t boundary_workspace_half = boundary_thermo_workspace.size / 2;
+  const Span<double> boundary_close_workspace{
+      boundary_thermo_workspace.data, boundary_workspace_half};
+  const Span<double> boundary_refresh_workspace{
+      boundary_thermo_workspace.data
+          ? boundary_thermo_workspace.data + boundary_workspace_half : nullptr,
+      boundary_thermo_workspace.size - boundary_workspace_half};
   bool cold_freeze_sgs = false;
   const auto refresh_coupled_state = [&](
       StageId halo_stage, BoundaryThermophysicalGhostPhase phase,
       Status prerequisite = {}) {
     boundary_thermo_certificate = {};
+    BoundaryThermophysicalSurfaceCache surface_cache;
     Status refreshed = prerequisite;
     refreshed = resolve_static_boundary_values(
         communicator, product.boundary, product.boundary_specs, product.patch_inlets,
@@ -12175,7 +12183,7 @@ Status ProductDriver::Impl::execute_attempt(
               {step.generation, product.geometry.fingerprint(),
                pressure_reference_certificate.pressure_reference,
                product.boundary.revision(), phase},
-              candidate, boundary_thermo_workspace);
+              candidate, boundary_close_workspace, surface_cache);
           if (refreshed) boundary_thermo_certificate = candidate;
         }
       }
@@ -12223,7 +12231,7 @@ Status ProductDriver::Impl::execute_attempt(
           {{}, {}, {}, {}, {}, molecular_viscosity, conductivity,
            enthalpy_diffusivity}, effective_viscosity,
           as_const(trial_enthalpy), {species_accepted.data(), species_accepted.size()},
-          boundary_thermo_workspace);
+          boundary_refresh_workspace, surface_cache);
     refreshed = product.reductions.consensus(refreshed);
     if (!refreshed) return refreshed;
     // Publish the final viscosity, not the value preceding this turbulence

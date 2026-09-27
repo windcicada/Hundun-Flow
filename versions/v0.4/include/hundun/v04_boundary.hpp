@@ -545,6 +545,24 @@ struct BoundaryThermophysicalGhostUse {
   BoundaryThermophysicalGhostBinding binding{};
 };
 
+// Call-local borrowed results from close(). Keep the density field and the
+// supplied workspace alive until refresh_inlet_material() returns. Primitive
+// content and workspace content are revalidated before reuse; this is neither
+// persistent state nor a replacement for a physical-ghost certificate.
+class BoundaryThermophysicalSurfaceCache {
+ public:
+  bool valid() const noexcept {
+    return certificate_.valid() && values_.data && values_.size && digest_;
+  }
+
+ private:
+  friend class BoundaryThermophysicalFaceClosure;
+  BoundaryThermophysicalGhostCertificate certificate_{};
+  ConstFieldView density_{};
+  Span<const double> values_{};
+  std::uint64_t digest_{};
+};
+
 // Rebuilds EOS and molecular-transport quantities only in locally owned,
 // nonperiodic physical ghost cells. The hot call is allocation-free and
 // atomic: invalid authority, shape, aliasing, or any nonphysical p/h/Y state
@@ -576,6 +594,19 @@ class BoundaryThermophysicalFaceClosure {
       FieldView effective_viscosity, ConstFieldView outlet_enthalpy,
       Span<const ConstFieldView> outlet_species,
       Span<double> surface_workspace) noexcept;
+  // Reuse a matching close() result where both paths evaluate identical
+  // primitive traces. Recompute the current owner SGS contribution. Empty,
+  // stale or overwritten caches fall back to ordinary evaluation. Scratch
+  // overlapping the cache also disables reuse without changing the contract.
+  static Status refresh_inlet_material(
+      const BoundaryPlan& boundary, const ThermodynamicsPlan& thermodynamics,
+      const TransportPlan& transport, double pressure_reference,
+      ConstFieldView pressure_perturbation,
+      const BoundaryThermophysicalGhostOutput& output,
+      FieldView effective_viscosity, ConstFieldView outlet_enthalpy,
+      Span<const ConstFieldView> outlet_species,
+      Span<double> surface_workspace,
+      const BoundaryThermophysicalSurfaceCache& cache) noexcept;
   // Compatibility entry point for the original four-field authority.  It
   // performs the same numeric closure but deliberately publishes no reusable
   // physical-ghost certificate.
@@ -607,6 +638,18 @@ class BoundaryThermophysicalFaceClosure {
                       BoundaryThermophysicalGhostCertificate& certificate,
                       Span<double> surface_workspace)
       noexcept;
+  // Also retain a borrowed surface cache when workspace is sufficient. A
+  // failed close clears the certificate and cache without publishing fields.
+  // Small workspace succeeds without producing a cache.
+  static Status close(const BoundaryPlan& boundary,
+                      const ThermodynamicsPlan& thermodynamics,
+                      const TransportPlan& transport,
+                      const BoundaryThermophysicalGhostInput& input,
+                      const BoundaryThermophysicalGhostOutput& output,
+                      BoundaryThermophysicalGhostContext context,
+                      BoundaryThermophysicalGhostCertificate& certificate,
+                      Span<double> surface_workspace,
+                      BoundaryThermophysicalSurfaceCache& cache) noexcept;
 };
 
 enum class TimeLimit : std::uint8_t {

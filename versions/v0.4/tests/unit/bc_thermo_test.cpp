@@ -1060,6 +1060,132 @@ bool test_material_surface_workspace() {
   return passed;
 }
 
+bool test_boundary_surface_cache(bool resolved_patch, bool perry) {
+  MixtureFixture fixture;
+  if (!fixture.initialize(false, perry, resolved_patch)) return false;
+  const double fraction = 0.35;
+  double owner_h{}, face_h{}, cp{}, gas{};
+  if (!fixture.thermodynamics.mixture_enthalpy(650., {&fraction, 1}, owner_h, cp, gas) ||
+      !fixture.thermodynamics.mixture_enthalpy(500., {&fraction, 1}, face_h, cp, gas))
+    return false;
+  std::fill(fixture.pressure.storage.begin(), fixture.pressure.storage.end(), 0.);
+  std::fill(fixture.enthalpy.storage.begin(), fixture.enthalpy.storage.end(), owner_h);
+  std::fill(fixture.species.storage.begin(), fixture.species.storage.end(), fraction);
+  std::fill(fixture.output[1].storage.begin(), fixture.output[1].storage.end(), 650.);
+  std::fill(fixture.output[5].storage.begin(), fixture.output[5].storage.end(), 2e-5);
+  OwnedField effective = make_field(88U, 91U, 300U);
+  std::fill(effective.storage.begin(), effective.storage.end(), 5e-5);
+  std::vector<double> resolved(fixture.boundary.resolved_scalar_count(), face_h);
+  const auto spans = fixture.boundary.spans();
+  for (std::size_t index = 0; index < spans.size; ++index) {
+    const auto& span = spans.data[index];
+    if (span.stage == BoundaryStage::scalar &&
+        span.value_source == BoundaryValueSource::resolved_scalar)
+      for (std::size_t i = 0; i < span.resolved_stride; ++i)
+        resolved[span.resolved_begin + i] = fraction;
+  }
+  FieldView y = fixture.species.view, h = fixture.enthalpy.view;
+  const BoundaryResolvedValues values{{resolved.data(), resolved.size()}, {}, {}};
+  if (!apply_boundary_ghosts(BoundaryStage::scalar, fixture.boundary, {&y, 1}, values) ||
+      !apply_boundary_ghosts(BoundaryStage::enthalpy, fixture.boundary, {&h, 1}, values))
+    return false;
+  std::vector<double> retained(8 * fixture.pressure.storage.size());
+  std::vector<double> scratch(9 * fixture.pressure.storage.size());
+  BoundaryThermophysicalGhostCertificate certificate;
+  BoundaryThermophysicalSurfaceCache cache;
+  auto input = fixture.input();
+  input.closure_kind = BoundaryThermophysicalClosureKind::physical_inlet_face;
+  const auto close = [&](Span<double> work) {
+    return BoundaryThermophysicalFaceClosure::close(fixture.boundary,
+        fixture.thermodynamics, fixture.transport, input, fixture.outputs(),
+        ghost_context(fixture.boundary), certificate, work, cache);
+  };
+  const auto refresh = [&](const BoundaryThermophysicalSurfaceCache& saved,
+                           Span<double> work, bool temperature) {
+    auto output = fixture.outputs();
+    if (!temperature) output.temperature = {};
+    return BoundaryThermophysicalFaceClosure::refresh_inlet_material(
+        fixture.boundary, fixture.thermodynamics, fixture.transport, 100000.,
+        as_const(fixture.pressure.view), output, effective.view,
+        as_const(fixture.enthalpy.view), {fixture.species_views.data(), 1}, work, saved);
+  };
+  // Compare both publication and failure atomicity against ordinary evaluation.
+  const auto compare = [&](Span<double> work, bool temperature = false,
+                           bool expected_failure = false) {
+    std::array<std::vector<double>, 8> before, expected;
+    for (std::size_t i = 0; i < before.size(); ++i) before[i] = fixture.output[i].storage;
+    const auto before_effective = effective.storage;
+    const auto reference = refresh({}, {scratch.data(), scratch.size()}, temperature);
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+      expected[i] = fixture.output[i].storage;
+      std::copy(before[i].begin(), before[i].end(), fixture.output[i].storage.begin());
+    }
+    const auto expected_effective = effective.storage;
+    std::copy(before_effective.begin(), before_effective.end(), effective.storage.begin());
+    Status status;
+    std::size_t allocations{};
+    {
+      allocation_observer::Guard guard;
+      status = refresh(cache, work, temperature);
+      allocations = allocation_observer::count.load(std::memory_order_relaxed);
+    }
+    bool same = static_cast<bool>(reference) != expected_failure &&
+        status.code == reference.code && status.detail == reference.detail &&
+        allocations == 0 && effective.storage == expected_effective;
+    for (std::size_t i = 0; i < expected.size(); ++i)
+      same &= fixture.output[i].storage == expected[i] &&
+              (reference || expected[i] == before[i]);
+    return expect(same && (reference || effective.storage == before_effective),
+        "borrowed surface reuse or fallback matches ordinary material refresh atomically");
+  };
+  bool passed = true;
+  for (unsigned scenario = 0; scenario < 12; ++scenario) {
+    if (scenario == 11) fixture.pressure.view.unchecked({-1,0,0}, 0) = 100.;
+    passed &= expect(close({retained.data(), retained.size()}) && cache.valid(),
+        "successful physical closure lends a complete surface snapshot");
+    if (!passed) return false;
+    const Int3 owner{kCells.x - 1, 0, 0};
+    FieldView changed;
+    double saved{};
+    if (scenario >= 1 && scenario <= 3) {
+      changed = scenario == 1 ? fixture.pressure.view :
+          scenario == 2 ? fixture.enthalpy.view : fixture.species.view;
+      auto& value = changed.unchecked(owner, 0);
+      saved = value;
+      value += scenario == 3 ? 0.001 : 100.;
+    }
+    if (scenario == 4) retained[0] = std::numeric_limits<double>::quiet_NaN();
+    if (scenario == 5) {
+      effective.view.unchecked(owner, 0) += 3e-5;
+      effective.view.unchecked({0,0,0}, 0) += 3e-5;
+    }
+    if (scenario == 6) fixture.output[1].view.unchecked({0,0,0}, 0) = 750.;
+    if (scenario == 9) {
+      saved = fixture.enthalpy.view.unchecked(owner, 0);
+      fixture.enthalpy.view.unchecked(owner, 0) = std::numeric_limits<double>::quiet_NaN();
+    }
+    if (scenario == 10) {
+      saved = effective.view.unchecked(owner, 0);
+      effective.view.unchecked(owner, 0) = 0.;
+    }
+    passed &= compare(scenario == 7 ? Span<double>{retained.data(), retained.size()} :
+                      Span<double>{scratch.data(), scenario == 8 ? 1 : scratch.size()},
+                      scenario == 6, scenario == 9 || scenario == 10);
+    if (changed.base) changed.unchecked(owner, 0) = saved;
+    if (scenario == 9) fixture.enthalpy.view.unchecked(owner, 0) = saved;
+    if (scenario == 10) effective.view.unchecked(owner, 0) = saved;
+    if (scenario == 11) fixture.pressure.view.unchecked({-1,0,0}, 0) = 0.;
+  }
+  passed &= expect(close({retained.data(), 1}) && !cache.valid(),
+      "small workspace preserves closure and disables borrowed reuse");
+  passed &= compare({scratch.data(), scratch.size()});
+  fixture.enthalpy.view.unchecked({kCells.x,0,0}, 0) =
+      std::numeric_limits<double>::quiet_NaN();
+  passed &= expect(!close({retained.data(), retained.size()}) && !cache.valid() &&
+      !certificate.valid(), "failed closure clears both borrowed and persistent authority");
+  return passed;
+}
+
 bool test_invalid_state_and_contract_are_atomic() {
   MixtureFixture fixture;
   bool passed =
@@ -1385,6 +1511,10 @@ int main(int argc, char **argv) {
       test_nasa_mixture_uses_fixed_ph_y() &&
       test_surface_workspace() &&
       test_material_surface_workspace() &&
+      test_boundary_surface_cache(false, false) &&
+      test_boundary_surface_cache(false, true) &&
+      test_boundary_surface_cache(true, false) &&
+      test_boundary_surface_cache(true, true) &&
       test_physical_inlet_face_keeps_discrete_mirror() &&
       test_physical_inlet_face_keeps_discrete_mirror(true) &&
       test_resolved_patch_inlet_uses_each_physical_face_state() &&
