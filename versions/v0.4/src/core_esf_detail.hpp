@@ -1427,8 +1427,11 @@ public:
           for(std::size_t f=0;f<spec_.fields;++f)
             delta_h+=(static_cast<long double>(remixed ? remix_h : reacted.candidate.values[f*stride_+ns_])-tuple_[f*stride_+ns_])/spec_.fields;
           auxiliary_row[ns_]=auxiliary.unchecked(cell,ns_)+static_cast<double>(delta_h);
+          // The first flow closure requests this same post-reactor tuple.
+          // Retain its checked PH/Y result in the existing exact-key cache.
           const auto auxiliary_status=query_auxiliary(gas,thermo,auxiliary_row.data(),
-              pressure_reference+pi.unchecked(cell,0),revision);
+              pressure_reference+pi.unchecked(cell,0),revision,nullptr,nullptr,
+              deterministic_ ? count_*spec_.fields+i : SIZE_MAX);
           if(!auxiliary_status)return auxiliary_status;
           for(std::size_t c=0;c<stride_;++c)auxiliary.unchecked(cell,c)=auxiliary_row[c];
           for (std::size_t f = 0; f < spec_.fields; ++f)
