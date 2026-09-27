@@ -97,7 +97,7 @@ public:
       }
     }
     const std::size_t per_cell =
-        sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5 + (deterministic_ ? 1 : 0)) +
+        sizeof(double) * (4 * spec_.fields * stride_ + spec_.fields + 5 + (ns_+1) + (deterministic_ ? 1 : 0)) +
         spec_.fields*sizeof(portable::GasSample) +
         (spec_.fields+1)*(sizeof(portable::GasSample)+(ns_+2)*sizeof(double)) +
         (deterministic_ ? (spec_.fields+1)*sizeof(ThermoState) : 0) +
@@ -186,6 +186,7 @@ public:
     }
     rates_.resize(count_ * spec_.fields * stride_);
     reactor_density_.resize(count_ * spec_.fields);
+    molecular_transport_cache_.resize(count_*(ns_+1));
     if(deterministic_)pasr_fraction_.resize(count_);
     reactor_samples_.resize(count_*spec_.fields);
     query_samples_.resize(count_*(spec_.fields+1));
@@ -326,6 +327,7 @@ public:
     std::uint64_t bytes =
         sizeof(*this) + pasr_fraction_.capacity()*sizeof(double) + query_native_.capacity()*sizeof(ThermoState) + query_samples_.capacity()*sizeof(portable::GasSample) + query_keys_.capacity()*sizeof(double) + (chemistry_batch_ ? chemistry_batch_->owned_bytes() : 0) + reactor_samples_.capacity()*sizeof(portable::GasSample) + immersed_bytes_ + workspace_->owned_bytes() +
         mixture_storage_.counters().aligned_payload_bytes +
+        molecular_transport_cache_.capacity()*sizeof(double) +
         mixture_species_.capacity() * sizeof(ConstFieldView) +
         tcr_history.owned_bytes() +
         (dynamic_plan_ ? dynamic_plan_->owned_bytes() : 0) +
@@ -606,23 +608,36 @@ public:
                            FieldView gamma) noexcept {
     if (species.size != independent_.size())
       return invalid();
+    // Repeated SGS refreshes need new turbulent diffusivity, but intrinsic
+    // conductivity depends only on T/Y and the immutable transport plan.
+    // Cache only exact input matches; every nonzero composition change misses.
+    if(molecular_transport_identity_!=transport.fingerprint()) {
+      std::fill(molecular_transport_cache_.begin(),molecular_transport_cache_.end(),0.);
+      molecular_transport_identity_=transport.fingerprint();
+    }
     for (int z = 0; z < cells_.z; ++z)
       for (int y = 0; y < cells_.y; ++y)
         for (int x = 0; x < cells_.x; ++x) {
           const Int3 cell{x, y, z};
           for (std::size_t s = 0; s < species.size; ++s)
             independent_[s] = species.data[s].unchecked(cell, 0);
-          MolecularTransportState intrinsic;
-          auto status = transport.evaluate(
-              temperature.unchecked(cell, 0),
-              {independent_.data(), independent_.size()}, intrinsic);
-          if (!status)
-            return status;
+          const auto index=(std::size_t(z)*cells_.y+y)*cells_.x+x;
+          auto* cached=molecular_transport_cache_.data()+index*(ns_+1);
+          const double thermal=temperature.unchecked(cell,0);
+          if(!(cached[0]>0) || cached[1]!=thermal ||
+              !std::equal(independent_.begin(),independent_.end(),cached+2)) {
+            MolecularTransportState intrinsic;
+            const auto status=transport.evaluate(thermal,
+                {independent_.data(),independent_.size()},intrinsic);
+            if(!status)return status;
+            cached[0]=intrinsic.conductivity;cached[1]=thermal;
+            std::copy(independent_.begin(),independent_.end(),cached+2);
+          }
           const double turbulent =
               effective.unchecked(cell, 0) - molecular.unchecked(cell, 0);
           const double heat_capacity = cp.unchecked(cell, 0);
           const double coefficient =
-              intrinsic.conductivity / heat_capacity + turbulent / sc_t_;
+              cached[0] / heat_capacity + turbulent / sc_t_;
           if (!(heat_capacity > 0) || !std::isfinite(turbulent) ||
               turbulent < 0 || !std::isfinite(coefficient) ||
               !(coefficient > 0))
@@ -1673,6 +1688,8 @@ public:
   }
 
 private:
+  PlanFingerprint molecular_transport_identity_{};
+  std::vector<double> molecular_transport_cache_;
   bool deterministic_{};
   bool native_eos_compatible_{};
   std::vector<double> pasr_fraction_;
