@@ -1763,6 +1763,31 @@ private:
         ++query_hits_;sample=saved;if(native_state)*native_state=query_native_[cache_slot];return {};
       }
     }
+    if(key && native_eos_compatible_ && pressure>0 && std::isfinite(pressure)) {
+      // The certified native ideal-gas thermal state depends only on h/Y.
+      // Pressure corrections need the same arithmetic as the native pressure
+      // closure, not another polynomial inversion. No provider rates or
+      // transport outputs are cached by this path.
+      const auto other=cache_slot<count_ ? cache_slot+count_ : cache_slot-count_;
+      for(const auto slot : {cache_slot,other}) {
+        const auto& saved=query_samples_[slot];
+        const auto* previous=query_keys_.data()+slot*(ns_+2);
+        if(!(saved.density_kg_per_m3>0) || saved.revision!=revision ||
+            saved.composition_fingerprint!=gas.gas_identity().composition_fingerprint ||
+            !std::equal(row,row+stride_,previous+1))continue;
+        auto native=query_native_[slot];
+        native.rho=pressure*native.drho_dp_hY;
+        native.drho_dh_pY=pressure*(-native.drho_dp_hY/(native.temperature*native.cp));
+        if(!std::isfinite(native.rho) || native.rho<=0 ||
+            !std::isfinite(native.drho_dh_pY) || native.drho_dh_pY>=0)return numerical();
+        sample={revision,gas.gas_identity().composition_fingerprint,pressure,
+            native.temperature,native.rho,row[ns_],native.cp,0.,0.};
+        if(native_state)*native_state=native;
+        key[0]=pressure;std::copy_n(row,stride_,key+1);
+        query_samples_[cache_slot]=sample;query_native_[cache_slot]=native;
+        ++query_hits_;return {};
+      }
+    }
     double sum = 0;
     for (std::size_t s = 0; s < ns_; ++s) {
       if (!std::isfinite(row[s]) || row[s] < 0 || row[s] > 1)
