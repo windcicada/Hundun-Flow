@@ -589,6 +589,7 @@ Status TransportPlan::evaluate(
   double mixture_conductivity = 0.0;
   if (kernel_ == TransportKernel::constant) {
     for (std::size_t first = 0U; first < count; ++first) {
+      if (mole_fraction[first] == 0.0) continue;
       double wilke_denominator = 0.0;
       for (std::size_t second = 0U; second < count; ++second) {
         wilke_denominator +=
@@ -605,8 +606,13 @@ Status TransportPlan::evaluate(
     }
   } else {
     for (std::size_t first = 0U; first < count; ++first) {
+      // Absent species contribute exactly zero to Wilke mixing. Keep every
+      // nonzero trace and the original summation order of active species.
+      // Species material data above are still evaluated and validated.
+      if (mole_fraction[first] == 0.0) continue;
       double wilke_denominator = 0.0;
       for (std::size_t second = 0U; second < count; ++second) {
+        if (mole_fraction[second] == 0.0) continue;
         const std::size_t interaction = first * count + second;
         const double numerator =
             1.0 + std::sqrt(viscosity[first] / viscosity[second]) *
