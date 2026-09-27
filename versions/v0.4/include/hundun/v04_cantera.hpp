@@ -101,6 +101,7 @@ public:
 
   std::size_t lane_index() const noexcept;
   const portable::GasIdentity &gas_identity() const noexcept override;
+  portable::IdealGasNasa7View ideal_gas_nasa7() const noexcept override;
   bool chemically_invariant(std::size_t) const noexcept override;
   portable::Status query_gas(const portable::GasQuery &,
                              portable::GasQueryOutput &) noexcept override;

@@ -44,6 +44,11 @@ void test_exact_identity_and_independent_lanes() {
   auto lane1 = hundun::v04::chemistry::make_cantera_backend(config(), pool);
   HUNDUN_CHECK(!lane0->chemically_invariant(0) && !lane0->chemically_invariant(1));
   HUNDUN_CHECK(lane0->lane_index() == 0U);
+  const auto model=lane0->ideal_gas_nasa7();
+  HUNDUN_CHECK(model.species && model.species_count==2);
+  for(std::size_t i=0;i<2;++i)
+    HUNDUN_CHECK(model.species[i].molecular_weight_kg_per_kmol==
+        lane0->gas_identity().molecular_weights_kg_per_kmol[i]);
   HUNDUN_CHECK(lane1->lane_index() == 1U);
   HUNDUN_CHECK(lane0->composition().fingerprint ==
                lane1->composition().fingerprint);
@@ -453,6 +458,14 @@ void test_continuous_nasa_and_identity(const std::filesystem::path &path) {
   auto raw = chemistry::make_cantera_backend(source, raw_pool);
   auto gas = chemistry::make_cantera_backend(continuous, pool);
   auto second = chemistry::make_cantera_backend(continuous, pool);
+  const auto nasa=gas->ideal_gas_nasa7();
+  const auto raw_nasa=raw->ideal_gas_nasa7();
+  HUNDUN_CHECK(nasa.species && nasa.species_count==1);
+  HUNDUN_CHECK(nasa.species==second->ideal_gas_nasa7().species);
+  HUNDUN_CHECK(nasa.composition_fingerprint==gas->gas_identity().composition_fingerprint);
+  HUNDUN_CHECK(nasa.minimum_temperature_k==300. && nasa.maximum_temperature_k==3000.);
+  HUNDUN_CHECK(nasa.species[0].low==raw_nasa.species[0].low);
+  HUNDUN_CHECK(nasa.species[0].high[5]!=raw_nasa.species[0].high[5]);
   HUNDUN_CHECK(
       !portable::same_gas_identity(raw->gas_identity(), gas->gas_identity()));
   HUNDUN_CHECK(
@@ -478,6 +491,19 @@ void test_continuous_nasa_and_identity(const std::filesystem::path &path) {
     query.temperature_k = temperature;
     HUNDUN_CHECK(raw->query_gas(query, original) == portable::Status::success);
     HUNDUN_CHECK(gas->query_gas(query, output) == portable::Status::success);
+    // The metadata must describe the effective provider, rather than the
+    // unadjusted input asset. Independently evaluate its published polynomial.
+    const auto& species=nasa.species[0];
+    const auto& a=temperature<=species.temperature_switch_k ? species.low : species.high;
+    const double r=nasa.gas_constant_j_per_kmol_k/species.molecular_weight_kg_per_kmol;
+    double h_polynomial=a[5],cp_polynomial=0.,power=1.;
+    for(unsigned i=0;i<5;++i) {
+      cp_polynomial+=a[i]*power;
+      h_polynomial+=a[i]*power*temperature/(i+1);
+      power*=temperature;
+    }
+    HUNDUN_CHECK_NEAR(r*h_polynomial,output.sample.enthalpy_j_per_kg,1e-8);
+    HUNDUN_CHECK_NEAR(r*cp_polynomial,output.sample.cp_j_per_kg_k,1e-9);
     HUNDUN_CHECK_NEAR(output.sample.cp_j_per_kg_k,
                       original.sample.cp_j_per_kg_k, 1e-10);
     // Direct integration of the published low/high NASA7 polynomials at
@@ -509,6 +535,8 @@ void test_case_temperature_interval(const std::filesystem::path &path) {
   auto runtime = std::make_shared<chemistry::CanteraBackendRuntime>(extended);
   chemistry::CanteraWorkspacePool pool(runtime, 1);
   auto gas = chemistry::make_cantera_backend(extended, pool);
+  HUNDUN_CHECK(gas->ideal_gas_nasa7().minimum_temperature_k==273.15);
+  HUNDUN_CHECK(gas->ideal_gas_nasa7().maximum_temperature_k==3500.);
   double y = 1, d = 0, h = 0, w = 0;
   portable::GasQuery q{{1, 1, 1},
                        gas->composition().fingerprint,

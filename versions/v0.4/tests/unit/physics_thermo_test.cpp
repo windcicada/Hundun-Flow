@@ -4,6 +4,7 @@
 #include "hundun/v04_physics.hpp"
 
 #include "../../src/physics_input_detail.hpp"
+#include "../../src/core_gas_thermo_detail.hpp"
 
 #include <array>
 #include <atomic>
@@ -1337,10 +1338,47 @@ bool test_fixed_pressure() {
   return passed;
 }
 
+bool test_native_nasa_metadata_admission() {
+  auto spec=base_spec();
+  spec.species.push_back(constant_species("A",28.,1005.));
+  spec.species.push_back(constant_species("B",32.,1100.));
+  spec.species[0].nasa7_low[4]=1e-18;
+  if(!detail::canonicalize_thermophysical_spec(spec))return false;
+  portable::GasIdentity gas;gas.composition_fingerprint=17;
+  std::array<portable::IdealGasNasa7Species,2> rows;
+  for(std::size_t i=0;i<2;++i) {
+    const auto& s=spec.species[i];
+    gas.species_names.push_back(s.stable_name);
+    gas.molecular_weights_kg_per_kmol.push_back(s.molecular_weight);
+    rows[i]={s.molecular_weight,s.temperature_switch,s.nasa7_low,s.nasa7_high};
+  }
+  portable::IdealGasNasa7View view{17,kUniversalGasConstant,spec.minimum_temperature,
+      spec.maximum_temperature,rows.data(),rows.size()};
+  bool passed=expect(detail::native_nasa7_compatible(spec,gas,view),"matching effective NASA model admitted");
+  std::swap(spec.species[0],spec.species[1]);
+  passed&=expect(detail::native_nasa7_compatible(spec,gas,view),"native species order matched by identity");
+  rows[0].low[4]*=2;
+  passed&=expect(!detail::native_nasa7_compatible(spec,gas,view),"tiny polynomial term changes are not hidden by an absolute tolerance");
+  rows[0].low[4]/=2;
+  const double original_high_h=rows[0].high[5];
+  rows[0].high[5]+=1;
+  passed&=expect(!detail::native_nasa7_compatible(spec,gas,view),"different effective enthalpy reference rejected");
+  rows[0].high[5]=original_high_h;
+  auto bad=view;bad.gas_constant_j_per_kmol_k*=1.001;
+  passed&=expect(!detail::native_nasa7_compatible(spec,gas,bad),"different gas constant rejected");
+  bad=view;bad.minimum_temperature_k=spec.minimum_temperature+1;
+  passed&=expect(!detail::native_nasa7_compatible(spec,gas,bad),"incomplete temperature interval rejected");
+  bad=view;bad.composition_fingerprint=18;
+  passed&=expect(!detail::native_nasa7_compatible(spec,gas,bad),"stale composition identity rejected");
+  passed&=expect(!detail::native_nasa7_compatible(spec,gas,{}),"provider without metadata remains on query path");
+  return passed;
+}
+
 }  // namespace
 
 int main() {
   bool passed = test_constant_cp_path();
+  passed &= test_native_nasa_metadata_admission();
   passed &= test_fixed_pressure();
   passed &= test_transport_coordinate();
   passed &= test_isomer_composition_invariance();

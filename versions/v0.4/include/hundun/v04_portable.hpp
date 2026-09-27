@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -94,11 +95,29 @@ struct GasQueryOutput {
   double *net_mass_rates_kg_per_m3_s{};
   std::size_t capacity{};
 };
+// Optional immutable caloric-model description in GasIdentity species order.
+// Coefficients describe the provider's effective model, including any runtime
+// enthalpy-reference/continuity adjustment. No field state or sampled fit.
+struct IdealGasNasa7Species {
+  double molecular_weight_kg_per_kmol{};
+  double temperature_switch_k{};
+  std::array<double, 7> low{}, high{};
+};
+struct IdealGasNasa7View {
+  std::uint64_t composition_fingerprint{};
+  double gas_constant_j_per_kmol_k{};
+  double minimum_temperature_k{}, maximum_temperature_k{};
+  const IdealGasNasa7Species* species{};
+  std::size_t species_count{};
+};
 class GasQueryProvider {
 public:
   virtual ~GasQueryProvider() = default;
   virtual const GasIdentity &gas_identity() const noexcept = 0;
   virtual Status query_gas(const GasQuery &, GasQueryOutput &) noexcept = 0;
+  // A missing capability never licenses replacing the provider's EOS.
+  // The view remains valid for the lifetime of this provider.
+  virtual IdealGasNasa7View ideal_gas_nasa7() const noexcept { return {}; }
   // True certifies an identically zero net stoichiometric row, including all reactions.
   // An unspecified provider returns false; a zero sampled rate is insufficient.
   virtual bool chemically_invariant(std::size_t) const noexcept { return false; }

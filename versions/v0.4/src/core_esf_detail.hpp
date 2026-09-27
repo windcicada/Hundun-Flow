@@ -13,6 +13,7 @@
 #include "solver_mass_source_detail.hpp"
 #include "solver_mixture_bound_detail.hpp"
 #include "field_view_interval_detail.hpp"
+#include "core_gas_thermo_detail.hpp"
 
 namespace hundun::v04::detail {
 // Persistent fields live in native StateLayers; typed TCR histories are staged
@@ -47,6 +48,8 @@ public:
     cells_ = cells;
     ns_ = gas.gas_identity().species_names.size();
     gas_fingerprint_=gas.fingerprint();
+    native_eos_compatible_=deterministic_ && gas.gas_query() &&
+        native_nasa7_compatible(model.thermophysics,gas.gas_identity(),gas.gas_query()->ideal_gas_nasa7());
     stride_ = ns_ + 1;
     count_ = std::size_t(cells.x) * cells.y * cells.z;
     c_z_ = model.reaction.mixing_c_z;
@@ -1613,7 +1616,7 @@ public:
       return {StatusCode::mpi_failure,10237};
     int rank{};
     if (MPI_Comm_rank(communicator,&rank)!=MPI_SUCCESS) return {StatusCode::mpi_failure,10237};
-    if(rank==0)std::fprintf(stdout,"thermo_queries calls=%llu cache_hits=%llu state=physical_and_auxiliary\n",global[0],global[1]);
+    if(rank==0)std::fprintf(stdout,"thermo_queries calls=%llu cache_hits=%llu state=physical_and_auxiliary native_eos=%d\n",global[0],global[1],int(native_eos_compatible_));
     query_calls_=query_hits_=0;
     return {};
   }
@@ -1671,6 +1674,7 @@ public:
 
 private:
   bool deterministic_{};
+  bool native_eos_compatible_{};
   std::vector<double> pasr_fraction_;
   bool noise_allowed(Int3 cell) const noexcept {
     const int position[]{cell.x+begin_.x,cell.y+begin_.y,cell.z+begin_.z};
@@ -1785,12 +1789,16 @@ private:
                                ns_};
     portable::GasQueryOutput output{
         {}, diffusion_.data(), enthalpies_.data(), query_rates_.data(), ns_};
+    const bool native_only=native_eos_compatible_ && !rates;
+    if(native_only)
+      output.sample={revision,gas.gas_identity().composition_fingerprint,pressure,
+          native.temperature,native.rho,row[ns_],native.cp,0.,0.};
     if (!portable::same_gas_identity(gas.gas_identity(),
                                      gas.gas_query()->gas_identity()) ||
-        (rates ? gas.gas_query()->query_gas(request, output) :
+        (!native_only && (rates ? gas.gas_query()->query_gas(request, output) :
          key ? gas.gas_query()->query_thermo(request, output) :
          gas.gas_query()->query_sample(request, output)) !=
-            portable::Status::success ||
+            portable::Status::success) ||
         output.diffusivities_m2_per_s != diffusion_.data() ||
         output.species_enthalpies_j_per_kg != enthalpies_.data() ||
         output.net_mass_rates_kg_per_m3_s != query_rates_.data() ||

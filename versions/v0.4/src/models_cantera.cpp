@@ -332,6 +332,8 @@ struct CanteraBackendRuntime::Impl final {
   double minimum_temperature{}, maximum_temperature{};
   CompositionIdentity composition;
   portable::GasIdentity gas_identity;
+  std::vector<portable::IdealGasNasa7Species> nasa7;
+  double nasa7_minimum{}, nasa7_maximum{};
   std::vector<std::uint8_t> chemically_invariant;
   combustion::ChemistryIdentity closure_identity;
 };
@@ -431,6 +433,25 @@ CanteraBackendRuntime::CanteraBackendRuntime(const CanteraBackendConfig &config)
   gas.closure_fingerprint = closure.fingerprint;
   if (!matches(config)) {
     throw std::invalid_argument("reacting mechanism composition mismatch");
+  }
+  // Publish only the effective ideal-gas NASA7 model. Other caloric models
+  // retain the ordinary query interface, even when a few samples coincide.
+  if (probe->thermo()->type() == "ideal-gas") {
+    impl_->nasa7_minimum = source_interval ? probe->thermo()->minTemp() : config.minimum_temperature;
+    impl_->nasa7_maximum = source_interval ? probe->thermo()->maxTemp() : config.maximum_temperature;
+    for (std::size_t i=0;i<probe->thermo()->nSpecies();++i) {
+      const auto nasa=std::dynamic_pointer_cast<Cantera::NasaPoly2>(probe->thermo()->species(i)->thermo);
+      if (!nasa) { impl_->nasa7.clear(); break; }
+      std::array<double,15> coefficients{};
+      std::size_t index{};int type{};double minimum{},maximum{},reference_pressure{};
+      nasa->reportParameters(index,type,minimum,maximum,reference_pressure,coefficients.data());
+      portable::IdealGasNasa7Species species;
+      species.molecular_weight_kg_per_kmol=gas.molecular_weights_kg_per_kmol[i];
+      species.temperature_switch_k=coefficients[0];
+      std::copy_n(coefficients.data()+1,7,species.high.data());
+      std::copy_n(coefficients.data()+8,7,species.low.data());
+      impl_->nasa7.push_back(species);
+    }
   }
 }
 
@@ -546,6 +567,12 @@ const CompositionIdentity &CanteraBackend::composition() const noexcept {
 
 const portable::GasIdentity &CanteraBackend::gas_identity() const noexcept {
   return impl_->runtime->impl_->gas_identity;
+}
+portable::IdealGasNasa7View CanteraBackend::ideal_gas_nasa7() const noexcept {
+  const auto& runtime=*impl_->runtime->impl_;
+  if(runtime.nasa7.empty())return {};
+  return {runtime.gas_identity.composition_fingerprint,Cantera::GasConstant,
+      runtime.nasa7_minimum,runtime.nasa7_maximum,runtime.nasa7.data(),runtime.nasa7.size()};
 }
 bool CanteraBackend::chemically_invariant(std::size_t species) const noexcept {
   const auto& flags=impl_->runtime->impl_->chemically_invariant;

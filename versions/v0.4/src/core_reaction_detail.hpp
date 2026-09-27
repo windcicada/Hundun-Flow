@@ -184,7 +184,7 @@ public:
     if (!gas.thermodynamic_model.empty()) string(gas.thermodynamic_model);
     integer(static_cast<unsigned>(model.reaction.mode));
     if (interval_enabled_) string("mean-transport-reactor-cnbe-v1");
-    if (pasr_interval_enabled_) string(split_pasr_ ? "pasr-transport-reactor-flow-cnbe-v2;frozen-T-rho-configured-mass-tolerances;native-carrier-density" : "pasr-accepted-interval-source-cnbe-v1");
+    if (pasr_interval_enabled_) string(split_pasr_ ? "pasr-transport-reactor-flow-cnbe-v3;frozen-T-rho-configured-mass-tolerances;native-carrier-density;certified-native-nasa7" : "pasr-accepted-interval-source-cnbe-v1");
     if (response_enabled_) {
       string("bounded-interval-response-reference-time-v2");
       for(double value : {response_relative_,response_absolute_,response_reference_time_}) {
