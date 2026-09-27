@@ -287,7 +287,7 @@ void mix_ghost_digests(const BoundaryPlan &boundary, ThermophysicalGhostDigests 
   digests.density = hash_mix(
       digests.density, double_bits(binding.density.unchecked(cell, 0U)));
   const auto inlet=inlet_face_cell(boundary,binding.closure_kind,cell,
-                                   binding.enthalpy.interior);
+                                   binding.enthalpy.interior,true);
   if (inlet.selected) {
     digests.primitive=mix_primitive_cell(digests.primitive,binding,inlet.mirror);
     digests.primitive=mix_primitive_cell(digests.primitive,binding,inlet.owner);

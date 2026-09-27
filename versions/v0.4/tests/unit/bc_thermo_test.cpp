@@ -757,6 +757,17 @@ bool test_physical_inlet_face_keeps_discrete_mirror(bool compact_stencil = false
       as_const(fixture.output[0U].view),input.closure_kind};
   passed &= expect(certificate.matches(fixture.boundary,ghost_context(fixture.boundary),binding),
                    "physical face certificate binds the actual closure kind");
+  const Int3 outlet_owner{kCells.x-1,0,0};
+  for(auto primitive:{fixture.pressure.view,fixture.enthalpy.view,fixture.species.view}) {
+    const double saved=primitive.unchecked(outlet_owner,0);
+    primitive.unchecked(outlet_owner,0)=std::nextafter(saved,
+        std::numeric_limits<double>::infinity());
+    passed &= expect(!certificate.matches(fixture.boundary,ghost_context(fixture.boundary),binding),
+        "same-revision outlet owner mutation invalidates reconstructed face authority");
+    primitive.unchecked(outlet_owner,0)=saved;
+    passed &= expect(certificate.matches(fixture.boundary,ghost_context(fixture.boundary),binding),
+        "restoring the complete outlet primitive restores the certificate binding");
+  }
   fixture.species.view.unchecked(owner,0U)+=0.01;
   passed &= expect(!certificate.matches(fixture.boundary,ghost_context(fixture.boundary),binding),
                    "same-revision owner mutation invalidates reconstructed face authority");
