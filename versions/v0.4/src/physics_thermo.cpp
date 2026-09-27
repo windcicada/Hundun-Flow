@@ -299,6 +299,8 @@ Status ThermodynamicsPlan::compile(
     candidate.temperature_switch_.resize(count);
     candidate.species_enthalpy_minimum_.resize(count);
     candidate.species_enthalpy_maximum_.resize(count);
+    candidate.species_cp_minimum_.resize(count);
+    candidate.species_cp_maximum_.resize(count);
     for (std::vector<double>& coefficients : candidate.nasa_low_) {
       coefficients.resize(count);
     }
@@ -390,6 +392,14 @@ Status ThermodynamicsPlan::compile(
           candidate.maximum_temperature_ <= candidate.temperature_switch_[species]
               ? low
               : high);
+      candidate.species_cp_minimum_[species] = species_cp(
+          candidate.universal_gas_constant_, candidate.minimum_temperature_,
+          candidate.inverse_molecular_weight_[species],
+          candidate.minimum_temperature_ <= candidate.temperature_switch_[species] ? low : high);
+      candidate.species_cp_maximum_[species] = species_cp(
+          candidate.universal_gas_constant_, candidate.maximum_temperature_,
+          candidate.inverse_molecular_weight_[species],
+          candidate.maximum_temperature_ <= candidate.temperature_switch_[species] ? low : high);
       if (!finite(candidate.species_enthalpy_minimum_[species]) ||
           !finite(candidate.species_enthalpy_maximum_[species])) {
         return {StatusCode::invalid_plan, kThermoSpeciesBounds};
@@ -480,6 +490,15 @@ Status ThermodynamicsPlan::mixture_properties(
     return {StatusCode::numerical_failure, kThermoRange};
   }
   const auto properties = [&](std::size_t species) {
+    // The immutable inversion brackets use the same species polynomial
+    // values on every query. Preserve the affine mixture sum below while
+    // avoiding repeated endpoint polynomial evaluation during PH inversion.
+    if (temperature == minimum_temperature_)
+      return std::array<double, 3>{species_enthalpy_minimum_[species],
+          species_cp_minimum_[species], universal_gas_constant_ * inverse_molecular_weight_[species]};
+    if (temperature == maximum_temperature_)
+      return std::array<double, 3>{species_enthalpy_maximum_[species],
+          species_cp_maximum_[species], universal_gas_constant_ * inverse_molecular_weight_[species]};
     const bool low = temperature <= temperature_switch_[species];
     std::array<double, 7U> coefficients{};
     for (std::size_t index = 0U; index < 7U; ++index) {

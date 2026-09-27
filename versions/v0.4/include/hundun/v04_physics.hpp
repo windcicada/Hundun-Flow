@@ -250,6 +250,8 @@ class ThermodynamicsPlan {
   std::vector<double> temperature_switch_;
   std::vector<double> species_enthalpy_minimum_;
   std::vector<double> species_enthalpy_maximum_;
+  std::vector<double> species_cp_minimum_;
+  std::vector<double> species_cp_maximum_;
   std::vector<std::uint16_t> independent_to_species_;
   std::size_t dependent_species_{};
   double minimum_temperature_{};
