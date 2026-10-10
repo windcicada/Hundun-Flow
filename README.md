@@ -154,17 +154,21 @@ Native restart retains fields, time histories, face fluxes, stochastic fields, m
 
 Both directories contain small native model demonstrations and fresh-run/restart commands. Full combustor geometries and long-duration reference calculations have their own inputs and acceptance records.
 
-## GTMC combustion-field demonstration
+## Combustion-field demonstrations
 
-The following images show a native GTMC restart calculation at accepted step 32016 and $t=21.815583$ ms on a $153\times325\times151$ mesh. The snapshot uses methane/JL4 chemistry, four-field ESF/TPDF, IEM, Vreman, and static IBM. It illustrates an instantaneous field; statistical assessment and release acceptance have separate evidence records. [Image provenance](docs/hot.md) records the source state and rendering checks.
+The following images show velocity magnitude and temperature in a gas turbine combustor and GTMC. Click an image to view it at full resolution.
 
-The three-dimensional view combines translucent combustor geometry, 1400 K and 1800 K temperature isosurfaces, and instantaneous streamlines colored by speed.
+### Gas turbine combustor
 
-![GTMC geometry, temperature isosurfaces, and speed-colored streamlines](docs/images/gtmc-3d.png)
+| Velocity magnitude (m/s) | Temperature (K) |
+| --- | --- |
+| [![Gas turbine combustor velocity magnitude](docs/images/GasturbineCombustor_V.png)](docs/images/GasturbineCombustor_V.png) | [![Gas turbine combustor temperature](docs/images/GasturbineCombustor_T.png)](docs/images/GasturbineCombustor_T.png) |
 
-The central plane at $z=-0.075$ mm shows speed and temperature recovered from the physical mean enthalpy and composition. Gray regions mark IBM solids. The plane retains the original mesh resolution; the three-dimensional view samples every second cell along each axis.
+### GTMC
 
-![GTMC central-plane speed and temperature](docs/images/gtmc-mid.png)
+| Velocity magnitude (m/s) | Temperature (K) |
+| --- | --- |
+| [![GTMC velocity magnitude](docs/images/GTMC_V.png)](docs/images/GTMC_V.png) | [![GTMC temperature](docs/images/GTMC_T.png)](docs/images/GTMC_T.png) |
 
 ## Documentation and contributions
 
