@@ -160,9 +160,13 @@ The following images show velocity magnitude and temperature in a gas turbine co
 
 ### Gas turbine combustor
 
-| Velocity magnitude (m/s) | Temperature (K) |
-| --- | --- |
-| [![Gas turbine combustor velocity magnitude](docs/images/GasturbineCombustor_V.png)](docs/images/GasturbineCombustor_V.png) | [![Gas turbine combustor temperature](docs/images/GasturbineCombustor_T.png)](docs/images/GasturbineCombustor_T.png) |
+Velocity magnitude (m/s)
+
+[![Gas turbine combustor velocity magnitude](docs/images/GasturbineCombustor_V.png)](docs/images/GasturbineCombustor_V.png)
+
+Temperature (K)
+
+[![Gas turbine combustor temperature](docs/images/GasturbineCombustor_T.png)](docs/images/GasturbineCombustor_T.png)
 
 ### GTMC
 
